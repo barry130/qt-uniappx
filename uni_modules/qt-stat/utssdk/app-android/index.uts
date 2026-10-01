@@ -1,0 +1,441 @@
+/**
+ * qt-stat 安卓端实现（纯采集版，设计文档 §7.1 / 附录第 1 步）
+ *
+ * 职责：
+ * 1. 设备匿名标识 deviceId：首次生成随机 UUID 并持久化（禁止采集 IMEI/OAID 等设备标识）
+ * 2. 事件封装：evt/ts/deviceId/ut/appVersion/model/os(/page/duration/ch/errorType/message/stack/extra)
+ * 3. 内存队列 + 定时/满批触发上报（POST /api/v1/stat/report，匿名，不进 token 体系）
+ * 4. hide 时持久化队列到 storage，冷启动恢复并先 flush；失败回队列重试 ≤3 次，队列上限 500 丢最旧
+ * 5. 停留时长由客户端计算：show 记录时间戳，退后台时 duration = now - lastShowTs
+ * 6. 所有 API 全部 try/catch 包裹，任何统计异常不得影响 App 主流程
+ *
+ * 错误采集：仅覆盖 JS/UTS 层可捕获的运行错误（App onError → error 事件入库）。
+ * 原生崩溃（进程死亡/NDK/ANR）不做采集（自托管 Sentry 因服务器资源受限未部署，M4 已取消）。
+ */
+
+import type { QtStatOptions } from '../interface.uts'
+
+// ==================== 常量 ====================
+
+/** 匿名设备标识 storage key */
+const DEVICE_ID_KEY = 'qt-stat-device-id'
+/** 队列持久化 storage key */
+const QUEUE_KEY = 'qt-stat-queue'
+/** 队列上限，超出丢最旧（设计 §7.1） */
+const QUEUE_MAX = 500
+/** 同一批连续失败重试上限（设计 §7.1：失败回队列重试 ≤3 次） */
+const MAX_RETRY = 3
+/** 服务端单次 events 数量强校验 ≤ 200（设计 §4.1），客户端按此分片 */
+const SERVER_BATCH_LIMIT = 200
+/** message 截断长度（服务端列宽 1024） */
+const MSG_MAX_LEN = 1000
+/** stack 截断长度（服务端限制 16KB） */
+const STACK_MAX_LEN = 16000
+/** extra 序列化后上限（服务端限制 2KB，超限丢 extra 保事件本体） */
+const EXTRA_MAX_LEN = 2048
+/** 上报超时（毫秒） */
+const REQUEST_TIMEOUT = 15000
+
+// ==================== 模块级状态 ====================
+
+let initialized = false
+let ingestUrl = ''
+let channelName = ''
+let debugMode = false
+let batchIntervalMs = 10000
+let maxBatchSize = 50
+
+/** 匿名设备标识 */
+let deviceId = ''
+/** 平台：app-android / app-ios（取 getAppBaseInfo().uniPlatform） */
+let utName = 'app-android'
+/** App 版本号 */
+let appVersionName = ''
+/** 设备型号 */
+let modelName = ''
+/** 操作系统版本，如 "android 15" */
+let osName = ''
+
+/** 上报队列（元素为事件对象：内存中 UTSJSONObject，恢复后为 JSON.parse 的普通对象，仅整体序列化用） */
+let queue: any[] = []
+/** 连续失败次数（达到 MAX_RETRY 丢最旧一批，避免无限堆积） */
+let consecutiveFailures = 0
+/** 是否有上报链路在途（防止并发重发） */
+let sending = false
+/** 定时器 */
+let timerStarted = false
+let flushTimer = 0
+/** 本次前台停留起始时间戳（show 时记录，hide/flush 时计算 duration） */
+let lastShowTs = 0
+
+// ==================== 工具 ====================
+
+function randomHex(len: number): string {
+	const chars = '0123456789abcdef'
+	let s = ''
+	for (let i = 0; i < len; i++) {
+		s += chars.charAt(Math.floor(Math.random() * 16))
+	}
+	return s
+}
+
+/** 生成随机 UUID（v4 形态）。不采集 IMEI/OAID 等真实设备标识（合规要求） */
+function genUuid(): string {
+	return randomHex(8) + '-' + randomHex(4) + '-4' + randomHex(3) + '-' + randomHex(4) + '-' + randomHex(12)
+}
+
+function log(msg: string): void {
+	if (debugMode) {
+		console.log('[qt-stat] ' + msg)
+	}
+}
+
+/** 读取（或首次生成并持久化）匿名设备标识 */
+function ensureDeviceId(): string {
+	try {
+		const saved = uni.getStorageSync(DEVICE_ID_KEY) as string
+		if (saved != null && saved.length > 0) return saved
+	} catch (_) {}
+	const id = genUuid()
+	try {
+		uni.setStorageSync(DEVICE_ID_KEY, id)
+	} catch (_) {}
+	return id
+}
+
+/** 平台标识：本项目按端各自打包，固定取值 app-android（不依赖 getAppBaseInfo().uniPlatform） */
+
+/** App 版本号（getAppBaseInfo().appVersion） */
+function readAppVersion(): string {
+	try {
+		const info = uni.getAppBaseInfo()
+		const v = info.appVersion
+		if (v != null) return v
+	} catch (_) {}
+	return ''
+}
+
+/** 队列超上限时丢最旧 */
+function capQueue(): void {
+	if (queue.length > QUEUE_MAX) {
+		queue = queue.slice(queue.length - QUEUE_MAX)
+	}
+}
+
+/** 队列持久化到 storage（hide 时调用，防崩溃丢数据） */
+function persistQueue(): void {
+	try {
+		if (queue.length == 0) {
+			uni.removeStorageSync(QUEUE_KEY)
+			return
+		}
+		uni.setStorageSync(QUEUE_KEY, JSON.stringify(queue))
+	} catch (_) {}
+}
+
+/** 冷启动恢复持久化队列（恢复到队首，保证事件时间顺序） */
+function restoreQueue(): void {
+	try {
+		const raw = uni.getStorageSync(QUEUE_KEY) as string
+		if (raw == null || raw.length == 0) return
+		const parsed = JSON.parse(raw)
+		if (parsed == null) return
+		const arr = parsed as Array<any>
+		if (arr.length == 0) {
+			uni.removeStorageSync(QUEUE_KEY)
+			return
+		}
+		const merged: any[] = []
+		for (let i = 0; i < arr.length; i++) merged.push(arr[i])
+		for (let i = 0; i < queue.length; i++) merged.push(queue[i])
+		queue = merged
+		capQueue()
+		uni.removeStorageSync(QUEUE_KEY)
+		log('restore queue ' + queue.length)
+	} catch (_) {}
+}
+
+// ==================== 事件封装 ====================
+
+/**
+ * 构造一条上报事件（字段见设计 §4.1；可选字段仅在有意义时携带，减小载荷）
+ */
+function buildEvent(
+	evt: string,
+	page: string,
+	duration: number,
+	errorType: string,
+	message: string,
+	stack: string,
+	extra: UTSJSONObject | null
+): UTSJSONObject {
+	const ev = new UTSJSONObject()
+	ev.set('evt', evt)
+	ev.set('ts', Date.now())
+	ev.set('deviceId', deviceId)
+	ev.set('ut', utName)
+	if (appVersionName.length > 0) ev.set('appVersion', appVersionName)
+	if (modelName.length > 0) ev.set('model', modelName)
+	if (osName.length > 0) ev.set('os', osName)
+	if (channelName.length > 0) ev.set('ch', channelName)
+	if (page.length > 0) ev.set('page', page)
+	if (duration > 0) ev.set('duration', duration)
+	if (evt == 'error') {
+		if (errorType.length > 0) ev.set('errorType', errorType)
+		if (message.length > 0) ev.set('message', message)
+		if (stack.length > 0) ev.set('stack', stack)
+		// release 与 appVersion 同源（运行时 getAppBaseInfo().appVersion），无需外部手动传值
+		if (appVersionName.length > 0) ev.set('release', appVersionName)
+	}
+	if (extra != null) {
+		try {
+			const s = JSON.stringify(extra)
+			if (s != null && s.length <= EXTRA_MAX_LEN) {
+				ev.set('extra', extra)
+			}
+		} catch (_) {}
+	}
+	return ev
+}
+
+/** 入队；达到满批条数立即触发一次上报 */
+function enqueue(ev: UTSJSONObject): void {
+	try {
+		queue.push(ev)
+		capQueue()
+		if (queue.length >= maxBatchSize) {
+			flushInternal((_ok: boolean) => {})
+		}
+	} catch (_) {}
+}
+
+// ==================== 上报 ====================
+
+/**
+ * 立即清空队列（回调返回是否全部发送成功）。
+ * sending=true 期间重复调用直接返回 false（在途链路会继续处理剩余队列）。
+ */
+function flushInternal(done: (ok: boolean) => void): void {
+	try {
+		if (!initialized || ingestUrl.length == 0) {
+			done(true)
+			return
+		}
+		if (queue.length == 0) {
+			done(true)
+			return
+		}
+		if (sending) {
+			done(false)
+			return
+		}
+		sending = true
+		sendNext(done)
+	} catch (_) {
+		sending = false
+		done(false)
+	}
+}
+
+/**
+ * 统一客户端系统头（与 App 侧 services/client-info.ts、服务端 ClientHeaders 同一契约）：
+ * X-App-Ut 平台 / X-App-Version 版本 / X-Device 设备型号 / X-OS 系统。
+ * 上报地址也是 astral 后端，接口统计拦截器同样测量它，故这几个头必须一并携带；
+ * 空值不写（不存在该头 = 后端按「未携带」处理，语义一致）。
+ */
+function applyClientHeaders(headers: UTSJSONObject): void {
+	if (utName.length > 0) headers.set('X-App-Ut', utName)
+	if (appVersionName.length > 0) headers.set('X-App-Version', appVersionName)
+	if (modelName.length > 0) headers.set('X-Device', modelName)
+	if (osName.length > 0) headers.set('X-OS', osName)
+}
+
+/**
+ * 发送队列头部一片（≤200 条）；成功后从队列移除该片并继续下一片，直到清空。
+ * 失败则整批留在队首，计入连续失败（≥3 次丢最旧一批）。
+ */
+function sendNext(done: (ok: boolean) => void): void {
+	try {
+		if (queue.length == 0) {
+			sending = false
+			try {
+				uni.removeStorageSync(QUEUE_KEY)
+			} catch (_) {}
+			log('flush done')
+			done(true)
+			return
+		}
+		const batch = queue.slice(0, SERVER_BATCH_LIMIT)
+		const body = new UTSJSONObject()
+		body.set('events', batch)
+		const headers = new UTSJSONObject()
+		headers.set('Content-Type', 'application/json')
+		applyClientHeaders(headers)
+		uni.request({
+			url: ingestUrl,
+			method: 'POST',
+			data: body,
+			header: headers,
+			timeout: REQUEST_TIMEOUT,
+			success: (response) => {
+				const ok = response.statusCode >= 200 && response.statusCode < 300
+				log('report batch=' + batch.length + ' statusCode=' + response.statusCode)
+				if (ok) {
+					try {
+						consecutiveFailures = 0
+						queue = queue.slice(batch.length)
+					} catch (_) {}
+					sendNext(done)
+					return
+				}
+				onSendFailure(batch, done)
+			},
+			fail: (_error) => {
+				onSendFailure(batch, done)
+			},
+		})
+	} catch (_) {
+		sending = false
+		done(false)
+	}
+}
+
+/** 一片上报失败：整批留在队首，连续失败达上限则丢最旧一批（防无限堆积） */
+function onSendFailure(batch: any[], done: (ok: boolean) => void): void {
+	try {
+		consecutiveFailures++
+		if (consecutiveFailures >= MAX_RETRY) {
+			queue = queue.slice(batch.length)
+			consecutiveFailures = 0
+			persistQueue()
+		}
+	} catch (_) {}
+	sending = false
+	done(false)
+}
+
+/** 定时兜底上报（每 batchIntervalMs 一次） */
+function startTimer(): void {
+	if (timerStarted) return
+	timerStarted = true
+	flushTimer = setInterval(() => {
+		try {
+			if (queue.length > 0) {
+				flushInternal((_ok: boolean) => {})
+			}
+		} catch (_) {}
+	}, batchIntervalMs) as number
+}
+
+// ==================== 对外 API ====================
+
+/**
+ * 初始化（App.uvue onLaunch 第一行调用）。重复调用幂等。
+ */
+export function initQtStat(options: QtStatOptions): void {
+	try {
+		if (initialized) return
+		initialized = true
+		ingestUrl = options.ingestUrl
+		channelName = options.channel
+		debugMode = options.debug
+		if (options.batchIntervalMs > 0) batchIntervalMs = options.batchIntervalMs
+		if (options.maxBatchSize > 0 && options.maxBatchSize <= SERVER_BATCH_LIMIT) {
+			maxBatchSize = options.maxBatchSize
+		}
+		deviceId = ensureDeviceId()
+		utName = 'app-android'
+		appVersionName = readAppVersion()
+		try {
+			const device = uni.getDeviceInfo()
+			// getDeviceInfo 字段均为 string | null，需判空后赋值（UTS 严格空安全）
+			const model = device.deviceModel
+			if (model != null) modelName = model
+			const osN = device.osName
+			const osV = device.osVersion
+			if (osN != null && osV != null) osName = osN + ' ' + osV
+			else if (osN != null) osName = osN
+		} catch (_) {}
+		restoreQueue()
+		startTimer()
+		log('init ok url=' + ingestUrl + ' deviceId=' + deviceId + ' ut=' + utName + ' appVersion=' + appVersionName + ' queue=' + queue.length)
+	} catch (e) {
+		console.log('[qt-stat] init failed', e)
+	}
+}
+
+/**
+ * 通用事件上报。
+ * - launcher/show 由 App.uvue 生命周期调用
+ * - show 记录时间戳（用于计算停留时长）
+ * - hide 计算 duration = now - lastShowTs 并持久化队列
+ */
+export function qtTrack(evt: string, page: string = '', extra: UTSJSONObject | null = null): void {
+	try {
+		if (!initialized) return
+		if (evt == 'show') {
+			lastShowTs = Date.now()
+		}
+		let duration = 0
+		if (evt == 'hide') {
+			if (lastShowTs > 0) {
+				duration = Date.now() - lastShowTs
+			}
+			lastShowTs = 0
+		}
+		enqueue(buildEvent(evt, page, duration, '', '', '', extra))
+		if (evt == 'hide') {
+			persistQueue()
+		}
+	} catch (_) {}
+}
+
+/** 页面访问上报（页面 onShow 里调用，一次展示 = 1 PV） */
+export function qtTrackPage(page: string): void {
+	try {
+		if (!initialized) return
+		if (page.length == 0) return
+		enqueue(buildEvent('page', page, 0, '', '', '', null))
+	} catch (_) {}
+}
+
+/**
+ * 错误上报（errorType: js | network | biz）。
+ * 注意：uni-app x 的 App onError 明确说明可能丢失错误堆栈，stack 可为空串。
+ */
+export function qtTrackError(errorType: string, message: string, stack: string = '', page: string = ''): void {
+	try {
+		if (!initialized) return
+		let msg = message
+		if (msg.length > MSG_MAX_LEN) msg = msg.substring(0, MSG_MAX_LEN)
+		let st = stack
+		if (st.length > STACK_MAX_LEN) st = st.substring(0, STACK_MAX_LEN)
+		enqueue(buildEvent('error', page, 0, errorType, msg, st, null))
+	} catch (_) {}
+}
+
+/**
+ * 立即清空队列（App onHide 时调用）。
+ * 退后台时自动补一条 hide 事件（含本次前台停留时长），随后持久化队列并上报。
+ * 返回是否全部发送成功（false 仅代表本次未完成，队列已持久化，恢复网络后会补报）。
+ */
+export function qtStatFlush(): Promise<boolean> {
+	return new Promise<boolean>((resolve: (value: boolean) => void, reject: (err: any) => void) => {
+		try {
+			if (lastShowTs > 0) {
+				const duration = Date.now() - lastShowTs
+				lastShowTs = 0
+				try {
+					queue.push(buildEvent('hide', '', duration, '', '', '', null))
+					capQueue()
+				} catch (_) {}
+			}
+			persistQueue()
+			flushInternal((ok: boolean) => {
+				resolve(ok)
+			})
+		} catch (_) {
+			resolve(false)
+		}
+	})
+}

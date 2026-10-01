@@ -1,0 +1,68 @@
+/**
+ * qt-app-native：iOS 端占位实现
+ * 打开外部链接走 UIApplication，退出应用/安装 APK 平台不支持。
+ * 本项目以 Android 为主，此处保证接口可编译；实际调用方对返回值做降级处理。
+ */
+
+import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity } from "../interface.uts";
+
+export const openExternalUrl: OpenExternalUrl = (url: string): boolean => {
+  if (url == null || url.length == 0) return false;
+  try {
+    UIApplication.sharedApplication.openURL(NSURL.URLWithString(url));
+    return true;
+  } catch (e) {
+    return false;
+  }
+};
+
+export const exitAppNative: ExitAppNative = (): boolean => {
+  return false;
+};
+
+export const installApkNative: InstallApkNative = (filePath: string): boolean => {
+  return false;
+};
+
+// iOS 的通知授权走 GETUserNotificationSettings 体系，本项目以 Android 为主，
+// 此处直接上报已授权避免预留占位，由调用方按平台降级。
+// iOS 沙盒不存在公共媒体目录写入诉求，统一返回不支持，调用方会自动回退到应用私有目录。
+export const saveToPublicMedia: SaveToPublicMedia = function (
+  tempPath: string,
+  dirType: string,
+  fileName: string,
+  subDir?: string
+): string {
+  return "";
+};
+
+export const ensurePublicDirPermission: EnsurePublicDirPermission = function (): boolean {
+  return false;
+};
+
+// iOS 没有公开的「直达本应用通知设置页」API（UIApplicationOpenSettingsURLString 只能到应用设置根页），
+// 本项目以 Android 为主，此处返回 false，由调用方降级为提示用户手动开启。
+export const openNotificationSettings: OpenNotificationSettings = function (): boolean {
+  return false;
+};
+
+// 本地音频扫描仅 Android 提供（MediaStore）；iOS 以沙盒为主，返回空数组由调用方提示。
+export const scanLocalAudio: ScanLocalAudio = function (onResult: (items: LocalAudioItem[]) => void): void {
+	onResult([]);
+};
+
+// iOS 无 Android 系统 inset 概念（安全区由 safeAreaInsets 原生承担），恒返回 false。
+export const applyLegacyInsets: ApplyLegacyInsets = function (): boolean {
+	return false;
+};
+
+// iOS 无 Activity 重建等价 API，恒返回 false。
+export const recreateActivity: RecreateActivity = function (): boolean {
+	return false;
+};
+
+// iOS 本地音频库恒为空（scanLocalAudio 返回空数组），此入口实际不会命中；
+// 沙盒内文件删除需 NSFileManager，这里保持占位、按返回值由调用方降级。
+export const deleteLocalMedia: DeleteLocalMedia = function (items: LocalAudioItem[]): DeleteLocalMediaResult {
+	return { deleted: 0, pending: 0, failed: items.length };
+};

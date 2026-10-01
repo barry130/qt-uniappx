@@ -1,0 +1,710 @@
+<template>
+  <qt-page-frame :max-width="640">
+  <view class="page">
+    <!-- 设置项较多，宽屏/横屏内容超出可视高度时必须能下滑 -->
+    <scroll-view class="list" :class="layout.isWide ? 'list-wide' : ''" direction="vertical" :show-scrollbar="false">
+    <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="showSource">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="disc" :size="36" color="#6d8fd6" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">默认音源</text>
+        <view class="cell-right">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ sourceText() }}</text>
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+      </view>
+    </view>
+
+    <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="showSourcePackage">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="music" :size="36" color="#5f9ea0" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">音源包</text>
+        <view v-if="sourceUpdateStore.updatePending" class="cell-dot" />
+        <view class="cell-right">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ sourcePackageText() }}</text>
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+      </view>
+    </view>
+
+    <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="goTheme">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="edit" :size="36" color="#7c6cf2" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">外观与皮肤</text>
+        <view class="cell-right">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">宽屏 / 壁纸 / 主题</text>
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+      </view>
+    </view>
+
+    <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="showRate">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="trending" :size="36" color="#d99b3f" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">默认倍速</text>
+        <view class="cell-right">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ rateText() }}</text>
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+      </view>
+      <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="showSleep">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="clock" :size="36" color="#9b82d9" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">定时关闭</text>
+        <view class="cell-right">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ sleepText() }}</text>
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+      </view>
+      <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="goEq">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="chart" :size="36" color="#5b8fd9" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">均衡器</text>
+        <view class="cell-right">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">五段音效调节</text>
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+      </view>
+      <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="showConcurrent">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="volume" :size="36" color="#4fb186" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">同时播放</text>
+        <view class="cell-right">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ concurrentText() }}</text>
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+      </view>
+    </view>
+
+    <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="showPlayQuality">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="music" :size="36" color="#4fb186" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">播放默认音质</text>
+        <view class="cell-right">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ playQualityText() }}</text>
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+      </view>
+      <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="showDownloadQuality">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="download" :size="36" color="#6d8fd6" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">下载默认音质</text>
+        <view class="cell-right">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ downloadQualityText() }}</text>
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+      </view>
+      <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="showDownloadNameFormat">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="download" :size="36" color="#6d8fd6" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">下载文件名格式</text>
+        <view class="cell-right">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ downloadNameFormatText() }}</text>
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+      </view>
+      <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="showCacheLimit">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="download" :size="36" color="#4fb186" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">音乐缓存上限</text>
+        <view class="cell-right">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ cacheLimitText() }}</text>
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+      </view>
+      <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="clearAudioCache">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="trash" :size="36" color="#6d8fd6" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">清除音乐缓存</text>
+        <view class="cell-right">
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+      </view>
+    </view>
+
+    <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="goDesktopLyric">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="music" :size="36" color="#4fb186" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">桌面歌词</text>
+        <view class="cell-right">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ lyricOn ? "已开启" : "已关闭" }}</text>
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+      </view>
+    </view>
+
+    <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="folder" :size="36" color="#d99b3f" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">下载目录</text>
+        <view class="cell-right">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ downloads.dirHint() }}</text>
+        </view>
+      </view>
+    </view>
+
+    <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="clearAll">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="trash" :size="36" :color="theme.skin.danger" />
+        <text class="cell-title cell-title-danger" :class="[layout.isWide ? 'cell-title-wide' : '']" :style="'color:' + theme.skin.danger + ';'">清除全部缓存与数据</text>
+        <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+      </view>
+    </view>
+
+    <qt-action-sheet
+      v-model:visible="sheetVisible"
+      :title="sheetTitle"
+      :actions="sheetActions"
+      @select="onSheetSelect"
+    />
+    </scroll-view>
+  </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { computed, ref, onUnmounted } from "vue";
+import { onShow } from "@dcloudio/uni-app";
+import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { audioPlayer } from "@/services/audio-player";
+import { desktopLyric } from "@/services/desktop-lyric";
+import { usePlayerStore } from "@/stores/player";
+import { useDownloadsStore } from "@/stores/downloads";
+import { useSourceStore } from "@/stores/source";
+import { platformLabel } from "@/services/platform";
+import { engineStatus, engineVersion, loadedVersionCode, lastEngineError } from "@/services/source-engine";
+import { installedPackage } from "@/services/source-bundle-fs";
+import { checkAndDownload, applyNow, installFromUrl, uninstallSourcePackage, pendingApply, pickSmokeSongs, lastRemoteInfo, syncSourceUpdateBadge } from "@/services/source-update";
+import { useSourceUpdateStore } from "@/stores/source-update";
+import { clearCachedMe } from "@/services/user-cache";
+
+const player = usePlayerStore();
+const downloads = useDownloadsStore();
+const sourceStore = useSourceStore();
+const layout = useQtLayout();
+const theme = useThemeStore();
+const groupStyle = computed<string>(() => "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";");
+const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
+const rates: number[] = [0.75, 1.0, 1.25, 1.5, 2.0];
+const currentRate = ref(audioPlayer.rate);
+const sleepMinutes = ref(0);
+const sources: string[] = ["wyy", "qq", "kw", "kg"];
+// 音源包：状态都在非响应式的 service 里，用 sourceRefresh 做一次重算触发
+const sourceRefresh = ref(0);
+// 「有新音源包」红点：检查下载后亮，立即应用 / 下次启动自动装载后灭
+const sourceUpdateStore = useSourceUpdateStore();
+// 桌面歌词（响应式镜像：服务是非响应式单例，模板要靠 ref 刷新）
+const lyricOn = ref(desktopLyric.isEnabled());
+
+const sheetVisible = ref(false);
+const sheetTitle = ref("");
+const sheetActions = ref<SheetAction[]>([]);
+let sheetSelect: ((index: number) => void) | null = null;
+/** 清除本地数据后延迟跳转登录页的定时器：页面卸载时必须清掉，避免在已注销的实例上触发回调 */
+let clearDataTimer: number | null = null;
+
+function openSheet(title: string, actions: SheetAction[], select: (index: number) => void): void {
+  sheetTitle.value = title;
+  sheetActions.value = actions;
+  sheetSelect = select;
+  sheetVisible.value = true;
+}
+function onSheetSelect(_action: SheetAction, index: number): void {
+  const cb = sheetSelect;
+  sheetSelect = null;
+  if (cb) cb(index);
+}
+
+onShow(() => {
+  downloads.restore();
+  currentRate.value = audioPlayer.rate;
+  concurrentMode.value = audioPlayer.getConcurrentMode();
+  sourceStore.restore();
+  sourceUpdateStore.refresh();
+  sourceRefresh.value++;
+  // 从系统授权页返回时刷新开关状态（去授权前开关先记为开，返回后真实生效状态以权限为准）
+  // 同时与原生对账：通知栏「词」按钮改的是原生窗口，回调漏达时这里会显示错
+  desktopLyric.refreshFromNative();
+  lyricOn.value = desktopLyric.isEnabled();
+});
+
+/** 打开均衡器设置页 */
+function goEq(): void {
+  uni.navigateTo({ url: "/pages/equalizer/index" });
+}
+
+function goTheme(): void {
+  uni.navigateTo({ url: "/pages/theme/index" });
+}
+
+function sourceText(): string {
+  return platformLabel(sourceStore.current);
+}
+function showSource(): void {
+  openSheet("默认音源", sources.map((s) => ({
+    name: platformLabel(s),
+    color: s == sourceStore.current ? theme.skin.accent : undefined,
+  })), (index) => {
+    pickSource(sources[index]);
+  });
+}
+function pickSource(s: string): void {
+  sourceStore.setSource(s);
+  uni.showToast({ title: "默认音源：" + platformLabel(s), icon: "none" });
+}
+
+// ==================== 音源包 ====================
+
+/** 音源包操作（弹窗里的动作序号） */
+const SP_CHECK = 0;
+const SP_APPLY = 1;
+const SP_INSTALL_URL = 2;
+const SP_UNINSTALL = 3;
+
+function sourcePackageText(): string {
+  const tick = sourceRefresh.value;
+  const pkg = installedPackage();
+  if (pkg == null) {
+    // 仓库不内置音源包：未安装时在线取链不可用（本地音乐不受影响）
+    if (engineStatus() == "failed") return "未安装（引擎异常）";
+    return "未安装";
+  }
+  const tag = pkg.source == "custom" ? "（自定义）" : "";
+  if (pendingApply()) return "v" + pkg.versionName + tag + "（待生效）";
+  const st = engineStatus();
+  if (st == "ready" || st == "loading") return "v" + pkg.versionName + tag;
+  if (st == "failed") return "v" + pkg.versionName + tag + "（异常）";
+  return "v" + pkg.versionName + tag + "（未装载）";
+}
+
+/** 音源包详情（对齐 qt-pc 设置页：当前 / 远端最新 / 状态 / 更新说明） */
+function sourcePackageDetail(): string {
+  const pkg = installedPackage();
+  const remote = lastRemoteInfo();
+  const custom = pkg != null && pkg.source == "custom";
+  const lines: string[] = [];
+  if (pkg == null) {
+    lines.push("当前：未安装（在线播放不可用，本地音乐不受影响）");
+  } else if (custom) {
+    lines.push("当前：自定义包（目录号 " + pkg.versionCode + "）");
+  } else {
+    lines.push("当前：v" + pkg.versionName);
+  }
+  if (custom) {
+    lines.push("远端：自定义包不参与自动更新，升级请重新粘贴链接");
+  } else {
+    lines.push(remote == null ? "远端：未检查" : "远端：v" + remote.versionName);
+  }
+  const active = installedPackage();
+  if (engineStatus() == "failed") {
+    lines.push("状态：音源包异常，" + lastEngineError());
+  } else if (pendingApply()) {
+    lines.push("状态：新包已安装，「立即应用」或重启后生效");
+  } else if (active != null && loadedVersionCode() == active.versionCode && engineStatus() == "ready") {
+    lines.push("状态：引擎运行中" + (engineVersion().length > 0 ? "（" + engineVersion() + "）" : ""));
+  } else {
+    lines.push("状态：尚未装载");
+  }
+  if (!custom && remote != null && remote.notes.length > 0) {
+    lines.push("更新说明：" + remote.notes);
+  }
+  return lines.join("\n");
+}
+
+function showSourcePackage(): void {
+  const pkg = installedPackage();
+  const actions: SheetAction[] = [
+    { name: "检查更新" },
+    { name: "从链接安装自定义包" },
+    { name: "立即应用（含自检）", disabled: pkg == null || !pendingApply() },
+    { name: "卸载音源包", color: "#d95f5f", disabled: pkg == null },
+  ];
+  uni.showModal({
+    title: "音源包",
+    content:
+      sourcePackageDetail() +
+      "\n\n本应用不内置音源包，在线播放需先安装：「检查更新」从官方清单下载，「从链接安装」粘贴自备的 source-bundle.js 直链（仅 https）。检查更新只下载不打断；「立即应用」会重建引擎并做取链自检，自检失败自动回退。",
+    confirmText: "操作",
+    cancelText: "取消",
+    success: (res) => {
+      if (!res.confirm) return;
+      openSheet("音源包操作", actions, (index) => {
+        if (index == SP_CHECK) runSourceCheck();
+        else if (index == SP_APPLY) runSourceApply();
+        else if (index == SP_INSTALL_URL) runSourceInstallUrl();
+        else if (index == SP_UNINSTALL) runSourceUninstall();
+      });
+    },
+  });
+}
+
+function runSourceCheck(): void {
+  uni.showLoading({ title: "检查中", mask: true });
+  checkAndDownload(true).then((r) => {
+    uni.hideLoading();
+    sourceRefresh.value++;
+    syncSourceUpdateBadge();
+    uni.showModal({ title: "检查更新", content: r.message, showCancel: false });
+  }).catch(() => {
+    uni.hideLoading();
+    uni.showToast({ title: "检查失败", icon: "none" });
+  });
+}
+
+function runSourceApply(): void {
+  uni.showLoading({ title: "应用中", mask: true });
+  pickSmokeSongs().then((songs) => {
+    return applyNow(songs);
+  }).then((r) => {
+    uni.hideLoading();
+    sourceRefresh.value++;
+    syncSourceUpdateBadge();
+    uni.showModal({ title: "立即应用", content: r.message, showCancel: false });
+  }).catch(() => {
+    uni.hideLoading();
+    uni.showToast({ title: "应用失败", icon: "none" });
+  });
+}
+
+/** 从直链安装自定义音源包（不自动更新，升级=重新粘贴链接） */
+function runSourceInstallUrl(): void {
+  uni.showModal({
+    title: "从链接安装",
+    editable: true,
+    placeholderText: "粘贴 source-bundle.js 的 https 直链",
+    confirmText: "安装",
+    cancelText: "取消",
+    success: (res) => {
+      if (!res.confirm) return;
+      const url = res.content != null ? res.content.trim() : "";
+      if (url.length == 0) {
+        uni.showToast({ title: "链接不能为空", icon: "none" });
+        return;
+      }
+      uni.showLoading({ title: "安装中", mask: true });
+      installFromUrl(url).then((r) => {
+        uni.hideLoading();
+        sourceRefresh.value++;
+        syncSourceUpdateBadge();
+        if (!r.ok) {
+          uni.showModal({ title: "安装失败", content: r.message, showCancel: false });
+          return;
+        }
+        // 安装与生效分开：生效会重建引擎并做自检，是否立刻做交给用户点一下
+        uni.showModal({
+          title: "安装完成",
+          content: r.message,
+          confirmText: "立即应用",
+          cancelText: "稍后",
+          success: (res2) => {
+            if (res2.confirm) runSourceApply();
+          },
+        });
+      }).catch(() => {
+        uni.hideLoading();
+        uni.showToast({ title: "安装失败，请重试", icon: "none" });
+      });
+    },
+  });
+}
+
+function runSourceUninstall(): void {
+  uni.showModal({
+    title: "卸载音源包",
+    content: "移除本机已安装的音源包？卸载后在线播放不可用（本地音乐不受影响），需要时再「检查更新」或「从链接安装」。",
+    confirmText: "卸载",
+    cancelText: "取消",
+    success: (res) => {
+      if (!res.confirm) return;
+      uninstallSourcePackage().then(() => {
+        sourceRefresh.value++;
+        syncSourceUpdateBadge();
+        uni.showToast({ title: "已卸载音源包", icon: "none" });
+      }).catch(() => {
+        uni.showToast({ title: "卸载失败，请重试", icon: "none" });
+      });
+    },
+  });
+}
+
+function rateText(): string {
+  return currentRate.value + "x";
+}
+function showRate(): void {
+  openSheet("默认倍速", rates.map((rate) => ({
+    name: rate + "x",
+    color: rate == currentRate.value ? theme.skin.accent : undefined,
+  })), (index) => {
+    pickRate(rates[index]);
+  });
+}
+function pickRate(rate: number): void {
+  currentRate.value = rate;
+  audioPlayer.changeRate(rate);
+  uni.showToast({ title: "默认倍速 " + rate + "x", icon: "none" });
+}
+
+function sleepText(): string {
+  if (player.sleepStopAfterCurrent) return "播放完当前歌曲后";
+  if (sleepMinutes.value > 0) return sleepMinutes.value + " 分钟后";
+  return "关闭";
+}
+const sleepOptions: { minutes: number; name: string }[] = [
+  { minutes: 0, name: "关闭定时" },
+  { minutes: 10, name: "10 分钟后" },
+  { minutes: 30, name: "30 分钟后" },
+  { minutes: 60, name: "60 分钟后" },
+  { minutes: 90, name: "播放完当前歌曲后" },
+];
+function showSleep(): void {
+  openSheet("定时关闭", sleepOptions.map((opt) => ({
+    name: opt.name,
+    color: (opt.minutes == 90 ? player.sleepStopAfterCurrent : sleepMinutes.value == opt.minutes) && opt.minutes != 0 ? theme.skin.accent : undefined,
+  })), (index) => {
+    pickSleep(sleepOptions[index].minutes);
+  });
+}
+function pickSleep(minutes: number): void {
+  sleepMinutes.value = minutes;
+  player.setSleep(minutes);
+}
+
+// 与其他应用的音频共存方式（0 不允许 / 1 部分场景 / 2 全部场景）
+const concurrentMode = ref(audioPlayer.getConcurrentMode());
+const concurrentOptions: { value: number; name: string; hint: string }[] = [
+  { value: 0, name: "不允许", hint: "独占音频，其他应用播放时暂停" },
+  { value: 1, name: "部分场景", hint: "对方可共存时压低音量继续播放" },
+  { value: 2, name: "全部场景", hint: "与其他应用完全同时播放" },
+];
+function concurrentText(): string {
+  for (let i = 0; i < concurrentOptions.length; i++) {
+    if (concurrentOptions[i].value == concurrentMode.value) return concurrentOptions[i].name;
+  }
+  return "不允许";
+}
+function showConcurrent(): void {
+  concurrentMode.value = audioPlayer.getConcurrentMode();
+  openSheet("同时播放（与其他应用的音频共存方式）", concurrentOptions.map((opt) => ({
+    name: opt.name + "（" + opt.hint + "）",
+    color: opt.value == concurrentMode.value ? theme.skin.accent : undefined,
+  })), (index) => {
+    const opt = concurrentOptions[index];
+    if (opt == null) return;
+    audioPlayer.setConcurrentMode(opt.value);
+    concurrentMode.value = opt.value;
+    uni.showToast({ title: "同时播放：" + opt.name, icon: "none" });
+  });
+}
+
+const qualityOptions: { value: string; name: string }[] = [
+  { value: "128", name: "标准 128k" },
+  { value: "320", name: "高品 320k" },
+  { value: "flac", name: "无损 FLAC" },
+];
+function qualityLabel(q: string): string {
+  for (let i = 0; i < qualityOptions.length; i++) {
+    if (qualityOptions[i].value == q) return qualityOptions[i].name;
+  }
+  return "高品 320k";
+}
+function playQualityText(): string {
+  return qualityLabel(player.quality);
+}
+function downloadQualityText(): string {
+  return qualityLabel(downloads.downloadQuality);
+}
+function showPlayQuality(): void {
+  openSheet("播放默认音质", qualityOptions.map((opt) => ({
+    name: opt.name,
+    color: opt.value == player.quality ? theme.skin.accent : undefined,
+  })), (index) => {
+    player.setQuality(qualityOptions[index].value);
+    uni.showToast({ title: "播放音质：" + qualityOptions[index].name, icon: "none" });
+  });
+}
+function showDownloadQuality(): void {
+  openSheet("下载默认音质", qualityOptions.map((opt) => ({
+    name: opt.name,
+    color: opt.value == downloads.downloadQuality ? theme.skin.accent : undefined,
+  })), (index) => {
+    downloads.setDownloadQuality(qualityOptions[index].value);
+    uni.showToast({ title: "下载音质：" + qualityOptions[index].name, icon: "none" });
+  });
+}
+
+const nameFormatOptions: { value: string; name: string }[] = [
+  { value: "artist", name: "歌手 - 歌名" },
+  { value: "song", name: "歌名 - 歌手" },
+];
+function downloadNameFormatText(): string {
+  for (let i = 0; i < nameFormatOptions.length; i++) {
+    if (nameFormatOptions[i].value == downloads.downloadNameFormat)
+      return nameFormatOptions[i].name;
+  }
+  return "歌手 - 歌名";
+}
+function showDownloadNameFormat(): void {
+  openSheet("下载文件名格式", nameFormatOptions.map((opt) => ({
+    name: opt.name,
+    color: opt.value == downloads.downloadNameFormat ? theme.skin.accent : undefined,
+  })), (index) => {
+    downloads.setDownloadNameFormat(nameFormatOptions[index].value);
+    uni.showToast({ title: "下载文件名格式：" + nameFormatOptions[index].name, icon: "none" });
+  });
+}
+
+const cacheLimitOptions: number[] = [512, 1024, 2048, 3072, 4096];
+// 模板需要响应式：audioPlayer 是非响应式单例，直接在模板里读不会触发重渲染
+const cacheLimitMb = ref(audioPlayer.getCacheLimitMb());
+function cacheLimitLabel(mb: number): string {
+  if (mb % 1024 == 0) return (mb / 1024) + " GB";
+  return mb + " MB";
+}
+function cacheLimitText(): string {
+  return cacheLimitLabel(cacheLimitMb.value);
+}
+function showCacheLimit(): void {
+  cacheLimitMb.value = audioPlayer.getCacheLimitMb();
+  openSheet("音乐缓存上限", cacheLimitOptions.map((mb) => ({
+    name: cacheLimitLabel(mb),
+    color: mb == cacheLimitMb.value ? theme.skin.accent : undefined,
+  })), (index) => {
+    const mb = cacheLimitOptions[index];
+    audioPlayer.setCacheLimitMb(mb);
+    cacheLimitMb.value = mb;
+    uni.showToast({ title: "音乐缓存上限：" + cacheLimitLabel(mb), icon: "none" });
+  });
+}
+
+// ==================== 桌面歌词 ====================
+
+function goDesktopLyric(): void {
+  uni.navigateTo({ url: "/pages/desktop-lyric/index" });
+}
+
+function clearAudioCache(): void {
+  uni.showModal({
+    title: "清除音乐缓存",
+    content: "将删除已缓存的在线播放音乐文件（不影响已下载歌曲），正在播放会先停止，确定继续？",
+    confirmText: "清除",
+    confirmColor: theme.skin.danger,
+    success: (res) => {
+      if (!res.confirm) return;
+      // 先停掉前端播放状态（若在播放），保持界面与原生一致，再清磁盘缓存
+      if (player.playing) player.stop();
+      const ok = audioPlayer.clearAudioCache();
+      uni.showToast({ title: ok ? "音乐缓存已清除" : "清除失败", icon: "none" });
+    },
+  });
+}
+
+function clearAll(): void {
+  uni.showModal({
+    title: "清除数据",
+    content: "将删除本地全部数据并退出登录（收藏、歌单、播放记录、主题、登录态等；已下载的歌曲文件保留），确定继续？",
+    confirmText: "清除",
+    confirmColor: theme.skin.danger,
+    success: (res) => {
+      if (res.confirm) {
+        // 白名单式全量清除：除下载记录（文件本体保留，删记录会让文件失去管理入口）外，
+        // 本地存储全部删除（含登录态、主题、收藏、歌单、扫描结果、同步游标等未来新增键）
+        try {
+          const keep = new Set<string>(["qt-downloads"]);
+          const info = uni.getStorageInfoSync();
+          const keys = info.keys;
+          for (let i = 0; i < keys.length; i++) {
+            if (!keep.has(keys[i])) uni.removeStorageSync(keys[i]);
+          }
+        } catch (_) {}
+        // /me 缓存随登录态一起清（内存副本也要清，否则本进程内还能读到旧账号信息）
+        clearCachedMe();
+        // 内存态复位：播放器（含同步游标/待同步队列）、下载列表、音源、主题
+        player.resetLocalData();
+        downloads.items = [];
+        sourceStore.setSource("wyy");
+        // 同时播放模式也回到默认（不允许），并即时下发原生层
+        audioPlayer.setConcurrentMode(0);
+        concurrentMode.value = 0;
+        theme.setMode("system");
+        theme.setSkin("linen");
+        theme.setBackgroundImage("");
+        // 音频磁盘缓存同属"下载歌曲本体以外的数据"，一并删除
+        audioPlayer.clearAudioCache();
+        uni.showToast({ title: "已清除", icon: "success" });
+        // 登录态已删除，回到登录页
+        clearDataTimer = setTimeout(() => {
+          uni.reLaunch({ url: "/pages/login/index" });
+        }, 600) as number;
+      }
+    },
+  });
+}
+onUnmounted(() => {
+  if (clearDataTimer != null) {
+    clearTimeout(clearDataTimer);
+    clearDataTimer = null;
+  }
+});
+</script>
+
+<style>
+.page {
+  flex: 1;
+}
+.list {
+  flex: 1;
+  padding: 16rpx 0 40rpx;
+}
+.list-wide {
+  padding: 12px 0 24px;
+}
+.group {
+  margin-top: 20rpx;
+  margin-left: 24rpx;
+  margin-right: 24rpx;
+  border-radius: 24rpx;
+  overflow: hidden;
+
+  border-width: 1px;
+
+}
+.cell {
+  height: 96rpx;
+  padding: 0 32rpx;
+  flex-direction: row;
+  align-items: center;
+  border-bottom-width: 1px;
+}
+.cell-no-border {
+  border-bottom-width: 0;
+}
+.cell-icon {
+  margin-right: 20rpx;
+}
+.cell-title {
+  flex: 1;
+
+  font-size: 28rpx;
+  font-weight: 500;
+}
+.cell-title-danger {
+
+}
+.cell-right {
+  flex-direction: row;
+  align-items: center;
+}
+.cell-dot {
+  width: 16rpx;
+  height: 16rpx;
+  border-radius: 8rpx;
+  background-color: #ff4b4b;
+}
+.cell-value {
+
+  font-size: 24rpx;
+  margin-right: 12rpx;
+}
+/* 宽屏下 rpx 会随窗口放大膨胀，固定 px 尺寸 */
+.group-wide { margin-top: 14px; margin-left: 24px; margin-right: 24px; border-radius: 14px; }
+.cell-wide { height: 64px; padding-left: 24px; padding-right: 24px; }
+.cell-title-wide { font-size: 17px; }
+.cell-value-wide { font-size: 14px; }
+.cell-icon-wide { margin-right: 10px; }
+</style>

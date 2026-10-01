@@ -1,0 +1,274 @@
+<template>
+  <qt-page-frame :max-width="640">
+  <view class="page">
+    <!-- 宽屏/横屏可视高度小于内容高度，必须能下滑 -->
+    <scroll-view class="list" :class="layout.isWide ? 'list-wide' : ''" direction="vertical" :show-scrollbar="false">
+    <view class="logo" :class="layout.isWide ? 'logo-wide' : ''">
+      <image class="logo-img" :class="layout.isWide ? 'logo-img-wide' : ''" src="/static/icon/xxxhdpi.png" mode="aspectFill" />
+      <text class="name" :class="layout.isWide ? 'name-wide' : ''">轻听</text>
+      <text class="version" :class="layout.isWide ? 'version-wide' : ''">版本 {{ version }}</text>
+      <text class="slogan" :class="layout.isWide ? 'slogan-wide' : ''">聚合音乐APP，用音乐连接每一刻</text>
+    </view>
+    <view class="group" :class="layout.isWide ? 'group-wide' : ''">
+      <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" @click="checkUpdate">
+        <QtIcon class="cell-icon" :class="layout.isWide ? 'cell-icon-wide' : ''" name="refresh" :size="36" color="#6d8fd6" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''">检查更新</text>
+        <view class="cell-right" :class="layout.isWide ? 'cell-right-wide' : ''">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''">{{ updateText }}</text>
+          <QtIcon name="chevron-right" :size="28" color="#c4c9d4" />
+        </view>
+      </view>
+      <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" @click="openAgreement">
+        <QtIcon class="cell-icon" :class="layout.isWide ? 'cell-icon-wide' : ''" name="info" :size="36" color="#9b82d9" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''">用户协议与隐私政策</text>
+        <QtIcon name="chevron-right" :size="28" color="#c4c9d4" />
+      </view>
+    </view>
+    <view class="group" :class="layout.isWide ? 'group-wide' : ''">
+      <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" @click="copyEmail">
+        <QtIcon class="cell-icon" :class="layout.isWide ? 'cell-icon-wide' : ''" name="edit" :size="36" color="#4fb186" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''">意见反馈</text>
+        <view class="cell-right" :class="layout.isWide ? 'cell-right-wide' : ''">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''">feedback@canace.cn</text>
+          <QtIcon name="chevron-right" :size="28" color="#c4c9d4" />
+        </view>
+      </view>
+    </view>
+    <text class="footer" :class="layout.isWide ? 'footer-wide' : ''">© 2026 轻听音乐</text>
+    </scroll-view>
+    <qt-upgrade-popup
+      v-model:visible="popupVisible"
+      :info="popupInfo"
+      @closed="onPopupClosed"
+    />
+  </view>
+  </qt-page-frame>
+</template>
+
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { ref, onMounted } from "vue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import qtUpgradePopup from "@/uni_modules/qt-ui/components/qt-upgrade-popup/qt-upgrade-popup.uvue";
+import type { AppUpdateInfo } from "@/services/upgrade";
+import {
+  checkAppUpdate,
+  consumePendingUpdate,
+} from "@/services/upgrade";
+import { openInBrowser } from "@/services/app-native";
+import { getVersionText } from "@/services/app-version";
+
+const layout = useQtLayout();
+
+// 版本信息运行时从 manifest.json（uni.getAppBaseInfo）读取，发版无需改这里
+const version = getVersionText();
+const updateText = ref("点击检查");
+const popupVisible = ref(false);
+const popupInfo = ref<AppUpdateInfo | null>(null);
+/** 用户协议与隐私政策文档地址（系统浏览器打开） */
+const DOC_URL = "https://docs.qq.com/doc/DWURrU01ESHVNc2dV";
+
+onMounted(() => {
+  // 启动检查发现新版本后，由 App.uvue 跳转过来，这里自动弹出升级弹窗
+  const pending = consumePendingUpdate();
+  if (pending != null) {
+    updateText.value = "发现新版本";
+    popupInfo.value = pending;
+    popupVisible.value = true;
+  }
+});
+
+function checkUpdate(): void {
+  updateText.value = "检查中...";
+  checkAppUpdate()
+    .then((info) => {
+      if (info != null) {
+        updateText.value = "发现新版本";
+        popupInfo.value = info;
+        popupVisible.value = true;
+      } else {
+        updateText.value = "已是最新版本";
+        uni.showToast({ title: "已是最新版本", icon: "none" });
+      }
+    })
+    .catch(() => {
+      updateText.value = "点击检查";
+      uni.showToast({ title: "检查更新失败", icon: "none" });
+    });
+}
+
+function onPopupClosed(): void {
+  popupVisible.value = false;
+  updateText.value = "点击检查";
+}
+
+function openAgreement(): void {
+  openInBrowser(DOC_URL);
+}
+
+function copyEmail(): void {
+  uni.setClipboardData({
+    data: "feedback@canace.cn",
+    success: () => {
+      uni.showToast({ title: "邮箱已复制", icon: "none" });
+    },
+  });
+}
+</script>
+
+<style>
+.page {
+  flex: 1;
+}
+/* 窄屏保持 logo 贴顶的 hero 样式（顶角为直角），只留底部余量 */
+.list {
+  flex: 1;
+  padding-bottom: 40rpx;
+}
+.list-wide {
+  padding: 24px 24px 32px;
+  align-items: center;
+}
+.logo {
+  padding: 110rpx 40rpx 80rpx;
+  align-items: center;
+  background-color: rgba(255,255,255,0.62);
+  border-width: 1px;
+  border-color: rgba(255,255,255,0.6);
+  border-radius: 0 0 24rpx 24rpx;
+  box-shadow: 0 10rpx 30rpx rgba(16,22,38,0.08);
+}
+.logo-img {
+  width: 132rpx;
+  height: 132rpx;
+  border-radius: 32rpx;
+}
+.name {
+  margin-top: 28rpx;
+  color: #191d26;
+  font-size: 40rpx;
+  font-weight: 700;
+}
+.version {
+  margin-top: 10rpx;
+  color: #6b7385;
+  font-size: 25rpx;
+}
+.slogan {
+  margin-top: 26rpx;
+  color: #6b7385;
+  font-size: 23rpx;
+  text-align: center;
+}
+.group {
+  margin: 20rpx 24rpx 0;
+  border-radius: 24rpx;
+  overflow: hidden;
+  background-color: rgba(255,255,255,0.62);
+  border-width: 1px;
+  border-color: rgba(255,255,255,0.6);
+  box-shadow: 0 10rpx 30rpx rgba(16,22,38,0.08);
+}
+.cell {
+  height: 96rpx;
+  padding: 0 32rpx;
+  flex-direction: row;
+  align-items: center;
+  border-bottom-width: 1px;
+  border-bottom-color: rgba(16, 22, 38, 0.06);
+}
+.cell-no-border {
+  border-bottom-width: 0;
+}
+.cell-icon {
+  margin-right: 20rpx;
+}
+.cell-title {
+  flex: 1;
+  color: #191d26;
+  font-size: 28rpx;
+  font-weight: 500;
+}
+.cell-right {
+  flex-direction: row;
+  align-items: center;
+}
+.cell-value {
+  color: #6b7385;
+  font-size: 24rpx;
+  margin-right: 12rpx;
+}
+.footer {
+  margin-top: 60rpx;
+  color: #aeb4c0;
+  font-size: 22rpx;
+  text-align: center;
+}
+
+.logo-dark {
+  background-color: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.12);
+  box-shadow: 0 10rpx 30rpx rgba(0,0,0,0.22);
+}
+.group-dark {
+  background-color: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.12);
+  box-shadow: 0 10rpx 30rpx rgba(0,0,0,0.22);
+}
+
+/* Vapor 宽屏：px 覆盖 rpx，1600x900 下避免按窗口比例放大 2.7 倍 */
+.logo-wide {
+  align-items: center;
+  width: 560px;
+  padding: 44px 28px 40px;
+  border-radius: 16px;
+  box-shadow: 0 8px 22px rgba(16,22,38,0.10);
+}
+.logo-img-wide {
+  width: 88px;
+  height: 88px;
+  border-radius: 24px;
+}
+.name-wide {
+  margin-top: 14px;
+  font-size: 28px;
+}
+.version-wide {
+  margin-top: 6px;
+  font-size: 14px;
+}
+.slogan-wide {
+  margin-top: 14px;
+  font-size: 13px;
+}
+.group-wide {
+  margin: 14px 0 0;
+  width: 560px;
+  border-radius: 14px;
+  box-shadow: 0 8px 22px rgba(16,22,38,0.10);
+}
+.cell-wide {
+  height: 60px;
+  padding-left: 20px;
+  padding-right: 20px;
+}
+.cell-icon-wide {
+  margin-right: 14px;
+}
+.cell-title-wide {
+  font-size: 16px;
+}
+.cell-right-wide {
+  flex-direction: row;
+  align-items: center;
+}
+.cell-value-wide {
+  font-size: 14px;
+  margin-right: 8px;
+}
+.footer-wide {
+  margin-top: 32px;
+  font-size: 13px;
+}
+</style>

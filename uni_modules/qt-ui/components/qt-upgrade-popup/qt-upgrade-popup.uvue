@@ -1,0 +1,413 @@
+<template>
+  <view v-if="visible" class="up-mask" @click="onMaskTap">
+    <view class="up-card" :class="layout.isWide ? 'up-card-wide' : ''" @click.stop>
+      <view class="up-header" :class="layout.isWide ? 'up-header-wide' : ''">
+        <image class="up-icon" :class="layout.isWide ? 'up-icon-wide' : ''" src="/static/icon/xxxhdpi.png" mode="aspectFill" />
+        <text class="up-title" :class="layout.isWide ? 'up-title-wide' : ''">发现新版本</text>
+        <view v-if="isBeta" class="up-badge" :class="layout.isWide ? 'up-badge-wide' : ''"><text class="up-badge-text" :class="layout.isWide ? 'up-badge-text-wide' : ''">测试版</text></view>
+      </view>
+      <view class="up-version-row" :class="layout.isWide ? 'up-version-row-wide' : ''">
+        <text class="up-version" :class="layout.isWide ? 'up-version-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">{{ info.versionName }}</text>
+        <text v-if="sizeText.length > 0" class="up-size" :class="layout.isWide ? 'up-size-wide' : ''">{{ sizeText }}</text>
+      </view>
+      <scroll-view class="up-content" :class="layout.isWide ? 'up-content-wide' : ''" direction="vertical" :show-scrollbar="false">
+        <!-- 更新说明富文本：与公告内容同一渲染方式（支持 HTML/纯文本） -->
+        <QtRichText
+          :html="info.versionInfo"
+          color="#596173"
+          :font-size="26"
+          :line-height="1.7"
+          align="left"
+        />
+      </scroll-view>
+      <view v-if="downloading || probing" class="up-progress" :class="layout.isWide ? 'up-progress-wide' : ''">
+        <view class="up-progress-track">
+          <view class="up-progress-bar" :style="'width:' + progress + '%;background-color:' + themeStore.skin.accent + ';'"></view>
+        </view>
+        <text class="up-progress-text" :class="layout.isWide ? 'up-progress-text-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">{{ progressText }}</text>
+      </view>
+      <view class="up-actions" :class="layout.isWide ? 'up-actions-wide' : ''">
+        <!-- 双链接规则（UPDATE_DESIGN.md §3.1）：双链接 = 直接下载(主) + 浏览器下载(次)；
+             单链接 = 只显示对应按钮；强制更新同样展示全部按钮 -->
+        <view
+          v-if="showCancelBtn"
+          class="up-btn up-btn-cancel" :class="[layout.isWide ? 'up-btn-wide' : '', layout.isWide ? 'up-btn-cancel-wide' : '']"
+          @click="cancel"
+        >
+          <text class="up-btn-text-cancel" :class="layout.isWide ? 'up-btn-text-wide' : ''">以后再说</text>
+        </view>
+        <view
+          v-if="showDirectBtn"
+          class="up-btn up-btn-primary" :class="layout.isWide ? 'up-btn-wide' : ''"
+          :style="(showBrowserBtn ? (layout.isWide ? 'margin-right:12px;' : 'margin-right:20rpx;') : '') + 'background-color:' + themeStore.skin.accent + ';'"
+          @click="update"
+        >
+          <text class="up-btn-text-primary" :class="layout.isWide ? 'up-btn-text-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">{{ primaryBtnText }}</text>
+        </view>
+        <view v-if="showBrowserBtn && !downloading && !probing" class="up-btn up-btn-browser" :class="layout.isWide ? 'up-btn-wide' : ''" :style="'border-color:' + themeStore.skin.accent + ';'" @click="updateByBrowser">
+          <text class="up-btn-text-browser" :class="layout.isWide ? 'up-btn-text-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">浏览器下载</text>
+        </view>
+      </view>
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, onUnmounted } from "vue";
+import QtRichText from "@/uni_modules/qt-ui/components/qt-rich-text/qt-rich-text.uvue";
+import type { AppUpdateInfo } from "@/services/upgrade";
+import { formatFileSize, resolveDownloadUrl } from "@/services/upgrade";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+
+const layout = useQtLayout();
+const themeStore = useThemeStore();
+import { downloadApk, installApk, openInBrowser } from "@/services/app-native";
+import { saveToPublicMedia, ensurePublicDirPermission } from "@/uni_modules/qt-app-native";
+
+/** APP 更新包公共目录（固定）：Download/QtDownload/Update */
+const UPDATE_SUB_DIR = "QtDownload/Update";
+const UPDATE_FILE_PREFIX = "轻听音乐";
+
+// 下载完成后的延迟关闭定时器：组件卸载时必须清掉，避免在已卸载实例上触发回调
+let closeTimer: number | null = null;
+onUnmounted(() => {
+  if (closeTimer != null) {
+    clearTimeout(closeTimer);
+    closeTimer = null;
+  }
+});
+
+const props = defineProps<{
+  visible: boolean;
+  info: AppUpdateInfo | null;
+}>();
+const emit = defineEmits<{
+  "update:visible": [value: boolean];
+  closed: [];
+}>();
+
+const downloading = ref(false);
+const progress = ref(0);
+/** GitHub 加速探测进行中（按钮显示「测速中…」） */
+const probing = ref(false);
+/**
+ * 逃生开关：直链下载失败、或已经拉起过安装界面后放开关闭入口。
+ * 否则网络不可达 / 用户取消安装时，强制更新弹窗既关不掉也装不上，用户会被彻底卡住。
+ */
+const escapeAllowed = ref(false);
+
+const isBeta = computed(() => props.info != null && props.info.channel == "beta");
+const sizeText = computed(() =>
+  props.info != null ? formatFileSize(props.info.fileSize) : ""
+);
+
+/** 按钮显隐规则：downloadUrl 有显示「直接下载」；browserUrl 有显示「浏览器下载」 */
+const showDirectBtn = computed(() => props.info != null && props.info.downloadUrl.length > 0);
+const showBrowserBtn = computed(() => props.info != null && props.info.browserUrl.length > 0);
+/** 「以后再说」：非强制更新常显；强制更新仅在下载失败后作为逃生入口出现 */
+const showCancelBtn = computed(
+  () =>
+    !downloading.value &&
+    !probing.value &&
+    (props.info == null || !props.info.isForce || escapeAllowed.value)
+);
+/** 强制更新时点遮罩不关闭；仅在下载失败/无法拉起安装时放行，避免完全卡死 */
+const maskClosable = computed(
+  () => props.info == null || !props.info.isForce || escapeAllowed.value
+);
+
+const primaryBtnText = computed(() => {
+  if (probing.value) return "测速中...";
+  if (downloading.value) return "下载中...";
+  return "直接下载";
+});
+const progressText = computed(() =>
+  probing.value ? "测速中" : progress.value + "%"
+);
+
+function closeSelf(): void {
+  emit("update:visible", false);
+  emit("closed");
+}
+
+function cancel(): void {
+  if (downloading.value || probing.value) return;
+  closeSelf();
+}
+
+function onMaskTap(): void {
+  // 强制更新时点击遮罩不关闭（下载失败后除外）
+  if (!maskClosable.value) return;
+  cancel();
+}
+
+/** 浏览器下载：打开 browserUrl（双链接方案的浏览器分支） */
+function updateByBrowser(): void {
+  const info = props.info;
+  if (info == null || downloading.value || probing.value) return;
+  openInBrowser(info.browserUrl);
+  // 强制更新不关闭弹窗：从浏览器返回后仍需拦截，否则等于放行了强制更新
+  if (!info.isForce) closeSelf();
+}
+
+async function update(): Promise<void> {
+  const info = props.info;
+  if (info == null || downloading.value || probing.value) return;
+  escapeAllowed.value = false;
+  // GitHub 直链：先并发探测加速节点选最快可用（全部失败回退原始链接）
+  probing.value = true;
+  let url = info.downloadUrl;
+  try {
+    url = await resolveDownloadUrl(info, () => {});
+  } catch (_) {
+    url = info.downloadUrl;
+  } finally {
+    probing.value = false;
+  }
+  if (url.length == 0) {
+    uni.showToast({ title: "暂无可用下载地址", icon: "none" });
+    return;
+  }
+  console.log("[Upgrade] 开始下载：" + url);
+  // 直链下载（uni.downloadFile + 进度条）
+  downloading.value = true;
+  progress.value = 0;
+  try {
+    const path = await downloadApk(url, (_received, _total, percent) => {
+      progress.value = percent;
+    });
+    progress.value = 100;
+    // 另存一份到公共目录 Download/QtDownload/Update（固定，不可修改）
+    let installPath = path;
+    try {
+      ensurePublicDirPermission();
+      const apkName = UPDATE_FILE_PREFIX + "_v" + info.versionName + ".apk";
+      const saved = saveToPublicMedia(path, "download", apkName, UPDATE_SUB_DIR);
+      if (saved != null && saved.length > 0) installPath = saved;
+      else console.log("[Upgrade] 公共目录保存失败，使用临时文件安装");
+    } catch (e) {
+      console.log("[Upgrade] 公共目录保存失败", e != null ? e.toString() : "unknown");
+    }
+    // 下载完成，拉起安装。
+    // 注意：拉起安装成功不放开强制更新——用户取消安装回到 APP 后仍然要拦住；
+    // 只有连安装界面都拉不起来（更新这条路走不通）时才给逃生入口，避免彻底卡死。
+    if (!installApk(installPath)) {
+      escapeAllowed.value = true;
+    }
+    // 非强制更新：下载完成后关闭弹窗；强制更新等安装后由用户处理
+    if (!info.isForce) {
+      setTimeout(() => {
+        downloading.value = false;
+        closeSelf();
+      }, 600);
+    } else {
+      downloading.value = false;
+    }
+  } catch (e) {
+    downloading.value = false;
+    progress.value = 0;
+    // 下载失败：放开关闭入口（强制更新也能退出），用户可改用浏览器下载
+    escapeAllowed.value = true;
+    const msg = e != null && (e as Error).message != null ? (e as Error).message : "下载失败";
+    uni.showToast({ title: msg, icon: "none" });
+  }
+}
+</script>
+
+<style>
+.up-mask {
+  position: fixed;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  justify-content: center;
+  align-items: center;
+  z-index: 999;
+}
+.up-card {
+  width: 600rpx;
+  border-radius: 32rpx;
+  background-color: #ffffff;
+  padding: 44rpx 40rpx 36rpx;
+  overflow: hidden;
+}
+.up-header {
+  flex-direction: row;
+  align-items: center;
+}
+.up-icon {
+  width: 88rpx;
+  height: 88rpx;
+  border-radius: 24rpx;
+}
+.up-title {
+  margin-left: 20rpx;
+  color: #191d26;
+  font-size: 34rpx;
+  font-weight: 700;
+}
+.up-badge {
+  margin-left: 16rpx;
+  padding: 6rpx 14rpx;
+  background-color: #4fb186;
+  border-radius: 20rpx;
+}
+.up-badge-text {
+  color: #ffffff;
+  font-size: 20rpx;
+}
+.up-version-row {
+  margin-top: 28rpx;
+  flex-direction: row;
+  align-items: center;
+}
+.up-version {
+  font-size: 40rpx;
+  font-weight: 700;
+}
+.up-size {
+  margin-left: 16rpx;
+  color: #6b7385;
+  font-size: 24rpx;
+}
+.up-content {
+  margin-top: 20rpx;
+  max-height: 260rpx;
+}
+.up-info {
+  color: #596173;
+  font-size: 26rpx;
+  line-height: 1.6;
+}
+.up-progress {
+  margin-top: 28rpx;
+  flex-direction: row;
+  align-items: center;
+}
+.up-progress-track {
+  flex: 1;
+  height: 14rpx;
+  background-color: #eef1f7;
+  border-radius: 7rpx;
+  overflow: hidden;
+}
+.up-progress-bar {
+  height: 14rpx;
+  border-radius: 7rpx;
+}
+.up-progress-text {
+  margin-left: 16rpx;
+  font-size: 24rpx;
+  width: 90rpx;
+  text-align: right;
+}
+.up-actions {
+  margin-top: 36rpx;
+  flex-direction: row;
+  justify-content: space-between;
+}
+.up-btn {
+  height: 88rpx;
+  flex: 1;
+  justify-content: center;
+  align-items: center;
+  border-radius: 44rpx;
+}
+.up-btn-cancel {
+  margin-right: 20rpx;
+  background-color: #f0f2f6;
+}
+.up-btn-primary {
+}
+.up-btn-text-cancel {
+  color: #596173;
+  font-size: 28rpx;
+}
+.up-btn-text-primary {
+  font-size: 28rpx;
+  font-weight: 600;
+}
+/* 浏览器下载（次按钮，双链接时与主按钮并排） */
+.up-btn-browser {
+  background-color: #ffffff;
+  border-style: solid;
+  border-width: 1px;
+}
+.up-btn-text-browser {
+  font-size: 28rpx;
+  font-weight: 600;
+}
+
+/* Vapor 宽屏：px 覆盖 rpx。弹窗限宽 560px 居中，
+   避免 600rpx 在 1600x900 / 2560x1440 上被放大到 900dp+ 占满整屏 */
+.up-card-wide {
+  width: 560px;
+  border-radius: 16px;
+  padding: 24px 24px 20px;
+}
+.up-header-wide {
+  flex-direction: row;
+  align-items: center;
+}
+.up-icon-wide {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+}
+.up-title-wide {
+  margin-left: 12px;
+  font-size: 19px;
+}
+.up-badge-wide {
+  margin-left: 10px;
+  padding: 3px 9px;
+  border-radius: 11px;
+}
+.up-badge-text-wide {
+  font-size: 12px;
+}
+.up-version-row-wide {
+  margin-top: 16px;
+  flex-direction: row;
+  align-items: center;
+}
+.up-version-wide {
+  font-size: 23px;
+}
+.up-size-wide {
+  margin-left: 10px;
+  font-size: 13px;
+}
+.up-content-wide {
+  margin-top: 12px;
+  max-height: 180px;
+}
+.up-progress-wide {
+  margin-top: 16px;
+  flex-direction: row;
+  align-items: center;
+}
+.up-progress-text-wide {
+  margin-left: 10px;
+  font-size: 13px;
+  width: 56px;
+}
+.up-actions-wide {
+  margin-top: 20px;
+  flex-direction: row;
+  justify-content: space-between;
+}
+.up-btn-wide {
+  height: 46px;
+  border-radius: 23px;
+}
+.up-btn-cancel-wide {
+  margin-right: 12px;
+}
+.up-btn-text-wide {
+  font-size: 15px;
+}
+</style>

@@ -1,0 +1,799 @@
+/**
+ * WebView(V8) 引擎适配层 —— 安卓端唯一的 JS 引擎后端（系统 WebView 的 V8/JIT）。
+ *
+ * 为什么是它：内嵌 JS 解释器跑同一段混淆脚本 init 要 6361ms，Node/V8 上只要 84ms（约 ×75.7）。
+ * 一条 8.3-9.5s 的 init 会独占引擎线程并吃光 5s 整链预算，于是 kg 在安卓上 0/36，
+ * 只能靠 chain.json 的 platforms:[1103] 白名单把重线路挡在安卓之外。
+ * 换成系统 WebView 的 V8（带 JIT）后 init 回到百毫秒量级，白名单与预热都可以不要。
+ * 2026-09-23 起内嵌解释器后端与 libs/*.aar 已整体删除，本文件是唯一实现。
+ *
+ * 设计要点（详见《qt-uniappx-V8引擎方案.md》）：
+ *
+ * 1. **驱动线程不变**：仍然是 index.uts 的引擎线程跑 PumpTask/InvokeTask/...，
+ *    本文件只提供「同步 evaluate」这一件事——引擎线程把求值投到主线程（WebView 只能在主线程用），
+ *    再用 CountDownLatch 等结果回来。这样 index.uts 的泵/waiter/HTTP/定时器/poison 全部零改动。
+ * 2. **prelude 逐字复用**：prelude.uts 是引擎无关的纯 JS（所有 shim 都有 typeof 守卫，
+ *    且 setTimeout/setInterval 被宿主队列接管），V8 下不需要改一个字；
+ *    JS 侧的泵协议仍是裸函数 __qtPump/__qtCall/__qtResolveHttp/__qtFireTimer。
+ * 3. **求值必须包信封**：evaluateJavascript 不回传异常（回调只拿到 "null"），
+ *    所以 bootstrap 里用 __qtEnv 包一层 try/catch + JSON.stringify，原生侧解**两层** JSON。
+ * 4. **bundle 不走 evaluateJavascript**：1.7MB 源码过一次 evaluateJavascript 会撞 Binder
+ *    事务上限（约 1MB）。改为：原生把源码写进 filesDir，再由 shouldInterceptRequest
+ *    以 `https://qt.local/qt-bundle.js` 提供给页面，页面用**动态 import()** 加载。
+ *    这同时拿到了「compile-only 闸门」：语法错时 import 的 reject 里 e.name === 'SyntaxError'，
+ *    且此时**零副作用**（顶层未执行）。
+ *    ⚠️ import 的说明符必须是**绝对 URL**：本文件里 prelude/bootstrap 都是用
+ *    evaluateJavascript 注入的，**注入脚本的 base URL 是 about:blank**，根相对写法
+ *    `import('/qt-bundle.js')` 会直接报「Failed to resolve module specifier ...
+ *    base URL is about:blank」（2026092301 首轮真机验证踩到）。拦截响应另需带
+ *    `Access-Control-Allow-Origin: *`，因为模块抓取一律走 CORS 模式。
+ * 5. **同步版求值**：泵用 __qtPump()（不是 Promise 包装版）——evaluateJavascript 对 Promise
+ *    表达式只返回 null，拿不到泵的输出；V8 在每次脚本求值后会自行跑微任务检查点，
+ *    HTTP 回投后的 await 续跑照样推进。
+ *
+ * 失败即失败：v8Start 返回错误文本时 index.uts 直接把错误上报给调用方（不再有回退后端）。
+ */
+
+import WebView from 'android.webkit.WebView'
+import WebViewClient from 'android.webkit.WebViewClient'
+import WebResourceRequest from 'android.webkit.WebResourceRequest'
+import WebResourceResponse from 'android.webkit.WebResourceResponse'
+import ValueCallback from 'android.webkit.ValueCallback'
+import RenderProcessGoneDetail from 'android.webkit.RenderProcessGoneDetail'
+import PackageInfo from 'android.content.pm.PackageInfo'
+import View from 'android.view.View'
+import ViewGroup from 'android.view.ViewGroup'
+import Handler from 'android.os.Handler'
+import Looper from 'android.os.Looper'
+import Build from 'android.os.Build'
+import Runnable from 'java.lang.Runnable'
+import CountDownLatch from 'java.util.concurrent.CountDownLatch'
+import TimeUnit from 'java.util.concurrent.TimeUnit'
+import HashMap from 'java.util.HashMap'
+import File from 'java.io.File'
+import FileInputStream from 'java.io.FileInputStream'
+import FileOutputStream from 'java.io.FileOutputStream'
+import OutputStreamWriter from 'java.io.OutputStreamWriter'
+import { UTSAndroid } from 'io.dcloud.uts'
+import { QT_JS_PRELUDE } from './prelude.uts'
+
+// ==================== 常量 ====================
+
+/**
+ * 页面基地址。**必须是 https 且是「我们自己的域」**：用它 loadDataWithBaseURL 之后，
+ * 文档的 origin 就是 https://qt.local，页面内发起的模块抓取算同源，
+ * 由 shouldInterceptRequest 本地拦截返回，不产生任何真实网络请求。
+ */
+const V8_BASE_URL = 'https://qt.local/'
+/** 被拦截的 bundle 路径（shouldInterceptRequest 按它匹配） */
+const V8_BUNDLE_PATH = '/qt-bundle.js'
+/**
+ * bundle 的**绝对** URL —— bootstrap 里的 import 必须用它，**不能写根相对的 '/qt-bundle.js'**。
+ *
+ * 真机踩坑（2026092301 首轮真机验证，2026-09-23）：bootstrap 是用 evaluateJavascript 注入的，
+ * 而**注入脚本的 base URL 是 about:blank**（不是文档的 base URL，且被当成 CORS 跨源脚本），
+ * 于是根相对写法直接失败：
+ *   Failed to resolve module specifier '/qt-bundle.js'.
+ *   The base URL is about:blank because import() is called from a CORS-cross-origin script.
+ * 绝对 URL 不依赖脚本 base URL，任何注入方式下都能解析。与 V8_BUNDLE_PATH 拼接，
+ * 避免两处路径写歪。
+ */
+const V8_BUNDLE_URL = 'https://qt.local' + V8_BUNDLE_PATH
+/** 空白页（prelude/bootstrap 都通过 evaluateJavascript 注入，避免 HTML 转义问题） */
+const V8_HTML =
+	'<!doctype html><html><head><meta charset="utf-8">' +
+	'<meta name="viewport" content="width=device-width,initial-scale=1">' +
+	'</head><body></body></html>'
+/** 页面加载超时（onPageFinished） */
+const V8_PAGE_TIMEOUT_MS = 10000
+/** 单次 evaluate 超时：与 index.uts 的 STALL_MS 对齐（超时即认定脚本卡住） */
+const V8_EVAL_TIMEOUT_MS = 15000
+/** bundle 模块装载总超时（含 V8 编译 1.7MB + 顶层执行） */
+const V8_LOAD_TIMEOUT_MS = 15000
+/**
+ * 停止/销毁 WebView 时等主线程完成的上限。
+ * 必须是具名常量：UTS 里 `3000.toLong()` 会被词法分析当成 Double 字面量
+ * （`3000.` + `toLong`）而报「Syntax error: Expecting an element」，
+ * 写成 `V8_STOP_TIMEOUT_MS.toLong()` 才正常。
+ */
+const V8_STOP_TIMEOUT_MS = 3000
+/** 装载状态轮询间隔 */
+const V8_POLL_INTERVAL_MS = 25
+/**
+ * 是否打开 chrome://inspect 调试（仅 `setWebContentsDebuggingEnabled`）。
+ * 正式包必须为 false：开着等于允许任何能连 adb 的人调试引擎里的 WebView。
+ */
+const V8_DEBUG = false
+
+/**
+ * WebView 侧 bootstrap（prelude 之后注入）。
+ *
+ * 注意：本字符串会被 UTS 当模板串处理，所以 JS 里**不写反斜杠转义、不写 ${、不写反引号**。
+ * 需要换行时用 JSON.stringify 的结果或字符串拼接，不写字面量转义。
+ */
+const QT_V8_BOOTSTRAP = `
+(function () {
+  if (globalThis.__qtV8Ready) { return; }
+  globalThis.__qtV8Ready = true;
+
+  // 信封：evaluateJavascript 不把异常回传（回调只拿到 null），
+  // 所以每一次求值都包一层 try/catch + JSON.stringify，原生侧解两层 JSON 后能看到真实错误。
+  globalThis.__qtEnv = function (fn) {
+    try {
+      var v = fn();
+      return JSON.stringify({ ok: 1, v: v == null ? '' : String(v) });
+    } catch (e) {
+      var msg = (e && e.stack) ? String(e.stack) : String(e);
+      return JSON.stringify({ ok: 0, e: msg });
+    }
+  };
+
+  globalThis.__qtEnvProbe = function () {
+    return globalThis.__qtEnv(function () { return String(1 + 1); });
+  };
+  globalThis.__qtEnvPump = function () {
+    return globalThis.__qtEnv(function () { return globalThis.__qtPump(); });
+  };
+  globalThis.__qtEnvCall = function (name, argsJson) {
+    return globalThis.__qtEnv(function () { return globalThis.__qtCall(name, argsJson); });
+  };
+  globalThis.__qtEnvResolveHttp = function (id, statusCode, headersJson, body, error) {
+    return globalThis.__qtEnv(function () {
+      globalThis.__qtResolveHttp(id, statusCode, headersJson, body, error);
+      return '';
+    });
+  };
+  globalThis.__qtEnvFireTimer = function (id) {
+    return globalThis.__qtEnv(function () { globalThis.__qtFireTimer(id); return ''; });
+  };
+  globalThis.__qtEnvDropOp = function (id) {
+    return globalThis.__qtEnv(function () {
+      if (globalThis.__qtDropOp) { globalThis.__qtDropOp(id); }
+      return '';
+    });
+  };
+  globalThis.__qtEnvEntries = function () {
+    return globalThis.__qtEnv(function () {
+      var n = 0, k, e = globalThis.__qtEntries || {};
+      for (k in e) { if (Object.prototype.hasOwnProperty.call(e, k)) { n++; } }
+      return String(n);
+    });
+  };
+  globalThis.__qtEnvBusy = function () {
+    return globalThis.__qtEnv(function () {
+      return String(globalThis.__qtBusy ? globalThis.__qtBusy() : 0);
+    });
+  };
+
+  // ---------- bundle 模块装载 ----------
+  // bundle 是真正的 ESM（顶层 export），不能当普通脚本求值；源码由原生写进 filesDir，
+  // 再由 shouldInterceptRequest 以 https://qt.local/qt-bundle.js 提供，这里动态 import。
+  // 说明符必须是**绝对 URL**（占位符在原生侧替换成 V8_BUNDLE_URL）：本脚本由
+  // evaluateJavascript 注入，base URL 是 about:blank，根相对写法解析不了。
+  globalThis.__qtLoadStatus = 'pending';
+
+  globalThis.__qtImportBundle = function () {
+    globalThis.__qtLoadStatus = 'pending';
+    import('__QT_V8_BUNDLE_URL__').then(function () {
+      var n = 0, k, e = globalThis.__qtEntries || {};
+      for (k in e) { if (Object.prototype.hasOwnProperty.call(e, k)) { n++; } }
+      globalThis.__qtLoadStatus = n > 0 ? ('ok:' + n) : 'err:未注册任何入口（__qtEntries 为空）';
+    }, function (err) {
+      var name = (err && err.name) ? String(err.name) : '';
+      var msg = (err && err.message) ? String(err.message) : String(err);
+      // SyntaxError 表示 parse 期就被拦下、顶层一行都没执行 —— 与 QuickJS compileModule 同语义
+      globalThis.__qtLoadStatus = 'err:' + (name == 'SyntaxError' ? '语法错误：' : '') + msg;
+    });
+    return 'pending';
+  };
+
+  globalThis.__qtEnvLoadStatus = function () {
+    return globalThis.__qtEnv(function () { return String(globalThis.__qtLoadStatus); });
+  };
+
+  // 诊断用：页面真实的 origin / baseURI。装载失败时带进错误信息，一眼分辨
+  // 「文档 base URL 没生效」还是「模块抓取被 CORS 拦下」。
+  globalThis.__qtEnvDocBase = function () {
+    return globalThis.__qtEnv(function () {
+      return String(location.origin) + ' | ' + String(document.baseURI);
+    });
+  };
+})();
+`.replace('__QT_V8_BUNDLE_URL__', V8_BUNDLE_URL)
+
+// ==================== 模块级状态 ====================
+
+let gWebView: WebView | null = null
+/** 挂到 Activity 上的那个 1×1 视图（销毁时要摘掉，不能留一个 destroyed 的 WebView 在视图树里） */
+let gHostView: View | null = null
+let gMainHandler: Handler | null = null
+/** 页面是否已 onPageFinished（未就绪前不能 evaluateJavascript） */
+let gPageReady = false
+let gPageLatch: CountDownLatch | null = null
+/** 渲染进程是否已崩溃（崩溃后所有求值直接失败，等上层 stop+start 重建） */
+let gRenderGone = false
+/** 最近一次求值的错误（信封里 ok=0 时填），供装载/探针路径上报 */
+let gLastEvalError = ''
+/** 正在等回调的那次求值（同一时刻只允许一次，保证串行） */
+let gPendingSlot: V8EvalSlot | null = null
+/** bundle 源码落盘路径（由 shouldInterceptRequest 提供给页面） */
+let gBundlePath = ''
+
+// ==================== 小工具 ====================
+
+function v8ErrText(e: any): string {
+	if (e == null) return 'unknown error'
+	return `${e}`
+}
+
+function v8MainHandler(): Handler {
+	const h = gMainHandler
+	if (h != null) return h
+	const created = new Handler(Looper.getMainLooper())
+	gMainHandler = created
+	return created
+}
+
+/** 是否在主线程（主线程上不能阻塞等自己投出去的任务，否则自锁） */
+function v8OnMainThread(): boolean {
+	try {
+		return Looper.myLooper() == Looper.getMainLooper()
+	} catch (e) {
+		return false
+	}
+}
+
+/** 在引擎线程上小睡（不引 Thread.sleep，用 CountDownLatch 计时更省心） */
+function v8Sleep(ms: number): void {
+	try {
+		new CountDownLatch(1).await(ms.toLong(), TimeUnit.MILLISECONDS)
+	} catch (e) {
+		// 中断即返回
+	}
+}
+
+/** 应用私有目录下的 bundle 落地文件路径 */
+function bundleFilePath(): string {
+	if (gBundlePath.length > 0) return gBundlePath
+	const ctx = UTSAndroid.getAppContext()
+	if (ctx == null) return ''
+	const dir = ctx.filesDir
+	if (dir == null) return ''
+	gBundlePath = dir.getAbsolutePath() + '/qt-v8-bundle.js'
+	return gBundlePath
+}
+
+/** 把文本写进文件（与 index.uts 的 writeTextFile 同一套 API，避免跨文件循环依赖） */
+function writeText(path: string, text: string): void {
+	const w = new OutputStreamWriter(new FileOutputStream(new File(path)), 'UTF-8')
+	w.write(text)
+	w.flush()
+	w.close()
+}
+
+/**
+ * 解 evaluateJavascript 的返回值。
+ *
+ * 两层 JSON：JS 里返回的是字符串 `{"ok":1,"v":"..."}`，WebView 回调把它再 JSON 编码一次
+ * （字符串带引号、内部引号被转义），所以要 parse 两次。undefined/null 都回调字符串 "null"。
+ */
+function unwrapEval(raw: string | null): string {
+	if (raw == null) return ''
+	const outer = `${raw}`
+	if (outer.length == 0 || outer == 'null') return ''
+	let inner = ''
+	try {
+		inner = `${JSON.parse(outer)}`
+	} catch (e) {
+		// 不是 JSON（理论上不会发生）：按裸字符串处理，避免把结果吞掉
+		return outer
+	}
+	try {
+		const o = JSON.parse(inner) as UTSJSONObject
+		const okFlag = o.get('ok')
+		if (okFlag != null && `${okFlag}` == '0') {
+			const errVal = o.get('e')
+			gLastEvalError = errVal == null ? '脚本执行异常' : `${errVal}`
+			return ''
+		}
+		const v = o.get('v')
+		return v == null ? '' : `${v}`
+	} catch (e) {
+		return inner
+	}
+}
+
+// ==================== 一次求值的载体 ====================
+
+/** 引擎线程等待、主线程回填的一次求值 */
+class V8EvalSlot {
+	latch: CountDownLatch
+	value: string
+	seq: number
+
+	constructor(seq: number) {
+		this.seq = seq
+		this.value = ''
+		this.latch = new CountDownLatch(1)
+	}
+}
+
+/** evaluateJavascript 的回调（主线程） */
+class V8EvalCallback implements ValueCallback<string> {
+	private slot: V8EvalSlot
+
+	constructor(slot: V8EvalSlot) {
+		super()
+		this.slot = slot
+	}
+
+	override onReceiveValue(value: string | null): void {
+		this.slot.value = unwrapEval(value)
+		this.slot.latch.countDown()
+	}
+}
+
+/** 把「在主线程上发一次 evaluateJavascript」做成 Runnable */
+class V8EvalPost implements Runnable {
+	private code: string
+	private slot: V8EvalSlot
+
+	constructor(code: string, slot: V8EvalSlot) {
+		this.code = code
+		this.slot = slot
+	}
+
+	override run(): void {
+		const wv = gWebView
+		if (wv == null) {
+			this.slot.latch.countDown()
+			return
+		}
+		try {
+			wv.evaluateJavascript(this.code, new V8EvalCallback(this.slot))
+		} catch (e) {
+			gLastEvalError = v8ErrText(e)
+			this.slot.latch.countDown()
+		}
+	}
+}
+
+/** 把任意闭包投到主线程执行（建/毁 WebView 用） */
+class V8MainTask implements Runnable {
+	private fn: () => void
+
+	constructor(fn: () => void) {
+		this.fn = fn
+	}
+
+	override run(): void {
+		this.fn()
+	}
+}
+
+function v8OnMain(fn: () => void): void {
+	v8MainHandler().post(new V8MainTask(fn))
+}
+
+// ==================== WebViewClient ====================
+
+class V8Client extends WebViewClient {
+	/**
+	 * 必须显式写构造函数并调 super()：
+	 * UTS 编译到 Kotlin 时，父类只要有构造函数，子类就得在这里初始化
+	 * （否则报 "This type has a constructor, so it must be initialized here"）。
+	 */
+	constructor() {
+		super()
+	}
+
+	/**
+	 * 本地提供 bundle 模块。
+	 *
+	 * 走这里而不是 evaluateJavascript 传源码的原因：1.7MB 过一次 evaluateJavascript
+	 * 会撞 Binder 事务上限（约 1MB）。本回调在**后台线程**执行，读文件是安全的。
+	 */
+	override shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse | null {
+		try {
+			const url = request.getUrl()
+			if (url == null) return null
+			const p = url.getPath()
+			if (p == null || p != V8_BUNDLE_PATH) return null
+			const path = bundleFilePath()
+			if (path.length == 0) return null
+			const f = new File(path)
+			if (!f.exists()) return null
+			const res = new WebResourceResponse('text/javascript', 'utf-8', new FileInputStream(f))
+			// 模块脚本一律以 CORS 模式抓取；evaluateJavascript 注入脚本的 origin 可能是
+			// opaque（null），不给 ACAO 会过不了 CORS 检查。* 同时覆盖 null/opaque origin。
+			const headers = new HashMap<string, string>()
+			headers.put('Access-Control-Allow-Origin', '*')
+			headers.put('Access-Control-Allow-Headers', '*')
+			res.setResponseHeaders(headers)
+			return res
+		} catch (e) {
+			console.error('[qt-js-engine/v8] bundle 拦截失败:', e)
+			return null
+		}
+	}
+
+	override onPageFinished(view: WebView, url: string): void {
+		gPageReady = true
+		const l = gPageLatch
+		if (l != null) l.countDown()
+	}
+
+	/**
+	 * 渲染进程被系统回收（API 26+）。
+	 * 返回 true 表示「已处理」，避免系统连带杀掉本应用进程；
+	 * 之后所有求值直接失败，由 services/source-engine.uts 的 stop+start 重建引擎。
+	 */
+	override onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): boolean {
+		gRenderGone = true
+		const l = gPageLatch
+		if (l != null) l.countDown()
+		return true
+	}
+}
+
+// ==================== 可用性 ====================
+
+/** WebView 是否可用（去 Google 化的 ROM 可能没有 WebView 包） */
+export function v8Available(): boolean {
+	try {
+		if (Build.VERSION.SDK_INT >= 26) {
+			const pkg = WebView.getCurrentWebViewPackage()
+			if (pkg == null) return false
+		}
+		return true
+	} catch (e) {
+		return false
+	}
+}
+
+/** WebView 包版本（即 Chromium 版本），用于 start() 上报 */
+export function v8Version(): string {
+	try {
+		if (Build.VERSION.SDK_INT >= 26) {
+			const pkg: PackageInfo | null = WebView.getCurrentWebViewPackage()
+			if (pkg != null) {
+				const v = pkg.versionName
+				if (v != null && v.length > 0) return `${v}`
+			}
+		}
+	} catch (e) {
+		// 落到下面的兜底
+	}
+	// 不做 UA 兜底：`WebView.getDefaultUserAgent(ctx)` 是静态方法，UTS 解析不到
+	// （Unresolved reference），而 WebSettings.getUserAgentString() 又只能在主线程读。
+	// 版本号仅用于日志上报，API 26 以下（minSdk 24，占比极低）如实返回 unknown。
+	return 'unknown'
+}
+
+/** 渲染进程是否已崩溃（上层据此判定引擎不健康） */
+export function v8RenderGone(): boolean {
+	return gRenderGone
+}
+
+// ==================== 启动 / 停止 ====================
+
+/**
+ * 启动 WebView 引擎。返回空串表示成功，否则返回错误文本（调用方直接上报失败）。
+ * **必须在引擎线程调用**（内部会阻塞等待主线程完成建视图与页面加载）。
+ */
+export function v8Start(): string {
+	if (!v8Available()) return '系统 WebView 不可用'
+	gRenderGone = false
+	gLastEvalError = ''
+	gPageReady = false
+	gPageLatch = new CountDownLatch(1)
+
+	// ① 主线程建 WebView、挂 1×1 视图、载入空白页
+	let createError = ''
+	v8OnMain(() => {
+		try {
+			const activity = UTSAndroid.getUniActivity()
+			if (activity == null) {
+				createError = '当前没有可用 Activity'
+				const l = gPageLatch
+				if (l != null) l.countDown()
+				return
+			}
+			const wv = new WebView(activity)
+			const s = wv.getSettings()
+			s.setJavaScriptEnabled(true)
+			// 不放开本地文件/内容访问：bundle 走 shouldInterceptRequest，不需要 file:// 权限
+			s.setAllowFileAccess(false)
+			s.setAllowContentAccess(false)
+			wv.setBackgroundColor(0)
+			wv.setWebViewClient(new V8Client())
+			// 渲染进程优先级拉到 IMPORTANT：锁屏/后台时尽量不被降级（API 26+）
+			if (Build.VERSION.SDK_INT >= 26) {
+				try {
+					wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+				} catch (e) {
+					// 个别 ROM 不支持，忽略
+				}
+			}
+			gWebView = wv
+			// 1×1 挂到 Activity 内容根：WebView 必须在窗口里才会正常执行 JS，
+			// 但 1×1 比 0×0 更稳（部分实现会把 0 尺寸当作不可见而节流）
+			const host = wv as View
+			activity.addContentView(host, new ViewGroup.LayoutParams(1, 1))
+			gHostView = host
+			wv.loadDataWithBaseURL(V8_BASE_URL, V8_HTML, 'text/html', 'utf-8', null)
+		} catch (e) {
+			createError = v8ErrText(e)
+			const l = gPageLatch
+			if (l != null) l.countDown()
+		}
+	})
+
+	// ② 等页面加载完成
+	const latch = gPageLatch
+	if (latch != null) {
+		try {
+			latch.await(V8_PAGE_TIMEOUT_MS.toLong(), TimeUnit.MILLISECONDS)
+		} catch (e) {
+			// 中断
+		}
+	}
+	if (createError.length > 0) {
+		v8Stop()
+		return 'WebView 创建失败：' + createError
+	}
+	if (gRenderGone) {
+		v8Stop()
+		return 'WebView 渲染进程启动即崩溃'
+	}
+	if (!gPageReady) {
+		v8Stop()
+		return `WebView 页面加载超时（${V8_PAGE_TIMEOUT_MS}ms）`
+	}
+
+	// ③ 注入 prelude（逐字复用 QuickJS 那份，15KB，远小于 Binder 上限）
+	v8EvalRaw(QT_JS_PRELUDE)
+	// ④ 注入 bootstrap（信封 + 模块装载器）
+	v8EvalRaw(QT_V8_BOOTSTRAP)
+	// ⑤ 探针：确认引擎可执行且返回值能取回
+	const probe = v8EvalSync('__qtEnvProbe()')
+	if (probe != '2') {
+		const why = gLastEvalError.length > 0 ? gLastEvalError : `探针返回 "${probe}"`
+		v8Stop()
+		return 'WebView 探针失败：' + why
+	}
+	if (V8_DEBUG) {
+		try {
+			WebView.setWebContentsDebuggingEnabled(true)
+		} catch (e) {
+			// 忽略
+		}
+	}
+	return ''
+}
+
+/** 停止并销毁引擎（摘掉 1×1 视图 + destroy）。 */
+export function v8Stop(): void {
+	if (v8OnMainThread()) {
+		// 已在主线程：直接做，不能再 post 出去等自己
+		destroyOnMain()
+	} else {
+		const done = new CountDownLatch(1)
+		v8OnMain(() => {
+			destroyOnMain()
+			done.countDown()
+		})
+		try {
+			done.await(V8_STOP_TIMEOUT_MS.toLong(), TimeUnit.MILLISECONDS)
+		} catch (e) {
+			// 中断
+		}
+	}
+	gPageReady = false
+	gPageLatch = null
+	gPendingSlot = null
+	gRenderGone = false
+	gLastEvalError = ''
+}
+
+/** 主线程上的销毁动作（摘视图 + destroy） */
+function destroyOnMain(): void {
+	try {
+		const host = gHostView
+		if (host != null) {
+			const parent = host.getParent()
+			if (parent != null) {
+				const vg = parent as ViewGroup
+				vg.removeView(host)
+			}
+		}
+	} catch (e) {
+		console.error('[qt-js-engine/v8] 摘除宿主视图失败:', e)
+	}
+	try {
+		const wv = gWebView
+		if (wv != null) {
+			wv.stopLoading()
+			wv.destroy()
+		}
+	} catch (e) {
+		console.error('[qt-js-engine/v8] 销毁 WebView 失败:', e)
+	}
+	gHostView = null
+	gWebView = null
+}
+
+// ==================== 求值 ====================
+
+/**
+ * 求值一段 JS 并**同步**拿回字符串结果（引擎线程调用）。
+ *
+ * 这是整个适配层的核心：引擎线程 → 主线程 evaluateJavascript → 回调回填 → 引擎线程被唤醒。
+ * 之所以能用「阻塞等」而不是把 index.uts 的泵改成异步回调链：
+ * 驱动线程本来就是专用引擎线程（不是主线程），阻塞它不会卡 UI，也不会自锁
+ * （回调在主线程，不依赖引擎线程）。
+ */
+export function v8EvalSync(code: string): string {
+	if (gWebView == null) return ''
+	if (gRenderGone) return ''
+	if (!gPageReady) return ''
+	if (v8OnMainThread()) {
+		// 主线程上阻塞等自己投出去的任务 = 自锁。这里直接拒绝，并留下明确原因。
+		gLastEvalError = 'v8EvalSync 不允许在主线程调用（引擎线程才该调它）'
+		return ''
+	}
+	gLastEvalError = ''
+	const slot = new V8EvalSlot(0)
+	gPendingSlot = slot
+	const post = new V8EvalPost(code, slot)
+	v8OnMain(() => {
+		post.run()
+	})
+	let ok = false
+	try {
+		ok = slot.latch.await(V8_EVAL_TIMEOUT_MS.toLong(), TimeUnit.MILLISECONDS)
+	} catch (e) {
+		// 中断
+	}
+	gPendingSlot = null
+	if (!ok) {
+		gLastEvalError = `evaluate 超时（${V8_EVAL_TIMEOUT_MS}ms）`
+		return ''
+	}
+	return slot.value
+}
+
+/** 不关心返回值/错误的求值（注入 prelude 与 bootstrap 用） */
+function v8EvalRaw(code: string): void {
+	if (gWebView == null) return
+	if (!gPageReady) return
+	const slot = new V8EvalSlot(0)
+	const post = new V8EvalPost(code, slot)
+	v8OnMain(() => {
+		post.run()
+	})
+	try {
+		slot.latch.await(V8_EVAL_TIMEOUT_MS.toLong(), TimeUnit.MILLISECONDS)
+	} catch (e) {
+		// 中断
+	}
+}
+
+/** 最近一次求值的错误（空串表示无错） */
+export function v8LastError(): string {
+	return gLastEvalError
+}
+
+// ==================== bundle 装载 ====================
+
+/**
+ * 装载 bundle：落盘 → 触发动态 import → 轮询装载状态。
+ * 返回空串表示成功，否则是错误文本。**引擎线程调用**。
+ *
+ * 装载闸门三步：
+ *   ① 语法校验 → import 的 reject（e.name === 'SyntaxError'，此时顶层零执行）
+ *   ② 执行     → import 的 resolve
+ *   ③ 校验入口注册 → import 完成后数 __qtEntries 的键数，> 0 才算过
+ */
+export function v8LoadBundle(code: string): string {
+	if (gWebView == null) return '引擎未启动'
+	if (gRenderGone) return 'WebView 渲染进程已崩溃，需重启音源引擎'
+	const path = bundleFilePath()
+	if (path.length == 0) return '取不到应用私有目录'
+	try {
+		writeText(path, code)
+	} catch (e) {
+		return 'bundle 落盘失败：' + v8ErrText(e)
+	}
+	const t0 = Date.now()
+	v8EvalSync('__qtImportBundle()')
+	const deadline = Date.now() + V8_LOAD_TIMEOUT_MS
+	while (Date.now() < deadline) {
+		const st = v8EvalSync('__qtEnvLoadStatus()')
+		if (st.length == 0) {
+			// 求值本身失败（超时/渲染进程崩溃）：直接上报，别死等
+			const why = gLastEvalError.length > 0 ? gLastEvalError : '装载状态读取失败'
+			if (gRenderGone) return 'WebView 渲染进程已崩溃，需重启音源引擎'
+			if (why.indexOf('超时') >= 0) return 'bundle 装载阻塞（' + why + '）'
+			return why
+		}
+		if (st.indexOf('ok:') == 0) {
+			// ③ 入口数校验（bootstrap 已经判过，这里再确认一次）
+			const n = v8EntriesCount()
+			if (n <= 0) return 'bundle 未注册任何入口（__qtEntries 为空）'
+			const cost = Date.now() - t0
+			if (cost > V8_EVAL_TIMEOUT_MS) return `bundle 装载阻塞 ${cost}ms`
+			return ''
+		}
+		if (st.indexOf('err:') == 0) {
+			// 带上页面 origin/baseURI 诊断：绝对 URL 化之后若仍失败，多半是 CORS，
+			// 这行能一眼看清文档 base URL 有没有生效
+			const base = v8EvalSync('__qtEnvDocBase()')
+			const suffix = base.length > 0 ? `（页面 ${base}）` : ''
+			return st.substring(4) + suffix
+		}
+		v8Sleep(V8_POLL_INTERVAL_MS)
+	}
+	return `bundle 模块装载超时（${V8_LOAD_TIMEOUT_MS}ms）`
+}
+
+/** __qtEntries 的入口个数（数字，供 v8LoadBundle 校验） */
+export function v8EntriesCount(): number {
+	const s = v8EvalSync('__qtEnvEntries()')
+	if (s.length == 0) return 0
+	let v = 0
+	for (let i = 0; i < s.length; i++) {
+		const c = s.charCodeAt(i)!
+		if (c >= 48 && c < 58) {
+			v = v * 10 + (c - 48)
+		} else if (c == 46) {
+			break
+		} else if (i > 0) {
+			break
+		}
+	}
+	return v
+}
+
+/** 是否还有未完成的活（供上层判断要不要继续泵；当前泵由 index.uts 驱动，这里只做暴露） */
+export function v8Busy(): string {
+	return v8EvalSync('__qtEnvBusy()')
+}
+
+// ==================== 给 index.uts 用的表达式包装 ====================
+// 一律「同步版 + 信封」两点：evaluateJavascript 对 Promise 只回调 null，且不回传异常。
+// 引号转义由 index.uts 的 quoteAscii 负责，这里只拼字符串。
+
+export function v8ExprCall(nameLiteral: string, argsLiteral: string): string {
+	return `__qtEnvCall(${nameLiteral},${argsLiteral})`
+}
+
+export function v8ExprPump(): string {
+	return '__qtEnvPump()'
+}
+
+export function v8ExprResolveHttp(
+	idLiteral: string,
+	status: number,
+	headersLiteral: string,
+	bodyLiteral: string,
+	errorLiteral: string
+): string {
+	return `__qtEnvResolveHttp(${idLiteral},${status},${headersLiteral},${bodyLiteral},${errorLiteral})`
+}
+
+export function v8ExprFireTimer(idLiteral: string): string {
+	return `__qtEnvFireTimer(${idLiteral})`
+}
+
+export function v8ExprDropOp(idLiteral: string): string {
+	return `__qtEnvDropOp(${idLiteral})`
+}
+
+export function v8ExprEntriesCount(): string {
+	return '__qtEnvEntries()'
+}
+
+export function v8ExprProbe(): string {
+	return '__qtEnvProbe()'
+}

@@ -1,0 +1,195 @@
+<script setup lang="uts">
+import { usePlayerStore } from '@/stores/player'
+import { useDownloadsStore } from '@/stores/downloads'
+import { useSourceStore } from '@/stores/source'
+import { useThemeStore } from '@/uni_modules/qt-ui/stores/theme'
+import { useNoticeStore } from '@/stores/notice'
+import { audioPlayer } from '@/services/audio-player'
+import { desktopLyric } from '@/services/desktop-lyric'
+import { resolveUrl } from '@/services/http'
+import { initQtStat, qtTrack, qtTrackError, qtStatFlush } from '@/uni_modules/qt-stat'
+import { checkAppUpdate, checkOfficialVersion, setPendingUpdate } from '@/services/upgrade'
+import { prewarmSourceEngine } from '@/services/source-engine'
+import { checkSourceUpdateSilently } from '@/services/source-update'
+import { exitApp, ensureNotificationPermission, openNotificationSettings, applyLegacyInsets } from '@/services/app-native'
+import { refreshQtLayout, pauseQtLayoutWatcher, resumeQtLayoutWatcher } from '@/uni_modules/qt-ui/composables/use-qt-layout'
+import { installBootGuard } from '@/services/boot-guard'
+import { refreshMe } from '@/services/user-cache'
+
+const themeStore = useThemeStore()
+
+onLaunch(() => {
+  // 三星 One UI 手势导航下 edge-to-edge 窗口会让运行时首屏挂载竞态（S24 Ultra
+  // 全屏白屏），启动最早点强制窗口回归传统 inset 布局（等价三键导航），见 boot-guard.ts
+  applyLegacyInsets()
+  // 尽早确定宽窄屏状态（qt-page-frame / 各组件的响应式判断都依赖它）
+  refreshQtLayout(720)
+  // 统计采集最先初始化（JS/UTS 层错误等，走自建 /api/v1/app/stat/report）
+  initQtStat({
+    ingestUrl: resolveUrl('app/stat/report'),
+    channel: 'official',
+    debug: false,
+    batchIntervalMs: 10000,
+    maxBatchSize: 50,
+  })
+  qtTrack('launcher')
+
+  // 让自定义基座收录 uni-showLoading 模块（框架 navigateBack 内部会无条件调 hideLoading，
+  // 而自定义基座按用量裁剪模块；项目本身不用 loading 会导致返回时报 uni-showLoading not found）。
+  keepLoadingModule()
+  audioPlayer.restore()
+  // 桌面歌词开关为运行期状态（不持久化），启动后默认关闭，无需恢复
+  desktopLyric.restore()
+  usePlayerStore().restore()
+  useDownloadsStore().restore()
+  useSourceStore().restore()
+  useThemeStore().init()
+  // 酷我 Cookie 鉴权随音源包走（bundle 内惰性初始化），启动无需本端预热
+  // 启动时检查/请求通知栏权限（Android 13+ 弹系统授权框，并说明用途）
+  checkNotificationPermission()
+  // 已登录时从服务器同步收藏：先增量拉取，再与服务器做存在性对账，本地有而
+  // 服务器没有的收藏自动补推（覆盖服务器整库重建/部分删数据后自愈）
+  usePlayerStore().syncLikesOnLaunch().catch(() => {})
+  // 已登录则后台拉一次 /me 写缓存：本次运行内「我的」相关页面只读缓存，不再每次 onShow 都请求
+  refreshMe().catch(() => {})
+  // 启动顺序：1.官方校验 → 2.检查更新 → 3.加载公告
+  runStartup()
+  // 音源引擎预热：恢复本地状态 → 起 WebView(V8) 引擎 → 装已安装的音源包（未安装则直接返回，全程失败静默）
+  prewarmSourceEngine()
+  // 启动静默检查音源更新（默认开，4 小时一次；只下载不打断，装包交给「立即应用」/下次启动）
+  setTimeout(() => {
+    checkSourceUpdateSilently()
+  }, 3000)
+  // 首屏守卫：部分机型（如三星 S24 Ultra 全屏）首页视图树可能一直不挂载，
+  // 8s 后仍未挂载则上报 boot-guard 并重建首页，见 services/boot-guard.ts
+  installBootGuard()
+})
+
+// 进入前台时发送 show 事件（统计回前台）；已登录时增量拉取收藏变更（多端同步，LIKE_SYNC_DESIGN.md）
+onShow(() => {
+  qtTrack('show')
+  useThemeStore().syncSystemTheme()
+  // 回前台恢复窗口尺寸监听（后台期间系统可能改了窗口尺寸，如分屏 / 旋转）
+  resumeQtLayoutWatcher(720)
+  usePlayerStore().pullChanges().catch(() => {})
+  // 桌面歌词与原生真相（悬浮窗是否真的在显示）对账：后台期间用户可能在通知栏
+  // 点过「词」按钮，而 JS 侧回调未必收到，这里补齐，避免窗口开着却没歌词
+  desktopLyric.refreshFromNative()
+})
+
+// 进入后台时保存播放状态（当前歌曲/进度），供下次重启后恢复；并追加统计 flush
+onHide(() => {
+  usePlayerStore().persist()
+  // 暂停宽窄屏窗口监听，避免后台空转
+  pauseQtLayoutWatcher()
+  qtStatFlush()
+})
+
+/**
+ * 仅「引用」loading API，不实际弹出，用于让编译器把 uni-showLoading 模块打进自定义基座。
+ * 不要删除：删掉后自定义基座会裁掉该模块，返回上一页时框架内部 hideLoading 会抛
+ * “uni-showLoading not found”。
+ */
+function keepLoadingModule(): void {
+  // 条件恒为 false，只保留对 API 的静态引用，运行时不会执行、不会闪 loading
+  if (Date.now() < 0) {
+    uni.showLoading({ title: '' })
+    uni.hideLoading()
+  }
+}
+
+// JS/UTS 层运行错误上报（仅覆盖可捕获运行错误，走自建 /api/v1/app/stat/report；原生崩溃不做采集）
+// err 类型不定：优先取 Error.message/stack（实测 JSON.stringify(Error) 会得到 "{}"，不可作首选）；
+// stack 由运行时提供（含 app-service.js 位置），page 取 getCurrentPages 栈顶路由
+onError((err: any) => {
+  let msg = ''
+  let stack = ''
+  try {
+    const e = err as Error
+    const m = e.message
+    if (m != null && m.length > 0) msg = m
+  } catch (_) {}
+  if (msg.length == 0) {
+    try {
+      msg = JSON.stringify(err)
+    } catch (_) {
+      msg = ''
+    }
+  }
+  if (msg.length == 0 || msg == '{}') msg = 'unknown'
+  try {
+    const e2 = err as Error
+    const st = e2.stack
+    if (st != null) stack = st
+  } catch (_) {}
+  let page = ''
+  try {
+    const pages = getCurrentPages()
+    if (pages.length > 0) {
+      const top = pages[pages.length - 1]
+      const r = top.route
+      if (r != null) page = r
+    }
+  } catch (_) {}
+  qtTrackError('js', msg, stack, page)
+})
+
+/** 启动时检查通知栏权限，未授权则弹系统授权框，并说明用途 */
+function checkNotificationPermission(): void {
+  ensureNotificationPermission().then((granted) => {
+    if (granted) return
+    // 拒绝或未授权：说明用途，避免用户不理解为何需要此权限
+    uni.showModal({
+      title: '开启通知权限',
+      content: '为了在后台播放时也能显示歌曲信息与播放控制，需要开启「通知」权限。\n是否前往系统设置开启？',
+      confirmText: '去设置',
+      cancelText: '暂不',
+      confirmColor: themeStore.skin.danger,
+      success: (res) => {
+        if (!res.confirm) return
+        const ok = openNotificationSettings()
+        if (!ok) {
+          uni.showToast({ title: '无法打开设置页，请手动在系统设置中开启', icon: 'none' })
+        }
+      },
+    })
+  })
+}
+
+/** 启动主流程（顺序执行） */
+async function runStartup(): Promise<void> {
+  // 1. 校验是否为官方 APP：非官方则提示并 3S 后自动退出
+  const isOfficial = await checkOfficialVersion()
+  if (!isOfficial) {
+    uni.showModal({
+      title: '提示',
+      content: '检测到非官方版本，3 秒后自动退出',
+      showCancel: false,
+      confirmText: '知道了',
+      confirmColor: themeStore.skin.danger,
+    })
+    setTimeout(() => {
+      exitApp()
+    }, 3000)
+    return
+  }
+
+  // 2. 检查 APP 更新：存在更新时挂起，由首页直接弹出升级弹窗（富文本展示更新说明，
+  //    确认后原地下载/安装，不再跳转 我的 → 关于 页面）
+  try {
+    const info = await checkAppUpdate()
+    if (info != null && info.updateType == '1') {
+      setPendingUpdate(info)
+    }
+  } catch (e) {
+    console.log('[App] 检查更新异常', e)
+  }
+
+  // 3. 加载 APP 公告
+  useNoticeStore().load().catch(() => {})
+}
+</script>
+
+<style>
+  @import "@/styles/glass.css";
+</style>

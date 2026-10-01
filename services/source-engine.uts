@@ -1,0 +1,573 @@
+/**
+ * 音源引擎门面（app 侧）
+ *
+ * 职责：把 qt-js-engine 插件（回调式、原生线程）包成 Promise 风格，并管住三件事：
+ *   1. 引擎生命周期：起一次、装一次包、出错降级；
+ *   2. 音源包装载：从本地读 chain.json / source-bundle.js 灌进引擎
+ *      （chain.json 可缺——custom 直链包自包含，用 bundle 内置的默认线路）；
+ *   3. 取链：getPlayUrlByEngine() 是唯一的取链入口（未安装音源包时取链不可用，
+ *      失败返回 "" 由调用方报「暂时无法播放」——原型 TS 链已删除，见方案 §2.6）。
+ *
+ * ── bundle 入口契约（hostApiVersion = 1，与 qt-pc 侧同一份 source-bundle.js）──
+ * bundle 末尾必须写 `globalThis.__qtEntries = { bundleInfo, loadChain, getPlayUrl, verifyPlayable }`：
+ *   bundleInfo()            → JSON 文本 {name, version, platforms:[1101], hostApiVersion}
+ *   loadChain(chainJson)    → JSON 文本 {ok:true, lines:N}；chain.json 非法时抛错
+ *   getPlayUrl(args)        → JSON 文本 {url, source, quality, line}；取不到时抛错
+ *   verifyPlayable(args)    → JSON 文本 {ok, status, length}；用于冒烟自检
+ * args 为单个对象：{platform, id, name, singer, album, quality, duration}
+ *
+ * line 是本次取链**命中**的线路 {id, name, kind}（chain.json 里那条源），供管理端
+ * 「当前播放地址」显示「这条地址是音源包里哪条源取到的」；包内 10 分钟缓存命中时
+ * 为 null。早期构建把它序列化成了字符串，parsePlayUrlLine 两种形状都认。
+ *
+ * 契约版本不匹配时**拒绝装载**（引擎返回的 hostApiVersion 与这里不一致），
+ * 因为入口名/参数形状变了以后静默失败比直接降级更难排查。
+ */
+
+import type { Song } from "@/types/music";
+import type { SourcePackage } from "@/services/source-bundle-fs";
+import { start, stop, loadBundle, invoke, isRunning, isHealthy } from "@/uni_modules/qt-js-engine";
+import {
+  installedPackage,
+  readArtifact,
+  ensureLocalStateRestored,
+  ARTIFACT_CHAIN,
+  ARTIFACT_BUNDLE,
+} from "@/services/source-bundle-fs";
+
+/** 与插件 interface.uts 对应的结构类型（服务层不引插件类型，避免跨模块类型耦合） */
+type EngineInfo = { engine: string; version: string; hostApiVersion: number; probe: string };
+/** 引擎启动参数：V8 后端不需要任何参数（内存/栈上限是已删除的 QuickJS 后端专有开关） */
+type StartOptions = {};
+type VoidResult = { ok: boolean; error: string };
+type EvalResult = { ok: boolean; value: string; error: string };
+
+export type SourceEngineStatus = "idle" | "starting" | "loading" | "ready" | "failed";
+
+/**
+ * 装载失败的原因分类：热更新侧据此决定「是不是坏包」。
+ * invalid = 包本身有问题（语法错/chain 非法）→ 可以拉黑；
+ * missing / engine / contract 都是环境或本机问题，不能拉黑好包。
+ */
+export type SourceLoadFailure = "" | "missing" | "invalid" | "engine" | "contract";
+
+/** 宿主契约版本（manifest 里也有这个字段，两边必须一致） */
+const HOST_API_VERSION = 1;
+/** 取链超时：包含 bundle 内所有 HTTP 与定时器等待 */
+const PLAY_TIMEOUT_MS = 12000;
+/** 冒烟/试听校验超时 */
+const VERIFY_TIMEOUT_MS = 8000;
+/** 装载 chain 的超时（纯本地计算，给短一点） */
+const LOAD_CHAIN_TIMEOUT_MS = 4000;
+
+/**
+ * 引擎被隔离（poison：单次 evaluate 同步执行超过插件侧 STALL_MS）后的自动重建策略。
+ *
+ * 隔离是**全局**的：gPoisoned 一置位，搜索/歌单/歌词/榜单/取链全部立刻失败，
+ * 且插件侧不会自己复位——只有 stop() 才能清掉（stop 对已隔离引擎是「放弃卡住的
+ * 线程」直接重建，那个线程会成为泄漏，已记录为插件的已知代价）。
+ * 所以服务层必须自己发现并重建，否则一次超时就等于永久不可用，用户只能手动重启。
+ *
+ * 但重建不能无上限：若某个包/线路必然超时，每次请求都「重建 → 又超时」会把
+ * 卡住的线程越攒越多（每个都占着 128MB 内存上限）。故设「时间窗内最多 N 次」。
+ */
+const MAX_REVIVES_PER_WINDOW = 3;
+const REVIVE_WINDOW_MS = 10 * 60 * 1000;
+/** 两次自动重建的最小间隔，避免连续请求触发重建风暴 */
+const MIN_REVIVE_INTERVAL_MS = 20000;
+
+let gStatus: SourceEngineStatus = "idle";
+let gEngineVersion = "";
+/** 引擎内核标识（固定 webview-v8）：排查「安卓到底跑的哪个引擎」用 */
+let gEngineName = "";
+let gLastError = "";
+let gLoadFailure: SourceLoadFailure = "";
+/** 已成功装载进引擎的包版本号（0 = 未装载） */
+let gLoadedCode = 0;
+/** 装载失败过的包版本号，避免每次播放都重试同一个坏包 */
+let gLoadFailedCode = 0;
+/** 起引擎/装包的并发去重 */
+let gBootPromise: Promise<boolean> | null = null;
+let gLoadPromise: Promise<boolean> | null = null;
+/** 自动重建的滑动窗口计数（见 MAX_REVIVES_PER_WINDOW） */
+let gReviveWindowStart = 0;
+let gRevivesInWindow = 0;
+let gLastReviveAt = 0;
+
+export function engineStatus(): SourceEngineStatus {
+  return gStatus;
+}
+
+export function engineVersion(): string {
+  return gEngineVersion;
+}
+
+/** 引擎内核标识：固定 webview-v8（系统 WebView 的 V8/JIT）。真机排查第一眼看这个 */
+export function engineName(): string {
+  return gEngineName;
+}
+
+export function loadedVersionCode(): number {
+  return gLoadedCode;
+}
+
+export function lastEngineError(): string {
+  return gLastError;
+}
+
+/** 上次装载失败的原因分类（见 SourceLoadFailure） */
+export function loadFailureKind(): SourceLoadFailure {
+  return gLoadFailure;
+}
+
+/** 引擎当前是否可用于取链 */
+export function engineUsable(): boolean {
+  return gStatus == "ready" && gLoadedCode > 0 && isRunning() && isHealthy();
+}
+
+function msgOf(e: any): string {
+  if (e == null) return "unknown error";
+  return `${e}`;
+}
+
+function fail(message: string): void {
+  gStatus = "failed";
+  gLastError = message;
+  console.log("[SourceEngine] " + message);
+}
+
+// ==================== 插件回调 → Promise ====================
+
+function callStart(options: StartOptions): Promise<EngineInfo> {
+  return new Promise<EngineInfo>((resolve, reject) => {
+    start(options, (info: EngineInfo | null, error: string | null) => {
+      if (info != null) {
+        resolve(info);
+      } else {
+        reject(new Error(error != null ? error : "引擎启动失败"));
+      }
+    });
+  });
+}
+
+function callStop(): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    stop((r: VoidResult) => {
+      resolve(r.ok);
+    });
+  });
+}
+
+function callLoadBundle(code: string): Promise<boolean> {
+  return new Promise<boolean>((resolve, reject) => {
+    loadBundle(code, (r: VoidResult) => {
+      if (r.ok) {
+        resolve(true);
+      } else {
+        reject(new Error(r.error));
+      }
+    });
+  });
+}
+
+function callInvoke(name: string, argsJson: string, timeoutMs: number): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    invoke(name, argsJson, timeoutMs, (r: EvalResult) => {
+      if (r.ok) {
+        resolve(r.value);
+      } else {
+        reject(new Error(r.error));
+      }
+    });
+  });
+}
+
+// ==================== 引擎生命周期 ====================
+
+/**
+ * 启动引擎（幂等，并发调用共用同一次启动）。
+ *
+ * 额外职责：**发现引擎被隔离并自动重建**。
+ * 插件侧对「单次 evaluate 同步执行超过 STALL_MS」的脚本做 poison 隔离，被隔离后
+ * gStatus 仍是 "ready"、isHealthy() 变 false，所有 invoke 立刻失败且永不恢复。
+ * 这里把它降级为「这一次请求失败 + 下一次自动恢复」：
+ *   stop()（放弃卡住的线程）→ start()，并清零 gLoadedCode，
+ *   让随后的 ensurePackageLoaded 走完整的「重新装载 bundle + chain」。
+ */
+export function ensureEngine(): Promise<boolean> {
+  if (gStatus == "ready" && !isHealthy()) {
+    const now = Date.now();
+    if (now - gReviveWindowStart > REVIVE_WINDOW_MS) {
+      gReviveWindowStart = now;
+      gRevivesInWindow = 0;
+    }
+    if (gRevivesInWindow >= MAX_REVIVES_PER_WINDOW || now - gLastReviveAt < MIN_REVIVE_INTERVAL_MS) {
+      // 反复被隔离说明包/线路有系统性问题：不再重建，明确失败等用户手动重启。
+      // 保持 gStatus = "ready"（而不是 failed），这样窗口过期后还能自动恢复。
+      gLastError = `引擎多次被隔离（脚本执行超时），已暂停自动重建；请在设置里点「立即应用」重建引擎`;
+      console.log("[SourceEngine] " + gLastError);
+      return Promise.resolve(false);
+    }
+    gRevivesInWindow += 1;
+    gLastReviveAt = now;
+    console.log(
+      `[SourceEngine] 引擎已被隔离（脚本执行超时），自动重建（本窗口第 ${gRevivesInWindow}/${MAX_REVIVES_PER_WINDOW} 次）`,
+    );
+    gStatus = "idle";
+    gLoadedCode = 0;
+    gLastError = "";
+    const revived = reviveEngine();
+    gBootPromise = revived;
+    return revived;
+  }
+  if (gStatus == "ready" || gStatus == "loading") return Promise.resolve(true);
+  const pending = gBootPromise;
+  if (pending != null) return pending;
+  const p = bootEngine();
+  gBootPromise = p;
+  return p;
+}
+
+/** 被隔离后的重建：停掉旧引擎（放弃卡住的线程）再起一个新的 */
+async function reviveEngine(): Promise<boolean> {
+  await callStop();
+  return await bootEngine();
+}
+
+async function bootEngine(): Promise<boolean> {
+  gStatus = "starting";
+  try {
+    const info = await callStart({});
+    if (info.hostApiVersion != HOST_API_VERSION) {
+      gLoadFailure = "contract";
+      fail(`宿主契约版本不匹配：引擎 ${info.hostApiVersion} / 期望 ${HOST_API_VERSION}`);
+      return false;
+    }
+    gEngineVersion = info.version;
+    gEngineName = info.engine;
+    gLastError = "";
+    gStatus = "idle";
+    console.log(
+      `[SourceEngine] 引擎就绪：${info.engine} ${info.version}（hostApiVersion ${info.hostApiVersion}，probe "${info.probe}"）`,
+    );
+    return true;
+  } catch (e) {
+    gLoadFailure = "engine";
+    fail(`引擎启动失败：${msgOf(e)}`);
+    return false;
+  } finally {
+    gBootPromise = null;
+  }
+}
+
+/** 停止引擎（换包/排查时用；平时不需要停） */
+export async function shutdownEngine(): Promise<void> {
+  await callStop();
+  gStatus = "idle";
+  gEngineVersion = "";
+  gLoadedCode = 0;
+  gLoadFailedCode = 0;
+  gLoadFailure = "";
+  // 手动重启 = 用户已介入，清掉自动重建的限流窗口，让它重新可用
+  gReviveWindowStart = 0;
+  gRevivesInWindow = 0;
+  gLastReviveAt = 0;
+}
+
+// ==================== 音源包装载 ====================
+
+/**
+ * 把生效中的音源包装进引擎（幂等）。
+ * 返回 false 表示「本次取不了链」：没有音源包 / 引擎起不来 / 包装载失败。
+ * 由于引擎是唯一取链实现，这里失败 = 所有播放走不通，预热失败会打日志便于排查。
+ */
+export async function ensurePackageLoaded(): Promise<boolean> {
+  // 首页等页面调用可能在预热完成前到达，先确保 state.json 已恢复，
+  // 否则会读到空状态而误报「尚未装载」
+  await ensureLocalStateRestored();
+  const state = installedPackage();
+  if (state == null) return Promise.resolve(false);
+  // 引擎被隔离（poison）时 gLoadedCode 仍是该版本号，但引擎里所有 invoke 都会立刻失败。
+  // 这里必须把「健康」也作为「已就绪」的条件，否则会直接返回 true 骗过调用方，
+  // 而 ensureEngine() 里的自动重建永远走不到（必须让它看到 !isHealthy() 才能重建）。
+  if (gLoadedCode == state.versionCode && isHealthy()) return Promise.resolve(true);
+  if (gLoadFailedCode == state.versionCode) return Promise.resolve(false);
+  const pending = gLoadPromise;
+  if (pending != null) return pending;
+  const p = loadPackage(state);
+  gLoadPromise = p;
+  return p;
+}
+
+async function loadPackage(pkg: SourcePackage): Promise<boolean> {
+  const versionCode = pkg.versionCode;
+  try {
+    if (!(await ensureEngine())) {
+      gLoadFailure = "engine";
+      return false;
+    }
+    gStatus = "loading";
+    const code = await readArtifact(versionCode, ARTIFACT_BUNDLE);
+    if (code.length == 0) {
+      gLoadFailedCode = versionCode;
+      gLoadFailure = "missing";
+      fail(`音源包文件缺失：${versionCode}`);
+      return false;
+    }
+    // 插件内部会先 compile 做语法校验（不执行），再 execute
+    try {
+      await callLoadBundle(code);
+    } catch (e) {
+      // 语法/执行期报错 = 包本身有问题，可以拉黑
+      gLoadFailedCode = versionCode;
+      gLoadFailure = "invalid";
+      fail(`bundle 装载失败：${msgOf(e)}`);
+      return false;
+    }
+    // chain.json 交给 bundle：线路顺序/音质/预算都由它自己解析。
+    // 它是可选覆盖层（内容与 bundle 内置默认链同源）：custom 直链包必无，
+    // official 包的 manifest 也可不列——缺了不算失败，跳过 loadChain，
+    // bundle 用自己内置的 defaultChainConfig 线路。
+    const chain = await readArtifact(versionCode, ARTIFACT_CHAIN);
+    let lines = 0;
+    if (chain.length == 0) {
+      console.log(`[SourceEngine] chain.json 缺失（${versionCode}），改用 bundle 内置默认线路`);
+    } else {
+      try {
+        const loadRes = await callInvoke("loadChain", JSON.stringify([chain]), LOAD_CHAIN_TIMEOUT_MS);
+        const o = JSON.parse(loadRes) as UTSJSONObject | null;
+        if (o != null) {
+          const n = o.get("lines") as number | null;
+          if (n != null) lines = n;
+        }
+      } catch (e) {
+        // chain 不合法等于没有线路，按包有问题处理（否则每次播放都白跑一趟）
+        gLoadFailedCode = versionCode;
+        gLoadFailure = "invalid";
+        fail(`chain.json 装载失败：${msgOf(e)}`);
+        return false;
+      }
+    }
+    gLoadedCode = versionCode;
+    gLastError = "";
+    gLoadFailure = "";
+    gStatus = "ready";
+    console.log(`[SourceEngine] 音源包已装载：${pkg.versionName}（code ${versionCode}，线路 ${lines} 条）`);
+    return true;
+  } catch (e) {
+    gLoadFailedCode = versionCode;
+    gLoadFailure = "engine";
+    fail(`音源包装载失败：${msgOf(e)}`);
+    return false;
+  } finally {
+    gLoadPromise = null;
+  }
+}
+
+/** 引擎侧是否已注册全部入口（诊断用，不装载包） */
+export async function bundleInfo(): Promise<string> {
+  if (!(await ensureEngine())) return "";
+  try {
+    return await callInvoke("bundleInfo", "[]", LOAD_CHAIN_TIMEOUT_MS);
+  } catch (e) {
+    return "";
+  }
+}
+
+// ==================== 取链 ====================
+
+/**
+ * 取链命中的音源线路：chain.json 里那条真正给出地址的源。
+ * kind 取值 lx / http / bundle，另有 "cross" 表示「本档线路全灭、跨源兜底救回」。
+ */
+export type PlayUrlLine = { id: string; name: string; kind: string; targetSong: Song | null };
+
+/**
+ * 最近一次取链命中的线路。bundle 侧只在成功应答里带回来（失败走 trace），
+ * 这里接住供调用方落进播放地址缓存——管理端要显示「当前这条地址走的是哪条源」，
+ * 而地址会被缓存 10 分钟，线路信息必须与地址同生命周期，不能只看最后一次调用。
+ */
+let lastPlayUrlLine: PlayUrlLine | null = null;
+
+/** 读走最近一次命中线路（读后即清）；无命中（包内缓存/老包）返回 null */
+export function consumePlayUrlLine(): PlayUrlLine | null {
+  const t = lastPlayUrlLine;
+  lastPlayUrlLine = null;
+  return t;
+}
+
+/**
+ * 解析应答里的 line 字段。形状不对（null/缺 id/非对象）一律按无命中处理。
+ *
+ * 兼容两种形状：新包是嵌套对象 `{id,name,kind}`，早期构建把它序列化成了
+ * **字符串**（JSON 文本）。这里先按对象取，取不到再按字符串 parse 一次——
+ * 这样升级顺序（先换包 / 先换 App）都不会让管理端显示不出线路。
+ */
+/**
+ * 跨源兜底命中的目标歌（bundle 侧搜索匹配到的目标平台条目）。
+ * 引擎歌曲条目不带 platform（单源契约按入参补），这里从线路 id 前缀取：
+ * "cross:kw" → kw。非 cross 线路（或字段缺失）返回 null。
+ */
+function parseTargetSong(raw: any, lineId: string): Song | null {
+  if (raw == null) return null;
+  if (!lineId.startsWith("cross:")) return null;
+  const platform = lineId.substring("cross:".length);
+  if (platform.length == 0) return null;
+  try {
+    const o = raw as UTSJSONObject;
+    const id = o.get("id") as string | null;
+    if (id == null || id.length == 0) return null;
+    const name = o.get("name") as string | null;
+    const singer = o.get("singer") as string | null;
+    const album = o.get("album") as string | null;
+    const picUrl = o.get("picUrl") as string | null;
+    const interval = o.get("interval") as number | null;
+    const duration = o.get("duration") as number | null;
+    const song: Song = {
+      id: id,
+      name: name != null ? name : "",
+      singer: singer != null ? singer : "",
+      album: album != null ? album : "",
+      picUrl: picUrl != null ? picUrl : "",
+      platform: platform,
+      url: "",
+      duration: duration != null ? duration : (interval != null ? interval : 0),
+    };
+    return song;
+  } catch (_) {
+    return null;
+  }
+}
+
+function parsePlayUrlLine(raw: any): PlayUrlLine | null {
+  if (raw == null) return null;
+  // ① 对象形状（当前包）
+  try {
+    const o = raw as UTSJSONObject;
+    const id = o.get("id") as string | null;
+    if (id != null && id.length > 0) {
+      const name = o.get("name") as string | null;
+      const kind = o.get("kind") as string | null;
+      return {
+        id: id,
+        name: name != null ? name : "",
+        kind: kind != null ? kind : "",
+        targetSong: parseTargetSong(o.get("targetSong"), id),
+      };
+    }
+  } catch (e) {
+    // 落到下面按字符串再试
+  }
+  // ② 字符串形状（旧包：line 是 JSON 文本）
+  try {
+    const text = raw as string;
+    if (text.length == 0) return null;
+    const o = JSON.parse(text) as UTSJSONObject;
+    const id = o.get("id") as string | null;
+    if (id == null || id.length == 0) return null;
+    const name = o.get("name") as string | null;
+    const kind = o.get("kind") as string | null;
+    return {
+      id: id,
+      name: name != null ? name : "",
+      kind: kind != null ? kind : "",
+      targetSong: parseTargetSong(o.get("targetSong"), id),
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * 用引擎取播放地址。失败一律返回 ""（不抛错）——
+ * 调用方拿到空串直接报「暂时无法播放」，不再有第二套取链实现兜底。
+ * 成功时把命中的线路存进 lastPlayUrlLine（见 consumePlayUrlLine）。
+ */
+export async function getPlayUrlByEngine(song: Song, quality: string): Promise<string> {
+  if (!(await ensurePackageLoaded())) return "";
+  const args = new UTSJSONObject();
+  args.set("platform", song.platform);
+  args.set("id", song.id);
+  args.set("name", song.name);
+  args.set("singer", song.singer);
+  args.set("album", song.album);
+  args.set("quality", quality);
+  args.set("duration", song.duration != null ? song.duration : 0);
+  let value = "";
+  try {
+    value = await callInvoke("getPlayUrl", JSON.stringify([args]), PLAY_TIMEOUT_MS);
+  } catch (e) {
+    // 单曲取不到不算引擎故障，不写 failed。
+    // 错误文本里带歌/音质定位 + bundle 侧的逐线路追踪（qt-entries 会把 trace 拼进 error）
+    console.log(`[SourceEngine] 引擎取链失败：${msgOf(e)}（${song.platform} @${quality}「${song.name} ${song.singer}」id=${song.id}）`);
+    return "";
+  }
+  try {
+    const o = JSON.parse(value) as UTSJSONObject;
+    const url = o.get("url") as string | null;
+    if (url == null || url.length == 0) return "";
+    // 命中线路随应答一起回来（老包没有 line 字段 → null，管理端按未知展示）
+    lastPlayUrlLine = parsePlayUrlLine(o.get("line"));
+    return url;
+  } catch (e) {
+    return "";
+  }
+}
+
+// ==================== 音源数据接口 ====================
+
+/** 数据接口默认超时：单请求一般数秒；像酷我每日推荐一次拉 20 页这种多请求链条，
+ * 手机网络下可到 20-30s，给 30s 预算（单个 HTTP 仍有 15s 超时，坏接口不会拖满） */
+const DATA_TIMEOUT_MS = 30000;
+
+/**
+ * 调 bundle 的音源数据入口（search / playlistDetail / lyric / cover 等），
+ * 返回入口应答的 JSON 文本（形状见 qt-pc/src/source-scripts/qt-entries.ts）。
+ *
+ * 与 getPlayUrlByEngine 的分工：这里只做「装载 + invoke + 原样回传」，
+ * 不解析具体字段——解析与模型映射归调用方（services/music-api.ts），
+ * 入口增删时不必动本文件。失败抛错（调用方按原语义 catch/提示），
+ * 因为数据接口取不到就是页面加载失败，需要让用户看到。
+ */
+export async function invokeSource(name: string, argsJson: string, timeoutMs: number = DATA_TIMEOUT_MS): Promise<string> {
+  if (!(await ensurePackageLoaded())) {
+    throw new Error("音源包未就绪：" + (gLastError.length > 0 ? gLastError : "尚未装载"));
+  }
+  return await callInvoke(name, argsJson, timeoutMs);
+}
+
+/** 试听校验：让 bundle 自己发一次 Range 请求确认地址真的可播（冒烟自检的第 ③ 道闸门） */
+export async function verifyPlayableByEngine(url: string): Promise<boolean> {
+  if (!(await ensurePackageLoaded())) return false;
+  const args = new UTSJSONObject();
+  args.set("url", url);
+  try {
+    const value = await callInvoke("verifyPlayable", JSON.stringify([args]), VERIFY_TIMEOUT_MS);
+    const o = JSON.parse(value) as UTSJSONObject;
+    const okFlag = o.get("ok") as boolean | null;
+    return okFlag == true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// ==================== 启动预热 ====================
+
+/**
+ * 冷启动预热：恢复生效状态 → 起引擎 → 装包。
+ * 全部失败都只记录日志，不抛错（本地音乐不受影响；未安装音源包时由设置页/首页引导安装）。
+ */
+export async function prewarm(): Promise<void> {
+  try {
+    // 先恢复本地状态：未安装音源包时直接返回（在线取链不可用，由页面引导安装）
+    await ensureLocalStateRestored();
+    if (installedPackage() == null) return;
+    if (!(await ensureEngine())) return;
+    await ensurePackageLoaded();
+  } catch (e) {
+    console.log("[SourceEngine] 预热失败：" + msgOf(e));
+  }
+}
+
+/** App.uvue 启动入口用的别名（语义更直白） */
+export const prewarmSourceEngine = prewarm;

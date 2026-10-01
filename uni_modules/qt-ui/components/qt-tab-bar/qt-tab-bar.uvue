@@ -1,0 +1,106 @@
+<template>
+  <view
+    v-if="!layout.isWide"
+    class="tab-bar"
+    :style="'background-color:' + theme.skin.tabSurface + ';border-top-color:' + theme.skin.divider + ';'"
+  >
+    <view
+      v-for="item in tabs"
+      :key="item.path"
+      class="tab-item"
+      @click="go(item.path)"
+    >
+      <view
+        class="tab-icon-wrap"
+        :style="active(item.path) ? 'background-color:' + theme.skin.accentSoft + ';' : 'background-color:transparent;'"
+      >
+        <QtIcon
+          :name="item.icon"
+          :size="26"
+          :color="active(item.path) ? theme.skin.accent : theme.skin.iconMuted"
+        />
+        <view v-if="hasDot(item.path)" class="tab-dot" />
+      </view>
+      <text
+        class="tab-label"
+        :style="'color:' + (active(item.path) ? theme.skin.accent : theme.skin.textMuted) + ';'"
+      >{{ item.label }}</text>
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+
+const props = defineProps<{
+  current: string;
+  /** 需要亮红点的 tab 路径列表（不带前导斜杠，如 pages/profile/index） */
+  dots?: string[];
+}>();
+
+const theme = useThemeStore();
+const layout = useQtLayout();
+
+type TabItem = { path: string; label: string; icon: string };
+const tabs: TabItem[] = [
+  { path: "pages/home/index", label: "发现", icon: "compass" },
+  { path: "pages/profile/index", label: "我的", icon: "user" },
+];
+
+function active(path: string): boolean {
+  return props.current == path;
+}
+
+function hasDot(path: string): boolean {
+  if (props.dots == null) return false;
+  const bare = path.charAt(0) == "/" ? path.substring(1) : path;
+  return props.dots.indexOf(bare) >= 0;
+}
+
+function go(path: string): void {
+  if (active(path)) return;
+  uni.switchTab({ url: "/" + path, fail: (_: any) => {} });
+}
+</script>
+
+<style>
+.tab-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 58px;
+  flex-direction: row;
+  align-items: center;
+  border-top-width: 1px;
+}
+.tab-item {
+  flex: 1;
+  height: 58px;
+  justify-content: center;
+  align-items: center;
+}
+.tab-icon-wrap {
+  width: 46px;
+  height: 30px;
+  border-radius: 15px;
+  justify-content: center;
+  align-items: center;
+}
+.tab-dot {
+  position: absolute;
+  top: -1px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 4px;
+  background-color: #ff4b4b;
+}
+.tab-label {
+  margin-top: 1px;
+  font-size: 11px;
+  font-weight: 500;
+}
+</style>

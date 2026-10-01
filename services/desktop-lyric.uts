@@ -1,0 +1,484 @@
+/**
+ * 桌面歌词服务（JS 层编排）
+ *
+ * 职责：订阅播放进度 → 取当前歌的 LRC（含翻译）→ 按 progress 算出当前行 →
+ *       行变化时才推送原生悬浮窗（几秒一次，不逐帧推）。
+ * 原生侧只负责「画出来 + 拖动 + 锁定」，见 qt-audio-player/utssdk/app-android/desktop-lyric.uts。
+ *
+ * 生命周期：
+ * - enable()：显示悬浮窗（需先授权），启动跟随
+ * - disable()：移除悬浮窗，停止跟随
+ * - 切歌/进度变化时自动推送；暂停时保持当前行（不清窗，方便用户看）
+ * - 停止播放（stop）时清空为占位文案
+ *
+ * 持久化策略：开关「不持久化」（本次运行有效，每次启动默认关闭）；锁定、字号、
+ * 颜色、字体持久化（uni storage），原生侧在 SharedPreferences 另存一份：
+ * - qt-desktop-lyric-lock 锁定（原生侧也持久化，这里存一份供设置页快速读取）
+ * - qt-desktop-lyric-font 主行字号 sp（翻译行 = 主行 * 0.8，下限 5）
+ * - qt-desktop-lyric-color 颜色 hex；qt-desktop-lyric-tf 字体下标
+ *   （0 黑体 / 1 宋体 / 2 楷体 / 3 等宽，与原生 typefaceForIndex 一一对应；
+ *    uvue 预览需用同一族名，见 pages/desktop-lyric/index.uvue）
+ */
+
+import { usePlayerStore } from "@/stores/player";
+import { musicApi } from "@/services/music-api";
+import { qtDiag } from "@/services/diag";
+import { parseLrc, activeLyricIndex } from "@/utils/lrc";
+import type { LyricLine, Song } from "@/types/music";
+// #ifdef APP-ANDROID
+// 歌词窗接口直接走模块级函数（无实例桥接，见 services/audio-player.uts 头部说明），
+// 不再经由 audioPlayer 的实例缓存转发
+import {
+  audioLyricHasOverlayPermission,
+  audioLyricRequestOverlayPermission,
+  audioLyricShow,
+  audioLyricHide,
+  audioLyricUpdate,
+  audioLyricIsShowing,
+  audioLyricSetLocked,
+  audioLyricSetFontSp,
+  audioLyricSetTextColor,
+  audioLyricSetTypeface,
+  audioLyricSetWidth,
+  audioOnLyricWindowChanged,
+} from "@/uni_modules/qt-audio-player";
+// #endif
+
+const KEY_LOCK = "qt-desktop-lyric-lock";
+const KEY_FONT = "qt-desktop-lyric-font";
+const KEY_COLOR = "qt-desktop-lyric-color";
+const KEY_TF = "qt-desktop-lyric-tf";
+const KEY_WIDTH = "qt-desktop-lyric-width";
+
+const FONT_MIN = 6;
+const FONT_MAX = 60;
+const FONT_DEFAULT = 18;
+const WIDTH_MIN = 50;
+const WIDTH_MAX = 95;
+const WIDTH_DEFAULT = 80;
+
+/** 简单延时（毫秒）：空歌词重试前稍等，避免对真·纯音乐歌曲连打两次请求 */
+function delay(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    setTimeout(() => {
+      resolve();
+    }, ms);
+  });
+}
+
+class DesktopLyricService {
+  /** 功能是否启用（悬浮窗是否应该存在） */
+  private on: boolean = false;
+  /** 跟随已就绪：进度监听已接、窗口已显示 */
+  private active: boolean = false;
+  private lines: LyricLine[] = [];
+  private loadedKey: string = "";
+  private lastLineIndex: number = -2;
+  private lastProgress: number = -1;
+  private fetching: boolean = false;
+  /**
+   * 上一次「显式」变更显隐的时间戳（应用内开关 / 原生回调）。
+   * 原生显隐是 post 到主线程异步执行的：enable() 返回时窗口还没真的加进去，
+   * 这段时间对账会把「JS 说开、原生还没有」误判成「用户关了」，所以显式变更后
+   * 1.5s 内一律不对账——对账只作为回调漏达时的兜底，不参与正常流程。
+   */
+  private lastSwitchAt: number = 0;
+
+  private markSwitched(): void {
+    this.lastSwitchAt = Date.now();
+  }
+
+  constructor() {
+    // 通知栏「桌面歌词」开关（原生显隐悬浮窗）后经此回调同步运行态并启停跟随播放：
+    // 窗口本体显隐全在原生侧，JS 只负责进度跟随。幂等，应用内开关触发的重复通知无害。
+    // #ifdef APP-ANDROID
+    audioOnLyricWindowChanged((on: boolean) => {
+      qtDiag("[QT Lyric] 显隐回调进入 on=" + on.toString())
+      this.markSwitched();
+      if (on) {
+        this.on = true;
+        this.startFollowing(); // 已跟随则只立即推一次当前行
+      } else {
+        this.on = false;
+        this.stopFollowing();
+      }
+    });
+    qtDiag("[QT Lyric] 构造完成：显隐回调已注册")
+    // #endif
+  }
+
+  // ---------- 持久化读取 ----------
+
+  /** 开关是运行期状态，不持久化：每次启动默认关闭 */
+  isEnabled(): boolean {
+    return this.on;
+  }
+
+  /**
+   * 与原生真相（悬浮窗是否真的在显示）对账，不一致时纠正跟随状态。
+   *
+   * 通知栏「词」按钮是原生控件：它只改原生窗口，JS 侧靠 audioOnLyricWindowChanged 被动跟随。
+   * 回调漏达时（实例加载的 JS 包旧于原生基座、点击早于本服务注册），会出现
+   * 「窗口已存在但没有任何文字，设置页开关还是关的」这种状态脱节。
+   * 所以凡是「用户能观察到状态」的时刻（启动 / 回前台 / 页面 onShow / 切歌）都先对账一次，
+   * 不依赖回调必达；对账本身幂等，正常情况下是空操作。
+   */
+  /**
+   * 原生悬浮窗是否显示：true/false；基座还没有该查询接口（JS 包比基座新）时返回 null =「未知」。
+   * 必须容错：对账只是兜底，绝不能因为拿不到原生真相就把开关判反或崩掉。
+   */
+  private nativeShowing(): boolean | null {
+    // #ifdef APP-ANDROID
+    try {
+      return audioLyricIsShowing()
+    } catch (e) {
+      return null
+    }
+    // #endif
+    // #ifndef APP-ANDROID
+    return null
+    // #endif
+  }
+
+  refreshFromNative(): void {
+    // #ifdef APP-ANDROID
+    // 显式变更后的一小段窗口期不对账：见 lastSwitchAt 说明
+    if (Date.now() - this.lastSwitchAt < 1500) return;
+    const showing = this.nativeShowing();
+    // 返回 null = 基座还没有这个查询接口（应用实例的基座早于本次改动）：无从对账，保持现状
+    if (showing == null) return;
+    if (showing == this.on) {
+      // 状态一致：跟随态若因异常退出（如取词途中出错），这里只补挂跟随
+      if (showing && !this.active) this.startFollowing();
+      return;
+    }
+    qtDiag("[QT Lyric] 与原生对账：窗口显示=" + showing.toString() + " JS开关=" + this.on.toString())
+    this.on = showing;
+    if (showing) {
+      this.startFollowing();
+    } else {
+      this.stopFollowing();
+    }
+    // #endif
+  }
+
+  isLocked(): boolean {
+    try {
+      const raw = uni.getStorageSync(KEY_LOCK) as string;
+      return raw == "1";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  getFontSp(): number {
+    try {
+      const raw = uni.getStorageSync(KEY_FONT) as string;
+      const v = parseInt(raw);
+      if (!(v >= FONT_MIN && v <= FONT_MAX)) return FONT_DEFAULT;
+      return v;
+    } catch (_) {
+      return FONT_DEFAULT;
+    }
+  }
+
+  /** 歌词窗宽度：屏宽百分比 50–95，默认 80 */
+  getWidthPct(): number {
+    try {
+      const raw = uni.getStorageSync(KEY_WIDTH) as string;
+      const v = parseInt(raw);
+      if (!(v >= WIDTH_MIN && v <= WIDTH_MAX)) return WIDTH_DEFAULT;
+      return v;
+    } catch (_) {
+      return WIDTH_DEFAULT;
+    }
+  }
+
+  /** 歌词颜色（hex 字符串，如 "#FFFFFF"，默认白色） */
+  getColor(): string {    try {
+      const raw = uni.getStorageSync(KEY_COLOR) as string;
+      if (raw.length == 7 && raw.charAt(0) == "#") return raw;
+      return "#FFFFFF";
+    } catch (_) {
+      return "#FFFFFF";
+    }
+  }
+
+  /** 字体下标：0 黑体 / 1 宋体 / 2 楷体 / 3 等宽，越界回 0 */
+  getTypefaceIndex(): number {
+    try {
+      const raw = uni.getStorageSync(KEY_TF) as string;
+      const v = parseInt(raw);
+      if (!(v >= 0 && v <= 3)) return 0;
+      return v;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  hasPermission(): boolean {
+    // #ifdef APP-ANDROID
+    return audioLyricHasOverlayPermission();
+    // #endif
+    // #ifndef APP-ANDROID
+    return false;
+    // #endif
+  }
+
+  /** 跳系统设置页申请悬浮窗权限；返回是否成功拉起设置页（false 时调用方提示手动前往） */
+  requestPermission(): boolean {
+    // #ifdef APP-ANDROID
+    return audioLyricRequestOverlayPermission();
+    // #endif
+    // #ifndef APP-ANDROID
+    return false;
+    // #endif
+  }
+
+  // ---------- 开关 ----------
+
+  /** 打开桌面歌词：显示悬浮窗并开始跟随播放。未授权返回 false（设置页引导授权） */
+  enable(): boolean {
+    this.on = true;
+    this.markSwitched();
+    // #ifdef APP-ANDROID
+    const ok = audioLyricShow();
+    if (ok) this.startFollowing();
+    return ok;
+    // #endif
+    // #ifndef APP-ANDROID
+    return false;
+    // #endif
+  }
+
+  /** 关闭桌面歌词：移除悬浮窗并停止跟随 */
+  disable(): void {
+    this.on = false;
+    this.markSwitched();
+    // #ifdef APP-ANDROID
+    audioLyricHide();
+    // #endif
+    this.stopFollowing();
+  }
+
+  /** 开关不持久化，启动后始终是关闭状态；原生悬浮窗可能仍在（上次运行留下的），启动先对一次账 */
+  restore(): void {
+    this.refreshFromNative()
+  }
+
+  // ---------- 配置 ----------
+
+  setLocked(locked: boolean): void {
+    try {
+      uni.setStorageSync(KEY_LOCK, locked ? "1" : "0");
+    } catch (_) {}
+    // #ifdef APP-ANDROID
+    audioLyricSetLocked(locked);
+    // #endif
+  }
+
+  /** 设置主行字号（翻译行按比例 = 主行 * 0.8，下限 5） */
+  setFontSp(sp: number): void {
+    let value = Math.round(sp);
+    if (!(value >= FONT_MIN)) value = FONT_MIN;
+    if (value > FONT_MAX) value = FONT_MAX;
+    try {
+      uni.setStorageSync(KEY_FONT, value.toString());
+    } catch (_) {}
+    // #ifdef APP-ANDROID
+    let tr = Math.round(value * 0.8);
+    if (tr < 5) tr = 5;
+    audioLyricSetFontSp(value, tr);
+    // #endif
+  }
+
+  /** 设置歌词颜色（hex 字符串），持久化并即时下发原生 */
+  setColor(hex: string): void {
+    try {
+      uni.setStorageSync(KEY_COLOR, hex);
+    } catch (_) {}
+    // #ifdef APP-ANDROID
+    if (hex.length >= 7) {
+      // 整串 parseInt 超过 Int32 上限会溢出，这里逐通道解析后拼 ARGB（Alpha 置满）。
+      // 注意原生侧 Double.toInt() 超出 Int 范围是「饱和」不是「回绕」，
+      // 必须先转成有符号 Int32（≥ 2^31 时减 2^32）再下发，否则颜色全变半透明白
+      const r = parseInt(hex.substring(1, 3), 16);
+      const g = parseInt(hex.substring(3, 5), 16);
+      const b = parseInt(hex.substring(5, 7), 16);
+      // NaN 与任何值比较都是 false，可同时挡住解析失败和超范围
+      if (r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255) {
+        let value = 4278190080.0 + r * 65536.0 + g * 256.0 + b;
+        if (value >= 2147483648.0) value = value - 4294967296.0;
+        audioLyricSetTextColor(value);
+      }
+    }
+    // #endif
+  }
+
+  /** 设置字体（0 黑体 / 1 宋体 / 2 楷体 / 3 等宽），持久化并即时下发 */
+  setTypefaceIndex(index: number): void {
+    if (!(index >= 0 && index <= 3)) return;
+    try {
+      uni.setStorageSync(KEY_TF, index.toString());
+    } catch (_) {}
+    // #ifdef APP-ANDROID
+    audioLyricSetTypeface(index);
+    // #endif
+  }
+
+  /** 设置歌词窗宽度（屏宽百分比 50–95），持久化并即时下发 */
+  setWidthPct(pct: number): void {
+    let v = Math.round(pct);
+    if (!(v >= WIDTH_MIN)) v = WIDTH_MIN;
+    if (v > WIDTH_MAX) v = WIDTH_MAX;
+    try {
+      uni.setStorageSync(KEY_WIDTH, v.toString());
+    } catch (_) {}
+    // #ifdef APP-ANDROID
+    audioLyricSetWidth(v);
+    // #endif
+  }
+
+  // ---------- 跟随播放 ----------
+
+  private startFollowing(): void {
+    if (this.active) {
+      this.refreshNow();
+      return;
+    }
+    this.active = true;
+    this.lastProgress = -1;
+    const player = usePlayerStore();
+    player.addDesktopLyricHook((progress: number) => this.onProgress(progress));
+    this.loadLyricForCurrent();
+  }
+
+  private stopFollowing(): void {
+    this.active = false;
+    this.lines = [];
+    this.loadedKey = "";
+    this.lastLineIndex = -2;
+    const player = usePlayerStore();
+    player.removeDesktopLyricHook();
+  }
+
+  /** 外部在切歌/重播时通知重新拉歌词 */
+  notifySongChanged(): void {
+    // 先与原生对账：切歌是用户最容易发现「桌面歌词没出来」的时刻，
+    // 之前若漏收显隐回调（窗口已开但 JS 没进跟随态），这里补齐
+    this.refreshFromNative();
+    if (!this.active) return;
+    this.loadLyricForCurrent();
+  }
+
+  private onProgress(progress: number): void {
+    if (!this.active) return;
+    // 原生 onTime 200ms 回调一次；暂停/拖动时进度不动，用变化量粗筛避免无谓遍历
+    if (Math.abs(progress - this.lastProgress) < 0.1 && progress > 0) return;
+    this.lastProgress = progress;
+    this.pushActiveLine(progress);
+  }
+
+  private pushActiveLine(progress: number): void {
+    if (this.lines.length == 0) return;
+    const index = activeLyricIndex(this.lines, progress);
+    if (index == this.lastLineIndex) return;
+    this.lastLineIndex = index;
+    const line = index >= 0 ? this.lines[index] : null;
+    // #ifdef APP-ANDROID
+    if (line == null || line.text.length == 0) {
+      audioLyricUpdate(" · · · ", "");
+    } else {
+      const tr = line.translation != null ? line.translation! : "";
+      audioLyricUpdate(line.text, tr);
+    }
+    // #endif
+  }
+
+  /** 当前歌曲的 key（无歌为空串）：异步取词回来后用它判断结果是否已过期 */
+  private currentSongKey(): string {
+    const current: Song | null = usePlayerStore().current;
+    return current != null ? current.platform + ":" + current.id : "";
+  }
+
+  private async loadLyricForCurrent(): Promise<void> {
+    const player = usePlayerStore();
+    const current: Song | null = player.current;
+    if (current == null) {
+      // 无歌可跟：必须给一个可见占位，否则悬浮窗是个「什么都没有的透明窗」，
+      // 视觉上等同于没打开（用户以为按钮坏了）。顺带清 loadedKey，下次同 key 能重新取词
+      this.lines = [];
+      this.lastLineIndex = -2;
+      this.loadedKey = "";
+      // #ifdef APP-ANDROID
+      audioLyricUpdate("等待播放", "");
+      // #endif
+      return;
+    }
+    const key = current.platform + ":" + current.id;
+    if (key == this.loadedKey) {
+      this.refreshNow();
+      return;
+    }
+    if (this.fetching) return;
+    this.fetching = true;
+    this.loadedKey = key;
+    try {
+      let text = await musicApi.lyrics(current);
+      if (text.length == 0) {
+        // 空结果既可能是真·纯音乐，也可能是接口偶发失败：稍等重试一次再下结论。
+        // 走 retryLyrics（忽略「已问过」标记）；若播放页刚拉到结果，这里会直接命中缓存。
+        await delay(400);
+        text = await musicApi.retryLyrics(current);
+      }
+      let translation = "";
+      try {
+        translation = await musicApi.lyricTranslation(current);
+      } catch (_) {
+        translation = "";
+      }
+      // 取词期间切了歌：本次结果作废，不能把上一首的歌词推给悬浮窗
+      if (this.active && this.currentSongKey() == key) {
+        const lines = parseLrc(text, translation);
+        qtDiag("[QT Lyric] 桌面歌词 " + key + " 文本 " + text.length + " 字符 / 翻译 "
+          + translation.length + " 字符 → " + lines.length + " 行");
+        if (lines.length == 0) {
+          this.lines = [];
+          this.lastLineIndex = -2;
+          // #ifdef APP-ANDROID
+          audioLyricUpdate("纯音乐，请欣赏", "");
+          // #endif
+        } else {
+          this.lines = lines;
+          this.lastLineIndex = -2;
+          this.refreshNow();
+        }
+      }
+    } catch (e) {
+      qtDiag("[QT Lyric] 桌面歌词取词异常：" + (e != null ? e.toString() : ""));
+      if (this.active && this.currentSongKey() == key) {
+        this.lines = [];
+        this.lastLineIndex = -2;
+        // #ifdef APP-ANDROID
+        audioLyricUpdate("暂无歌词", "");
+        // #endif
+      }
+    }
+    // 所有路径都必须解除占用：以前空歌词/取词途中切歌是直接 return，
+    // fetching 永远为 true，之后每次切歌都在入口被挡掉，悬浮窗卡死在上一首的文案
+    // （用户反馈的「桌面歌词只显示纯音乐，请欣赏，播放页却有歌词」）。
+    this.fetching = false;
+    // 取词途中切了歌：立刻补拉当前歌，否则要等到下一次切歌才恢复
+    const curKey = this.currentSongKey();
+    if (this.active && curKey.length > 0 && curKey != key) this.loadLyricForCurrent();
+  }
+
+  /** 歌词加载完成或切歌后，立即按当前进度推一次 */
+  private refreshNow(): void {
+    const player = usePlayerStore();
+    this.lastProgress = -1;
+    this.onProgress(player.progress);
+  }
+}
+
+export const desktopLyric = new DesktopLyricService();

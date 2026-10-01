@@ -1,0 +1,137 @@
+﻿<template>
+  <view class="page" :class="themeStore.dark ? 'page-dark' : ''"
+    ><view class="profile" @click="onProfileTap"
+      ><view class="avatar"
+        ><text class="avatar-text">{{ loggedIn ? "我" : "未" }}</text></view
+      ><view class="info"
+        ><text class="name">{{
+          loggedIn ? nickname : "登录后同步收藏与歌单"
+        }}</text
+        ><text class="sub">{{
+          loggedIn ? "轻听音乐账户 · 点击退出" : "点击登录"
+        }}</text></view
+      ><text class="arrow">></text></view
+    ><rice-cell-group :border="false" class="group"
+      ><rice-cell title="本地音乐与最近播放" arrow @click="goLibrary" />
+      <rice-cell title="下载管理" arrow @click="goDownload" />
+      <rice-cell title="播放与音质设置" arrow @click="goSettings" />
+      <rice-cell title="关于轻听" arrow :border="false" @click="goAbout" /></rice-cell-group
+    ></view
+  >
+</template>
+<script setup lang="ts">
+import { ref, computed } from "vue";
+import { onShow } from "@dcloudio/uni-app";
+import { useThemeStore } from "@/stores/theme";
+
+const token = ref("");
+const storedNickname = ref("");
+const themeStore = useThemeStore();
+
+onShow(() => {
+  token.value = uni.getStorageSync("qt-token") as string;
+  storedNickname.value = uni.getStorageSync("qt-nickname") as string;
+});
+
+const nickname = computed(() =>
+  storedNickname.value.length > 0 ? storedNickname.value : "轻听用户"
+);
+const loggedIn = computed(() => token.value.length > 0);
+
+function onProfileTap() {
+  if (loggedIn.value) {
+    uni.showModal({
+      title: "退出登录",
+      content: "确定退出当前账号吗？本地收藏与下载不会丢失。",
+      confirmText: "退出",
+      confirmColor: "#e5484d",
+      success: (res) => {
+        if (res.confirm) {
+          uni.removeStorageSync("qt-token");
+          uni.removeStorageSync("qt-nickname");
+          token.value = "";
+          storedNickname.value = "";
+          uni.showToast({ title: "已退出登录", icon: "none" });
+        }
+      },
+    });
+  } else {
+    uni.navigateTo({ url: "/pages/login/index" });
+  }
+}
+function goLibrary() {
+  uni.switchTab({ url: "/pages/library/index" });
+}
+function goDownload() {
+  uni.navigateTo({ url: "/pages/download/index" });
+}
+function goSettings() {
+  uni.navigateTo({ url: "/pages/settings/index" });
+}
+function goAbout() {
+  uni.navigateTo({ url: "/pages/about/index" });
+}
+</script>
+<style>
+.page {
+  flex: 1;
+  background-color: #eef1f7;
+}
+.page-dark {
+  background-color: #0e1118;
+}
+.profile {
+  padding: 72rpx 32rpx 50rpx;
+  flex-direction: row;
+  align-items: center;
+  background-color: rgba(255,255,255,0.62);
+  border-width: 1px;
+  border-color: rgba(255,255,255,0.6);
+  border-radius: 0 0 24rpx 24rpx;
+  box-shadow: 0 10rpx 30rpx rgba(16,22,38,0.08);
+}
+.profile-dark {
+  background-color: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.12);
+  box-shadow: 0 10rpx 30rpx rgba(0,0,0,0.22);
+}
+.avatar {
+  width: 110rpx;
+  height: 110rpx;
+  justify-content: center;
+  align-items: center;
+  background-color: #e5484d;
+  border-radius: 36rpx;
+  box-shadow: 0 8rpx 20rpx rgba(229, 72, 77, 0.3);
+}
+.info {
+  margin-left: 28rpx;
+  flex: 1;
+}
+.avatar-text {
+  color: #ffffff;
+  font-size: 38rpx;
+  font-weight: 600;
+}
+.name {
+  color: #191d26;
+  font-size: 31rpx;
+  font-weight: 600;
+}
+.sub {
+  margin-top: 13rpx;
+  color: #9aa1b2;
+  font-size: 23rpx;
+}
+.arrow {
+  color: #9aa1b2;
+}
+.group {
+  margin-top: 20rpx;
+  background-color: #fff;
+  border-radius: 18rpx;
+  margin-left: 24rpx;
+  margin-right: 24rpx;
+  overflow: hidden;
+}
+.page-dark { background-color:#0e1118; }</style>

@@ -1,0 +1,88 @@
+<template>
+  <view
+    class="switcher"
+    :class="layout.isWide ? 'switcher-wide' : ''"
+    :style="'background-color:' + theme.skin.surfaceMuted + ';'"
+    @click="open"
+  >
+    <view class="switcher-inner" :class="layout.isWide ? 'switcher-inner-wide' : ''">
+      <text class="switcher-text" :class="layout.isWide ? 'switcher-text-wide' : ''" :style="'color:' + theme.skin.textSubtle + ';'">{{ label() }}</text>
+      <QtIcon class="switcher-caret" name="chevron-down" :size="layout.isWide ? 18 : 24" :color="theme.skin.iconMuted" />
+    </view>
+  </view>
+
+  <qt-action-sheet
+    v-model:visible="sheetVisible"
+    title="切换音源"
+    :actions="sheetActions"
+    @select="onSheetSelect"
+  />
+</template>
+
+<script setup lang="ts">
+import { ref, computed } from "vue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useSourceStore } from "@/stores/source";
+import { platformLabel } from "@/services/platform";
+import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+
+const emit = defineEmits(["change"]);
+const store = useSourceStore();
+const layout = useQtLayout();
+const theme = useThemeStore();
+const sources: string[] = ["wyy", "qq", "kw", "kg"];
+const sheetVisible = ref(false);
+
+const sheetActions = computed<SheetAction[]>(() =>
+  sources.map((s) => ({
+    name: platformLabel(s),
+    color: s == store.current ? theme.skin.accent : undefined,
+  }))
+);
+
+function label(): string {
+  return platformLabel(store.current);
+}
+function open(): void {
+  sheetVisible.value = true;
+}
+function onSheetSelect(_action: SheetAction, index: number): void {
+  const s = sources[index];
+  if (s == store.current) return;
+  store.setSource(s);
+  emit("change", s);
+}
+</script>
+
+<style>
+.switcher {
+  height: 64rpx;
+  padding: 0 24rpx;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  border-radius: 32rpx;
+}
+.switcher-inner {
+  height: 64rpx;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+}
+.switcher-text {
+  height: 64rpx;
+  font-size: 24rpx;
+  font-weight: 400;
+  line-height: 64rpx;
+}
+.switcher-caret {
+  margin-left: 6rpx;
+}
+
+.switcher-wide { height: 44px; padding-left: 18px; padding-right: 18px; border-radius: 22px; }
+.switcher-inner-wide { height: 44px; }
+.switcher-text-wide { height: 44px; line-height: 44px; font-size: 16px; }
+</style>

@@ -1,0 +1,443 @@
+<template>
+  <qt-page-frame :max-width="760">
+  <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']">
+    <scroll-view class="scroll" :class="layout.isWide ? 'scroll-wide' : ''" direction="vertical" :show-scrollbar="false">
+      <view v-if="loading" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
+        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''">加载中...</text>
+      </view>
+      <view v-else-if="notFound" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
+        <QtIcon name="info" :size="layout.isWide ? 44 : 72" color="#c3c9d6" />
+        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''">反馈不存在或无权查看</text>
+      </view>
+
+      <template v-else>
+        <!-- 反馈主体 -->
+        <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
+          <view class="fb-head" :class="layout.isWide ? 'fb-head-wide' : ''">
+            <view class="type-badge" :class="layout.isWide ? 'type-badge-wide' : ''" :style="'background-color:' + feedbackTypeColor(fb.type)">
+              <text class="type-badge-text" :class="layout.isWide ? 'type-badge-text-wide' : ''">{{ feedbackTypeLabel(fb.type) }}</text>
+            </view>
+            <view class="status-badge" :class="layout.isWide ? 'status-badge-wide' : ''" :style="'background-color:' + feedbackStatusColor(fb.status)">
+              <text class="status-badge-text" :class="layout.isWide ? 'status-badge-text-wide' : ''">{{ feedbackStatusLabel(fb.status) }}</text>
+            </view>
+          </view>
+          <text class="fb-title" :class="layout.isWide ? 'fb-title-wide' : ''">{{ fb.title }}</text>
+          <text class="fb-content" :class="layout.isWide ? 'fb-content-wide' : ''">{{ fb.content }}</text>
+          <view class="meta" :class="layout.isWide ? 'meta-wide' : ''">
+            <text v-if="fb.createTime != null && fb.createTime!.length > 0" class="meta-text" :class="layout.isWide ? 'meta-text-wide' : ''">{{ fb.createTime }}</text>
+            <text v-if="deviceLine.length > 0" class="meta-text" :class="layout.isWide ? 'meta-text-wide' : ''">{{ deviceLine }}</text>
+            <text v-if="fb.appVersion != null && fb.appVersion!.length > 0" class="meta-text" :class="layout.isWide ? 'meta-text-wide' : ''">版本 {{ fb.appVersion }}</text>
+          </view>
+        </view>
+
+        <!-- 回复时间线 -->
+        <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
+          <text class="label" :class="layout.isWide ? 'label-wide' : ''">回复（{{ replies.length }}）</text>
+          <view v-if="replies.length == 0" class="reply-empty" :class="layout.isWide ? 'reply-empty-wide' : ''">
+            <text class="reply-empty-text" :class="layout.isWide ? 'reply-empty-text-wide' : ''">暂无回复，官方会尽快处理</text>
+          </view>
+          <view v-for="(r, idx) in replies" :key="r.id" class="reply-item" :class="layout.isWide ? 'reply-item-wide' : ''">
+            <view class="reply-avatar" :class="[isOfficial(r) ? 'reply-avatar-official' : '', layout.isWide ? 'reply-avatar-wide' : '']" :style="isOfficial(r) ? 'background-color:' + themeStore.skin.accent + ';' : ''">
+              <text class="reply-avatar-text" :class="layout.isWide ? 'reply-avatar-text-wide' : ''">{{ avatarChar(r.nickname) }}</text>
+            </view>
+            <view class="reply-body" :class="layout.isWide ? 'reply-body-wide' : ''">
+              <view class="reply-head" :class="layout.isWide ? 'reply-head-wide' : ''">
+                <text class="reply-nickname" :class="layout.isWide ? 'reply-nickname-wide' : ''">{{ r.nickname != null && r.nickname!.length > 0 ? r.nickname : "用户" }}</text>
+                <view v-if="isOfficial(r)" class="official-badge" :class="layout.isWide ? 'official-badge-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'">
+                  <text class="official-badge-text" :class="layout.isWide ? 'official-badge-text-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">官方</text>
+                </view>
+                <text class="reply-time" :class="layout.isWide ? 'reply-time-wide' : ''">{{ formatTime(r.replyTime) }}</text>
+              </view>
+              <text class="reply-content" :class="layout.isWide ? 'reply-content-wide' : ''">{{ r.content }}</text>
+            </view>
+          </view>
+        </view>
+        <view class="scroll-bottom-pad" :class="layout.isWide ? 'scroll-bottom-pad-wide' : ''"></view>
+      </template>
+    </scroll-view>
+
+    <!-- 底部回复输入框：公开反馈不允许继续回复，改为只读提示 -->
+    <view v-if="!notFound" class="input-bar" :class="[themeStore.dark ? 'input-bar-dark' : '', layout.isWide ? 'input-bar-wide' : '']">
+      <view v-if="!canReply" class="input-locked" :class="[themeStore.dark ? 'input-row-dark' : '', layout.isWide ? 'input-locked-wide' : '']">
+        <QtIcon name="info" :size="layout.isWide ? 14 : 26" :color="themeStore.skin.textMuted" />
+        <text class="input-locked-text" :class="layout.isWide ? 'input-locked-text-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';'">公开反馈不支持回复</text>
+      </view>
+      <view v-else class="input-row" :class="[themeStore.dark ? 'input-row-dark' : '', layout.isWide ? 'input-row-wide' : '']">
+        <input
+          :value="replyText"
+          @input="onReplyInput"
+          class="reply-input" :class="[[layout.isWide ? 'reply-input-wide' : ''], layout.isWide ? 'reply-input-wide' : '']"
+          
+          placeholder="回复..."
+          :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
+          confirm-type="send"
+          :maxlength="2000"
+          @confirm="sendReply"
+        />
+        <view class="send-btn" :class="[replyText.trim().length == 0 || sending ? 'send-btn-disabled' : '', layout.isWide ? 'send-btn-wide' : '']" :style="replyText.trim().length == 0 || sending ? '' : 'background-color:' + themeStore.skin.accent + ';'" @tap="sendReply">
+          <text class="send-btn-text" :class="layout.isWide ? 'send-btn-text-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">{{ sending ? "..." : "发送" }}</text>
+        </view>
+      </view>
+    </view>
+  </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { ref, computed } from "vue";
+import { onLoad, onShow } from "@dcloudio/uni-app";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import {
+  fetchFeedbackDetail,
+  fetchReplies,
+  replyFeedback,
+  feedbackTypeLabel,
+  feedbackTypeColor,
+  feedbackStatusLabel,
+  feedbackStatusColor,
+} from "@/services/feedback";
+import { qtTrackPage } from "@/uni_modules/qt-stat";
+import type { FeedbackItem, FeedbackReplyItem } from "@/types/feedback";
+
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+
+const fb = ref<FeedbackItem>({ id: 0 });
+const replies = ref<FeedbackReplyItem[]>([]);
+const loading = ref(false);
+const notFound = ref(false);
+const feedbackId = ref(0);
+const replyText = ref("");
+const sending = ref(false);
+
+const deviceLine = computed(() => {
+  const parts: string[] = [];
+  if (fb.value.device != null && fb.value.device!.length > 0) parts.push(fb.value.device!);
+  if (fb.value.os != null && fb.value.os!.length > 0) parts.push(fb.value.os!);
+  return parts.join(" · ");
+});
+
+function isOfficial(r: FeedbackReplyItem): boolean {
+  return r.userType == "ADMIN";
+}
+
+/** 公开反馈不允许继续追加回复：公开列表对所有人可见，补充内容会一并暴露 */
+const canReply = computed<boolean>(() => !(fb.value.isPublic ?? false));
+
+function avatarChar(nickname?: string): string {
+  const n = nickname != null ? nickname.trim() : "";
+  if (n.length == 0) return "官";
+  return n.charAt(0);
+}
+
+function onReplyInput(e: InputEvent): void {
+  replyText.value = String((e.detail as any).value ?? "");
+}
+
+/** 发送回复；成功后把新回复追加到时间线并清空输入 */
+async function sendReply(): Promise<void> {
+  // 公开反馈禁止回复（输入框已隐藏，这里兜住键盘回车等入口）
+  if (!canReply.value) {
+    uni.showToast({ title: "公开反馈不支持回复", icon: "none" });
+    return;
+  }
+  const text = replyText.value.trim();
+  if (text.length == 0 || sending.value || feedbackId.value <= 0) return;
+  sending.value = true;
+  try {
+    const r = await replyFeedback(feedbackId.value, text);
+    replies.value = replies.value.concat(r);
+    replyText.value = "";
+    uni.showToast({ title: "已回复", icon: "success" });
+  } catch (e) {
+    uni.showToast({ title: (e as Error).message || "回复失败", icon: "none" });
+  } finally {
+    sending.value = false;
+  }
+}
+
+async function load(): Promise<void> {
+  if (feedbackId.value <= 0) {
+    notFound.value = true;
+    return;
+  }
+  loading.value = true;
+  try {
+    fb.value = await fetchFeedbackDetail(feedbackId.value);
+    replies.value = await fetchReplies(feedbackId.value);
+  } catch (_) {
+    notFound.value = true;
+  } finally {
+    loading.value = false;
+  }
+}
+
+function formatTime(t?: string): string {
+  if (t == null || t.length == 0) return "";
+  if (t.length >= 16) return t.substring(5, 16);
+  return t;
+}
+
+onLoad((options) => {
+  const id = options != null ? (options["id"] as string | undefined) : undefined;
+  feedbackId.value = id != null ? parseInt(id) || 0 : 0;
+  qtTrackPage("pages/feedback/detail");
+  load();
+});
+
+onShow(() => {
+  // 从其他页面返回时静默刷新（如管理员刚回复过）
+  if (feedbackId.value > 0 && !loading.value && fb.value.id > 0) {
+    fetchReplies(feedbackId.value)
+      .then((list) => {
+        replies.value = list;
+      })
+      .catch(() => {});
+  }
+});
+</script>
+
+<style>
+.page {
+  flex: 1;
+}
+
+.scroll {
+  flex: 1;
+}
+.scroll-bottom-pad {
+  height: 40rpx;
+}
+.card {
+  margin: 20rpx 24rpx 0;
+  padding: 28rpx 24rpx;
+  background-color: rgba(255, 255, 255, 0.62);
+  border-width: 1px;
+  border-color: rgba(255, 255, 255, 0.6);
+  border-radius: 20rpx;
+  box-shadow: 0 10rpx 30rpx rgba(16, 22, 38, 0.08);
+}
+.card-dark {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 10rpx 30rpx rgba(0, 0, 0, 0.22);
+}
+.fb-head {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+.type-badge {
+  padding: 4rpx 14rpx;
+  border-radius: 8rpx;
+}
+.type-badge-text {
+  color: #ffffff;
+  font-size: 20rpx;
+  font-weight: 600;
+}
+.status-badge {
+  padding: 4rpx 14rpx;
+  border-radius: 8rpx;
+}
+.status-badge-text {
+  color: #ffffff;
+  font-size: 20rpx;
+  font-weight: 600;
+}
+.fb-title {
+  margin-top: 18rpx;
+  color: #191d26;
+  font-size: 32rpx;
+  font-weight: 700;
+  line-height: 1.4;
+}
+.fb-content {
+  margin-top: 14rpx;
+  color: #41485a;
+  font-size: 27rpx;
+  line-height: 1.6;
+}
+.meta {
+  margin-top: 20rpx;
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.meta-text {
+  margin-right: 24rpx;
+  color: #6b7385;
+  font-size: 22rpx;
+}
+.label {
+  color: #191d26;
+  font-size: 27rpx;
+  font-weight: 600;
+}
+.reply-empty {
+  margin-top: 20rpx;
+  padding: 40rpx 0;
+  justify-content: center;
+  align-items: center;
+}
+.reply-empty-text {
+  color: #6b7385;
+  font-size: 25rpx;
+}
+.reply-item {
+  margin-top: 26rpx;
+  flex-direction: row;
+}
+.reply-avatar {
+  width: 64rpx;
+  height: 64rpx;
+  border-radius: 20rpx;
+  background-color: #7f8ba3;
+  justify-content: center;
+  align-items: center;
+  flex-shrink: 0;
+}
+.reply-avatar-official {
+}
+.reply-avatar-text {
+  color: #ffffff;
+  font-size: 26rpx;
+  font-weight: 600;
+}
+.reply-body {
+  flex: 1;
+  margin-left: 18rpx;
+}
+.reply-head {
+  flex-direction: row;
+  align-items: center;
+}
+.reply-nickname {
+  color: #191d26;
+  font-size: 25rpx;
+  font-weight: 600;
+}
+.official-badge {
+  margin-left: 12rpx;
+  padding: 2rpx 10rpx;
+  border-radius: 6rpx;
+}
+.official-badge-text {
+  font-size: 18rpx;
+  font-weight: 600;
+}
+.reply-time {
+  margin-left: 16rpx;
+  color: #6b7385;
+  font-size: 21rpx;
+}
+.reply-content {
+  margin-top: 10rpx;
+  color: #41485a;
+  font-size: 26rpx;
+  line-height: 1.55;
+}
+.input-bar {
+  padding: 16rpx 24rpx 30rpx;
+  background-color: rgba(255, 255, 255, 0.92);
+  border-top-width: 1px;
+  border-top-color: rgba(16, 22, 38, 0.06);
+}
+.input-bar-dark {
+  background-color: #161a24;
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+.input-row {
+  flex-direction: row;
+  align-items: center;
+  background-color: #f4f5fa;
+  border-radius: 36rpx;
+  padding: 0 8rpx 0 28rpx;
+}
+.input-row-dark {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+/* 公开反馈：不可回复，用等高的只读提示条替代输入框 */
+.input-locked {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  height: 72rpx;
+  background-color: #f4f5fa;
+  border-radius: 36rpx;
+}
+.input-locked-wide { height: 40px; border-radius: 20px; }
+.input-locked-text { margin-left: 10rpx; font-size: 25rpx; }
+.input-locked-text-wide { margin-left: 6px; font-size: 13px; }
+.reply-input {
+  flex: 1;
+  height: 72rpx;
+  color: #191d26;
+  font-size: 26rpx;
+}
+.field-ph {
+  color: #6b7385;
+  font-size: 26rpx;
+}
+.send-btn {
+  margin-left: 16rpx;
+  padding: 14rpx 32rpx;
+  justify-content: center;
+  align-items: center;
+  border-radius: 32rpx;
+}
+.send-btn-disabled {
+  background-color: #c4c9d4;
+}
+.send-btn-text {
+  font-size: 25rpx;
+  font-weight: 600;
+}
+.empty {
+  padding: 160rpx 32rpx;
+  justify-content: center;
+  align-items: center;
+}
+.empty-text {
+  margin-top: 20rpx;
+  color: #6b7385;
+  font-size: 26rpx;
+}
+
+/* Vapor 宽屏：px 覆盖 rpx，1600x900 下避免按窗口比例放大 2.7 倍 */
+.page-wide { align-items: center; }
+.scroll-wide { width: 640px; }
+.card-wide { width: 640px; margin: 14px 0 0; padding: 20px; border-radius: 14px; }
+.fb-head-wide { flex-direction: row; align-items: center; justify-content: space-between; }
+.type-badge-wide { padding: 2px 8px; border-radius: 5px; }
+.type-badge-text-wide { font-size: 11px; }
+.status-badge-wide { padding: 2px 8px; border-radius: 5px; }
+.status-badge-text-wide { font-size: 11px; }
+.fb-title-wide { margin-top: 10px; font-size: 20px; }
+.fb-content-wide { margin-top: 8px; font-size: 16px; }
+.meta-wide { margin-top: 12px; }
+.meta-text-wide { margin-right: 12px; font-size: 12px; }
+.label-wide { font-size: 16px; }
+.reply-empty-wide { margin-top: 12px; padding: 24px 0; }
+.reply-empty-text-wide { font-size: 14px; }
+.reply-item-wide { margin-top: 16px; }
+.reply-avatar-wide { width: 40px; height: 40px; border-radius: 12px; }
+.reply-avatar-text-wide { font-size: 14px; }
+.reply-body-wide { margin-left: 12px; }
+.reply-head-wide { flex-direction: row; align-items: center; }
+.reply-nickname-wide { font-size: 14px; }
+.official-badge-wide { margin-left: 8px; padding: 2px 6px; border-radius: 4px; }
+.official-badge-text-wide { font-size: 10px; }
+.reply-time-wide { margin-left: 8px; font-size: 12px; }
+.reply-content-wide { margin-top: 6px; font-size: 15px; }
+.scroll-bottom-pad-wide { height: 20px; }
+.input-bar-wide { width: 640px; padding: 12px 0 16px; }
+.input-row-wide { border-radius: 18px; padding: 0 4px 0 18px; }
+.reply-input-wide { height: 44px; font-size: 15px; }
+.field-ph-wide { font-size: 15px; }
+.send-btn-wide { margin-left: 10px; padding: 10px 20px; border-radius: 16px; }
+.send-btn-text-wide { font-size: 14px; }
+.empty-wide { padding: 80px 24px; }
+.empty-text-wide { margin-top: 10px; font-size: 14px; }
+</style>

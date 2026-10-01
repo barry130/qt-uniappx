@@ -1,0 +1,123 @@
+/**
+ * qt-js-engine 插件接口定义（跨端统一）
+ *
+ * 用途：在安卓端本地执行远程下发的音源包 `source-bundle.js`（与 qt-pc 同一份产物），
+ * 从而做到「音源接口失效时不发版就能更新」。iOS 侧走系统 JavaScriptCore。
+ *
+ * 设计约束（见《qt-uniappx-V8引擎方案.md》）：
+ * - 安卓后端是系统 WebView 的 V8（`android.webkit.WebView`），创建与求值都要 marshal 到主线程
+ *   → 插件内部固定一条引擎线程，所有 API 都 post 过去；
+ * - 全部 API 采用**回调式**（与 qt-audio-player 的 AudioPlayerVoidCallback 风格一致），
+ *   避免 Promise 跨 UTS↔Kotlin 转换的坑；
+ * - 宿主能力（HTTP、定时器）由插件注入 JS 全局，bundle 本身保持平台无关；
+ * - 跨语言边界只传**字符串**：进 JS 的字符串做 JS 字面量转义，出 JS 的一律 String(...)。
+ */
+
+/**
+ * 引擎启动参数。
+ *
+ * 当前 V8 后端不需要任何参数（内存/栈上限、堆栈捕获都是已删除的 QuickJS 后端专有开关）。
+ * 保留这个类型只是让 `start(options, callback)` 的签名稳定。
+ */
+export type QtJsStartOptions = {};
+
+/** 引擎信息 */
+export type QtJsEngineInfo = {
+	/** 引擎内核标识，固定为 "webview-v8" */
+	engine: string;
+	/** 系统 WebView 的 V8 版本，如 "110.0.5481.154" */
+	version: string;
+	/** 宿主契约版本（与 manifest 的 hostApiVersion 对应），当前为 1 */
+	hostApiVersion: number;
+	/** 启动探测表达式的结果（spike 用，正常为 "2"） */
+	probe: string;
+};
+
+/** 通用结果（无返回值的操作） */
+export type QtJsVoidResult = {
+	ok: boolean;
+	/** 失败原因；成功时为空串 */
+	error: string;
+};
+
+/** 脚本执行结果 */
+export type QtJsEvalResult = {
+	ok: boolean;
+	/** 成功时的返回值（统一转成字符串，避免手工 release 对象引用） */
+	value: string;
+	/** 失败时的错误信息（含 JS 异常栈，若已开启堆栈捕获） */
+	error: string;
+};
+
+/** 启动回调 */
+export type QtJsStartCallback = (info: QtJsEngineInfo | null, error: string | null) => void;
+/** 执行回调 */
+export type QtJsEvalCallback = (result: QtJsEvalResult) => void;
+/** 无返回值操作的回调 */
+export type QtJsVoidCallback = (result: QtJsVoidResult) => void;
+/** 文件类操作回调：ok=false 时 error 有值；ok=true 时 value 是结果（读文件为内容，列表为 JSON 数组） */
+export type QtJsFileCallback = (ok: boolean, value: string, error: string) => void;
+
+/** 启动引擎（幂等：已启动时直接回调现有 info） */
+export type QtJsStart = (options: QtJsStartOptions, callback: QtJsStartCallback) => void;
+/** 停止并销毁引擎（换音源包重建、或应用退出时调用） */
+export type QtJsStop = (callback: QtJsVoidCallback) => void;
+/** 执行一段 JS（调试/冒烟用；正式取链走 invoke 入口） */
+export type QtJsEvaluate = (code: string, callback: QtJsEvalCallback) => void;
+/** 引擎是否已启动 */
+export type QtJsIsRunning = () => boolean;
+
+/**
+ * 装载音源包脚本：先 compile 做语法校验（不执行），通过后再 execute。
+ * 这一步同时是热更新三道闸门里的第 ② 道（PC 侧是 import 前语法检查，安卓侧是动态 import 的 SyntaxError）。
+ */
+export type QtJsLoadBundle = (code: string, callback: QtJsVoidCallback) => void;
+
+/**
+ * 调用 bundle 注册在 `globalThis.__qtEntries` 上的入口。
+ *
+ * - `name`  入口名，如 "getPlayUrl" / "verifyPlayable" / "bundleInfo"
+ * - `argsJson` 参数数组的 JSON 文本，如 `["{\"platform\":1101,...}"]`；无参传 "[]"
+ * - `timeoutMs` 调用级超时（含脚本内所有 HTTP 与定时器等待），超时后回调 error="timeout"
+ *
+ * 实现是「原生拉取队列」：JS 把待办推进队列 → 原生每 ~20ms evaluate("__qtPump()") 取走并处理
+ * → 再用 evaluate("__qtResolveHttp(...)") 回投。跨语言边界只有字符串进出，不需要变参 JNI 桥。
+ */
+export type QtJsInvoke = (name: string, argsJson: string, timeoutMs: number, callback: QtJsEvalCallback) => void;
+
+/** 放弃一个正在执行的 invoke（bundle 内对应 Promise 会被丢弃） */
+export type QtJsDropOp = (opId: number) => void;
+
+/** 引擎健康状态：一次 evaluate 超时后会置为 false（脚本死循环不可中断，只能停用引擎） */
+export type QtJsIsHealthy = () => boolean;
+
+// ==================== 音源包文件读写 ====================
+// 放在插件里用 java.io 实现，而不是依赖 uni.getFileSystemManager()（跨端可用性不确定）。
+// 路径为绝对路径，由调用方用 dataDir() 拼出来。
+
+/** 应用私有目录（Android 为 filesDir 绝对路径），用于拼音源包路径 */
+export type QtJsDataDir = () => string;
+export type QtJsReadTextFile = (path: string, callback: QtJsFileCallback) => void;
+export type QtJsWriteTextFile = (path: string, text: string, callback: QtJsFileCallback) => void;
+export type QtJsExists = (path: string, callback: QtJsFileCallback) => void;
+export type QtJsRemove = (path: string, callback: QtJsFileCallback) => void;
+export type QtJsMkdirs = (path: string, callback: QtJsFileCallback) => void;
+/** 列目录，value 为 `[{"name":"a.js","dir":false,"size":123}]` */
+export type QtJsListDir = (dir: string, callback: QtJsFileCallback) => void;
+
+/**
+ * 读 APK 内置资源（assets）里的文本（通用资源读取接口）。
+ *
+ * `path` 是相对 www 根目录的路径，如 `static/theme.json`；
+ * 实现会自己发现 appid（uni-app x 的资源在 `assets/apps/<appid>/www/` 下），
+ * 所以调用方不需要知道 appid，也不要传 `apps/xxx/www/` 前缀。
+ */
+export type QtJsReadAssetText = (path: string, callback: QtJsFileCallback) => void;
+
+/**
+ * J0 spike 专用：验证「原生 → JS」回调链路是否可用。
+ * 实现方式：先在 JS 里装一个 __qtFireTimer(id) 记录器，再用原生 Handler 延时调用它，
+ * 最后把 JS 侧的记录读回来。返回 "7" 表示链路通。
+ */
+export type QtJsSpikeTimerCallback = (fired: string, error: string) => void;
+export type QtJsSpikeNativeTimer = (delayMs: number, callback: QtJsSpikeTimerCallback) => void;

@@ -1,0 +1,439 @@
+<template>
+  <qt-page-frame :max-width="layout.isWide ? 1080 : 860">
+  <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']"
+    ><!-- 宽屏左栏：歌单信息（竖屏时隐藏，hero 在列表内顶部） -->
+    <scroll-view v-if="layout.isWide" class="wide-left" direction="vertical" :show-scrollbar="false">
+      <view class="whero" :style="'background-color:' + themeStore.skin.surfaceStrong + ';border-color:' + themeStore.skin.border + ';'">
+        <image class="whero-cover" :src="displayPicUrl" mode="aspectFill" />
+        <text class="whero-title" :style="'color:' + themeStore.skin.text + ';'" :max-lines="2">{{ playlist?.name ?? "加载中" }}</text>
+        <text class="whero-desc" :style="'color:' + themeStore.skin.textMuted + ';'" :max-lines="6">{{ playlist?.description ?? "为你精选的音乐集合" }}</text>
+        <text class="whero-count" :style="'color:' + themeStore.skin.textMuted + ';'">{{ playlist?.playCount ?? "" }} {{ countLabel }}</text>
+        <view
+          v-if="canSavePlaylist"
+          class="whero-save" :class="playlistSaved ? 'whero-save-on' : ''"
+          :style="playlistSaved ? 'background-color:' + themeStore.skin.accent + ';border-color:' + themeStore.skin.accent + ';' : 'background-color:' + themeStore.skin.accentSoft + ';border-color:' + themeStore.skin.accentSoft + ';'"
+          @click="toggleSave"
+        >
+          <QtIcon :name="playlistSaved ? 'heart-fill' : 'heart'" :size="16" :color="playlistSaved ? '#ffffff' : themeStore.skin.accent" />
+          <text class="whero-save-text" :style="'color:' + (playlistSaved ? '#ffffff' : themeStore.skin.accent) + ';'">{{ playlistSaved ? "已收藏" : "收藏歌单" }}</text>
+        </view>
+        <view v-if="playlist != null && isDeletableLocal" class="whero-save whero-del" :style="'background-color:' + themeStore.skin.dangerSoft + ';border-color:' + themeStore.skin.dangerSoft + ';'" @click="deletePlaylist">
+          <text class="whero-save-text" :style="'color:' + themeStore.skin.danger + ';'">删除歌单</text>
+        </view>
+      </view>
+    </scroll-view>
+    <list-view id="playlist-scroll" class="scroll" :class="layout.isWide ? 'scroll-wide' : ''" direction="vertical" :scroll-top="scrollTop" @scroll="onListScroll">
+      <list-item v-if="!layout.isWide && !loading" class="hero-item">
+        <view class="hero" :class="layout.isWide ? 'hero-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceStrong + ';border-color:' + themeStore.skin.border + ';'">
+          <image class="cover" :class="layout.isWide ? 'cover-wide' : ''" :src="displayPicUrl" mode="aspectFill" />
+          <view class="hero-info" :class="layout.isWide ? 'hero-info-wide' : ''">
+            <text class="title" :class="layout.isWide ? 'title-wide' : ''" :style="'color:' + themeStore.skin.text + ';'" :max-lines="2">{{ playlist?.name ?? "加载中" }}</text>
+            <text class="desc" :class="layout.isWide ? 'desc-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';'" :max-lines="3">{{
+              playlist?.description ?? "为你精选的音乐集合"
+            }}</text>
+            <text class="playcount" :class="layout.isWide ? 'playcount-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';'">{{ playlist?.playCount ?? "" }} {{ countLabel }}</text>
+          </view>
+          <view
+            v-if="canSavePlaylist"
+            class="save-btn" :class="[[layout.isWide ? 'save-btn-wide' : ''], [playlistSaved ? 'save-btn-on' : '', layout.isWide ? 'save-btn-wide' : '']]"
+            :style="playlistSaved ? 'background-color:' + themeStore.skin.accent + ';border-color:' + themeStore.skin.accent + ';' : 'background-color:' + themeStore.skin.accentSoft + ';border-color:' + themeStore.skin.accentSoft + ';'"
+            @click="toggleSave"
+          >
+            <QtIcon
+              :name="playlistSaved ? 'heart-fill' : 'heart'"
+              :size="layout.isWide ? 18 : 28"
+              :color="playlistSaved ? '#ffffff' : themeStore.skin.accent"
+            />
+          </view>
+          <view
+            v-if="playlist != null && isDeletableLocal"
+            class="save-btn delete-btn" :class="[[layout.isWide ? 'save-btn-wide' : ''], layout.isWide ? 'save-btn-wide' : '']"
+            :style="'background-color:' + themeStore.skin.dangerSoft + ';border-color:' + themeStore.skin.dangerSoft + ';'"
+            @click="deletePlaylist"
+          >
+            <text class="delete-btn-text" :class="layout.isWide ? 'delete-btn-text-wide' : ''" :style="'color:' + themeStore.skin.danger + ';'">删除</text>
+          </view>
+        </view>
+      </list-item>
+      <list-item v-if="loading" class="load-item" :class="layout.isWide ? 'load-item-wide' : ''">
+        <qt-loading :visible="true" :size="96" />
+      </list-item>
+      <!-- sticky-section + sticky-header：操作条滚到列表顶部后原生钉住（section 覆盖全部歌曲，故一直吸到列表末尾） -->
+      <sticky-section>
+      <sticky-header>
+        <view v-if="!loading" class="list-head" :class="layout.isWide ? 'list-head-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceStrong + ';border-color:' + themeStore.skin.border + ';'">
+          <text :class="layout.isWide ? 'list-head-count-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';'">歌曲 {{ tracks.length }} 首</text>
+          <view class="head-actions">
+            <view class="head-btn" :class="layout.isWide ? 'head-btn-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="enqueueAll">
+              <QtIcon name="list" :size="layout.isWide ? 16 : 28" :color="themeStore.skin.iconMuted" /><text class="head-btn-text" :class="layout.isWide ? 'head-btn-text-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">加入队列</text>
+            </view>
+            <view class="play-all" :class="layout.isWide ? 'play-all-wide' : ''" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="playAll">
+              <QtIcon name="play" :size="layout.isWide ? 16 : 28" :color="themeStore.skin.accent" /><text class="play-all-text" :class="layout.isWide ? 'play-all-text-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">播放全部</text>
+            </view>
+          </view>
+        </view>
+      </sticky-header>
+      <list-item
+        v-for="(song, index) in tracks"
+        :key="song.platform + ':' + song.id"
+        :id="'s-' + index"
+        class="song-item" :class="[[layout.isWide ? 'song-item-wide' : ''], layout.isWide ? 'song-item-wide' : '']"
+        
+        @click="play(song)"
+      >
+        <qt-song-row-lite :song="song" :use-picker="true" @play="play(song)" @more="openSheet" @pick="onPick" />
+      </list-item>
+      </sticky-section>
+    </list-view>
+    <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+    <QtActionSheet
+      v-model:visible="sheetVisible"
+      :title="sheetTitle()"
+      :actions="sheetActions"
+      @select="onSheetSelect"
+    />
+    <QtPlaylistPicker
+      v-model:visible="showPicker"
+      :song="currentSong"
+      :playlists="player.pickerPlaylists()"
+      :selected-ids="getSelectedPlaylistIds(currentSong)"
+      :anchor-top="pickerAnchorTop"
+      title="加入 / 移出歌单"
+      @confirm="handlePickerConfirm"
+    />
+    <MiniPlayer
+  /></view>
+  </qt-page-frame>
+</template><script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { ref, computed, onMounted } from "vue";
+import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
+import QtSongRowLite from "@/uni_modules/qt-ui/components/qt-song-row-lite/qt-song-row-lite.uvue";
+import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtPlaylistPicker from "@/uni_modules/qt-ui/components/qt-playlist-picker/qt-playlist-picker.uvue";
+import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import { useSongSheet } from "@/composables/use-song-sheet";
+import { musicApi } from "@/services/music-api";
+import { usePlayerStore } from "@/stores/player";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { onLoad, onShow } from "@dcloudio/uni-app";
+import { qtTrackPage } from "@/uni_modules/qt-stat";
+import type { Playlist, Song } from "@/types/music";
+import type { Source } from "@/services/music-api";
+const playlist = ref<Playlist | null>(null);
+const tracks = ref<Song[]>([]);
+const loading = ref(true);
+const player = usePlayerStore();
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+
+// 回到顶部
+const scrollTop = ref(0);
+const showBackToTop = ref(false);
+// 吸顶操作条用 list-view 原生 sticky-header 实现，无需测量和覆盖层
+function onListScroll(e: any) {
+  const st = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
+  showBackToTop.value = st > 600;
+}
+function backToTop() {
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  showBackToTop.value = false;
+}
+const { sheetVisible, sheetActions, openSheet, onSheetSelect, sheetTitle } =
+  useSongSheet();
+const showPicker = ref(false);
+const currentSong = ref<Song | null>(null);
+const pickerAnchorTop = ref(-1);
+let id = "";
+let platform = "wyy";
+let type = "playlist";
+let chartName = "";
+let chartDesc = "";
+let chartPic = "";
+
+const playlistSaved = computed(() => {
+  const pl = playlist.value;
+  if (pl == null) return false;
+  return player.isPlaylistSaved(pl);
+});
+
+// 可删除判定：只要 platform 为 local 就是自己的歌单（本机建的、或从服务器同步
+// 回来的自建歌单，后者 id 即 pid 存在 savedPlaylists 里），一律允许删除
+const isDeletableLocal = computed(() => {
+  const pl = playlist.value;
+  if (pl == null) return false;
+  return pl.platform === 'local';
+});
+
+// 是否允许收藏歌单：本地歌单、排行榜、专辑都不允许。
+// 排行榜是平台实时榜单（无本地歌单实体）；专辑是搜索详情页，收藏无意义，故隐藏收藏入口。
+const canSavePlaylist = computed(() => {
+  const pl = playlist.value;
+  if (pl == null || pl.platform === 'local') return false;
+  return type !== 'chart' && type !== 'album';
+});
+
+// 数量标签：专辑显示歌曲数（“首”），歌单显示播放量（“播放”）
+const countLabel = computed(() => (type == "album" ? "首" : "播放"));
+
+// 封面展示：本地歌单（自建零图片是设计基线）没有封面时兜底应用 logo（static/icon
+// 的启动图标，xxxhdpi 192×192）。只在展示层兜底、不写回歌单数据——以后换 logo，
+// 旧歌单不会残留旧图 URL。
+const displayPicUrl = computed<string>(() => {
+  const pl = playlist.value;
+  if (pl != null && pl.platform === 'local' && pl.picUrl.length == 0) {
+    return "/static/icon/xxxhdpi.png";
+  }
+  return pl?.picUrl ?? "";
+});
+
+async function toggleSave(): Promise<void> {
+  const pl = playlist.value;
+  if (pl == null) return;
+  player.toggleSavePlaylist(pl);
+  // 单条收藏已入队并由 store 异步推送（LIKE_SYNC_DESIGN.md），此处不再全量上传
+  uni.showToast({
+    title: playlistSaved.value ? "已收藏歌单" : "已取消收藏",
+    icon: "none",
+  });
+}
+onLoad((query) => {
+  const idValue = query.get("id") as string | null;
+  const platformValue = query.get("platform") as string | null;
+  const typeValue = query.get("type") as string | null;
+  const nameValue = query.get("name") as string | null;
+  const descValue = query.get("desc") as string | null;
+  const picValue = query.get("pic") as string | null;
+  id = idValue != null ? idValue : "";
+  platform = platformValue != null ? platformValue : "wyy";
+  type = typeValue != null ? typeValue : "playlist";
+  // 注意：uni.navigateTo 的 query 在框架层已做过一次 percent 解码，
+  // 这里不能再 decodeURIComponent —— 否则像「热歌 100%」这类含 % 的值会抛
+  // URIError: URI malformed（chart 页传入时已 encode 过一次）。
+  // 入口页传来的 name/pic/desc。chart 缺失时给默认榜单名；album 缺失时留空串
+  // （不能默认成"排行榜"，否则版权受限专辑拿不到 name 时会被错填成榜单名）。
+  chartName = nameValue != null ? nameValue : (type == "chart" ? "排行榜" : "");
+  chartDesc = descValue != null ? descValue : "";
+  chartPic = picValue != null ? picValue : "";
+  if (type == "chart") {
+    uni.setNavigationBarTitle({ title: chartName || "排行榜" });
+  } else if (type == "album") {
+    uni.setNavigationBarTitle({ title: "专辑" });
+  } else {
+    uni.setNavigationBarTitle({ title: "歌单" });
+  }
+});
+
+onShow(() => {
+  qtTrackPage("pages/playlist/index");
+});
+
+async function loadPlaylist(): Promise<void> {
+  loading.value = true;
+  try {
+    if (type == "chart") {
+      const source = platform as Source;
+      const songs = await musicApi.chartDetail({
+        id,
+        name: chartName,
+        picUrl: "",
+        platform: source,
+        description: chartDesc,
+      });
+      tracks.value = songs;
+      playlist.value = {
+        id,
+        name: chartName || "排行榜",
+        picUrl: chartPic,
+        playCount: "0",
+        platform: source,
+        description: chartDesc || null,
+        tracks: songs,
+      };
+    } else if (platform === 'local') {
+      // 自建歌单：优先在本地歌单里找，找不到再去同步回来的自建歌单里找。
+      // 只要 platform=local 就是自己的歌单，不能按 id/名字排除
+      //（用户完全可以自建一个叫「我喜欢的歌曲」的歌单，它的 id 也可能就是 'local'）。
+      let localPl = player.localPlaylists.find(p => p.id === id);
+      if (localPl == null) {
+        localPl = player.savedPlaylists.find(
+          p => p.id === id && p.platform === 'local'
+        );
+      }
+      if (localPl != null) {
+        playlist.value = localPl;
+        const pid = localPl.pid != null && localPl.pid.length > 0 ? localPl.pid! : localPl.id;
+        // 自建歌单的歌曲存在服务器收藏表里，先拉一次最新数据（未登录会直接跳过），
+        // 再按 pid 取属于本歌单的那部分
+        await player.syncLikedFromServer();
+        tracks.value = player.songsOfPid(pid);
+      } else {
+        throw new Error('歌单未找到');
+      }
+    } else if (type == "album") {
+      // 搜索结果点进来的专辑：复用 Playlist 结构渲染（musicApi.albumDetail 返回该结构）
+      const al = await musicApi.albumDetail(id, platform as Source);
+      // 163 对版权受限专辑（周杰伦等 TME 曲库）返回 HTTP 200 + code:404 + resourceState:false，
+      // 字段全空却不抛错 → 整页无名字、无封面、0 首歌。用入口页带来的 name/pic/desc 兜底。
+      if (al.name.length == 0 && chartName.length > 0) al.name = chartName;
+      if (al.picUrl.length == 0 && chartPic.length > 0) al.picUrl = chartPic;
+      const alDesc = al.description;
+      if ((alDesc == null || alDesc.length == 0) && chartDesc.length > 0) al.description = chartDesc;
+      playlist.value = al;
+      tracks.value = al.tracks != null ? al.tracks! : [];
+      if (tracks.value.length == 0) {
+        uni.showToast({ title: "该专辑曲目暂无授权", icon: "none" });
+      }
+    } else {
+      const loaded = await musicApi.playlist(id, platform as Source);
+      // 酷狗收藏歌单等接口拿不到名字时，用入口页带来的名称兜底
+      if (loaded.name.length == 0 && chartName.length > 0) loaded.name = chartName;
+      playlist.value = loaded;
+      tracks.value =
+        playlist.value.tracks != null ? playlist.value.tracks : [];
+    }
+  } catch (error) {
+    console.error("[QT Music Playlist] load failed:", error);
+    let msg = "加载失败";
+    if (error instanceof Error && error.message.length > 0) msg = error.message;
+    uni.showToast({ title: msg, icon: "none" });
+  } finally {
+    loading.value = false;
+  }
+}
+onMounted(() => {
+  loadPlaylist();
+});
+
+async function play(song: Song): Promise<void> {
+  try {
+    song.url = await musicApi.playUrl(song, player.quality);
+    player.playSingle(song);
+  } catch (_) {
+    uni.showToast({ title: "该歌曲暂时无法播放", icon: "none" });
+  }
+}
+function playAll() {
+  if (tracks.value.length > 0) {
+    // 播放全部：替换整个队列为当前列表
+    player.play(tracks.value[0], tracks.value);
+  }
+}
+function enqueueAll(): void {
+  if (tracks.value.length == 0) return;
+  player.enqueueMany(tracks.value);
+}
+
+function deletePlaylist(): void {
+  const pl = playlist.value;
+  // platform=local 即自己的歌单（本机建的或同步回来的自建歌单），不再要求存在于哪个列表
+  if (pl == null || pl.platform !== 'local') return;
+  uni.showModal({
+    title: '确认删除',
+    content: `确定要删除歌单「${pl.name}」吗？\n删除后，该歌单内的歌曲收藏将一并移除；其他歌单中的收藏不受影响。`,
+    confirmText: '删除',
+    confirmColor: themeStore.skin.danger,
+    success: (res) => {
+      if (res.confirm) {
+        player.deleteLocalPlaylist(pl.id);
+        uni.showToast({ title: '已删除歌单', icon: 'none' });
+        uni.navigateBack();
+      }
+    }
+  });
+}
+
+function onPick(song: Song, event: any): void {
+  currentSong.value = song;
+  // 取点击坐标作为下拉面板展开锚点
+  if (event != null && event.detail != null) {
+    pickerAnchorTop.value = event.detail.y;
+  } else if (event != null && event.touches != null && event.touches.length > 0) {
+    pickerAnchorTop.value = event.touches[0].clientY;
+  } else {
+    pickerAnchorTop.value = -1;
+  }
+  showPicker.value = true;
+}
+
+function getSelectedPlaylistIds(song: Song | null): string[] {
+  if (song == null) return [];
+  return player.pickerSelectedIds(song);
+}
+
+function handlePickerConfirm(selectedIds: string[]): void {
+  const song = currentSong.value;
+  if (song == null) return;
+  // 统一由 store 处理：按歌单 pid 增删（同步服务器）
+  const changed = player.applyPickerSelection(song, selectedIds);
+  // 如果当前显示的是本地歌单，刷新列表
+  if (playlist.value?.platform === 'local') {
+    // 本地歌单：按 pid 重新取一次，保证只显示本歌单的歌
+    const pid = playlist.value?.pid;
+    tracks.value = player.songsOfPid(pid != null ? pid : "");
+  }
+  uni.showToast({
+    title: changed ? '已更新收藏' : '未做更改',
+    icon: 'none'
+  });
+}
+</script>
+<style>
+.page { flex:1; }
+.scroll { flex:1; min-height:0; }
+/* list-item 不支持 margin，用 padding */
+.hero-item, .load-item { padding: 0; }
+.hero { padding:40rpx 32rpx; flex-direction:row; border-width:1px; border-radius:24rpx; }
+.cover { width:200rpx; height:200rpx; border-radius:20rpx; background-color:rgba(255,255,255,0.2); }
+.hero-info { flex:1; margin-left:26rpx; justify-content:center; }
+.title { font-size:35rpx; font-weight:600; }
+.desc { margin-top:18rpx; font-size:23rpx; }
+.playcount { margin-top:12rpx; font-size:22rpx; }
+.save-btn { align-self:flex-end; width:60rpx; height:60rpx; border-radius:30rpx; justify-content:center; align-items:center; border-width:1px; }
+.save-btn-on { }
+.list-head { height:96rpx; padding:0 32rpx; flex-direction:row; justify-content:space-between; align-items:center; font-size:25rpx; border-width:1px; border-radius:24rpx; }
+/* 吸顶操作条由 list-view 内的 sticky-header 原生钉住，无需覆盖层样式 */
+.head-actions { flex-direction:row; align-items:center; }
+.play-all { height:60rpx; padding:0 24rpx; border-radius:30rpx; flex-direction:row; justify-content:center; align-items:center; margin-left:18rpx; }
+.play-all-text { margin-left:10rpx; font-size:24rpx; font-weight:500; }
+.head-btn { height:60rpx; padding:0 24rpx; border-radius:30rpx; flex-direction:row; justify-content:center; align-items:center; border-width:1px; }
+.head-btn-text { margin-left:10rpx; font-size:24rpx; font-weight:500; }
+.load-item { padding:120rpx 0; justify-content:center; align-items:center; }
+.song-item { height: 128rpx; }
+/* dark */
+
+.delete-btn-text { font-size: 12px; }
+
+.hero-wide { padding-top: 20px; padding-bottom: 20px; padding-left: 24px; padding-right: 24px; border-radius: 14px; }
+.cover-wide { width: 112px; height: 112px; border-radius: 12px; }
+.hero-info-wide { margin-left: 16px; }
+.title-wide { font-size: 20px; }
+.desc-wide { margin-top: 8px; font-size: 14px; }
+.playcount-wide { margin-top: 6px; font-size: 13px; }
+.save-btn-wide { width: 44px; height: 44px; border-radius: 22px; }
+.delete-btn-text-wide { font-size: 14px; }
+.list-head-wide { height: 60px; padding-left: 20px; padding-right: 20px; border-radius: 14px; }
+.list-head-count-wide { font-size: 14px; }
+.head-btn-wide { height: 40px; padding-left: 18px; padding-right: 18px; border-radius: 20px; }
+.head-btn-text-wide { margin-left: 6px; font-size: 14px; }
+.play-all-wide { height: 40px; padding-left: 18px; padding-right: 18px; border-radius: 20px; margin-left: 10px; }
+.play-all-text-wide { margin-left: 6px; font-size: 14px; }
+.load-item-wide { padding-top: 72px; padding-bottom: 72px; }
+.song-item-wide { height: 82px; }
+
+/* 宽屏左右布局：左栏歌单信息 + 右栏歌曲列表（竖屏保持上下） */
+.page-wide { flex-direction: row; align-items: stretch; padding: 16px 20px 0; }
+.wide-left { width: 272px; flex-shrink: 0; margin-right: 16px; padding-bottom: 16px; }
+.whero { padding: 16px; flex-direction: column; border-width: 1px; border-radius: 16px; }
+.whero-cover { width: 238px; height: 238px; border-radius: 12px; background-color: rgba(255,255,255,0.2); }
+.whero-title { margin-top: 14px; font-size: 18px; font-weight: 600; }
+.whero-desc { margin-top: 8px; font-size: 13px; line-height: 20px; }
+.whero-count { margin-top: 6px; font-size: 12px; }
+.whero-save { margin-top: 14px; height: 40px; padding: 0 16px; border-radius: 20px; flex-direction: row; justify-content: center; align-items: center; border-width: 1px; align-self: stretch; }
+.whero-save-on { }
+.whero-del { }
+.whero-save-text { margin-left: 6px; font-size: 13px; }
+</style>

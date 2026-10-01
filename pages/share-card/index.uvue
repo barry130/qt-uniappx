@@ -1,0 +1,312 @@
+<template>
+  <qt-page-frame :max-width="960">
+    <view class="page" :class="layout.isWide ? 'page-wide' : ''">
+      <view v-if="song == null" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
+        <text class="empty-text" :style="'color:' + themeStore.skin.textMuted + ';'">没有可分享的歌曲</text>
+      </view>
+
+      <template v-else>
+        <!-- 卡片模式切换 -->
+        <view class="mode-row" :class="layout.isWide ? 'mode-row-wide' : ''">
+          <QtSegmented v-model="mode" :list="['歌曲卡片', '歌词卡片']" :item-gap="16" />
+        </view>
+
+        <!-- 卡片本体：takeSnapshot 截这个节点 -->
+        <view class="card-wrap" :class="layout.isWide ? 'card-wrap-wide' : ''">
+          <view id="shareCard" class="card" :style="'background-color:' + themeStore.skin.surface + ';'">
+            <image
+              class="cover"
+              :src="coverUrl"
+              mode="aspectFill"
+              @load="onCoverLoad"
+              @error="onCoverLoad"
+            />
+            <view class="info">
+              <text class="song-name" max-lines="2" :style="'color:' + themeStore.skin.text + ';'">{{ song.name }}</text>
+              <text class="song-singer" max-lines="1" :style="'color:' + themeStore.skin.textSubtle + ';'">{{ song.singer }}</text>
+              <view v-if="mode == 1" class="lyric-block">
+                <view v-if="lyricLines.length > 0">
+                  <text
+                    v-for="(line, idx) in lyricLines"
+                    :key="idx"
+                    class="lyric-line"
+                    max-lines="1"
+                    :style="'color:' + (idx == 0 ? themeStore.skin.accent : themeStore.skin.textSubtle) + ';'"
+                  >{{ line }}</text>
+                </view>
+                <text v-else class="lyric-line" :style="'color:' + themeStore.skin.textSubtle + ';'">{{ lyricLoading ? "歌词加载中..." : "暂无歌词" }}</text>
+              </view>
+            </view>
+            <view class="footer">
+              <text class="footer-brand" :style="'color:' + themeStore.skin.accent + ';'">轻听音乐</text>
+              <text class="footer-sub" :style="'color:' + themeStore.skin.textMuted + ';'">QuietMusic</text>
+            </view>
+          </view>
+        </view>
+
+        <!-- 操作区 -->
+        <view class="actions" :class="layout.isWide ? 'actions-wide' : ''">
+          <view class="act-btn act-primary" :style="'background-color:' + themeStore.skin.accent + ';'" @click="doShare">
+            <text class="act-text" :style="'color:' + themeStore.skin.onAccent + ';'">{{ working ? "处理中..." : "分享图片" }}</text>
+          </view>
+          <view class="act-btn act-ghost" :style="'background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';'" @click="doSave">
+            <text class="act-text" :style="'color:' + themeStore.skin.text + ';'">{{ working ? "处理中..." : "保存到相册" }}</text>
+          </view>
+        </view>
+        <view class="tip-row" :class="layout.isWide ? 'tip-row-wide' : ''">
+          <text class="tip-text" :style="'color:' + themeStore.skin.textMuted + ';'">生成图片后可分享到微信、QQ 等应用</text>
+        </view>
+      </template>
+    </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import { onLoad, onUnload } from "@dcloudio/uni-app";
+import { computed, ref } from "vue";
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import QtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtTrackPage } from "@/uni_modules/qt-stat";
+import { musicApi } from "@/services/music-api";
+import { parseLrc } from "@/utils/lrc.uts";
+import { useShareCardStore } from "@/stores/share-card";
+import { DEFAULT_PLAYLIST_COVER_ASSET } from "@/services/media";
+
+const layout = useQtLayout();
+const themeStore = useThemeStore();
+const shareCard = useShareCardStore();
+
+const song = computed(() => shareCard.song);
+/** 0 歌曲卡片 / 1 歌词卡片 */
+const mode = ref(0);
+const lyricLines = ref<string[]>([]);
+const lyricLoading = ref(false);
+/** 封面就绪后才允许截图（远程图失败也放行，按兜底样式出图） */
+const coverReady = ref(false);
+const working = ref(false);
+
+const coverUrl = computed(() => {
+  const s = song.value;
+  if (s == null) return DEFAULT_PLAYLIST_COVER_ASSET;
+  return s.picUrl != null && s.picUrl.length > 0 ? s.picUrl : DEFAULT_PLAYLIST_COVER_ASSET;
+});
+
+onLoad(() => {
+  qtTrackPage("pages/share-card/index");
+  loadLyrics();
+});
+
+onUnload(() => {
+  // 离开页面即清目标，避免返回后再进残留上一首
+  shareCard.song = null;
+});
+
+function loadLyrics(): void {
+  const s = song.value;
+  if (s == null) return;
+  lyricLoading.value = true;
+  musicApi
+    .lyrics(s)
+    .then((text) => {
+      const lines = parseLrc(text, "")
+        .map((l) => l.text.trim())
+        .filter((t) => t.length > 0);
+      lyricLines.value = lines.slice(0, 6);
+      lyricLoading.value = false;
+    })
+    .catch(() => {
+      lyricLoading.value = false;
+    });
+}
+
+function onCoverLoad(): void {
+  coverReady.value = true;
+}
+
+/** 截图卡片节点，拿到临时文件后走 then 分支（分享 / 保存共用） */
+function snapshotCard(onDone: (tempPath: string) => void, onFail: () => void): void {
+  if (working.value) return;
+  if (!coverReady.value) {
+    uni.showToast({ title: "封面还在加载，稍候再试", icon: "none", duration: 2500 });
+    onFail();
+    return;
+  }
+  const el = uni.getElementById("shareCard");
+  if (el == null) {
+    uni.showToast({ title: "生成图片失败", icon: "none", duration: 2500 });
+    onFail();
+    return;
+  }
+  working.value = true;
+  // 截图是异步原生调用，先给 loading，避免“点了没反应”的错觉
+  uni.showLoading({ title: "生成图片中...", mask: true });
+  el.takeSnapshot({
+    success: (res) => {
+      working.value = false;
+      uni.hideLoading();
+      const path = res.tempFilePath;
+      if (path == null || path.length == 0) {
+        uni.showToast({ title: "生成图片失败", icon: "none", duration: 2500 });
+        onFail();
+        return;
+      }
+      onDone(path);
+    },
+    fail: () => {
+      working.value = false;
+      uni.hideLoading();
+      uni.showToast({ title: "生成图片失败", icon: "none", duration: 2500 });
+      onFail();
+    },
+  });
+}
+
+function doShare(): void {
+  snapshotCard((tempPath) => {
+    // shareWithSystem 属于按需编译进基座的 uni 模块：调试基座若早于本页生成，
+    // 运行时没有该 API，调用会直接抛错（表现为点击无反应），这里必须兜住并给出出口
+    try {
+      uni.shareWithSystem({
+        type: "image",
+        imageUrl: tempPath,
+        fail: () => {
+          uni.showToast({ title: "分享未完成", icon: "none", duration: 2500 });
+        },
+      });
+    } catch (_) {
+      uni.showToast({ title: "系统分享不可用，可先保存到相册", icon: "none", duration: 3000 });
+    }
+  }, () => {});
+}
+
+function doSave(): void {
+  snapshotCard((tempPath) => {
+    uni.saveImageToPhotosAlbum({
+      filePath: tempPath,
+      success: () => {
+        uni.showToast({ title: "已保存到相册", icon: "none", duration: 2500 });
+      },
+      fail: () => {
+        uni.showToast({ title: "保存失败，请检查相册权限", icon: "none", duration: 2500 });
+      },
+    });
+  }, () => {});
+}
+</script>
+<style lang="css">
+.page {
+  padding: 16px;
+  align-items: center;
+}
+.page-wide {
+  padding: 20px;
+}
+.empty {
+  margin-top: 120px;
+  align-items: center;
+}
+.empty-wide {
+  margin-top: 160px;
+}
+.empty-text {
+  font-size: 14px;
+}
+.mode-row {
+  align-items: center;
+  margin-bottom: 20px;
+}
+.mode-row-wide {
+  margin-bottom: 24px;
+}
+.card-wrap {
+  width: 300px;
+  align-items: center;
+}
+.card-wrap-wide {
+  width: 340px;
+}
+.card {
+  width: 300px;
+  border-radius: 16px;
+  overflow: hidden;
+}
+.cover {
+  width: 300px;
+  height: 300px;
+  border-top-left-radius: 16px;
+  border-top-right-radius: 16px;
+}
+.info {
+  width: 300px;
+  padding: 18px 18px 6px 18px;
+}
+.song-name {
+  font-size: 18px;
+  font-weight: bold;
+  text-overflow: ellipsis;
+}
+.song-singer {
+  margin-top: 6px;
+  font-size: 13px;
+  text-overflow: ellipsis;
+}
+.lyric-block {
+  margin-top: 14px;
+}
+.lyric-line {
+  font-size: 14px;
+  line-height: 26px;
+  text-overflow: ellipsis;
+}
+.footer {
+  width: 300px;
+  padding: 12px 18px 16px 18px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+.footer-brand {
+  font-size: 13px;
+  font-weight: bold;
+}
+.footer-sub {
+  font-size: 10px;
+  letter-spacing: 2px;
+}
+.actions {
+  margin-top: 24px;
+  flex-direction: row;
+}
+.actions-wide {
+  margin-top: 28px;
+}
+.act-btn {
+  height: 44px;
+  border-radius: 22px;
+  padding: 0 28px;
+  align-items: center;
+  justify-content: center;
+}
+.act-primary {
+  margin-right: 14px;
+}
+.act-ghost {
+  border-width: 1px;
+  border-style: solid;
+}
+.act-text {
+  font-size: 14px;
+  font-weight: bold;
+}
+.tip-row {
+  margin-top: 14px;
+  align-items: center;
+}
+.tip-row-wide {
+  margin-top: 16px;
+}
+.tip-text {
+  font-size: 12px;
+}
+</style>

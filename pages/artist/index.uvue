@@ -1,0 +1,363 @@
+<template>
+  <qt-page-frame :max-width="layout.isWide ? 1080 : 860">
+  <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']">
+    <!-- 宽屏左栏：歌手信息（竖屏时隐藏，hero 在列表上方） -->
+    <scroll-view v-if="layout.isWide" class="wide-left" direction="vertical" :show-scrollbar="false">
+      <view class="whero" :class="themeStore.dark ? 'whero-dark' : ''">
+        <view class="wcover" :style="'background-color:' + themeStore.skin.accent + ';'">
+          <image v-if="avatarUrl.length > 0" class="wcover-img" :src="avatarUrl" mode="aspectFill" />
+          <QtIcon v-else name="mic" :size="60" :color="themeStore.skin.onAccent" />
+        </view>
+        <text class="wname" :class="themeStore.dark ? 'wname-dark' : ''" :max-lines="2">{{ artist }}</text>
+        <text class="wsub" :class="themeStore.dark ? 'wsub-dark' : ''">歌手热门歌曲</text>
+      </view>
+    </scroll-view>
+    <!-- 竖屏 hero：贴顶横幅；宽屏下移入左栏 -->
+    <view v-if="!layout.isWide" class="hero" :class="themeStore.dark ? 'hero-dark' : ''">
+      <view class="avatar" :style="'background-color:' + themeStore.skin.accent + ';box-shadow:0 10rpx 24rpx ' + qtAccentRgba(themeStore.skin, 0.3) + ';'">
+        <image v-if="avatarUrl.length > 0" class="avatar-img" :src="avatarUrl" mode="aspectFill" />
+        <QtIcon v-else name="mic" :size="48" :color="themeStore.skin.onAccent" />
+      </view>
+      <view class="hero-info">
+        <text class="name" :class="themeStore.dark ? 'name-dark' : ''" :max-lines="1">{{ artist }}</text>
+        <text class="sub" :class="themeStore.dark ? 'sub-dark' : ''">歌手热门歌曲</text>
+      </view>
+    </view>
+    <list-view
+      class="scroll"
+      :class="layout.isWide ? 'scroll-wide' : ''"
+      direction="vertical"
+      :lower-threshold="200"
+      @scrolltolower="loadMore"
+      :scroll-top="scrollTop"
+      @scroll="onListScroll"
+    >
+      <list-item class="head-item">
+        <view class="list-head" :class="[themeStore.dark ? 'list-head-dark' : '', layout.isWide ? 'list-head-wide' : '']"
+          ><text class="list-title" :class="[themeStore.dark ? 'list-title-dark' : '', layout.isWide ? 'list-title-wide' : '']">热门歌曲 {{ songs.length }} 首</text
+            ><view class="play-all" :class="layout.isWide ? 'play-all-wide' : ''" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="playAll"
+            ><QtIcon name="play" :size="layout.isWide ? 16 : 28" :color="themeStore.skin.accent" /><text class="play-all-text" :class="layout.isWide ? 'play-all-text-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">播放全部</text></view
+          ></view
+        >
+      </list-item>
+      <list-item v-if="loading && songs.length == 0" class="empty-item" :class="layout.isWide ? 'empty-item-wide' : ''">
+        <qt-loading :visible="true" />
+      </list-item>
+      <list-item
+        v-for="song in songs"
+        :key="song.id + song.platform"
+        class="row-item" :class="[[layout.isWide ? 'row-item-wide' : ''], layout.isWide ? 'row-item-wide' : '']"
+        
+      >
+        <QtSongRowLite
+          :song="song"
+          :showBadge="false"
+          @play="play(song)"
+          @more="openSheet"
+        />
+      </list-item>
+      <list-item v-if="!loading && songs.length == 0" class="empty-item" :class="layout.isWide ? 'empty-item-wide' : ''">
+        <text class="empty-text" :class="[themeStore.dark ? 'empty-text-dark' : '', layout.isWide ? 'empty-text-wide' : '']">暂无该歌手的热门歌曲</text>
+      </list-item>
+      <list-item v-if="loadingMore" class="foot-item" :class="layout.isWide ? 'foot-item-wide' : ''">
+        <qt-loading :visible="true" :size="44" />
+      </list-item>
+      <list-item v-else-if="!hasMore && !emptyShow" class="foot-item" :class="layout.isWide ? 'foot-item-wide' : ''">
+        <text class="foot-text" :class="[themeStore.dark ? 'foot-text-dark' : '', layout.isWide ? 'foot-text-wide' : '']">已加载全部</text>
+      </list-item>
+    </list-view>
+    <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+    <QtActionSheet
+      v-model:visible="sheetVisible"
+      :title="sheetTitle()"
+      :actions="sheetActions"
+      @select="onSheetSelect"
+    />
+    <MiniPlayer />
+  </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { ref, computed, onMounted } from "vue";
+import { onLoad, onShow } from "@dcloudio/uni-app";
+import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
+import QtSongRowLite from "@/uni_modules/qt-ui/components/qt-song-row-lite/qt-song-row-lite.uvue";
+import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import { useSongSheet } from "@/composables/use-song-sheet";
+import { musicApi } from "@/services/music-api";
+import { usePlayerStore } from "@/stores/player";
+import { useSourceStore } from "@/stores/source";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore, qtAccentRgba } from "@/uni_modules/qt-ui/stores/theme";
+import type { Song } from "@/types/music";
+import type { Source } from "@/services/music-api";
+
+const player = usePlayerStore();
+const sourceStore = useSourceStore();
+const layout = useQtLayout();
+const themeStore = useThemeStore();
+
+// 回到顶部
+const scrollTop = ref(0);
+const showBackToTop = ref(false);
+function onListScroll(e: any) {
+  const st = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
+  showBackToTop.value = st > 600;
+}
+function backToTop() {
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  showBackToTop.value = false;
+}
+const { sheetVisible, sheetActions, openSheet, onSheetSelect, sheetTitle } =
+  useSongSheet();
+const artist = ref("");
+const songs = ref<Song[]>([]);
+const avatarUrl = ref("");
+const loading = ref(false);
+const page = ref(1);
+const loadingMore = ref(false);
+const hasMore = ref(true);
+let loadedSource = "";
+
+const emptyShow = computed(() => songs.value.length == 0);
+
+onLoad((option: UTSJSONObject) => {
+  const nameValue = option.get("name") as string | null;
+  artist.value = nameValue != null ? nameValue : "";
+});
+
+// 加载序号：快速切音源/翻页时旧响应晚到不得覆盖新数据（写回前比对）
+let loadSeq = 0;
+
+async function load(targetPage: number): Promise<void> {
+  const seq = ++loadSeq;
+  loading.value = true;
+  try {
+    const result = await musicApi.artistSongs(
+      artist.value,
+      sourceStore.current as Source,
+      targetPage,
+      30
+    );
+    if (seq !== loadSeq) return;
+    if (targetPage == 1) {
+      avatarUrl.value = result.picUrl;
+      songs.value = result.songs;
+    } else {
+      for (let index = 0; index < result.songs.length; index++) {
+        const item = result.songs[index] as Song;
+        let exists = false;
+        for (let c = 0; c < songs.value.length; c++) {
+          const current = songs.value[c];
+          if (current.id == item.id && current.platform == item.platform) {
+            exists = true;
+            break;
+          }
+        }
+        if (!exists) songs.value.push(item);
+      }
+      // 页码只在写回成功后推进：加载失败/被取代时下次翻页重取同一页，不跳页
+      page.value = targetPage;
+    }
+    if (result.songs.length == 0) hasMore.value = false;
+  } catch (error) {
+    console.error("[QT Music Artist]", artist.value, error);
+    if (seq !== loadSeq) return;
+    uni.showToast({ title: "歌手歌曲加载失败", icon: "none" });
+  } finally {
+    if (seq === loadSeq) loading.value = false;
+  }
+}
+
+function ensureLoad(): void {
+  if (loadedSource == sourceStore.current) return;
+  loadedSource = sourceStore.current;
+  songs.value = [];
+  avatarUrl.value = "";
+  page.value = 1;
+  hasMore.value = true;
+  load(1);
+}
+
+function loadMore(): void {
+  if (loading.value || loadingMore.value || !hasMore.value) return;
+  loadingMore.value = true;
+  // 页码由 load 成功写回后推进，失败不跳页
+  load(page.value + 1).then(
+    () => {
+      loadingMore.value = false;
+    },
+    () => {
+      loadingMore.value = false;
+    }
+  );
+}
+
+async function play(song: Song): Promise<void> {
+  try {
+    song.url = await musicApi.playUrl(song, player.quality);
+    player.playSingle(song);
+  } catch (_) {
+    uni.showToast({ title: "该歌曲暂时无法播放", icon: "none" });
+  }
+}
+
+function playAll(): void {
+  if (songs.value.length > 0) {
+    // 播放全部：替换整个队列为当前列表
+    player.play(songs.value[0], songs.value);
+  }
+}
+
+onMounted(() => {
+  sourceStore.restore();
+  ensureLoad();
+});
+onShow(() => {
+  sourceStore.restore();
+  ensureLoad();
+});
+</script>
+
+<style>
+.page {
+  flex: 1;
+}
+/* 不能加 box-shadow：uni-app x Android 上 shadow 落在可点击元素或其祖先上会导致点击穿透/命中丢失
+   （qt-ui/docs/ui-review.md P0-1，settings 页实证）。.hero 里的音源切换器、.list-head 里的播放全部按钮正是受害者。
+   已有 1px border 表达边缘，去掉 shadow 不会掉层级。 */
+.hero {
+  padding: 44rpx 36rpx;
+  flex-direction: row;
+  align-items: center;
+  background-color: rgba(255,255,255,0.62);
+  border-width: 1px;
+  border-color: rgba(255,255,255,0.6);
+  border-radius: 0 0 24rpx 24rpx;
+}
+.avatar {
+  width: 130rpx;
+  height: 130rpx;
+  justify-content: center;
+  align-items: center;
+  border-radius: 44rpx;
+  overflow: hidden;
+}
+.avatar-img {
+  width: 130rpx;
+  height: 130rpx;
+}
+.hero-info {
+  flex: 1;
+  margin-left: 28rpx;
+}
+.name {
+  color: #191d26;
+  font-size: 36rpx;
+  font-weight: 700;
+  text-overflow: ellipsis;
+}
+.sub {
+  margin-top: 12rpx;
+  color: #6b7385;
+  font-size: 24rpx;
+}
+.scroll {
+  flex: 1;
+}
+.list-head {
+  height: 96rpx;
+  padding: 0 32rpx;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  background-color: rgba(255,255,255,0.62);
+  border-width: 1px;
+  border-color: rgba(255,255,255,0.6);
+  border-radius: 24rpx;
+  color: #6b7385;
+  font-size: 25rpx;
+}
+.list-title {
+  color: #6b7385;
+  font-size: 25rpx;
+}
+.play-all {
+  height: 60rpx;
+  padding: 0 24rpx;
+  border-radius: 30rpx;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+}
+.play-all-text {
+  margin-left: 10rpx;
+  font-size: 25rpx;
+  font-weight: 500;
+}
+.empty-item {
+  padding: 140rpx 0;
+  justify-content: center;
+  align-items: center;
+}
+.empty-text {
+  color: #6b7385;
+  font-size: 27rpx;
+}
+.row-item {
+  height: 128rpx;
+  justify-content: center;
+}
+.foot-item {
+  height: 88rpx;
+  justify-content: center;
+  align-items: center;
+}
+.foot-text {
+  color: #6b7385;
+  font-size: 24rpx;
+}
+
+.hero-dark {
+  background-color: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.12);
+}
+.list-head-dark {
+  background-color: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.12);
+}
+/* 其余深色文字/卡片变体：与 playlist 页取值保持一致 */
+.whero-dark { background-color: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.14); }
+.wname-dark { color: #f2f4f7; }
+.wsub-dark { color: #a6adbc; }
+.name-dark { color: #f2f4f7; }
+.sub-dark { color: #a6adbc; }
+.list-title-dark { color: #a6adbc; }
+.empty-text-dark { color: #a6adbc; }
+.foot-text-dark { color: #a6adbc; }
+
+/* 宽屏：px 覆盖 rpx，避免宽屏下按窗口比例放大 */
+.list-head-wide { height: 56px; padding-left: 24px; padding-right: 24px; border-radius: 14px; }
+.list-title-wide { font-size: 16px; }
+.play-all-wide { height: 36px; padding-left: 16px; padding-right: 16px; border-radius: 18px; }
+.play-all-text-wide { margin-left: 6px; font-size: 14px; }
+.row-item-wide { height: 82px; padding-left: 20px; padding-right: 20px; }
+.empty-item-wide { padding-top: 80px; padding-bottom: 80px; }
+.empty-text-wide { font-size: 16px; }
+.foot-item-wide { height: 52px; }
+.foot-text-wide { font-size: 14px; }
+
+/* 宽屏左右布局：左栏歌手信息 + 右栏歌曲列表（竖屏保持上下） */
+.page-wide { flex-direction: row; align-items: stretch; padding: 16px 20px 0; }
+.wide-left { width: 272px; flex-shrink: 0; margin-right: 16px; padding-bottom: 16px; }
+.scroll-wide { flex: 1; min-width: 0; }
+.whero { padding: 14px; background-color: rgba(255,255,255,0.62); border-width: 1px; border-color: rgba(255,255,255,0.6); border-radius: 14px; }
+.wcover { width: 238px; height: 238px; border-radius: 12px; overflow: hidden; align-items: center; justify-content: center; }
+.wcover-img { width: 238px; height: 238px; }
+.wname { margin-top: 14px; color: #191d26; font-size: 20px; font-weight: 700; }
+.wsub { margin-top: 6px; color: #6b7385; font-size: 14px; }
+</style>

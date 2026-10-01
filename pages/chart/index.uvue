@@ -1,0 +1,237 @@
+<template>
+  <qt-page-frame :max-width="1280">
+    <view class="page">
+      <!-- 榜单来源标签必须保留，切换时只筛选当前来源的榜单。 -->
+      <view class="source-row" :class="[layout.isWide ? 'source-row-wide' : '', themeStore.dark ? 'source-row-dark' : '']">
+        <qt-segmented :list="sourceLabels" v-model="sourceIndex" @change="onSourceChange" />
+      </view>
+
+      <scroll-view id="chart-scroll" :key="sourceIndex" class="scroll" direction="vertical" :show-scrollbar="false" :scroll-top="scrollTop" @scroll="onListScroll">
+        <view v-if="loading" class="loading" :class="layout.isWide ? 'loading-wide' : ''"><qt-loading :visible="true" /></view>
+        <view v-else class="chart-grid" :class="layout.isWide ? 'chart-grid-wide' : ''" :style="gridStyle" id="chart-grid">
+          <view
+            v-for="chart in filteredCharts"
+            :key="chart.id + chart.platform"
+            class="chart-row"
+            :class="[layout.isWide ? 'chart-row-wide' : '', themeStore.dark ? 'chart-row-dark' : '']"
+            :style="layout.isWide ? 'width:' + chartCardWidth + 'px;' : ''"
+            @click="openChart(chart)"
+          >
+            <image class="chart-cover" :class="layout.isWide ? 'chart-cover-wide' : ''" :src="chart.picUrl" mode="aspectFill" />
+            <view class="chart-info" :class="layout.isWide ? 'chart-info-wide' : ''">
+              <text class="chart-name" :class="[layout.isWide ? 'chart-name-wide' : '', themeStore.dark ? 'chart-name-dark' : '']" :max-lines="1">{{ chart.name }}</text>
+              <text class="chart-meta" :class="[layout.isWide ? 'chart-meta-wide' : '', themeStore.dark ? 'chart-meta-dark' : '']" :max-lines="1">{{ chart.description || "热门榜单" }}</text>
+            </view>
+            <QtIcon name="chevron-right" :size="layout.isWide ? 14 : 18" :color="themeStore.dark ? '#7c8494' : '#a6adba'" />
+          </view>
+          <view v-if="filteredCharts.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
+            <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''">暂无榜单数据</text>
+          </view>
+        </view>
+        <view class="pad" :class="layout.isWide ? 'pad-wide' : ''"></view>
+      </scroll-view>
+
+      <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+    </view>
+  </qt-page-frame>
+</template>
+
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { onShow } from "@dcloudio/uni-app";
+import QtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
+import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import { musicApi } from "@/services/music-api";
+import { useSourceStore } from "@/stores/source";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { platformLabel } from "@/services/platform";
+import type { Source, Chart } from "@/services/music-api";
+
+const themeStore = useThemeStore();
+const sourceStore = useSourceStore();
+const layout = useQtLayout();
+
+const sources: Source[] = ["wyy", "qq", "kw", "kg"];
+const sourceLabels = sources.map((s) => platformLabel(s));
+const sourceIndex = ref(0);
+const loading = ref(false);
+const allCharts = ref<Chart[]>([]);
+
+// 非响应式：仅切源时读一次用于恢复位置。滚动中只写普通变量、不更新 ref，
+// 否则 :scroll-top 会被每帧回写，触发整棵列表子树重渲染（下滑卡顿根因）。
+const scrollPositions: number[] = [0, 0, 0, 0];
+const scrollTop = ref(0);
+const showBackToTop = ref(false);
+function onListScroll(e: any): void {
+  const st = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
+  scrollPositions[sourceIndex.value] = st;
+  const next = st > 600;
+  if (next !== showBackToTop.value) showBackToTop.value = next;
+}
+function backToTop(): void {
+  // 0/1 交替写入，保证 scroll-top 每次都真正变化——用户向下滚后 scrollTop 未同步更新，
+  // 重复设同一个值不会触发回顶
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  showBackToTop.value = false;
+}
+
+const contentWidth = computed<number>(() => Math.min(layout.windowWidth, 1280));
+// 本页所有延迟/重试定时器句柄：页面卸载时统一清掉，避免在已注销的实例上触发原生回调
+let gridTimers: number[] = [];
+// 宽屏下 windowWidth 可能与真实渲染宽度不符（见 use-qt-layout 注释），按它算卡宽会留出大片空白。
+// 且 scroll-view 子节点 width:100% 解析不出（会收缩成卡片总宽），所以：
+// 1) 测外层 scroll-view（定宽元素）拿真实可用宽度；2) 把该宽度显式写成网格的 px 宽度。
+const scrollWidth = ref(0);
+function measureGrid(attempt: number): void {
+  uni.createSelectorQuery()
+    .select("#chart-scroll")
+    .boundingClientRect((rect: UniNodeInfo) => {
+      if (rect != null && rect.width > 0) {
+        scrollWidth.value = rect.width;
+        return;
+      }
+      if (attempt < 3) {
+        gridTimers.push(setTimeout(() => {
+          measureGrid(attempt + 1);
+        }, 200) as number);
+      }
+    })
+    .exec();
+}
+/** 网格内容区宽（扣除左右 16px padding）；未测得前按 windowWidth 估算兜底 */
+const chartInnerWidth = computed<number>(() => {
+  if (scrollWidth.value > 0) return scrollWidth.value - 32;
+  return Math.max(320, contentWidth.value - 48);
+});
+const chartColumns = computed<number>(() => {
+  const w = chartInnerWidth.value;
+  if (w >= 1000) return 4;
+  if (w >= 680) return 3;
+  return 2;
+});
+/** 宽屏按 scroll-view 实测宽度自动分成 2/3/4 列，竖屏始终一列。 */
+const chartCardWidth = computed<number>(() => {
+  if (!layout.isWide) return 0;
+  // 每个卡片保留 12px 右侧间距，避免最后一项换行。
+  return Math.max(120, Math.floor((chartInnerWidth.value - chartColumns.value * 12) / chartColumns.value));
+});
+const gridStyle = computed<string>(() => layout.isWide && scrollWidth.value > 0 ? "width:" + scrollWidth.value + "px;" : "");
+
+const filteredCharts = computed<Chart[]>(() => {
+  const currentSource = sources[sourceIndex.value];
+  return allCharts.value.filter((chart) => chart.platform === currentSource);
+});
+
+function onSourceChange(index: number): void {
+  sourceIndex.value = index;
+  scrollTop.value = scrollPositions[index] ?? 0;
+}
+
+async function loadAll(): Promise<void> {
+  loading.value = true;
+  allCharts.value = [];
+  try {
+    allCharts.value = await musicApi.allCharts();
+  } catch (error) {
+    console.error("[QT Music Chart Page]", error);
+    uni.showToast({ title: "加载失败", icon: "none" });
+  } finally {
+    loading.value = false;
+    // 网格随 loading 消失才渲染，等布局落定后实测一次宽度
+    gridTimers.push(setTimeout(() => {
+      measureGrid(0);
+    }, 300) as number);
+  }
+}
+
+function openChart(chart: Chart): void {
+  uni.navigateTo({
+    url:
+      "/pages/playlist/index?id=" +
+      encodeURIComponent(chart.id) +
+      "&platform=" +
+      encodeURIComponent(chart.platform) +
+      "&type=chart" +
+      "&name=" +
+      encodeURIComponent(chart.name) +
+      "&desc=" +
+      encodeURIComponent(chart.description || "") +
+      "&pic=" +
+      encodeURIComponent(chart.picUrl || ""),
+  });
+}
+
+onMounted(() => {
+  sourceStore.restore();
+  const current = sourceStore.current;
+  const idx = sources.indexOf(current);
+  if (idx >= 0) sourceIndex.value = idx;
+  loadAll();
+});
+// 页面停留时旋转屏幕：窗口尺寸变化后重测网格宽度，列数/卡宽随之刷新
+watch(
+  () => layout.windowWidth,
+  () => {
+    if (!layout.isWide) return;
+    gridTimers.push(setTimeout(() => {
+      measureGrid(0);
+    }, 300) as number);
+  }
+);
+onShow(() => {
+  sourceStore.restore();
+  if (allCharts.value.length == 0) {
+    const current = sourceStore.current;
+    const idx = sources.indexOf(current);
+    if (idx >= 0) sourceIndex.value = idx;
+    loadAll();
+  }
+});
+onUnmounted(() => {
+  // 页面卸载时清掉全部延迟/重试定时器，避免在已注销的 UTS 实例上触发回调
+  for (const t of gridTimers) {
+    if (t != null) clearTimeout(t);
+  }
+  gridTimers = [];
+});
+</script>
+
+<style>
+.page { flex: 1; min-height: 0; }
+.source-row { padding: 12rpx; margin: 22rpx 24rpx 0; background-color: #ffffff; border-width: 1px; border-color: #e6e8ee; border-radius: 24rpx; }
+.scroll { flex: 1; min-height: 0; margin-top: 20rpx; }
+.loading { height: 320rpx; align-items: center; justify-content: center; }
+/* 宽屏下网格宽度由脚本实测 scroll-view 后显式指定（见 gridStyle）；
+   这里保留 width:100% 供竖屏兜底 */
+.chart-grid { width: 100%; padding: 0 24rpx; flex-direction: row; flex-wrap: wrap; }
+.chart-row { width: 100%; height: 116rpx; margin-bottom: 12rpx; padding: 0 14rpx; flex-direction: row; align-items: center; background-color: #f6f7f9; border-radius: 16rpx; }
+.chart-cover { width: 82rpx; height: 82rpx; border-radius: 12rpx; background-color: #edeff3; }
+.chart-info { flex: 1; min-width: 0; margin-left: 16rpx; }
+.chart-name { color: #1b202b; font-size: 30rpx; font-weight: 600; text-overflow: ellipsis; }
+.chart-meta { margin-top: 6rpx; color: #8b93a2; font-size: 24rpx; text-overflow: ellipsis; }
+.empty { width: 100%; height: 300rpx; align-items: center; justify-content: center; }
+.empty-text { color: #9097a5; font-size: 26rpx; }
+.pad { height: 44rpx; }
+
+.source-row-dark { background-color: #161a23; border-color: #2a2f3a; }
+.chart-row-dark { background-color: #212734; }
+.chart-name-dark { color: #e9ebf0; }
+.chart-meta-dark { color: #9aa2b0; }
+
+.source-row-wide { margin: 12px 16px 0; padding: 8px; border-radius: 14px; align-self: flex-start; width: 520px; }
+.chart-grid-wide { padding-left: 16px; padding-right: 16px; }
+.loading-wide { height: 220px; }
+.chart-row-wide { height: 54px; margin-right: 12px; border-radius: 12px; }
+.chart-cover-wide { width: 38px; height: 38px; border-radius: 8px; }
+.chart-info-wide { margin-left: 10px; }
+.chart-name-wide { font-size: 15px; }
+.chart-meta-wide { margin-top: 3px; font-size: 13px; }
+.pad-wide { height: 22px; }
+.empty-wide { height: 220px; }
+.empty-text-wide { font-size: 15px; }
+</style>
+

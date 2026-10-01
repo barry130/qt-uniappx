@@ -1,0 +1,96 @@
+<template>
+  <view class="qt-ui" :style="rootStyle">
+    <image v-if="backgroundImage.length > 0" class="qt-ui-background" :src="backgroundImage" mode="aspectFill" />
+    <view v-if="backgroundImage.length > 0" class="qt-ui-overlay" :style="overlayStyle" />
+    <view class="qt-ui-content" :class="isWide ? 'qt-ui-content-wide' : ''" :style="contentStyle">
+      <view v-if="title.length > 0" class="qt-ui-heading">
+        <text class="qt-ui-title" :style="'color:' + textColor + ';'">{{ title }}</text>
+        <text v-if="subtitle.length > 0" class="qt-ui-subtitle" :style="'color:' + mutedColor + ';'">{{ subtitle }}</text>
+      </view>
+      <slot />
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed } from "vue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+
+const props = defineProps<{
+  title?: string;
+  subtitle?: string;
+  backgroundColor?: string;
+  backgroundImage?: string;
+  overlayColor?: string;
+  textColor?: string;
+  mutedColor?: string;
+  maxWidth?: number;
+  wideBreakpoint?: number;
+}>();
+
+const title = computed((): string => props.title != null ? props.title! : "");
+const subtitle = computed((): string => props.subtitle != null ? props.subtitle! : "");
+const backgroundColor = computed((): string => props.backgroundColor != null ? props.backgroundColor! : "#f5f6f8");
+const backgroundImage = computed((): string => props.backgroundImage != null ? props.backgroundImage! : "");
+const overlayColor = computed((): string => props.overlayColor != null ? props.overlayColor! : "rgba(245,246,248,0.76)");
+const textColor = computed((): string => props.textColor != null ? props.textColor! : "#191d26");
+const mutedColor = computed((): string => props.mutedColor != null ? props.mutedColor! : "#737b8e");
+const maxWidth = computed((): number => props.maxWidth != null ? props.maxWidth! : 1200);
+const wideBreakpoint = computed((): number => props.wideBreakpoint != null ? props.wideBreakpoint! : 720);
+const layout = useQtLayout(720);
+const rootStyle = computed((): string => "background-color:" + backgroundColor.value + ";");
+const overlayStyle = computed((): string => "background-color:" + overlayColor.value + ";");
+const isWide = computed((): boolean => layout.windowWidth >= wideBreakpoint.value);
+const contentStyle = computed((): string => {
+  if (!isWide.value) return "";
+  const width = layout.windowWidth < maxWidth.value ? layout.windowWidth : maxWidth.value;
+  return "width:" + width + "px;";
+});
+</script>
+
+<style>
+.qt-ui {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+.qt-ui-background {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 0;
+}
+.qt-ui-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+}
+.qt-ui-content {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 28rpx 24rpx 120rpx;
+}
+.qt-ui-content-wide {
+  align-self: center;
+  padding-left: 40rpx;
+  padding-right: 40rpx;
+}
+.qt-ui-heading {
+  margin-bottom: 28rpx;
+}
+.qt-ui-title {
+  font-size: 44rpx;
+  font-weight: 700;
+}
+.qt-ui-subtitle {
+  margin-top: 8rpx;
+  font-size: 24rpx;
+}
+</style>

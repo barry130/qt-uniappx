@@ -1,0 +1,46 @@
+<!--
+  统一图标组件
+  全站图标唯一入口，内部使用 services/icons.ts 自绘的线性 SVG。
+  用法：qt-icon name="play" :size="44" color="#ffffff"
+  size 单位：手机端为 rpx；宽屏（isWide）下为 px。
+  原因：rpx 随窗口宽度缩放（pages.json 已把缩放封顶在 500dp），宽屏下若仍按
+  rpx 计算图标会被放大 2-3 倍；调用方在 isWide 分支传入的值本来就按 px 预期。
+-->
+<template>
+  <image
+    class="qt-icon"
+    :style="sizeStyle"
+    mode="aspectFit"
+    :src="src"
+  />
+</template>
+
+<script setup lang="ts">
+import { computed } from "vue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { iconSrc } from "@/uni_modules/qt-ui/services/icons";
+
+const props = defineProps<{
+  name: string;
+  size?: number;
+  color?: string;
+  strokeWidth?: number;
+}>();
+
+const layout = useQtLayout();
+const px = computed((): number => (props.size != null ? props.size! : 40));
+const tint = computed((): string => (props.color != null ? props.color! : "#4a5162"));
+const weight = computed((): number => (props.strokeWidth != null ? props.strokeWidth! : 2));
+
+const src = computed((): string => iconSrc(props.name, tint.value, weight.value));
+const sizeStyle = computed((): string => {
+  const unit = layout.isWide ? "px" : "rpx";
+  return "width:" + px.value + unit + ";height:" + px.value + unit + ";";
+});
+</script>
+
+<style>
+.qt-icon {
+  flex-shrink: 0;
+}
+</style>

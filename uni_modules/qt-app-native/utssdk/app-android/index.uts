@@ -1,0 +1,612 @@
+/**
+ * qt-app-native：Android 端实现
+ *
+ * 打开系统浏览器、退出应用、安装 APK。
+ * 本目录会被编译进原生 Kotlin 层，UTSAndroid / android.* 均可用。
+ */
+
+import { UTSAndroid } from "io.dcloud.uts";
+import Intent from "android.content.Intent";
+import Uri from "android.net.Uri";
+import File from "java.io.File";
+import FileProvider from "androidx.core.content.FileProvider";
+import Build from "android.os.Build";
+import Environment from "android.os.Environment";
+import ContentValues from "android.content.ContentValues";
+import MediaStore from "android.provider.MediaStore";
+import Settings from "android.provider.Settings";
+import FileInputStream from "java.io.FileInputStream";
+import FileOutputStream from "java.io.FileOutputStream";
+import OutputStream from "java.io.OutputStream";
+
+import Cursor from "android.database.Cursor";
+import WindowCompat from "androidx.core.view.WindowCompat";
+import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity } from "../interface.uts";
+
+/**
+ * 强制窗口回归传统布局模式（decorFitsSystemWindows = true）。
+ *
+ * 背景：三星 One UI（Android 15/16）手势导航下窗口 edge-to-edge 全高、
+ * 导航栏 inset 为 0，uni-app x 运行时在这条 inset 路径上存在首屏挂载竞态
+ * （S24 Ultra 全屏白屏：首页视图树挂不上，reLaunch 也救不回）；
+ * 三键导航 / 分屏模式 inset 稳定，一切正常 —— 见 services/boot-guard.ts
+ * 统计上报（SM-S9280 window=412x892）。
+ *
+ * 这里在启动最早点把窗口拉回"内容区 = 窗口 - 系统栏 inset"的传统模式，
+ * 与三键导航等价，绕开坏路径。只能恢复性调用：状态栏/内容重叠要靠页面
+ * 自身的 statusBarHeight 让位逻辑（本项目 custom 导航页本来就自行让位）。
+ */
+export const applyLegacyInsets: ApplyLegacyInsets = function (): boolean {
+  try {
+    const activity = UTSAndroid.getUniActivity();
+    if (activity == null) return false;
+    const window = activity.getWindow();
+    if (window == null) return false;
+    WindowCompat.setDecorFitsSystemWindows(window, true);
+    console.log("[AppNative] applyLegacyInsets: decorFitsSystemWindows=true");
+    return true;
+  } catch (e) {
+    console.log("[AppNative] applyLegacyInsets error " + (e != null ? e.toString() : "unknown"));
+    return false;
+  }
+};
+
+/**
+ * 重建当前 Activity（首屏守卫最后手段，见 interface.uts）。
+ * recreate 会走 onSaveInstanceState/恢复链路；对 uni-app x 而言窗口层整个重来，
+ * 首屏挂载竞态随旧窗口一起销毁。
+ */
+export const recreateActivity: RecreateActivity = function (): boolean {
+  try {
+    const activity = UTSAndroid.getUniActivity();
+    if (activity == null) return false;
+    activity.recreate();
+    console.log("[AppNative] recreateActivity triggered");
+    return true;
+  } catch (e) {
+    console.log("[AppNative] recreateActivity error " + (e != null ? e.toString() : "unknown"));
+    return false;
+  }
+};
+
+/** 打开系统浏览器 */
+export const openExternalUrl: OpenExternalUrl = (url: string): boolean => {
+  if (url == null || url.length == 0) return false;
+  try {
+    const intent = new Intent();
+    intent.setAction(Intent.ACTION_VIEW);
+    intent.setData(Uri.parse(url));
+    // 从应用拉起外部浏览器，加 NEW_TASK 标志避免因任务栈问题被系统拒绝
+    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+
+    // 优先用当前 Activity 启动
+    const activity = UTSAndroid.getUniActivity();
+    if (activity != null) {
+      activity.startActivity(intent);
+      return true;
+    }
+    // Activity 不可用（如启动早期）：改用应用上下文启动
+    const context = UTSAndroid.getAppContext();
+    if (context != null) {
+      context.startActivity(intent);
+      return true;
+    }
+  } catch (e) {
+    console.log("[AppNative] openExternalUrl error", e);
+  }
+  return false;
+};
+
+/**
+ * 打开本应用的系统通知设置页。
+ * API 26+ 直达通知页；失败（部分国产 ROM 不支持该 Action）或更低版本时降级到应用详情页。
+ */
+export const openNotificationSettings: OpenNotificationSettings = function (): boolean {
+  try {
+    const activity = UTSAndroid.getUniActivity();
+    if (activity == null) return false;
+    const pkg = activity.getPackageName();
+    if (Build.VERSION.SDK_INT >= 26) {
+      try {
+        const intent = new Intent();
+        intent.setAction("android.settings.APP_NOTIFICATION_SETTINGS");
+        intent.putExtra("android.provider.extra.APP_PACKAGE", pkg);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        activity.startActivity(intent);
+        return true;
+      } catch (e) {
+        console.log("[AppNative] APP_NOTIFICATION_SETTINGS unsupported, fallback", e);
+      }
+    }
+    const fallback = new Intent();
+    fallback.setAction("android.settings.APPLICATION_DETAILS_SETTINGS");
+    fallback.setData(Uri.parse("package:" + pkg));
+    fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+    activity.startActivity(fallback);
+    return true;
+  } catch (e) {
+    console.log("[AppNative] openNotificationSettings error", e);
+    return false;
+  }
+};
+
+/** 退出应用（关闭所有 Activity） */
+export const exitAppNative: ExitAppNative = (): boolean => {
+  try {
+    const activity = UTSAndroid.getUniActivity();
+    if (activity != null) {
+      activity.finishAffinity();
+      return true;
+    }
+  } catch (e) {
+    console.log("[AppNative] exitAppNative error", e);
+  }
+  return false;
+};
+
+/** 安装 APK（FileProvider，兼容 Android 7+） */
+export const installApkNative: InstallApkNative = (filePath: string): boolean => {
+  if (filePath == null || filePath.length == 0) return false;
+  try {
+    const context = UTSAndroid.getAppContext();
+    if (context == null) return false;
+    const file = new File(filePath);
+    if (!file.exists()) return false;
+
+    const intent = new Intent();
+    intent.setAction(Intent.ACTION_VIEW);
+    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+    const pkg = context.getPackageName();
+    // 依次尝试可用的 FileProvider：
+    //  1) 应用自身（nativeResources 中声明的 com.qt.app.fileProvider）
+    //  2) uni-app x 运行时内置的 com.qt.app.dc.fileprovider
+    // 都不可用时才退回 file://（Android 7+ 会抛 FileUriExposedException）
+    const authorities: string[] = [pkg + ".fileProvider", pkg + ".dc.fileprovider"];
+    let uri: Uri = Uri.fromFile(file);
+    let hit = false;
+    for (let i = 0; i < authorities.length; i++) {
+      try {
+        const u = FileProvider.getUriForFile(context, authorities[i], file);
+        if (u != null) {
+          uri = u;
+          hit = true;
+          console.log("[AppNative] installApkNative use authority " + authorities[i]);
+          break;
+        }
+      } catch (e) {
+        console.log("[AppNative] installApkNative authority 不可用 " + authorities[i]);
+      }
+    }
+    if (!hit) {
+      console.log("[AppNative] installApkNative 无可用 FileProvider，退回 file://");
+    }
+    intent.setDataAndType(uri, "application/vnd.android.package-archive");
+    context.startActivity(intent);
+    return true;
+  } catch (e) {
+    console.log("[AppNative] installApkNative error", e);
+    return false;
+  }
+};
+
+/* ===== 以下合并自 qt-media-store：将临时文件写入公共媒体目录 ===== */
+
+/** 默认子目录（未传 subDir 时使用） */
+const DEFAULT_SUB_DIR = "轻听";
+
+/** 已知扩展名（含 apk — 更新 APK 也走此插件） */
+const KNOWN_EXTS: string[] = [
+	"mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "ape", "mp4", "wma",
+	"apk"
+];
+
+/** 从文件名中取出小写扩展名（不含点），取不到返回空串 */
+function extOf(fileName: string): string {
+	const dot = fileName.lastIndexOf(".");
+	if (dot < 0 || dot == fileName.length - 1) return "";
+	return fileName.substring(dot + 1).toLowerCase();
+}
+
+/** 扩展名 -> MIME，未知扩展名统一按通用二进制处理 */
+function mimeOf(ext: string): string {
+	if (ext == "apk") return "application/vnd.android.package-archive";
+	if (ext == "mp3") return "audio/mpeg";
+	if (ext == "flac") return "audio/flac";
+	if (ext == "wav") return "audio/wav";
+	if (ext == "m4a" || ext == "mp4") return "audio/mp4";
+	if (ext == "aac") return "audio/aac";
+	if (ext == "ogg" || ext == "opus") return "audio/ogg";
+	if (ext == "ape") return "audio/x-ape";
+	if (ext == "wma") return "audio/x-ms-wma";
+	return "application/octet-stream";
+}
+
+/** 校验扩展名是否为已知格式 */
+function isKnownExt(ext: string): boolean {
+	for (let i = 0; i < KNOWN_EXTS.length; i++) {
+		if (KNOWN_EXTS[i] == ext) return true;
+	}
+	return false;
+}
+
+/** 文件名兜底：优先用传入文件名；无扩展名或未知则尝试从临时路径推断，否则退回 mp3 */
+function resolveDisplayName(fileName: string, tempPath: string): string {
+	let name = fileName.replace(/[\\/:*?"<>|]/g, "_").trim();
+	if (name.length == 0) name = "music";
+	const ext = extOf(name);
+	if (isKnownExt(ext)) return name;
+	const fromTemp = extOf(tempPath);
+	if (isKnownExt(fromTemp)) return name + "." + fromTemp;
+	return name + ".mp3";
+}
+
+/** 流拷贝 */
+function copyStream(input: FileInputStream, output: OutputStream): void {
+	const buffer = new ByteArray(8192);
+	let count = input.read(buffer);
+	while (count > 0) {
+		output.write(buffer, 0, count);
+		count = input.read(buffer);
+	}
+	output.flush();
+}
+
+/** 同名文件避让：a.mp3 -> a(1).mp3 */
+function avoidDuplicate(dir: File, displayName: string): string {
+	const dot = displayName.lastIndexOf(".");
+	const base = dot > 0 ? displayName.substring(0, dot) : displayName;
+	const suffix = dot > 0 ? displayName.substring(dot) : "";
+	let candidate = displayName;
+	let index = 1;
+	while (new File(dir, candidate).exists() && index < 100) {
+		candidate = base + "(" + index + ")" + suffix;
+		index++;
+	}
+	return candidate;
+}
+
+/** Android 9- 直接写公共目录（需要 WRITE_EXTERNAL_STORAGE） */
+function saveLegacy(source: File, dirType: string, displayName: string, mime: string, subDir: string): string {
+	const activity = UTSAndroid.getUniActivity();
+	if (activity == null) {
+		console.log("[MediaStore] legacy: activity 为 null");
+		return "";
+	}
+	const perms = ["android.permission.WRITE_EXTERNAL_STORAGE"];
+	if (!UTSAndroid.checkSystemPermissionGranted(activity!, perms)) {
+		console.log("[MediaStore] legacy: 缺少 WRITE_EXTERNAL_STORAGE 权限");
+		return "";
+	}
+	const rootType = dirType == "music" ? Environment.DIRECTORY_MUSIC : Environment.DIRECTORY_DOWNLOADS;
+	const root = Environment.getExternalStoragePublicDirectory(rootType);
+	const dir = new File(root, subDir);
+	if (!dir.exists()) dir.mkdirs();
+	const finalName = avoidDuplicate(dir, displayName);
+	const target = new File(dir, finalName);
+
+	const input = new FileInputStream(source);
+	const output = new FileOutputStream(target);
+	try {
+		copyStream(input, output);
+	} finally {
+		try { input.close(); } catch (e1) {}
+		try { output.close(); } catch (e2) {}
+	}
+
+	// 通知媒体库，让文件管理器能扫描到
+	try {
+		const context = UTSAndroid.getAppContext();
+		if (context != null) {
+			const values = new ContentValues();
+			values.put(MediaStore.MediaColumns.DISPLAY_NAME, finalName);
+			values.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+			values.put(MediaStore.MediaColumns.DATA, target.getAbsolutePath());
+			context!.getContentResolver().insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values);
+		}
+	} catch (e3) {
+		console.log("[MediaStore] legacy: 媒体库登记失败(文件已写入)");
+	}
+	const path = target.getAbsolutePath();
+	console.log("[MediaStore] legacy 写入成功 " + path);
+	return path;
+}
+
+/**
+ * Android 10+ 通过 MediaStore 写入，无需存储权限。
+ * 注意：MediaStore.Audio 集合只允许 Music 等音频类主目录，写 Download 目录必须改用 MediaStore.Downloads 集合；
+ * APK 文件也走 MediaStore.Downloads 集合。
+ */
+function saveScoped(source: File, dirType: string, displayName: string, mime: string, subDir: string): string {
+	const context = UTSAndroid.getAppContext();
+	if (context == null) {
+		console.log("[MediaStore] getAppContext 返回 null");
+		return "";
+	}
+	const resolver = context!.getContentResolver();
+	if (resolver == null) {
+		console.log("[MediaStore] getContentResolver 返回 null");
+		return "";
+	}
+
+	const useMusic = dirType == "music";
+	const relativePath = (useMusic ? Environment.DIRECTORY_MUSIC : Environment.DIRECTORY_DOWNLOADS) + "/" + subDir + "/";
+	const collection = useMusic
+		? MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+		: MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+
+	const values = new ContentValues();
+	values.put(MediaStore.MediaColumns.DISPLAY_NAME, displayName);
+	values.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+	values.put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath);
+	values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+
+	const itemUri = resolver.insert(collection, values);
+	if (itemUri == null) {
+		console.log("[MediaStore] insert 返回 null，relativePath=" + relativePath);
+		return "";
+	}
+
+	const output = resolver.openOutputStream(itemUri!);
+	if (output == null) {
+		try { resolver.delete(itemUri!, null, null); } catch (e1) {}
+		console.log("[MediaStore] openOutputStream 返回 null");
+		return "";
+	}
+
+	const input = new FileInputStream(source);
+	try {
+		copyStream(input, output!);
+	} finally {
+		try { input.close(); } catch (e2) {}
+		try { output!.close(); } catch (e3) {}
+	}
+
+	const done = new ContentValues();
+	done.put(MediaStore.MediaColumns.IS_PENDING, 0);
+	resolver.update(itemUri!, done, null, null);
+
+	// 优先返回真实文件绝对路径
+	let result = itemUri!.toString();
+	try {
+		const columns = ["_data"];
+		const cursor = resolver.query(itemUri!, columns.toKotlinList().toTypedArray(), null, null, null);
+		if (cursor != null) {
+			try {
+				if (cursor!.moveToFirst()) {
+					const path = cursor!.getString(0);
+					if (path != null && path!.length > 0) result = path!;
+				}
+			} finally {
+				cursor!.close();
+			}
+		}
+	} catch (e4) {
+		console.log("[MediaStore] 查询真实路径失败，返回 URI");
+	}
+
+	console.log("[MediaStore] 写入成功 " + result + " -> " + relativePath + displayName);
+	return result;
+}
+
+/**
+ * 检查/申请写公共目录的权限。
+ * Android 10+ 用 MediaStore，无需权限；Android 9- 需要 WRITE_EXTERNAL_STORAGE。
+ */
+export const ensurePublicDirPermission: EnsurePublicDirPermission = function (): boolean {
+	const sdk = Build.VERSION.SDK_INT;
+	if (sdk >= 29) return true;
+	const activity = UTSAndroid.getUniActivity();
+	if (activity == null) return false;
+	const perms = ["android.permission.WRITE_EXTERNAL_STORAGE"];
+	if (UTSAndroid.checkSystemPermissionGranted(activity!, perms)) return true;
+	UTSAndroid.requestSystemPermission(activity!, perms, function (allRight: boolean, granted: string[]) {
+		console.log("[MediaStore] 存储权限申请结果 " + allRight);
+	}, function (doNotAskAgain: boolean, granted: string[]) {
+		console.log("[MediaStore] 存储权限被拒绝 doNotAskAgain=" + doNotAskAgain);
+	});
+	return false;
+}
+
+export const saveToPublicMedia: SaveToPublicMedia = function (
+	tempPath: string,
+	dirType: string,
+	fileName: string,
+	subDir?: string
+): string {
+	try {
+		// tempFilePath 可能是 file:// 或 unifile://sandbox/... 形式，统一转成绝对路径
+		let realPath = tempPath;
+		if (realPath.indexOf("file://") == 0) realPath = realPath.substring(7);
+		let source = new File(realPath);
+		if (!source.exists()) {
+			const converted = UTSAndroid.convert2AbsFullPath(tempPath);
+			if (converted.length > 0) {
+				source = new File(converted);
+				realPath = converted;
+			}
+		}
+		if (!source.exists()) {
+			console.log("[MediaStore] 源文件不存在 tempPath=" + tempPath + " realPath=" + realPath);
+			return "";
+		}
+
+		const dir = subDir != null && subDir.length > 0 ? subDir : DEFAULT_SUB_DIR;
+		const displayName = resolveDisplayName(fileName, realPath);
+		const mime = mimeOf(extOf(displayName));
+		const sdk = Build.VERSION.SDK_INT;
+		console.log("[MediaStore] sdk=" + sdk + " dirType=" + dirType + " subDir=" + dir + " name=" + displayName + " mime=" + mime);
+
+		if (sdk >= 29) {
+			return saveScoped(source, dirType, displayName, mime, dir);
+		}
+		return saveLegacy(source, dirType, displayName, mime, dir);
+	} catch (e) {
+		console.log("[MediaStore] 写入失败 " + (e != null ? e.toString() : "unknown"));
+		return "";
+	}
+};
+
+/** 真正执行 MediaStore 音频扫描（调用前需已具备读取权限） */
+function doScanAudio(): LocalAudioItem[] {
+	const items: LocalAudioItem[] = [];
+	try {
+		const context = UTSAndroid.getAppContext();
+		if (context == null) return items;
+		// projection 传 null 返回全部列，再用 getColumnIndex 定位（UTSArray 与 Kotlin Array<String> 类型不兼容，不能显式传列数组）
+		const selection = MediaStore.Audio.Media.IS_MUSIC + " != 0";
+		const sortOrder = MediaStore.Audio.Media.DATE_ADDED + " DESC";
+		const cursor = context.getContentResolver().query(
+			MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+			null,
+			selection,
+			null,
+			sortOrder
+		);
+		if (cursor == null) return items;
+		const idxId = cursor.getColumnIndex(MediaStore.Audio.Media._ID);
+		const idxTitle = cursor.getColumnIndex(MediaStore.Audio.Media.TITLE);
+		const idxArtist = cursor.getColumnIndex(MediaStore.Audio.Media.ARTIST);
+		const idxAlbum = cursor.getColumnIndex(MediaStore.Audio.Media.ALBUM);
+		const idxDuration = cursor.getColumnIndex(MediaStore.Audio.Media.DURATION);
+		const idxSize = cursor.getColumnIndex(MediaStore.Audio.Media.SIZE);
+		const idxMtime = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_MODIFIED);
+		const idxPath = cursor.getColumnIndex(MediaStore.Audio.Media.DATA);
+		while (cursor.moveToNext()) {
+			const id = cursor.getLong(idxId);
+			const title = cursor.getString(idxTitle) ?? "";
+			const artistRaw = cursor.getString(idxArtist) ?? "";
+			const album = cursor.getString(idxAlbum) ?? "";
+			const durationMs = cursor.getLong(idxDuration);
+			const sizeBytes = cursor.getLong(idxSize);
+			const modified = cursor.getLong(idxMtime);
+			const path = cursor.getString(idxPath) ?? "";
+			// 无效条目（无时长/无标题）跳过，避免列表里出现不可播的空行
+			if (title.length == 0 || durationMs <= 0) continue;
+			const item: LocalAudioItem = {
+				id: "local_" + id.toString(),
+				title: title,
+				singer: artistRaw == "<unknown>" ? "" : artistRaw,
+				album: album,
+				duration: Math.floor(durationMs / 1000),
+				uri: "content://media/external/audio/media/" + id.toString(),
+				path: path,
+				size: sizeBytes,
+				mtime: modified
+			};
+			items.push(item);
+		}
+		cursor.close();
+	} catch (e) {
+		console.log("[LocalAudio] 扫描失败 " + (e != null ? e.toString() : "unknown"));
+	}
+	console.log("[LocalAudio] 扫描完成 " + items.length + " 首");
+	return items;
+}
+
+export const scanLocalAudio: ScanLocalAudio = function (onResult: (items: LocalAudioItem[]) => void): void {
+	const activity = UTSAndroid.getUniActivity();
+	if (activity == null) {
+		onResult([]);
+		return;
+	}
+	// targetSdkVersion >= 33 时权限库强制要求 READ_MEDIA_* 细分权限，
+	// 即使设备系统低于 Android 13 也不能传 READ_EXTERNAL_STORAGE（会抛 IllegalArgumentException）
+	const perms = ["android.permission.READ_MEDIA_AUDIO"];
+	if (UTSAndroid.checkSystemPermissionGranted(activity, perms)) {
+		onResult(doScanAudio());
+		return;
+	}
+	try {
+		UTSAndroid.requestSystemPermission(activity, perms, function (allRight: boolean, granted: string[]) {
+			console.log("[LocalAudio] 音频权限申请结果 " + allRight);
+			onResult(allRight ? doScanAudio() : []);
+		}, function (doNotAskAgain: boolean, granted: string[]) {
+			console.log("[LocalAudio] 音频权限被拒 doNotAskAgain=" + doNotAskAgain);
+			onResult([]);
+		});
+	} catch (e) {
+		// 权限框架异常时也必须回调，避免页面停留在“扫描中”
+		console.log("[LocalAudio] 音频权限申请异常 " + (e != null ? e.toString() : "unknown"));
+		onResult([]);
+	}
+};
+
+// Android 11+ 分区存储：删除第三方公共媒体（非本应用写入的文件）时，
+// ContentResolver.delete 会抛 RecoverableSecurityException。正确做法是
+// Android 11+ 分区存储：第三方公共媒体（非本应用写入的文件）无写/删权限，ContentResolver.delete
+// 会抛 RecoverableSecurityException，File.delete 也删不动。要删第三方文件需先开通「所有文件
+// 访问」权限（MANAGE_EXTERNAL_STORAGE，由用户在系统设置里开启）。createDeleteRequest 的系统
+// 确认框虽更优雅，但其返回的 IntentSender 在 UTS SDK 中被认定为 PendingIntent、无法编译，故改用
+// 全部文件访问 + File.delete 方案（不依赖 IntentSender/集合类型，编译稳定、删得彻底）。
+// 仅在一次运行里引导一次「所有文件访问」设置页，避免反复打断。
+let manageAccessPrompted = false;
+
+export const deleteLocalMedia: DeleteLocalMedia = (items: LocalAudioItem[]): DeleteLocalMediaResult => {
+	const result: DeleteLocalMediaResult = { deleted: 0, pending: 0, failed: 0 };
+	const context = UTSAndroid.getAppContext();
+	if (context == null) {
+		result.failed = items.length;
+		return result;
+	}
+	// 是否已开通「所有文件访问」（API 30+，决定能否删第三方公共媒体文件）
+	const hasManage = Build.VERSION.SDK_INT >= 30 && Environment.isExternalStorageManager();
+	for (let i = 0; i < items.length; i++) {
+		const it = items[i];
+		let removed = false;
+		// 1) 应用自有的音频：按 content URI 删 MediaStore 条目（会连磁盘文件一起删）
+		if (it.uri != null && it.uri.length > 0) {
+			try {
+				const rows = context.getContentResolver().delete(Uri.parse(it.uri), null, null);
+				if (rows > 0) removed = true;
+			} catch (e) {
+				// 第三方公共媒体：分区存储下无写/删权限（RecoverableSecurityException），
+				// 忽略此处，靠第 2 步 File.delete（需「所有文件访问」权限）
+			}
+		}
+		// 2) 按绝对路径删文件：已开通「所有文件访问」时第三方文件也能删
+		if (!removed && it.path != null && it.path.length > 0) {
+			try {
+				const f = new File(it.path);
+				if (f.exists() && f.delete()) removed = true;
+			} catch (e) {
+				console.log("[LocalAudio] File.delete 失败 " + (e != null ? e.toString() : "unknown"));
+			}
+		}
+		if (removed) result.deleted++;
+		else result.failed++;
+	}
+	// 3) 有删不掉、且系统支持、又还没开「所有文件访问」→ 引导去系统设置开一次
+	if (result.failed > 0 && Build.VERSION.SDK_INT >= 30 && !hasManage && !manageAccessPrompted) {
+		manageAccessPrompted = true;
+		let opened = false;
+		try {
+			const activity = UTSAndroid.getUniActivity();
+			if (activity != null) {
+				try {
+					activity.startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+					opened = true;
+				} catch (e1) {
+					// 个别 ROM 不认该入口：退回应用详情页，用户可手动开「所有文件访问」
+					try {
+						activity.startActivity(new Intent(
+							Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+							Uri.parse("package:" + context.getPackageName())
+						));
+						opened = true;
+					} catch (e2) {
+						opened = false;
+					}
+				}
+			}
+		} catch (e) {
+			opened = false;
+		}
+		if (opened) {
+			result.pending = result.failed;
+			result.failed = 0;
+		}
+	}
+	return result;
+};

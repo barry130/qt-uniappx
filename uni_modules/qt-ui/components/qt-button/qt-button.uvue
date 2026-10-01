@@ -1,0 +1,80 @@
+<template>
+  <view
+    class="qt-button"
+    :class="[variantClass, sizeClass, disabled ? 'qt-button-disabled' : '']"
+    :style="buttonStyle"
+    @click="onTap"
+  >
+    <view v-if="icon.length > 0" class="qt-button-icon">
+      <QtIcon :name="icon" :size="iconSize" :color="iconColor" />
+    </view>
+    <text class="qt-button-label" :class="labelSizeClass" :style="labelStyle">{{ label }}</text>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed } from "vue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+
+const props = defineProps<{
+  label: string;
+  icon?: string;
+  variant?: "primary" | "secondary" | "ghost" | "outline";
+  size?: "sm" | "md" | "lg";
+  disabled?: boolean;
+}>();
+const emit = defineEmits<{ click: [] }>();
+const theme = useThemeStore();
+const layout = useQtLayout();
+const icon = computed((): string => props.icon != null ? props.icon! : "");
+const variant = computed((): string => props.variant != null ? props.variant! : "primary");
+const size = computed((): string => props.size != null ? props.size! : "md");
+const variantClass = computed((): string => "qt-button-" + variant.value);
+const sizeClass = computed((): string => "qt-button-size-" + size.value);
+const labelSizeClass = computed((): string => "qt-button-label-" + size.value);
+const labelColor = computed((): string => variant.value == "primary" ? theme.skin.onAccent : theme.skin.text);
+const iconColor = computed((): string => labelColor.value);
+const iconSize = computed((): number => {
+  if (layout.isWide) return size.value == "sm" ? 14 : 16;
+  return size.value == "sm" ? 28 : 32;
+});
+// 横屏（宽屏）下 rpx 随视口宽度放大，组件内部尺寸改用 px 固定，避免按钮巨大
+const buttonStyle = computed((): string => {
+  let style = "";
+  if (variant.value == "primary") style += "background-color:" + theme.skin.accent + ";border-color:" + theme.skin.accent + ";";
+  else if (variant.value == "secondary") style += "background-color:" + theme.skin.accentSoft + ";border-color:transparent;";
+  else if (variant.value == "outline") style += "background-color:transparent;border-color:" + theme.skin.border + ";";
+  else style += "background-color:transparent;border-color:transparent;";
+  if (layout.isWide) style += "height:" + (size.value == "sm" ? 44 : 48) + "px;padding:0 18px;border-radius:12px;";
+  return style;
+});
+const labelStyle = computed((): string => {
+  let style = "color:" + labelColor.value + ";";
+  if (layout.isWide) style += "font-size:" + (size.value == "sm" ? 14 : 16) + "px;";
+  return style;
+});
+function onTap(): void {
+  if (!props.disabled) emit("click");
+}
+</script>
+
+<style>
+.qt-button {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  border-width: 1px;
+  border-radius: 16rpx;
+}
+/* 触摸目标：sm 88rpx=44dp（iOS 下限）、md/lg 96rpx=48dp（Android 下限）。
+   原 sm 仅 64rpx(32dp)、md 82rpx(41dp)，均低于规范。 */
+.qt-button-size-sm { height: 88rpx; padding: 0 26rpx; }
+.qt-button-size-md { height: 96rpx; padding: 0 30rpx; }
+.qt-button-size-lg { height: 96rpx; padding: 0 36rpx; }
+.qt-button-label { font-size: 26rpx; font-weight: 600; }
+.qt-button-label-sm { font-size: 23rpx; }
+.qt-button-icon { margin-right: 10rpx; flex-shrink: 0; }
+.qt-button-disabled { opacity: 0.45; }
+</style>

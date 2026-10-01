@@ -1,0 +1,169 @@
+/**
+ * APP 原生能力（UTS）
+ * - openInBrowser: 跳转系统浏览器
+ * - downloadApk: 直链下载（uni.downloadFile，带进度）
+ * - installApk: 安装 APK（Android，经 FileProvider）
+ *
+ * 说明：Vapor 模式下本文件属于 JS 逻辑层，没有 UTSAndroid / android 全局对象，
+ * Android 原生能力（打开浏览器/退出/安装 APK）统一收敛在 uni_modules/qt-app-native 插件
+ * （编译进原生层），此处通过平台分发导入调用；H5 保留 window 实现，其余降级为复制+提示。
+ */
+
+import { openExternalUrl, exitAppNative, installApkNative, openNotificationSettings as openNotificationSettingsNative, applyLegacyInsets as applyLegacyInsetsNative } from "@/uni_modules/qt-app-native";
+import { ensureNotificationPermission as ensureNotificationPermissionNative } from "@/uni_modules/qt-audio-player";
+
+export type DownloadProgress = (received: number, total: number, percent: number) => void;
+
+/** 退出应用（Android 关闭所有 Activity；H5 尝试关闭窗口） */
+export function exitApp(): void {
+  // #ifdef APP-ANDROID
+  if (exitAppNative()) return;
+  // #endif
+  // #ifdef H5
+  try {
+    const w = window as any;
+    if (w.close != null) {
+      w.close();
+      return;
+    }
+  } catch (e) {}
+  // #endif
+  uni.showToast({ title: "已退出", icon: "none" });
+}
+
+/** 跳转系统浏览器打开链接 */
+export function openInBrowser(url: string): void {
+  if (url.length == 0) {
+    uni.showToast({ title: "下载地址为空", icon: "none" });
+    return;
+  }
+  // #ifdef APP-ANDROID
+  if (openExternalUrl(url)) return;
+  // #endif
+  // #ifdef H5
+  try {
+    const w = window as any;
+    if (w.open != null) {
+      w.open(url, "_blank");
+      return;
+    }
+  } catch (e) {}
+  // #endif
+  // 降级：复制链接 + 提示
+  uni.setClipboardData({
+    data: url,
+    success: () => {
+      uni.showToast({ title: "已复制下载链接，请到浏览器打开", icon: "none" });
+    },
+  });
+}
+
+/** 直链下载 APK 到本地（返回临时文件路径） */
+export function downloadApk(url: string, onProgress: DownloadProgress): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const task = uni.downloadFile({
+      url,
+      success: (res) => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          resolve(res.tempFilePath);
+        } else {
+          reject(new Error("下载失败 HTTP " + res.statusCode));
+        }
+      },
+      fail: (error) => {
+        console.log("[AppNative] 下载失败", error);
+        reject(new Error("下载失败"));
+      },
+    });
+    if (task != null && task.onProgressUpdate != null) {
+      task.onProgressUpdate((p) => {
+        const total = p.totalBytesExpectedToWrite > 0 ? p.totalBytesExpectedToWrite : 0;
+        const received = p.totalBytesWritten > 0 ? p.totalBytesWritten : 0;
+        const percent = total > 0 ? Math.floor((received / total) * 100) : 0;
+        onProgress(received, total, percent);
+      });
+    }
+  });
+}
+
+/**
+ * 安装 APK（Android 经 FileProvider，兼容 Android 7+）
+ * @returns 是否成功拉起系统安装界面；false 表示只能由用户自己去文件管理里点安装
+ */
+export function installApk(filePath: string): boolean {
+  if (filePath.length == 0) {
+    uni.showToast({ title: "安装包不存在", icon: "none" });
+    return false;
+  }
+  // #ifdef APP-ANDROID
+  if (installApkNative(filePath)) return true;
+  // #endif
+  uni.showToast({ title: "安装包已保存，请在文件管理中安装", icon: "none" });
+  return false;
+}
+
+/**
+ * 检查/请求「通知栏」运行时权限（Android 13+ 的 POST_NOTIFICATIONS）。
+ * @returns 是否已授权：
+ *  - Android 13+ 未授权时自动弹出系统授权框，await 其结果；
+ *  - Android 12-（通知权限默认可使用）与 H5 视为已授权。
+ * 经 uni_modules 原生插件实现，此处只做 Promise 包装与平台降级。
+ */
+export function ensureNotificationPermission(): Promise<boolean> {
+  // #ifdef APP-ANDROID
+  return new Promise((resolve) => {
+    try {
+      ensureNotificationPermissionNative((granted: boolean) => {
+        resolve(granted);
+      });
+    } catch (e) {
+      console.log("[AppNative] ensureNotificationPermission error", e);
+      resolve(false);
+    }
+  });
+  // #endif
+  // #ifndef APP-ANDROID
+  return Promise.resolve(true);
+  // #endif
+}
+
+/**
+ * 打开本应用的系统通知设置页，供用户手动开启通知权限。
+ * Android：API 26+ 直达通知页，否则降级到应用详情页。
+ * iOS / H5：不支持，返回 false，由调用方降级为提示。
+ * @returns 是否成功拉起设置页
+ */
+export function openNotificationSettings(): boolean {
+  // #ifdef APP-ANDROID
+  try {
+    return openNotificationSettingsNative();
+  } catch (e) {
+    console.log("[AppNative] openNotificationSettings error", e);
+    return false;
+  }
+  // #endif
+  // #ifndef APP-ANDROID
+  return false;
+  // #endif
+}
+
+/**
+ * 强制窗口回归传统布局模式（decorFitsSystemWindows = true），绕开
+ * 三星 One UI 手势导航下 edge-to-edge 窗口的首屏挂载竞态（S24 Ultra 全屏
+ * 白屏根因，见 services/boot-guard.ts）。须在 App 启动最早点调用；
+ * 非 Android 平台恒为 false。
+ * @returns 是否应用成功（失败不影响启动，仅记录日志）
+ */
+export function applyLegacyInsets(): boolean {
+  // #ifdef APP-ANDROID
+  try {
+    return applyLegacyInsetsNative();
+  } catch (e) {
+    console.log("[AppNative] applyLegacyInsets error", e);
+    return false;
+  }
+  // #endif
+  // #ifndef APP-ANDROID
+  return false;
+  // #endif
+}

@@ -1,0 +1,609 @@
+import type { Song } from "@/types/music";
+// #ifdef APP-ANDROID
+// 自研原生通知栏播放器（前台服务 + MediaSession + 媒体通知），替代 uni.getBackgroundAudioManager()
+// 一律走模块级函数、不缓存 UTS 类实例：实例在 JS 侧是按数字 id 查运行时注册表的代理，
+// Activity 销毁重建（进程与 JS 上下文存活）后注册项可能被注销，而 JS 缓存仍持旧 id，
+// 再调用会抛 IllegalStateException: UTS instance N is not registered，且该异常沿 JNI
+// 穿回 Java Handler，JS 的 try/catch 接不住、无法自愈。模块函数无接收者实例，免疫此类失效。
+import {
+  audioPlay,
+  audioResume,
+  audioPause,
+  audioStop,
+  audioSeek,
+  audioIsIntendingToPlay,
+  audioSetSrc,
+  audioSetTitle,
+  audioSetSinger,
+  audioSetAlbum,
+  audioSetCover,
+  audioGetCurrentTime,
+  audioSetCacheLimit,
+  audioSetConcurrentMode,
+  audioSetSpeed,
+  audioClearCache,
+  audioSetEqualizerBands,
+  audioSetEqualizerEnabled,
+  audioPostNotice,
+  audioOnPlay,
+  audioOnPause,
+  audioOnStop,
+  audioOnEnded,
+  audioOnTimeUpdate,
+  audioOnError,
+  audioOnPrev,
+  audioOnNext,
+  audioSetPlaylist,
+  audioPlayTimelineIndex,
+  audioSetRepeatMode,
+  audioCurrentMediaId,
+  audioSyncTimeline,
+  audioOnResolveRequest,
+  audioOnTrackChanged,
+  audioResolveDone,
+  audioResolveFail,
+} from "@/uni_modules/qt-audio-player";
+// #endif
+// #ifdef APP-ANDROID
+import type { AudioPlaylistItem, AudioResolveRequestCallback, AudioTrackChangedCallback } from "@/uni_modules/qt-audio-player";
+// #endif
+
+type TimeListener = (time: number, duration: number) => void;
+type EndListener = () => void;
+type ErrorListener = () => void;
+type PlayStateListener = (playing: boolean) => void;
+
+const RATE_KEY = "qt-playback-rate";
+const CACHE_LIMIT_KEY = "qt-audio-cache-limit";
+const CACHE_LIMIT_DEFAULT_MB = 1024;
+const CACHE_LIMIT_MAX_MB = 4096;
+const CONCURRENT_KEY = "qt-concurrent-play-mode";
+const CONCURRENT_DEFAULT = 0;
+/** EQ 设置持久化 key：开关 + 5 段增益（dB，逗号分隔串） */
+const EQ_ENABLED_KEY = "qt-eq-enabled";
+const EQ_BANDS_KEY = "qt-eq-bands";
+
+/**
+ * 轻听音乐播放器封装。
+ * - Android：使用自研原生播放器 qt-audio-player（前台服务保活 + 原生媒体通知栏控制）。
+ * - 其他平台（H5 等）：使用 uni.createInnerAudioContext 降级实现（不影响编译）。
+ * 对外保持与原来一致的 AudioPlayer 接口，store/页面调用无需改动。
+ */
+export class AudioPlayer {
+  private manager: InnerAudioContext | null = null;
+  private onTime: TimeListener | null = null;
+  private onEnd: EndListener | null = null;
+  private onError: ErrorListener | null = null;
+  private onState: PlayStateListener | null = null;
+  private nextListener: (() => void) | null = null;
+  /** 解析桥回调（持有以便 ensureNativeBound 每次重注册，防 UTS 回调断链） */
+  private resolveCb: AudioResolveRequestCallback | null = null;
+  private trackCb: AudioTrackChangedCallback | null = null;
+  private prevListener: (() => void) | null = null;
+  private tickTimer: number | null = null;
+  private loadedUrl: string | null = null;
+  rate = 1.0;
+  /** EQ 当前开关与 5 段增益（dB，-12~12），启动时从持久化恢复 */
+  eqEnabled = false;
+  eqBands: number[] = [0, 0, 0, 0, 0];
+
+  // #ifdef APP-ANDROID
+  /** 原生回调是否已绑定（模块级回调全局，绑定一次即可；重复绑定覆盖也无害） */
+  private nativeBound: boolean = false;
+  // #endif
+
+  restore(): void {
+    try {
+      const raw = uni.getStorageSync(RATE_KEY) as string;
+      // 注意：未设置过倍速时也要继续往下走，否则缓存上限/同时播放模式不会下发给原生层
+      if (raw.length > 0) {
+        const value = parseFloat(raw);
+        if (value > 0 && value <= 3) this.rate = value;
+      }
+    } catch (_) {}
+    // 启动时把持久化的音频缓存上限与「同时播放」模式下发给原生播放器
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    audioSetCacheLimit(this.getCacheLimitMb());
+    audioSetConcurrentMode(this.getConcurrentMode());
+    // 倍速也一起下发：原生播放器首次创建时套用（设置页可能从未打开过）
+    audioSetSpeed(this.rate);
+    // EQ 配置一并下发：原生挂载是惰性的，播放器首个条目 READY 时生效
+    this.restoreEqSettings();
+    // #endif
+  }
+
+  /**
+   * 同时播放模式：0 不允许（独占音频焦点，默认）/ 1 部分场景（可让路时压低音量继续）
+   * / 2 全部场景（与其他应用完全同时播放，任何焦点丢失都不打断）。
+   */
+  getConcurrentMode(): number {
+    try {
+      const raw = uni.getStorageSync(CONCURRENT_KEY) as string;
+      const value = parseInt(raw);
+      if (!(value >= 0) || value > 2) return CONCURRENT_DEFAULT;
+      return value;
+    } catch (_) {
+      return CONCURRENT_DEFAULT;
+    }
+  }
+
+  /** 设置同时播放模式（0/1/2），持久化并即时下发原生层 */
+  setConcurrentMode(mode: number): void {
+    let value = Math.round(mode);
+    if (!(value >= 0) || value > 2) value = CONCURRENT_DEFAULT;
+    try {
+      uni.setStorageSync(CONCURRENT_KEY, value.toString());
+    } catch (_) {}
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    // 归一成整数再下发：Math.round 在 UTS 里可能返回 Long/Double，
+    // 避免跨模块调用时被当成 2.0 之类的值处理
+    audioSetConcurrentMode(parseInt(value.toString()));
+    // #endif
+  }
+
+  /** 当前音频缓存上限（MB） */
+  getCacheLimitMb(): number {
+    try {
+      const raw = uni.getStorageSync(CACHE_LIMIT_KEY) as string;
+      const value = parseInt(raw);
+      if (!(value > 0)) return CACHE_LIMIT_DEFAULT_MB;
+      if (value > CACHE_LIMIT_MAX_MB) return CACHE_LIMIT_MAX_MB;
+      return value;
+    } catch (_) {
+      return CACHE_LIMIT_DEFAULT_MB;
+    }
+  }
+
+  /** 修改音频缓存上限（MB，最大 4096），持久化并即时下发原生层 */
+  setCacheLimitMb(mb: number): void {
+    let value = Math.round(mb);
+    if (!(value > 0)) value = CACHE_LIMIT_DEFAULT_MB;
+    if (value > CACHE_LIMIT_MAX_MB) value = CACHE_LIMIT_MAX_MB;
+    try {
+      uni.setStorageSync(CACHE_LIMIT_KEY, value.toString());
+    } catch (_) {}
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    audioSetCacheLimit(value);
+    // #endif
+  }
+
+  /** 手动清空音频磁盘缓存（正在播放会先停止）。仅 Android 支持磁盘缓存；其他平台直接返回 false */
+  clearAudioCache(): boolean {
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    return audioClearCache();
+    // #endif
+    // #ifndef APP-ANDROID
+    return false;
+    // #endif
+  }
+
+  /**
+   * 把 JS 侧监听器绑到原生模块的模块级回调（Android）。
+   * 每次调用都幂等重注册一遍：曾经只在首次注册，一旦某次注册中断，
+   * cbNext/cbPrev 永久缺失，通知栏下一首/上一首就静默失灵且无法自愈（UTS 日志
+   * 有「通知栏/媒体键 → 下一首」但 JS 全无响应就是这个形态）。重注册只是覆盖
+   * 等价闭包，代价可忽略；闭包引用 this 的监听器字段，bind() 换监听器不需要重绑。
+   * 桌面歌词窗接口由 desktop-lyric.uts 直接 import 模块函数调用，不再经由本类转发。
+   */
+  // #ifdef APP-ANDROID
+  private ensureNativeBound(): void {
+    if (!this.nativeBound) {
+      this.nativeBound = true;
+      console.log("[QT Music Audio] 首次绑定原生回调（play/pause/stop/ended/time/error/next/prev）");
+    }
+    audioOnPlay(() => {
+      if (this.onState != null) this.onState(true);
+    });
+    audioOnPause(() => {
+      if (this.onState != null) this.onState(false);
+    });
+    audioOnStop(() => {
+      if (this.onState != null) this.onState(false);
+    });
+    audioOnEnded(() => {
+      if (this.onEnd != null) this.onEnd();
+    });
+    audioOnTimeUpdate((time: number, duration: number) => {
+      if (this.onTime != null) this.onTime(time, duration);
+    });
+    audioOnError((message: string) => {
+      console.log("[QT Music Audio Error]", message);
+      if (this.onError != null) this.onError();
+    });
+    audioOnNext(() => {
+      console.log("[QT Music Audio] onNext from notification");
+      if (this.nextListener != null) this.nextListener();
+      else console.log("[QT Music Audio] onNext 已到达但 nextListener 未绑定");
+    });
+    audioOnPrev(() => {
+      console.log("[QT Music Audio] onPrev from notification");
+      if (this.prevListener != null) this.prevListener();
+      else console.log("[QT Music Audio] onPrev 已到达但 prevListener 未绑定");
+    });
+    // 解析桥/切歌对账回调与其它回调同样「每次调用重注册」：一次性注册曾因
+    // UTS 回调断链丢失（cbNext 事故），症状是解析请求无人应答、loader 等 15s
+    // 超时、播放静默卡死
+    audioOnResolveRequest(this.resolveCb);
+    audioOnTrackChanged(this.trackCb);
+  }
+  // #endif
+
+  private getManager(): InnerAudioContext {
+    if (this.manager != null) return this.manager!!;
+    const audio = uni.createInnerAudioContext();
+    this.manager = audio;
+    audio.onTimeUpdate(() => {
+      if (this.onTime != null) this.onTime(audio.currentTime, audio.duration);
+    });
+    audio.onEnded(() => {
+      if (this.onEnd != null) this.onEnd();
+    });
+    audio.onError((error) => {
+      console.log("[QT Music Audio Error]", JSON.stringify(error));
+      if (this.onError != null) this.onError();
+    });
+    audio.onPlay(() => {
+      if (this.onState != null) this.onState(true);
+    });
+    audio.onPause(() => {
+      if (this.onState != null) this.onState(false);
+    });
+    audio.onStop(() => {
+      if (this.onState != null) this.onState(false);
+    });
+    return audio;
+  }
+
+  private startTick(): void {
+    if (this.tickTimer != null) return;
+    this.tickTimer = setInterval(() => {
+      const audio = this.manager;
+      if (audio == null) return;
+      if (audio.paused) return;
+      if (this.onTime != null) {
+        this.onTime(audio.currentTime, audio.duration);
+      }
+    }, 1000) as number;
+  }
+
+  bind(
+    timeListener: TimeListener,
+    endListener: EndListener,
+    errorListener: ErrorListener,
+    stateListener: PlayStateListener | null = null,
+    nextListener: (() => void) | null = null,
+    prevListener: (() => void) | null = null
+  ): void {
+    this.onTime = timeListener;
+    this.onEnd = endListener;
+    this.onError = errorListener;
+    this.onState = stateListener;
+    this.nextListener = nextListener;
+    this.prevListener = prevListener;
+  }
+
+  currentTime(): number {
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    return audioGetCurrentTime();
+    // #endif
+    // #ifndef APP-ANDROID
+    return this.getManager().currentTime;
+    // #endif
+  }
+
+  /**
+   * 把歌曲地址规范化成可播放的 src（Android 原生播放器直接支持 http/https/file；此处统一处理相对路径）。
+   */
+  private toPlayableUrl(url: string): string {
+    if (url == null || url.length == 0) return url;
+    const lower = url.toLowerCase();
+    if (lower.indexOf("http://") == 0 || lower.indexOf("https://") == 0) return url;
+    if (lower.indexOf("file://") == 0 || lower.indexOf("content://") == 0) return url;
+    if (url.indexOf("/") == 0) return "file://" + url;
+    return "file:///" + url;
+  }
+
+  play(song: Song, startTime: number = 0): void {
+    if (song.url == null || song.url.length == 0) {
+      // 空地址绝不能静默返回：store 那边 playing 已经是 true、界面显示在播，
+      // 这里只弹个提示的话，播完的自动切歌就断死在这一步。交给错误回调走
+      // 「重取地址 → 有限次自动切歌 → 超限暂停提示」的既有流程。
+      uni.showToast({ title: "该歌曲暂无播放地址", icon: "none" });
+      if (this.onError != null) this.onError();
+      return;
+    }
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    try {
+      audioSetTitle(song.name);
+      audioSetSinger(song.singer != null ? song.singer : "");
+      audioSetAlbum(song.album != null ? song.album : "");
+      audioSetCover(song.picUrl != null ? song.picUrl : "");
+      audioSetSrc(this.toPlayableUrl(song.url));
+      this.loadedUrl = song.url;
+      audioPlay();
+    } catch (e) {
+      console.log("[QT Music Audio Play Error]", e != null ? e.toString() : "unknown");
+      uni.showToast({ title: "播放失败，请稍后重试", icon: "none" });
+    }
+    if (startTime > 0) this.seekWhenReady(startTime);
+    return;
+    // #endif
+    // #ifndef APP-ANDROID
+    const audio = this.getManager();
+    try {
+      audio.src = this.toPlayableUrl(song.url);
+      this.loadedUrl = song.url;
+      audio.play();
+    } catch (e) {
+      console.log("[QT Music Audio Play Error]", e != null ? e.toString() : "unknown");
+      uni.showToast({ title: "播放失败，请稍后重试", icon: "none" });
+    }
+    if (startTime > 0) this.seekWhenReady(startTime);
+    // #endif
+  }
+
+  private seekWhenReady(time: number): void {
+    if (time <= 0) return;
+    let attempts = 0;
+    const trySeek = () => {
+      // #ifdef APP-ANDROID
+      const current = audioGetCurrentTime();
+      if (current >= time - 0.5) return;
+      attempts++;
+      if (attempts > 12) return;
+      try {
+        audioSeek(time);
+      } catch (_) {}
+      setTimeout(trySeek, 500);
+      // #endif
+      // #ifndef APP-ANDROID
+      const audio = this.manager;
+      if (audio == null) return;
+      const current = audio.currentTime;
+      if (current >= time - 0.5) return;
+      attempts++;
+      if (attempts > 12) return;
+      try {
+        audio.seek(time);
+      } catch (_) {}
+      setTimeout(trySeek, 500);
+      // #endif
+    };
+    setTimeout(trySeek, 800);
+  }
+
+  /** EQ 开关：持久化 + 即时下发原生（参数保留，关闭只 setEnabled(false)） */
+  setEqualizerEnabled(on: boolean): void {
+    this.eqEnabled = on;
+    try {
+      uni.setStorageSync(EQ_ENABLED_KEY, on ? "1" : "0");
+    } catch (_) {}
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    audioSetEqualizerEnabled(on);
+    // #endif
+  }
+
+  /** 设置 5 段增益（dB，-12~12）：持久化 + 即时下发原生 */
+  setEqualizerBands(levels: number[]): void {
+    const next: number[] = [0, 0, 0, 0, 0];
+    for (let i = 0; i < 5; i++) {
+      let v = i < levels.length ? levels[i] : 0;
+      if (!(v >= -12)) v = -12;
+      else if (v > 12) v = 12;
+      next[i] = Math.round(v);
+    }
+    this.eqBands = next;
+    let raw = "";
+    for (let i = 0; i < 5; i++) {
+      raw += (i > 0 ? "," : "") + next[i].toString();
+    }
+    try {
+      uni.setStorageSync(EQ_BANDS_KEY, raw);
+    } catch (_) {}
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    audioSetEqualizerBands(next);
+    // #endif
+  }
+
+  /** 启动时恢复 EQ 持久化配置并下发（原生侧惰性挂载） */
+  private restoreEqSettings(): void {
+    try {
+      const raw = uni.getStorageSync(EQ_ENABLED_KEY) as string;
+      this.eqEnabled = raw == "1";
+    } catch (_) {}
+    try {
+      const raw = uni.getStorageSync(EQ_BANDS_KEY) as string;
+      if (raw.length > 0) {
+        const parts = raw.split(",");
+        const levels: number[] = [0, 0, 0, 0, 0];
+        for (let i = 0; i < 5 && i < parts.length; i++) {
+          const v = parseFloat(parts[i]);
+          if (!(v >= -12)) levels[i] = 0;
+          else if (v > 12) levels[i] = 12;
+          else levels[i] = v;
+        }
+        this.eqBands = levels;
+      }
+    } catch (_) {}
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    audioSetEqualizerBands(this.eqBands);
+    audioSetEqualizerEnabled(this.eqEnabled);
+    // #endif
+  }
+
+  changeRate(value: number): void {
+    let rate = value;
+    if (!(rate > 0)) rate = 1.0;
+    this.rate = rate;
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    audioSetSpeed(rate);
+    // #endif
+    try {
+      uni.setStorageSync(RATE_KEY, rate.toString());
+    } catch (_) {}
+  }
+
+  pause(): void {
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    audioPause();
+    // #endif
+    // #ifndef APP-ANDROID
+    this.getManager().pause();
+    // #endif
+  }
+  resume(): void {
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    audioResume();
+    // #endif
+    // #ifndef APP-ANDROID
+    this.getManager().play();
+    // #endif
+  }
+  isLoaded(): boolean {
+    return this.loadedUrl != null && this.loadedUrl.length > 0;
+  }
+  /** 底层当前加载的地址（未加载为 null）：续播前用来核对是不是当前这首歌 */
+  loadedSongUrl(): string | null {
+    return this.loadedUrl;
+  }
+  /**
+   * 底层是否「意图播放」（playWhenReady）。真暂停为 false；缓冲中 isPlaying 同样为
+   * false 但意图仍是 true——store 的对账探针靠这个区分「真暂停」和「缓冲中」。
+   */
+  isNativeIntendingToPlay(): boolean {
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    return audioIsIntendingToPlay();
+    // #endif
+    // #ifndef APP-ANDROID
+    const audio = this.manager;
+    if (audio != null && audio.paused) return false;
+    return true;
+    // #endif
+  }
+  stop(): void {
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    audioStop();
+    this.loadedUrl = null;
+    // #endif
+    // #ifndef APP-ANDROID
+    this.getManager().stop();
+    this.loadedUrl = null;
+    // #endif
+  }
+  seek(time: number): void {
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    audioSeek(time);
+    // #endif
+    // #ifndef APP-ANDROID
+    this.getManager().seek(time);
+    // #endif
+  }
+  /**
+   * 通知栏提示（独立于媒体通知的普通通知）：播放异常需要后台可见的告知时用
+   * （自动切歌熔断发生在后台，toast 看不见）。非安卓端无通知栏，静默跳过。
+   */
+  postNotice(title: string, body: string): void {
+    // #ifdef APP-ANDROID
+    audioPostNotice(title, body);
+    // #endif
+  }
+
+  // ==================== 播放队列（media3 时间线）+ 懒解析取链 ====================
+  // 队列归 media3：store 推整条队列（条目 uri 用 qt-resolve:// 占位），media3 真正加载
+  // 某条目那一刻回调 onResolveRequest 向 JS 要真实地址（复用 store 既有取链/跨源回退），
+  // 回 resolveDone/resolveFail 放行或报错。播完自动切歌、上一首/下一首媒体键、单曲/列表
+  // 循环全部由 media3 原生完成；切歌事实经 onTrackChanged 回 JS 对账。
+
+  /** 推送整条播放队列并定位到 startIndex；startPositionSec>0 从该秒起播（续播） */
+  setPlaylist(items: AudioPlaylistItem[], startIndex: number, autoPlay: boolean, startPositionSec: number = 0): void {
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    try {
+      audioSetPlaylist(items, startIndex, autoPlay, startPositionSec);
+    } catch (e) {
+      console.log("[QT Audio] setPlaylist 失败: " + (e != null ? e.toString() : "unknown"));
+    }
+    // #endif
+  }
+
+  /** 定位到时间线下标并播放（JS 的上一首/下一首/点选执行端） */
+  playTimelineIndex(index: number): void {
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    audioPlayTimelineIndex(index);
+    // #endif
+  }
+
+  /** 循环模式：0 不循环 / 1 单曲循环 / 2 列表循环 */
+  setRepeatMode(mode: number): void {
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    audioSetRepeatMode(mode);
+    // #endif
+  }
+
+  /** 当前条目 mediaId（空串 = 无）：对账探针用它核对「底层加载的是不是这首歌」 */
+  currentMediaId(): string {
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    return audioCurrentMediaId();
+    // #endif
+    // #ifndef APP-ANDROID
+    return "";
+    // #endif
+  }
+
+  /** 队列编辑后的无损同步（增/删/移差量对齐，不打断当前播放） */
+  syncTimeline(items: AudioPlaylistItem[], expectedCurrentMid: string): void {
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    audioSyncTimeline(items, expectedCurrentMid);
+    // #endif
+  }
+
+  /** 注册解析处理器：原生加载 qt-resolve 条目时向 JS 要真实地址（主线程回调） */
+  onResolveRequest(callback: AudioResolveRequestCallback): void {
+    // #ifdef APP-ANDROID
+    this.resolveCb = callback;
+    audioOnResolveRequest(callback);
+    // #endif
+  }
+
+  /** 回填解析结果（成功）：URL 会先过 facade 的地址规范化 */
+  resolveDone(mediaId: string, url: string): void {
+    // #ifdef APP-ANDROID
+    audioResolveDone(mediaId, this.toPlayableUrl(url));
+    // #endif
+  }
+
+  /** 回填解析结果（失败）：加载报错走 store 既有错误策略 */
+  resolveFail(mediaId: string): void {
+    // #ifdef APP-ANDROID
+    audioResolveFail(mediaId);
+    // #endif
+  }
+
+  /** 注册切歌事件（原生自动切歌/定位跳转都会触发），参数 = 新条目 mediaId */
+  onTrackChanged(callback: AudioTrackChangedCallback): void {
+    // #ifdef APP-ANDROID
+    this.trackCb = callback;
+    audioOnTrackChanged(callback);
+    // #endif
+  }
+}
+export const audioPlayer = new AudioPlayer();

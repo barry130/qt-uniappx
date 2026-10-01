@@ -1,0 +1,239 @@
+<template>
+  <qt-page-frame :max-width="1280">
+    <view class="page" :class="layout.isWide ? 'page-wide' : ''">
+      <view class="body" :class="layout.isWide ? 'body-wide' : ''">
+        <view class="hero" :class="layout.isWide ? 'hero-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';box-shadow:0 12rpx 32rpx ' + themeStore.skin.shadow + ';'" @click="playAll">
+          <view class="hero-icon" :class="layout.isWide ? 'hero-icon-wide' : ''" :style="'background-color:rgba(255,255,255,0.26);'">
+            <QtIcon name="play" :size="layout.isWide ? 20 : 30" :color="themeStore.skin.onAccent" />
+          </view>
+          <view class="hero-copy" :class="layout.isWide ? 'hero-copy-wide' : ''">
+            <text class="hero-title" :class="layout.isWide ? 'hero-title-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">播放全部</text>
+            <text class="hero-sub" :class="layout.isWide ? 'hero-sub-wide' : ''" :style="'color:' + heroSubColor + ';'">每日精选 · 共 {{ songs.length }} 首</text>
+          </view>
+          <view class="hero-end" :class="layout.isWide ? 'hero-end-wide' : ''" :style="'background-color:rgba(255,255,255,0.18);'" @click.stop="playShuffle">
+            <QtIcon name="shuffle" :size="layout.isWide ? 16 : 24" :color="themeStore.skin.onAccent" />
+          </view>
+        </view>
+
+        <scroll-view
+          class="scroll" :class="[layout.isWide ? 'scroll-wide' : '']"
+          direction="vertical"
+          :show-scrollbar="false"
+          :scroll-top="scrollTop"
+          @scroll="onListScroll"
+        >
+          <view class="list-shell" :class="layout.isWide ? 'list-shell-wide' : ''">
+            <view v-if="loading && songs.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
+              <qt-loading :visible="true" />
+            </view>
+            <view class="song-grid">
+              <view
+                v-for="song in songs"
+                :key="song.id + song.platform"
+                class="song-card" :class="layout.isWide ? 'song-card-wide' : ''"
+                :style="'width:' + songCardWidth + 'px;background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'"
+                @click="play(song)"
+              >
+                <image class="song-cover" :class="layout.isWide ? 'song-cover-wide' : ''" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
+                <view class="song-info" :class="layout.isWide ? 'song-info-wide' : ''">
+                  <text class="song-name" :class="layout.isWide ? 'song-name-wide' : ''" :style="'color:' + themeStore.skin.text + ';'" :max-lines="1">{{ song.name }}</text>
+                  <text class="song-meta" :class="layout.isWide ? 'song-meta-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';'" :max-lines="1">{{ song.singer }}{{ song.album.length > 0 ? " · " + song.album : "" }}</text>
+                </view>
+                <view class="song-play" :class="layout.isWide ? 'song-play-wide' : ''" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click.stop="play(song)">
+                  <QtIcon name="play" :size="24" :color="themeStore.skin.accent" />
+                </view>
+                <view class="song-more" :class="layout.isWide ? 'song-more-wide' : ''" @click.stop="openSheet(song)">
+                  <QtIcon name="more" :size="26" :color="themeStore.skin.textMuted" />
+                </view>
+              </view>
+            </view>
+            <view v-if="!loading && songs.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
+              <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="'color:' + themeStore.skin.textSubtle + ';'">今日推荐暂时为空</text>
+            </view>
+          </view>
+        </scroll-view>
+      </view>
+
+      <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+      <QtActionSheet v-model:visible="sheetVisible" :title="sheetTitle()" :actions="sheetActions" @select="onSheetSelect" />
+      <MiniPlayer />
+    </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { ref, computed, onMounted } from "vue";
+import { onShow } from "@dcloudio/uni-app";
+import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
+import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import { useSongSheet } from "@/composables/use-song-sheet";
+import { musicApi } from "@/services/music-api";
+import { usePlayerStore } from "@/stores/player";
+import { useSourceStore } from "@/stores/source";
+import { useThemeStore, qtOnAccentRgba } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import type { Song } from "@/types/music";
+import type { Source } from "@/services/music-api";
+
+const player = usePlayerStore();
+const sourceStore = useSourceStore();
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+
+const scrollTop = ref(0);
+const showBackToTop = ref(false);
+function onListScroll(e: any) {
+  const st = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
+  showBackToTop.value = st > 600;
+}
+function backToTop() {
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  showBackToTop.value = false;
+}
+
+const { sheetVisible, sheetActions, openSheet, onSheetSelect, sheetTitle } = useSongSheet();
+const songs = ref<Song[]>([]);
+const loading = ref(false);
+let loadedSource = "";
+
+// 强调色上的次级文字：onAccent 按透明度弱化一档（深色 onAccent / 白色 onAccent 都成立）
+const heroSubColor = computed((): string => qtOnAccentRgba(themeStore.skin, 0.78));
+
+/**
+ * 歌曲卡宽：竖屏固定单列满宽（横向信息更舒展）；
+ * 宽屏按内容区实宽推列数（目标卡宽约 330px，2–4 列），列宽一并扣除每卡 margin-right（含末卡）防换行。
+ */
+const dailyInner = computed((): number => {
+  if (layout.isWide) {
+    const frame = layout.windowWidth < 1280 ? layout.windowWidth : 1280;
+    return frame - 64; // body-wide 16×2 + list-shell-wide 16×2
+  }
+  const win = layout.windowWidth;
+  return win - win * (48 / 750); // list-shell 24rpx×2
+});
+const dailyCols = computed((): number => {
+  if (!layout.isWide) return 1;
+  const cols = Math.round(dailyInner.value / 330);
+  return Math.min(4, Math.max(2, cols));
+});
+const songCardWidth = computed((): number => {
+  const gap = layout.isWide ? 12 : layout.windowWidth * (14 / 750);
+  return Math.max(150, Math.floor((dailyInner.value - gap * dailyCols.value) / dailyCols.value));
+});
+
+// 加载序号：快速切音源时旧响应晚到不得覆盖新音源数据（写回前比对）
+let loadSeq = 0;
+
+async function load(): Promise<void> {
+  const seq = ++loadSeq;
+  loading.value = true;
+  try {
+    // 酷我一次拉全部分页（latest 内部按 bang/musicList 每页 30 翻页，上限 20 页 = 600 首）；
+    // 其他音源的推荐接口本身不翻页，取一批即可。列表因此不再有“加载更多”。
+    const limit = sourceStore.current == "kw" ? 600 : 40;
+    const list = await musicApi.latest(sourceStore.current as Source, limit, 0);
+    if (seq !== loadSeq) return;
+    songs.value = list;
+  } catch (error) {
+    console.error("[QT Music Daily]", sourceStore.current, error);
+    if (seq !== loadSeq) return;
+    uni.showToast({ title: "每日推荐加载失败", icon: "none" });
+  } finally {
+    if (seq === loadSeq) loading.value = false;
+  }
+}
+
+function ensureLoad(): void {
+  if (loadedSource == sourceStore.current) return;
+  loadedSource = sourceStore.current;
+  songs.value = [];
+  load();
+}
+
+async function play(song: Song): Promise<void> {
+  try {
+    song.url = await musicApi.playUrl(song, player.quality);
+    player.playSingle(song);
+  } catch (_) {
+    uni.showToast({ title: "该歌曲暂时无法播放", icon: "none" });
+  }
+}
+
+async function playAll(): Promise<void> {
+  if (songs.value.length == 0) return;
+  const first = songs.value[0];
+  try {
+    first.url = await musicApi.playUrl(first, player.quality);
+    await player.play(first, songs.value);
+  } catch (_) {
+    uni.showToast({ title: "暂时无法播放全部", icon: "none" });
+  }
+}
+
+function playShuffle(): void {
+  if (songs.value.length == 0) return;
+  const idx = Math.floor(Math.random() * songs.value.length);
+  const pick = songs.value[idx];
+  if (pick != null) play(pick);
+}
+
+onMounted(() => {
+  sourceStore.restore();
+  ensureLoad();
+});
+onShow(() => {
+  sourceStore.restore();
+  ensureLoad();
+});
+</script>
+
+<style>
+.page { flex: 1; min-height: 0; }
+.body { flex: 1; min-height: 0; }
+/* 页头：跟随皮肤强调色的可点条（换肤即变，不再写死深色），
+   与首页顶部 hero 的「强调色底 + 白字」形态保持一致。
+   左侧播放圆 + 右侧随机播放圆都用半透明白，保证任何强调色上都成立。 */
+.hero { flex-direction: row; align-items: center; margin: 20rpx 24rpx 0; padding: 0 28rpx; height: 132rpx; border-radius: 26rpx; }
+.hero-icon { width: 76rpx; height: 76rpx; border-radius: 38rpx; background-color: rgba(255,255,255,0.26); align-items: center; justify-content: center; }
+.hero-copy { flex: 1; min-width: 0; margin-left: 22rpx; }
+.hero-title { font-size: 30rpx; font-weight: 700; }
+.hero-sub { margin-top: 6rpx; font-size: 22rpx; }
+.hero-end { width: 64rpx; height: 64rpx; border-radius: 32rpx; background-color: rgba(255,255,255,0.18); align-items: center; justify-content: center; }
+.scroll { flex: 1; min-height: 0; margin-top: 20rpx; }
+.list-shell { padding: 0 24rpx 40rpx; }
+.song-grid { flex-direction: row; flex-wrap: wrap; }
+.song-card { height: 124rpx; margin-bottom: 14rpx; margin-right: 14rpx; padding: 0 18rpx; flex-direction: row; align-items: center; border-width: 1px; border-radius: 20rpx; }
+.song-cover { width: 86rpx; height: 86rpx; border-radius: 14rpx; }
+.song-info { flex: 1; min-width: 0; margin-left: 18rpx; }
+.song-name { font-size: 27rpx; font-weight: 600; text-overflow: ellipsis; }
+.song-meta { margin-top: 7rpx; font-size: 22rpx; text-overflow: ellipsis; }
+/* 行内播放按钮：与首页新歌速递同款——accentSoft 圆底 + accent 图标，尺寸一致（64rpx 圆）。
+   卡片本身可点播放，圆钮只是视觉锚点；更多按钮不再做白圆，用裸次级图标避免一排三个圆。 */
+.song-play { width: 64rpx; height: 64rpx; margin-left: 12rpx; align-items: center; justify-content: center; border-radius: 32rpx; }
+.song-more { width: 56rpx; height: 64rpx; margin-left: 8rpx; align-items: center; justify-content: center; }
+.empty { height: 260rpx; align-items: center; justify-content: center; }
+.empty-text { font-size: 26rpx; }
+
+.page-wide { padding-bottom: 0; }
+.body-wide { padding: 12px 16px 0; }
+.hero-wide { margin: 12px 16px 0; padding: 0 20px; height: 76px; border-radius: 14px; }
+.hero-icon-wide { width: 48px; height: 48px; border-radius: 24px; }
+.hero-copy-wide { margin-left: 14px; }
+.hero-end-wide { width: 38px; height: 38px; border-radius: 19px; }
+.scroll-wide { margin-top: 10px; }
+.list-shell-wide { padding: 0 16px 24px; }
+.hero-title-wide { font-size: 16px; }
+.hero-sub-wide { margin-top: 3px; font-size: 12px; }
+.song-card-wide { height: 62px; margin-bottom: 8px; margin-right: 12px; padding: 0 10px; border-radius: 12px; }
+.song-cover-wide { width: 40px; height: 40px; border-radius: 8px; }
+.song-info-wide { margin-left: 10px; }
+.song-name-wide { font-size: 14px; }
+.song-meta-wide { margin-top: 3px; font-size: 11px; }
+.song-play-wide { width: 32px; height: 32px; border-radius: 16px; }
+.song-more-wide { width: 30px; height: 32px; }
+.empty-wide { height: 180px; }
+.empty-text-wide { font-size: 15px; }
+</style>

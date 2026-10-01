@@ -1,0 +1,369 @@
+<template>
+  <qt-page-frame :max-width="640">
+  <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']">
+    <view class="head" :class="layout.isWide ? 'head-wide' : ''">
+      <image class="logo-img" :class="layout.isWide ? 'logo-img-wide' : ''" src="/static/icon/xxxhdpi.png" mode="aspectFill" />
+      <text class="head-title" :class="layout.isWide ? 'head-title-wide' : ''">重置密码</text>
+      <text class="head-sub" :class="layout.isWide ? 'head-sub-wide' : ''">通过邮箱验证码找回您的账号密码</text>
+    </view>
+
+    <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
+      <!-- 邮箱 -->
+      <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+        <input
+          :value="email"
+          @input="onEmailInput"
+          class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
+          placeholder="请输入注册邮箱"
+          :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
+          :maxlength="50"
+        />
+      </view>
+
+      <!-- 验证码 + 获取验证码按钮 -->
+      <view class="field-row code-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+        <input
+          :value="code"
+          @input="onCodeInput"
+          class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
+          placeholder="邮箱验证码"
+          :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
+          :maxlength="6"
+        />
+        <view class="code-btn" :class="[layout.isWide ? 'code-btn-wide' : '', sending || countdown > 0 ? 'code-btn-disabled' : '']" :style="sending || countdown > 0 ? '' : 'background-color:' + themeStore.skin.accentSoft + ';'" @click="sendCode">
+          <text class="code-btn-text" :class="layout.isWide ? 'code-btn-text-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">{{ countdown > 0 ? countdown + 's' : '获取验证码' }}</text>
+        </view>
+      </view>
+
+      <!-- 新密码 -->
+      <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+        <input
+          :value="password"
+          @input="onPasswordInput"
+          class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
+          :type="pwVisible ? 'text' : 'password'"
+          placeholder="设置新密码"
+          :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
+          :maxlength="18"
+        />
+        <view class="eye" :class="layout.isWide ? 'eye-wide' : ''" @click="pwVisible = !pwVisible">
+          <QtIcon :name="pwVisible ? 'eye' : 'eye-off'" :size="layout.isWide ? 22 : 40" color="#6b7385" />
+        </view>
+      </view>
+
+      <!-- 确认新密码 -->
+      <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+        <input
+          :value="confirmPw"
+          @input="onConfirmInput"
+          class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
+          :type="confirmVisible ? 'text' : 'password'"
+          placeholder="确认新密码"
+          :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
+          :maxlength="18"
+        />
+        <view class="eye" :class="layout.isWide ? 'eye-wide' : ''" @click="confirmVisible = !confirmVisible">
+          <QtIcon :name="confirmVisible ? 'eye' : 'eye-off'" :size="layout.isWide ? 22 : 40" color="#6b7385" />
+        </view>
+      </view>
+
+      <qt-button
+        class="action"
+        :class="layout.isWide ? 'action-wide' : ''"
+        label="确认重置"
+        size="lg"
+        :disabled="loading"
+        @click="submit"
+      />
+    </view>
+  </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { ref, computed, onBeforeUnmount } from "vue";
+import { accountApi } from "@/services/music-api";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+const email = ref("");
+const code = ref("");
+const password = ref("");
+const confirmPw = ref("");
+const pwVisible = ref(false);
+const confirmVisible = ref(false);
+const loading = ref(false);
+const sending = ref(false);
+const countdown = ref(0);
+let timer: number | null = null;
+// 重置成功后延迟返回的定时器：页面卸载时必须清掉，避免在已注销的实例上触发回调
+let navBackTimer: number | null = null;
+
+function onEmailInput(e: InputEvent): void {
+  const raw = String((e.detail as any).value ?? "");
+  email.value = raw.replace(/[^a-zA-Z0-9@.]/g, "");
+}
+function onCodeInput(e: InputEvent): void {
+  const raw = String((e.detail as any).value ?? "");
+  code.value = raw.replace(/[^0-9]/g, "");
+}
+function onPasswordInput(e: InputEvent): void {
+  password.value = String((e.detail as any).value ?? "");
+}
+function onConfirmInput(e: InputEvent): void {
+  confirmPw.value = String((e.detail as any).value ?? "");
+}
+
+function isEmail(text: string): boolean {
+  return text.indexOf("@") > 0 && text.indexOf(".") > text.indexOf("@");
+}
+
+/** 发送邮箱验证码（后端 business 标识：changePasswordByEmail） */
+function sendCode(): void {
+  if (sending.value || countdown.value > 0) return;
+  const mail = email.value.trim();
+  if (mail.length == 0) {
+    uni.showToast({ title: "请输入邮箱", icon: "none" });
+    return;
+  }
+  if (!isEmail(mail)) {
+    uni.showToast({ title: "请输入正确的邮箱地址", icon: "none" });
+    return;
+  }
+  sending.value = true;
+  accountApi
+    .sendEmail(mail, "changePasswordByEmail")
+    .then(() => {
+      uni.showToast({ title: "验证码已发送", icon: "success" });
+      countdown.value = 60;
+      timer = setInterval(() => {
+        countdown.value--;
+        if (countdown.value <= 0 && timer != null) {
+          clearInterval(timer);
+          timer = null;
+        }
+      }, 1000) as unknown as number;
+    })
+    .catch((error) => {
+      uni.showToast({ title: (error as Error).message || "发送失败", icon: "none" });
+    })
+    .finally(() => {
+      sending.value = false;
+    });
+}
+
+async function submit(): Promise<void> {
+  const mail = email.value.trim();
+  const pw = password.value;
+  if (mail.length == 0) {
+    uni.showToast({ title: "请输入邮箱", icon: "none" });
+    return;
+  }
+  if (!isEmail(mail)) {
+    uni.showToast({ title: "请输入正确的邮箱地址", icon: "none" });
+    return;
+  }
+  if (code.value.length == 0) {
+    uni.showToast({ title: "请输入验证码", icon: "none" });
+    return;
+  }
+  if (pw.length == 0) {
+    uni.showToast({ title: "请输入新密码", icon: "none" });
+    return;
+  }
+  if (pw.length < 6 || pw.length > 18) {
+    uni.showToast({ title: "密码长度为 6-18 位", icon: "none" });
+    return;
+  }
+  if (confirmPw.value.length == 0) {
+    uni.showToast({ title: "请输入确认密码", icon: "none" });
+    return;
+  }
+  if (pw !== confirmPw.value) {
+    uni.showToast({ title: "两次输入的密码不一致", icon: "none" });
+    return;
+  }
+
+  loading.value = true;
+  try {
+    await accountApi.changePassword(mail, pw, code.value.trim());
+    uni.showToast({ title: "密码重置成功", icon: "success" });
+    navBackTimer = setTimeout(() => {
+      uni.navigateBack();
+    }, 600) as number;
+  } catch (error) {
+    uni.showToast({ title: (error as Error).message || "重置失败", icon: "none" });
+  } finally {
+    loading.value = false;
+  }
+}
+
+onBeforeUnmount(() => {
+  if (timer != null) {
+    clearInterval(timer);
+    timer = null;
+  }
+  if (navBackTimer != null) {
+    clearTimeout(navBackTimer);
+    navBackTimer = null;
+  }
+});
+</script>
+
+<style>
+.page {
+  flex: 1;
+  padding: 80rpx 50rpx 60rpx;
+}
+
+.head {
+  align-items: center;
+}
+.logo-img {
+  width: 120rpx;
+  height: 120rpx;
+  border-radius: 32rpx;
+}
+.head-title {
+  margin-top: 24rpx;
+  color: #191d26;
+  font-size: 34rpx;
+  font-weight: 700;
+}
+.head-sub {
+  margin-top: 12rpx;
+  color: #6b7385;
+  font-size: 24rpx;
+}
+.card {
+  margin-top: 56rpx;
+  padding: 44rpx 36rpx 40rpx;
+  background-color: rgba(255, 255, 255, 0.92);
+  border-radius: 32rpx;
+}
+.card-dark {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+.field-row {
+  flex-direction: row;
+  align-items: center;
+  height: 100rpx;
+  margin-top: 26rpx;
+  padding: 0 28rpx;
+  background-color: #f4f5fa;
+  border-width: 1px;
+  border-color: #eef0f5;
+  border-radius: 22rpx;
+}
+.field-row-dark {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+.field-input {
+  flex: 1;
+  height: 100rpx;
+  color: #191d26;
+  font-size: 28rpx;
+}
+.field-ph {
+  color: #6b7385;
+  font-size: 28rpx;
+}
+.code-row {
+  padding: 0;
+  padding-left: 28rpx;
+}
+.code-btn {
+  height: 100rpx;
+  padding: 0 28rpx;
+  justify-content: center;
+  align-items: center;
+  border-left-width: 1px;
+  border-left-color: #f5d2d2;
+  border-radius: 0 22rpx 22rpx 0;
+}
+.code-btn-disabled {
+  background-color: #f0f1f5;
+}
+.code-btn-text {
+  font-size: 25rpx;
+  font-weight: 600;
+}
+.eye {
+  width: 64rpx;
+  height: 100rpx;
+  justify-content: center;
+  align-items: center;
+}
+.action {
+  margin-top: 48rpx;
+}
+.action-text {
+  color: #ffffff;
+  font-size: 32rpx;
+  font-weight: 600;
+}
+
+/* Vapor 宽屏：px 覆盖 rpx，1600x900 下避免按窗口比例放大 2.7 倍 */
+.page-wide {
+  padding: 40px 24px 32px;
+  align-items: center;
+  justify-content: center;
+}
+.head-wide {
+  align-items: center;
+}
+.logo-img-wide {
+  width: 64px;
+  height: 64px;
+  border-radius: 18px;
+}
+.head-title-wide {
+  margin-top: 12px;
+  font-size: 20px;
+}
+.head-sub-wide {
+  margin-top: 6px;
+  font-size: 13px;
+}
+.card-wide {
+  margin-top: 20px;
+  padding: 26px 26px 24px;
+  border-radius: 18px;
+  width: 420px;
+}
+.field-row-wide {
+  height: 52px;
+  margin-top: 14px;
+  padding-left: 18px;
+  padding-right: 18px;
+  border-radius: 12px;
+}
+.field-input-wide {
+  height: 52px;
+  font-size: 16px;
+}
+.field-ph-wide {
+  font-size: 16px;
+}
+.code-btn-wide {
+  height: 52px;
+  padding-left: 16px;
+  padding-right: 16px;
+}
+.code-btn-text-wide {
+  font-size: 13px;
+}
+.eye-wide {
+  width: 36px;
+  height: 52px;
+}
+.action-wide {
+  margin-top: 20px;
+}
+.action-text-wide { font-size: 15px; }
+</style>

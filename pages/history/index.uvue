@@ -1,0 +1,177 @@
+<template>
+  <qt-page-frame :max-width="760">
+  <view class="page" :class="layout.isWide ? 'page-wide' : ''">
+    <!-- 顶部：概览 + 清空 -->
+    <view class="summary" :class="layout.isWide ? 'summary-wide' : ''" :style="cardStyle">
+      <text class="sub" :class="layout.isWide ? 'sub-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">共 {{ historySongs.length }} 首播放记录</text>
+      <text
+        v-if="historySongs.length > 0"
+        class="clear-link" :class="layout.isWide ? 'clear-link-wide' : ''"
+        :style="'color:' + theme.skin.textSubtle + ';'" @click="clearHistory"
+      >清空记录</text>
+    </view>
+
+    <list-view class="scroll" :class="layout.isWide ? 'scroll-wide' : ''" direction="vertical" :scroll-top="scrollTop" @scroll="onListScroll">
+      <list-item
+        v-for="song in historySongs"
+        :key="song.id + song.platform"
+        class="row-item" :class="layout.isWide ? 'row-item-wide' : ''"
+      >
+        <SongRow :song="song" :showBadge="true" :inHistory="true" @play="play(song)" />
+      </list-item>
+      <list-item v-if="historySongs.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
+        <text class="empty-text" :style="'color:' + theme.skin.textMuted + ';'">还没有播放过歌曲</text>
+        <text class="link" :class="layout.isWide ? 'link-wide' : ''" :style="'color:' + theme.skin.accent + ';'" @click="discover">去发现音乐</text>
+      </list-item>
+      <!-- 让位固定悬浮的 MiniPlayer，避免最后一行被遮住 -->
+      <list-item class="foot-space" :class="layout.isWide ? 'foot-space-wide' : ''"></list-item>
+    </list-view>
+    <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+    <MiniPlayer />
+  </view>
+  </qt-page-frame>
+</template><script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import SongRow from "@/uni_modules/qt-ui/components/qt-song-row/qt-song-row.uvue";
+import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
+import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import { ref, computed } from "vue";
+import { usePlayerStore } from "@/stores/player";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { musicApi } from "@/services/music-api";
+import type { Song } from "@/types/music";
+
+const player = usePlayerStore();
+const layout = useQtLayout();
+const theme = useThemeStore();
+
+const cardStyle = computed<string>(() =>
+  "background-color:" + theme.skin.surface +
+  ";border-color:" + theme.skin.border + ";"
+);
+
+const historySongs = computed<Song[]>(() => player.history);
+
+// 回到顶部
+const scrollTop = ref(0);
+const showBackToTop = ref(false);
+function onListScroll(e: any) {
+  const st = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
+  showBackToTop.value = st > 600;
+}
+function backToTop() {
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  showBackToTop.value = false;
+}
+
+async function play(song: Song): Promise<void> {
+  try {
+    // 本地歌曲已带 content:// 地址，跳过在线取址
+    if (song.platform != "local") {
+      song.url = await musicApi.playUrl(song, player.quality);
+    }
+    player.playSingle(song);
+  } catch (_) {
+    uni.showToast({ title: "该歌曲暂时无法播放", icon: "none" });
+  }
+}
+
+function clearHistory(): void {
+  uni.showModal({
+    title: "清空最近播放",
+    content: "确定清空全部播放记录吗？",
+    confirmText: "清空",
+    confirmColor: theme.skin.danger,
+    success: (res) => {
+      if (res.confirm) {
+        player.clearHistory();
+      }
+    },
+  });
+}
+
+function discover(): void {
+  uni.switchTab({ url: "/pages/home/index" });
+}
+</script>
+
+<style>
+.page {
+  flex: 1;
+  min-height: 0;
+  padding: 20rpx 24rpx 0;
+}
+.page-wide {
+  padding: 20px 26px 0;
+}
+
+.summary {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24rpx 28rpx;
+  border-width: 1px;
+  border-radius: 24rpx;
+}
+.summary-wide {
+  padding: 16px 20px;
+  border-radius: 14px;
+}
+.sub {
+  font-size: 24rpx;
+}
+.sub-wide {
+  font-size: 13px;
+}
+.clear-link {
+  font-size: 24rpx;
+}
+.clear-link-wide {
+  font-size: 13px;
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+  margin-top: 20rpx;
+}
+.scroll-wide {
+  margin-top: 12px;
+}
+.row-item {
+  padding: 4rpx 0;
+}
+.row-item-wide {
+  padding: 4px 0;
+}
+.empty {
+  align-items: center;
+  padding: 100rpx 0 60rpx;
+}
+.empty-wide {
+  padding: 80px 0 40px;
+}
+.empty-text {
+  font-size: 26rpx;
+}
+.empty-text-wide {
+  font-size: 15px;
+}
+.link {
+  margin-top: 16rpx;
+  font-size: 26rpx;
+  font-weight: 600;
+}
+.link-wide {
+  margin-top: 10px;
+  font-size: 15px;
+}
+/* 让位固定悬浮的 MiniPlayer（120rpx 高），避免最后一行被遮住 */
+.foot-space {
+  height: 140rpx;
+}
+.foot-space-wide {
+  height: 80px;
+}
+</style>

@@ -1,0 +1,125 @@
+/**
+ * qt-app-native 插件接口定义
+ *
+ * Vapor 模式下 services/*.uts 属于 JS 逻辑层，运行时没有 UTSAndroid / android 全局对象，
+ * 只有 uni_modules UTS 插件会编译进原生层，才能访问 Android 原生 API。
+ * 因此打开系统浏览器、退出应用、安装 APK 等原生能力都收敛在本插件。
+ */
+
+/**
+ * 打开系统浏览器（Android 隐式 Intent / iOS UIApplication）
+ * @param url 外部链接，必须 http/https 开头
+ * @returns 成功拉起浏览器返回 true；失败返回 false（由调用方降级处理）
+ */
+export type OpenExternalUrl = (url: string) => boolean;
+
+/**
+ * 退出应用
+ * @returns Android 成功关闭 Activity 返回 true；不可用时返回 false（调用方降级为提示）
+ */
+export type ExitAppNative = () => boolean;
+
+/**
+ * 安装 APK（Android，经 FileProvider 兼容 Android 7+）
+ * @param filePath APK 本地文件绝对路径
+ * @returns 成功拉起安装页返回 true；失败返回 false（调用方降级为提示保存路径）
+ */
+export type InstallApkNative = (filePath: string) => boolean;
+
+/**
+ * 将临时文件写入公共媒体目录（Android MediaStore；iOS 不支持返回空）
+ * @param tempPath 临时文件路径（uni.downloadFile 结果）
+ * @param dirType 目录类型：download=Download 根目录 / music=Music 根目录
+ * @param fileName 完整文件名，必须带真实扩展名（如 "周杰伦 - 晴天.flac" 或 "轻听_v3.1.0.apk"）
+ * @param subDir 公共根目录下的子目录（可含层级），不传时默认 "轻听"
+ * @returns 成功返回真实文件路径（或 content:// URI）；失败返回空字符串
+ */
+export type SaveToPublicMedia = (tempPath: string, dirType: string, fileName: string, subDir?: string) => string;
+
+/**
+ * 确保具备写公共目录的权限。
+ * Android 10+（API 29+）走 MediaStore 无需任何权限，直接返回 true；
+ * Android 9-（API 28-）需要 WRITE_EXTERNAL_STORAGE：已授权返回 true，未授权时拉起系统权限弹窗并返回 false。
+ * 非 Android 平台恒返回 false。
+ * @returns 是否已具备写入能力
+ */
+export type EnsurePublicDirPermission = () => boolean;
+
+/**
+ * 打开本应用的系统通知设置页。
+ * Android 8+（API 26+）走 Settings.ACTION_APP_NOTIFICATION_SETTINGS 直达通知页；
+ * 更低版本降级到应用详情页（Settings.ACTION_APPLICATION_DETAILS_SETTINGS）。
+ * iOS 不支持（无对应公开 API），恒返回 false。
+ * @returns 成功拉起设置页返回 true；失败返回 false（调用方降级为提示）
+ */
+export type OpenNotificationSettings = () => boolean;
+
+/**
+ * 本地扫描到的单曲（Android MediaStore 音频库）。
+ * uri 为 content:// 媒体地址，可直接交给播放器（ExoPlayer/InnerAudio 均原生支持）。
+ */
+export type LocalAudioItem = {
+	id: string;
+	title: string;
+	singer: string;
+	album: string;
+	/** 秒 */
+	duration: number;
+	uri: string;
+	/** 文件绝对路径（用于按目录分组） */
+	path: string;
+	/** 文件大小（字节）；旧版本缓存的数据可能没有该字段，判定时按未知处理 */
+	size?: number;
+	/** 修改时间（秒，Android DATE_MODIFIED）；旧版本缓存的数据可能没有该字段，排序时按未知处理 */
+	mtime?: number;
+};
+
+/**
+ * 扫描本地音频。内部先检查/申请读取音频权限（Android 13+ READ_MEDIA_AUDIO，低版本 READ_EXTERNAL_STORAGE），
+ * 授权后扫描并回调结果；拒绝授权回调空数组。结果按加入时间倒序。
+ */
+export type ScanLocalAudio = (onResult: (items: LocalAudioItem[]) => void) => void;
+
+export type DeleteLocalMediaResult = {
+	/** 直接删除成功（MediaStore 条目删掉，或 File.delete 删掉磁盘文件）的数量 */
+	deleted: number;
+	/** 已发起系统「删除确认」对话框、待用户同意后由系统删除的数量（结果异步） */
+	pending: number;
+	/** 删除失败、未发起任何删除操作的数量 */
+	failed: number;
+};
+
+/**
+ * 删除若干本地文件（同时删 MediaStore 记录）。统一入口，单曲也可传一个元素的数组。
+ *
+ * Android：
+ *  - 应用自有的音频先按 content URI 删 MediaStore 条目（会连磁盘文件一起删）；
+ *  - 第三方公共媒体受分区存储限制，直接删会抛 RecoverableSecurityException：需要
+ *    MANAGE_EXTERNAL_STORAGE「所有文件访问」权限后用 File.delete() 删；未授权时本
+ *    函数会在一次运行里引导一次系统「所有文件访问」设置页，并把删不掉的条目计入
+ *    pending（需用户去系统设置开启后重试）；
+ *  - 再按绝对路径 File.delete() 兜底。
+ * iOS：本地音频库恒为空，此入口实际不会命中，恒返回全部 failed。
+ */
+export type DeleteLocalMedia = (items: LocalAudioItem[]) => DeleteLocalMediaResult;
+
+/**
+ * 强制窗口回归传统布局模式（decorFitsSystemWindows = true）。
+ *
+ * 针对 Samsung One UI（Android 15/16）手势导航下 edge-to-edge 全高窗口 +
+ * 导航栏 inset 为 0 时，uni-app x 运行时首屏挂载竞态（S24 Ultra 全屏白屏，
+ * 见 services/boot-guard.ts 与统计上报）。等价于三键导航下的窗口行为。
+ * 需在 App 启动最早点调用（Activity 已就绪）；iOS 无此概念，恒返回 false。
+ * @returns 应用成功返回 true；Activity/Window 不可用或平台不支持返回 false
+ */
+export type ApplyLegacyInsets = () => boolean;
+
+/**
+ * 重建当前 Activity（recreate）。
+ *
+ * 首屏守卫的最后手段：reLaunch 只重建页面、不重建窗口，窗口级竞态（如 S24 Ultra
+ * 手势导航白屏）必须重建 Activity 才能恢复。重建后 App onLaunch 不再触发、
+ * 页面栈清空回到首页。iOS 无等价 API，恒返回 false。
+ * @returns 已触发重建返回 true；Activity 不可用或平台不支持返回 false
+ */
+export type RecreateActivity = () => boolean;

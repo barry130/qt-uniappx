@@ -1,0 +1,228 @@
+<template>
+  <qt-page-frame :max-width="960">
+    <view class="page" :class="layout.isWide ? 'page-wide' : ''">
+      <!-- 均衡器开关 -->
+      <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';'">
+        <view class="head-row" :class="layout.isWide ? 'head-row-wide' : ''">
+          <view class="head-info">
+            <text class="head-title" :style="'color:' + themeStore.skin.text + ';'">均衡器</text>
+            <text class="head-sub" max-lines="2" :style="'color:' + themeStore.skin.textMuted + ';'">五段音效调节，对所有播放声音即时生效</text>
+          </view>
+          <view class="toggle" :style="'background-color:' + (enabled ? themeStore.skin.accent : themeStore.skin.surfaceInset) + ';'" @click="toggleEnabled">
+            <view class="toggle-knob" :class="enabled ? 'toggle-knob-on' : ''" :style="'background-color:' + (enabled ? themeStore.skin.onAccent : themeStore.skin.textMuted) + ';'" />
+          </view>
+        </view>
+      </view>
+
+      <!-- 预设 -->
+      <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';'">
+        <text class="section-title" :style="'color:' + themeStore.skin.text + ';'">预设</text>
+        <view class="chips" :class="layout.isWide ? 'chips-wide' : ''">
+          <view
+            v-for="(name, idx) in presets"
+            :key="idx"
+            class="chip"
+            :style="'background-color:' + (presetIndex == idx ? themeStore.skin.accent : themeStore.skin.surfaceInset) + ';'"
+            @click="applyPreset(idx)"
+          >
+            <text class="chip-text" :style="'color:' + (presetIndex == idx ? themeStore.skin.onAccent : themeStore.skin.text) + ';'">{{ name }}</text>
+          </view>
+        </view>
+      </view>
+
+      <!-- 五段调节 -->
+      <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';'">
+        <text class="section-title" :style="'color:' + themeStore.skin.text + ';'">{{ presetIndex >= 0 ? presets[presetIndex] : "自定义" }}</text>
+        <view v-for="(label, i) in bandLabels" :key="i" class="band-row">
+          <text class="band-label" :style="'color:' + themeStore.skin.textMuted + ';'">{{ label }}</text>
+          <slider
+            class="band-slider"
+            :min="-12"
+            :max="12"
+            :step="1"
+            :value="bands[i]"
+            :block-size="22"
+            track-class="eq-track"
+            track-active-class="eq-track-active"
+            thumb-class="eq-thumb"
+            @change="onBandChange(i, $event)"
+          />
+          <text class="band-value" :style="'color:' + themeStore.skin.text + ';'">{{ dbText(bands[i]) }}</text>
+        </view>
+      </view>
+    </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import { onLoad } from "@dcloudio/uni-app";
+import { ref } from "vue";
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtTrackPage } from "@/uni_modules/qt-stat";
+import { audioPlayer } from "@/services/audio-player.uts";
+
+const layout = useQtLayout();
+const themeStore = useThemeStore();
+
+const bandLabels: string[] = ["60Hz", "230Hz", "910Hz", "3.6kHz", "14kHz"];
+const presets: string[] = ["平直", "流行", "摇滚", "古典", "爵士", "电子", "低音增强", "人声"];
+const presetBands: number[][] = [
+  [0, 0, 0, 0, 0],
+  [-1, 2, 4, 2, -1],
+  [4, 2, -1, 2, 4],
+  [3, 1, -1, 1, 3],
+  [2, 1, 0, 2, 2],
+  [4, 2, 0, 2, 4],
+  [5, 3, 1, -1, 0],
+  [-2, 0, 3, 3, 1],
+];
+
+const enabled = ref(audioPlayer.eqEnabled);
+const bands = ref<number[]>(audioPlayer.eqBands.slice());
+const presetIndex = ref(-1);
+
+onLoad(() => {
+  qtTrackPage("pages/equalizer/index");
+  presetIndex.value = matchPreset(bands.value);
+});
+
+function matchPreset(current: number[]): number {
+  for (let p = 0; p < presetBands.length; p++) {
+    const pb = presetBands[p];
+    let same = true;
+    for (let i = 0; i < 5; i++) {
+      const v = i < current.length ? current[i] : 0;
+      if (v != pb[i]) {
+        same = false;
+        break;
+      }
+    }
+    if (same) return p;
+  }
+  return -1;
+}
+
+function dbText(v: number): string {
+  const n = Math.round(v);
+  return (n > 0 ? "+" : "") + n.toString() + " dB";
+}
+
+/** 当前曲线下发原生；开着才即时套用，关着只存（下次打开自动生效） */
+function commit(): void {
+  audioPlayer.setEqualizerBands(bands.value);
+  if (enabled.value) audioPlayer.setEqualizerEnabled(true);
+}
+
+function applyPreset(idx: number): void {
+  const pb = presetBands[idx];
+  const next: number[] = [pb[0], pb[1], pb[2], pb[3], pb[4]];
+  bands.value = next;
+  presetIndex.value = idx;
+  commit();
+}
+
+function onBandChange(i: number, e: UniSliderChangeEvent): void {
+  const next = bands.value.slice();
+  next[i] = Math.round(e.detail.value);
+  bands.value = next;
+  presetIndex.value = matchPreset(next);
+  commit();
+}
+
+function toggleEnabled(): void {
+  const on = !enabled.value;
+  enabled.value = on;
+  audioPlayer.setEqualizerEnabled(on);
+  // 从关到开时把当前曲线也推一遍，保证会话内参数与 UI 一致
+  if (on) audioPlayer.setEqualizerBands(bands.value);
+}
+</script>
+<style lang="css">
+.page {
+  padding: 16px;
+}
+.page-wide {
+  padding: 20px;
+}
+.card {
+  border-radius: 16px;
+  padding: 18px;
+  margin-bottom: 14px;
+}
+.head-row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+.head-info {
+  flex: 1;
+}
+.head-title {
+  font-size: 16px;
+  font-weight: bold;
+}
+.head-sub {
+  margin-top: 4px;
+  font-size: 12px;
+}
+.toggle {
+  width: 46px;
+  height: 26px;
+  border-radius: 13px;
+  padding: 3px;
+  margin-left: 12px;
+}
+.toggle-knob {
+  width: 20px;
+  height: 20px;
+  border-radius: 10px;
+}
+.toggle-knob-on {
+  margin-left: 20px;
+}
+.section-title {
+  font-size: 14px;
+  font-weight: bold;
+  margin-bottom: 12px;
+}
+.chips {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.chip {
+  border-radius: 14px;
+  padding: 6px 14px;
+  margin: 0 10px 10px 0;
+}
+.chip-text {
+  font-size: 13px;
+}
+.band-row {
+  flex-direction: row;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.band-label {
+  width: 52px;
+  font-size: 12px;
+}
+.band-slider {
+  flex: 1;
+  margin: 0 10px;
+}
+.band-value {
+  width: 58px;
+  font-size: 12px;
+  text-align: right;
+}
+.eq-track {
+  background-color: rgba(128, 128, 128, 0.35);
+}
+.eq-track-active {
+  background-color: #7c6cf2;
+}
+.eq-thumb {
+  background-color: #ffffff;
+}
+</style>

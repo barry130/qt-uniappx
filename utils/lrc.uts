@@ -1,0 +1,98 @@
+import type { LyricLine } from "@/types/music";
+
+/**
+ * 共享 LRC 解析（播放页歌词 + 桌面歌词悬浮窗共用）。
+ * 解析 [mm:ss.ff] 时间标签行；translationText 里的行按时间戳对齐（误差 < 0.05s）挂到主行。
+ */
+
+function numOrZero(text: string): number {
+  const parsed = parseInt(text);
+  return parsed > 0 ? parsed : 0;
+}
+
+/** 纯数字判定（UTS 里不依赖正则/charCodeAt，用 substring 逐字比对） */
+function isAllDigits(text: string): boolean {
+  if (text.length == 0) return false;
+  const digits = "0123456789";
+  for (let i = 0; i < text.length; i++) {
+    if (digits.indexOf(text.substring(i, i + 1)) < 0) return false;
+  }
+  return true;
+}
+
+export function parseLrc(text: string, translationText: string = ""): LyricLine[] {
+  const lines: LyricLine[] = [];
+  const parts = text.split("\n");
+  for (let i = 0; i < parts.length; i++) {
+    const line = parts[i] as string;
+    const start = line.indexOf("[");
+    if (start < 0) continue;
+    const end = line.indexOf("]", start);
+    if (end < 0) continue;
+    const tag = line.substring(start + 1, end);
+    const colon = tag.indexOf(":");
+    if (colon < 0) continue;
+    const minText = tag.substring(0, colon);
+    // 冒号前必须是纯数字，否则是元数据标签（[ti:]/[ar:]/[by:]/[offset:]…），不是时间行。
+    // 案例：微光的 [ar:67111]（歌手名就是数字）会被算成 67111 秒的「歌词行」，
+    // 而取行下标是「取最后一行 time <= progress」，一撞上这个巨大时间高亮就被钉死不动。
+    if (!isAllDigits(minText)) continue;
+    const min = numOrZero(minText);
+    const rest = tag.substring(colon + 1);
+    const dot = rest.indexOf(".");
+    let secText = rest;
+    let fracText = "";
+    if (dot >= 0) {
+      secText = rest.substring(0, dot);
+      fracText = rest.substring(dot + 1);
+    }
+    const sec = numOrZero(secText);
+    let frac = 0;
+    if (fracText.length > 0) {
+      // 小数位统一按「前 3 位 ÷ 1000」换算：原来的「其余按 /10」会把
+      // [00:04.2300] 这类 4 位小数算成 234 秒（时间被放大 10~1000 倍）
+      if (fracText.length >= 3) frac = numOrZero(fracText.substring(0, 3)) / 1000;
+      else if (fracText.length == 2) frac = numOrZero(fracText) / 100;
+      else frac = numOrZero(fracText) / 10;
+    }
+    // 酷狗等源用 \r\n 换行，split("\n") 后正文尾部会留一个 \r（显示上是不可见字符）
+    let text = line.substring(end + 1);
+    if (text.length > 0 && text.substring(text.length - 1) == "\r") {
+      text = text.substring(0, text.length - 1);
+    }
+    lines.push({
+      time: min * 60 + sec + frac,
+      text: text,
+    });
+  }
+  if (translationText.length > 0) {
+    const trs = parseLrc(translationText, "");
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i] as LyricLine;
+      for (let j = 0; j < trs.length; j++) {
+        const tr = trs[j] as LyricLine;
+        if (Math.abs(tr.time - line.time) < 0.05) {
+          line.translation = tr.text;
+          break;
+        }
+      }
+    }
+  }
+  return lines;
+}
+
+/**
+ * 按当前播放进度取该显示的歌词行下标（无匹配返回 -1）。
+ * 与播放页滚动版语义一致：取「时间 <= progress 的最后一行」。
+ */
+export function activeLyricIndex(lines: LyricLine[], progress: number): number {
+  if (lines.length == 0) return -1;
+  let index = -1;
+  // 不能 break：只要有一行时间异常（乱序、或被误解析成很大的值），
+  // break 会让高亮永久停在它前面一行（桌面歌词整首不动就是这么来的）
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] as LyricLine;
+    if (line.time <= progress) index = i;
+  }
+  return index;
+}

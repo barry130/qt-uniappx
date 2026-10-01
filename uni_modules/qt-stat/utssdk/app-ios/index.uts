@@ -1,0 +1,377 @@
+/**
+ * qt-stat iOS 端实现（采集逻辑与安卓端一致，纯采集版）
+ *
+ * 说明：
+ * - 本项目当前仅打包 Android（manifest 无 iOS 模块配置）；本实现随 iOS 打包开启后联调。
+ * - 错误采集仅覆盖 JS/UTS 层可捕获的运行错误（App onError → error 事件入库）；原生崩溃（进程死亡/NDK/ANR）不做采集。
+ * - 全部使用跨端 uni.* API（storage / getAppBaseInfo / getDeviceInfo / request），无平台专有依赖。
+ */
+
+import type { QtStatOptions } from '../interface.uts'
+
+// ==================== 常量 ====================
+
+const DEVICE_ID_KEY = 'qt-stat-device-id'
+const QUEUE_KEY = 'qt-stat-queue'
+const QUEUE_MAX = 500
+const MAX_RETRY = 3
+const SERVER_BATCH_LIMIT = 200
+const MSG_MAX_LEN = 1000
+const STACK_MAX_LEN = 16000
+const EXTRA_MAX_LEN = 2048
+const REQUEST_TIMEOUT = 15000
+
+// ==================== 模块级状态 ====================
+
+let initialized = false
+let ingestUrl = ''
+let channelName = ''
+let debugMode = false
+let batchIntervalMs = 10000
+let maxBatchSize = 50
+
+let deviceId = ''
+let utName = 'app-ios'
+let appVersionName = ''
+let modelName = ''
+let osName = ''
+
+let queue: any[] = []
+let consecutiveFailures = 0
+let sending = false
+let timerStarted = false
+let flushTimer = 0
+let lastShowTs = 0
+
+// ==================== 工具 ====================
+
+function randomHex(len: number): string {
+	const chars = '0123456789abcdef'
+	let s = ''
+	for (let i = 0; i < len; i++) {
+		s += chars.charAt(Math.floor(Math.random() * 16))
+	}
+	return s
+}
+
+function genUuid(): string {
+	return randomHex(8) + '-' + randomHex(4) + '-4' + randomHex(3) + '-' + randomHex(4) + '-' + randomHex(12)
+}
+
+function log(msg: string): void {
+	if (debugMode) {
+		console.log('[qt-stat] ' + msg)
+	}
+}
+
+function ensureDeviceId(): string {
+	try {
+		const saved = uni.getStorageSync(DEVICE_ID_KEY) as string
+		if (saved != null && saved.length > 0) return saved
+	} catch (_) {}
+	const id = genUuid()
+	try {
+		uni.setStorageSync(DEVICE_ID_KEY, id)
+	} catch (_) {}
+	return id
+}
+
+/** 平台标识：本项目按端各自打包，固定取值 app-ios（不依赖 getAppBaseInfo().uniPlatform） */
+
+function readAppVersion(): string {
+	try {
+		const info = uni.getAppBaseInfo()
+		const v = info.appVersion
+		if (v != null) return v
+	} catch (_) {}
+	return ''
+}
+
+function capQueue(): void {
+	if (queue.length > QUEUE_MAX) {
+		queue = queue.slice(queue.length - QUEUE_MAX)
+	}
+}
+
+function persistQueue(): void {
+	try {
+		if (queue.length == 0) {
+			uni.removeStorageSync(QUEUE_KEY)
+			return
+		}
+		uni.setStorageSync(QUEUE_KEY, JSON.stringify(queue))
+	} catch (_) {}
+}
+
+function restoreQueue(): void {
+	try {
+		const raw = uni.getStorageSync(QUEUE_KEY) as string
+		if (raw == null || raw.length == 0) return
+		const parsed = JSON.parse(raw)
+		if (parsed == null) return
+		const arr = parsed as Array<any>
+		if (arr.length == 0) {
+			uni.removeStorageSync(QUEUE_KEY)
+			return
+		}
+		const merged: any[] = []
+		for (let i = 0; i < arr.length; i++) merged.push(arr[i])
+		for (let i = 0; i < queue.length; i++) merged.push(queue[i])
+		queue = merged
+		capQueue()
+		uni.removeStorageSync(QUEUE_KEY)
+		log('restore queue ' + queue.length)
+	} catch (_) {}
+}
+
+// ==================== 事件封装 ====================
+
+function buildEvent(
+	evt: string,
+	page: string,
+	duration: number,
+	errorType: string,
+	message: string,
+	stack: string,
+	extra: UTSJSONObject | null
+): UTSJSONObject {
+	const ev = new UTSJSONObject()
+	ev.set('evt', evt)
+	ev.set('ts', Date.now())
+	ev.set('deviceId', deviceId)
+	ev.set('ut', utName)
+	if (appVersionName.length > 0) ev.set('appVersion', appVersionName)
+	if (modelName.length > 0) ev.set('model', modelName)
+	if (osName.length > 0) ev.set('os', osName)
+	if (channelName.length > 0) ev.set('ch', channelName)
+	if (page.length > 0) ev.set('page', page)
+	if (duration > 0) ev.set('duration', duration)
+	if (evt == 'error') {
+		if (errorType.length > 0) ev.set('errorType', errorType)
+		if (message.length > 0) ev.set('message', message)
+		if (stack.length > 0) ev.set('stack', stack)
+		// release 与 appVersion 同源（运行时 getAppBaseInfo().appVersion），无需外部手动传值
+		if (appVersionName.length > 0) ev.set('release', appVersionName)
+	}
+	if (extra != null) {
+		try {
+			const s = JSON.stringify(extra)
+			if (s != null && s.length <= EXTRA_MAX_LEN) {
+				ev.set('extra', extra)
+			}
+		} catch (_) {}
+	}
+	return ev
+}
+
+function enqueue(ev: UTSJSONObject): void {
+	try {
+		queue.push(ev)
+		capQueue()
+		if (queue.length >= maxBatchSize) {
+			flushInternal((_ok: boolean) => {})
+		}
+	} catch (_) {}
+}
+
+// ==================== 上报 ====================
+
+function flushInternal(done: (ok: boolean) => void): void {
+	try {
+		if (!initialized || ingestUrl.length == 0) {
+			done(true)
+			return
+		}
+		if (queue.length == 0) {
+			done(true)
+			return
+		}
+		if (sending) {
+			done(false)
+			return
+		}
+		sending = true
+		sendNext(done)
+	} catch (_) {
+		sending = false
+		done(false)
+	}
+}
+
+/**
+ * 统一客户端系统头（与 App 侧 services/client-info.ts、服务端 ClientHeaders 同一契约）：
+ * X-App-Ut 平台 / X-App-Version 版本 / X-Device 设备型号 / X-OS 系统。
+ * 上报地址也是 astral 后端，接口统计拦截器同样测量它，故这几个头必须一并携带；
+ * 空值不写（不存在该头 = 后端按「未携带」处理，语义一致）。
+ */
+function applyClientHeaders(headers: UTSJSONObject): void {
+	if (utName.length > 0) headers.set('X-App-Ut', utName)
+	if (appVersionName.length > 0) headers.set('X-App-Version', appVersionName)
+	if (modelName.length > 0) headers.set('X-Device', modelName)
+	if (osName.length > 0) headers.set('X-OS', osName)
+}
+
+function sendNext(done: (ok: boolean) => void): void {
+	try {
+		if (queue.length == 0) {
+			sending = false
+			try {
+				uni.removeStorageSync(QUEUE_KEY)
+			} catch (_) {}
+			log('flush done')
+			done(true)
+			return
+		}
+		const batch = queue.slice(0, SERVER_BATCH_LIMIT)
+		const body = new UTSJSONObject()
+		body.set('events', batch)
+		const headers = new UTSJSONObject()
+		headers.set('Content-Type', 'application/json')
+		applyClientHeaders(headers)
+		uni.request({
+			url: ingestUrl,
+			method: 'POST',
+			data: body,
+			header: headers,
+			timeout: REQUEST_TIMEOUT,
+			success: (response) => {
+				const ok = response.statusCode >= 200 && response.statusCode < 300
+				log('report batch=' + batch.length + ' statusCode=' + response.statusCode)
+				if (ok) {
+					try {
+						consecutiveFailures = 0
+						queue = queue.slice(batch.length)
+					} catch (_) {}
+					sendNext(done)
+					return
+				}
+				onSendFailure(batch, done)
+			},
+			fail: (_error) => {
+				onSendFailure(batch, done)
+			},
+		})
+	} catch (_) {
+		sending = false
+		done(false)
+	}
+}
+
+function onSendFailure(batch: any[], done: (ok: boolean) => void): void {
+	try {
+		consecutiveFailures++
+		if (consecutiveFailures >= MAX_RETRY) {
+			queue = queue.slice(batch.length)
+			consecutiveFailures = 0
+			persistQueue()
+		}
+	} catch (_) {}
+	sending = false
+	done(false)
+}
+
+function startTimer(): void {
+	if (timerStarted) return
+	timerStarted = true
+	flushTimer = setInterval(() => {
+		try {
+			if (queue.length > 0) {
+				flushInternal((_ok: boolean) => {})
+			}
+		} catch (_) {}
+	}, batchIntervalMs) as number
+}
+
+// ==================== 对外 API ====================
+
+export function initQtStat(options: QtStatOptions): void {
+	try {
+		if (initialized) return
+		initialized = true
+		ingestUrl = options.ingestUrl
+		channelName = options.channel
+		debugMode = options.debug
+		if (options.batchIntervalMs > 0) batchIntervalMs = options.batchIntervalMs
+		if (options.maxBatchSize > 0 && options.maxBatchSize <= SERVER_BATCH_LIMIT) {
+			maxBatchSize = options.maxBatchSize
+		}
+		deviceId = ensureDeviceId()
+		utName = 'app-ios'
+		appVersionName = readAppVersion()
+		try {
+			const device = uni.getDeviceInfo()
+			// getDeviceInfo 字段均为 string | null，需判空后赋值（UTS 严格空安全）
+			const model = device.deviceModel
+			if (model != null) modelName = model
+			const osN = device.osName
+			const osV = device.osVersion
+			if (osN != null && osV != null) osName = osN + ' ' + osV
+			else if (osN != null) osName = osN
+		} catch (_) {}
+		restoreQueue()
+		startTimer()
+		log('init ok url=' + ingestUrl + ' deviceId=' + deviceId + ' ut=' + utName + ' queue=' + queue.length)
+	} catch (e) {
+		console.log('[qt-stat] init failed', e)
+	}
+}
+
+export function qtTrack(evt: string, page: string = '', extra: UTSJSONObject | null = null): void {
+	try {
+		if (!initialized) return
+		if (evt == 'show') {
+			lastShowTs = Date.now()
+		}
+		let duration = 0
+		if (evt == 'hide') {
+			if (lastShowTs > 0) {
+				duration = Date.now() - lastShowTs
+			}
+			lastShowTs = 0
+		}
+		enqueue(buildEvent(evt, page, duration, '', '', '', extra))
+		if (evt == 'hide') {
+			persistQueue()
+		}
+	} catch (_) {}
+}
+
+export function qtTrackPage(page: string): void {
+	try {
+		if (!initialized) return
+		if (page.length == 0) return
+		enqueue(buildEvent('page', page, 0, '', '', '', null))
+	} catch (_) {}
+}
+
+export function qtTrackError(errorType: string, message: string, stack: string = '', page: string = ''): void {
+	try {
+		if (!initialized) return
+		let msg = message
+		if (msg.length > MSG_MAX_LEN) msg = msg.substring(0, MSG_MAX_LEN)
+		let st = stack
+		if (st.length > STACK_MAX_LEN) st = st.substring(0, STACK_MAX_LEN)
+		enqueue(buildEvent('error', page, 0, errorType, msg, st, null))
+	} catch (_) {}
+}
+
+export function qtStatFlush(): Promise<boolean> {
+	return new Promise<boolean>((resolve: (value: boolean) => void, reject: (err: any) => void) => {
+		try {
+			if (lastShowTs > 0) {
+				const duration = Date.now() - lastShowTs
+				lastShowTs = 0
+				try {
+					queue.push(buildEvent('hide', '', duration, '', '', '', null))
+					capQueue()
+				} catch (_) {}
+			}
+			persistQueue()
+			flushInternal((ok: boolean) => {
+				resolve(ok)
+			})
+		} catch (_) {
+			resolve(false)
+		}
+	})
+}

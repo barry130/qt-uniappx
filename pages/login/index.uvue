@@ -1,0 +1,435 @@
+<template>
+  <qt-page-frame :max-width="640">
+  <scroll-view class="login-scroll" direction="vertical" :show-scrollbar="false">
+  <view class="page" :style="'min-height:' + pageMinHeight + 'px;'" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']">
+    <view class="logo" :class="layout.isWide ? 'logo-wide' : ''">
+      <image class="logo-img" :class="layout.isWide ? 'logo-img-wide' : ''" src="/static/icon/xxxhdpi.png" mode="aspectFill" />
+      <text class="logo-sub" :class="layout.isWide ? 'logo-sub-wide' : ''">用音乐连接每一刻</text>
+    </view>
+
+    <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
+      <qt-segmented :list="['登录', '注册']" v-model="modeIndex" @change="switchMode" />
+
+      <!-- 注册：用户名 -->
+      <view v-if="mode == 'register'" class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+        <input
+          :value="regUsername"
+          @input="onRegUsernameInput"
+          class="field-input" :class="[[layout.isWide ? 'field-input-wide' : ''], layout.isWide ? 'field-input-wide' : '']"
+          
+          placeholder="用户名"
+          :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
+          :maxlength="30"
+        />
+      </view>
+
+      <!-- 登录：邮箱/用户名；注册：邮箱 -->
+      <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+        <input
+          :value="mode == 'register' ? regEmail : account"
+          @input="onAccountInput"
+          class="field-input" :class="[[layout.isWide ? 'field-input-wide' : ''], layout.isWide ? 'field-input-wide' : '']"
+          
+          :placeholder="mode == 'register' ? '邮箱' : '邮箱 / 用户名'"
+          :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
+          :maxlength="50"
+        />
+      </view>
+
+      <!-- 密码 -->
+      <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+        <input
+          :value="password"
+          @input="onPasswordInput"
+          class="field-input" :class="[[layout.isWide ? 'field-input-wide' : ''], layout.isWide ? 'field-input-wide' : '']"
+          
+          :type="pwVisible ? 'text' : 'password'"
+          placeholder="密码"
+          :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
+          :maxlength="18"
+        />
+        <view class="eye" :class="layout.isWide ? 'eye-wide' : ''" @click="pwVisible = !pwVisible">
+          <QtIcon :name="pwVisible ? 'eye' : 'eye-off'" :size="layout.isWide ? 22 : 40" color="#6b7385" />
+        </view>
+      </view>
+
+      <!-- 注册：确认密码 -->
+      <view v-if="mode == 'register'" class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+        <input
+          :value="confirmPw"
+          @input="onConfirmInput"
+          class="field-input" :class="[[layout.isWide ? 'field-input-wide' : ''], layout.isWide ? 'field-input-wide' : '']"
+          
+          :type="confirmVisible ? 'text' : 'password'"
+          placeholder="确认密码"
+          :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
+          :maxlength="18"
+        />
+        <view class="eye" :class="layout.isWide ? 'eye-wide' : ''" @click="confirmVisible = !confirmVisible">
+          <QtIcon :name="confirmVisible ? 'eye' : 'eye-off'" :size="layout.isWide ? 22 : 40" color="#6b7385" />
+        </view>
+      </view>
+
+      <view v-if="mode == 'login'" class="forget-row" :class="layout.isWide ? 'forget-row-wide' : ''">
+        <view class="forget-link" :class="layout.isWide ? 'forget-link-wide' : ''" @click="goForget"><text class="forget-text" :class="layout.isWide ? 'forget-text-wide' : ''">忘记密码？</text></view>
+      </view>
+
+      <qt-button
+        class="action"
+        :class="layout.isWide ? 'action-wide' : ''"
+        :label="mode == 'login' ? '登 录' : '注册并登录'"
+        size="lg"
+        :disabled="loading"
+        @click="submit"
+      />
+    </view>
+  </view>
+  </scroll-view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { ref, computed, onUnmounted } from "vue";
+import { accountApi, persistUserRoles } from "@/services/music-api";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import qtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import { saveTokens, parseTokenResponse, clearTokens, getUserId, saveUserId } from "@/services/auth";
+import { refreshMe } from "@/services/user-cache";
+import { usePlayerStore } from "@/stores/player";
+
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+// 页面撑满视口的高度（px）：Vapor 的 min-height 不支持 %，只能注入实像素。
+// 内容高（1:1/短屏）时会超过它、由外层 scroll-view 滚动，按钮才点得到。
+const pageMinHeight = computed<number>(() => layout.windowHeight);
+const mode = ref<string>("login");
+const modeIndex = ref<number>(0);
+// 登录账号（邮箱或用户名）
+const account = ref("");
+// 注册：用户名 + 邮箱
+const regUsername = ref("");
+const regEmail = ref("");
+// 密码与确认密码
+const password = ref("");
+const confirmPw = ref("");
+const pwVisible = ref(false);
+const confirmVisible = ref(false);
+const loading = ref(false);
+// 登录成功后延迟跳转定时器：页面卸载时必须清掉，避免在已注销的实例上触发回调
+let loginNavTimer: number | null = null;
+
+onUnmounted(() => {
+  if (loginNavTimer != null) {
+    clearTimeout(loginNavTimer);
+    loginNavTimer = null;
+  }
+});
+
+function switchMode(index: number): void {
+  mode.value = index == 0 ? "login" : "register";
+  // 切换模式时清空确认密码并复位明文可见
+  confirmPw.value = "";
+  pwVisible.value = false;
+  confirmVisible.value = false;
+}
+
+/** 跳转忘记密码页 */
+function goForget(): void {
+  uni.navigateTo({ url: "/pages/forget-password/index" });
+}
+
+/** 账号/邮箱输入过滤：仅允许英文字母、数字、@ 和 .（邮箱必要字符），其他字符不允许输入 */
+function onAccountInput(e: InputEvent): void {
+  const raw = String((e.detail as any).value ?? "");
+  const v = raw.replace(/[^a-zA-Z0-9@.]/g, "");
+  if (mode.value == "register") regEmail.value = v;
+  else account.value = v;
+}
+
+/** 注册用户名输入过滤：仅允许英文字母和数字 */
+function onRegUsernameInput(e: InputEvent): void {
+  const raw = String((e.detail as any).value ?? "");
+  regUsername.value = raw.replace(/[^a-zA-Z0-9]/g, "");
+}
+
+function onPasswordInput(e: InputEvent): void {
+  password.value = String((e.detail as any).value ?? "");
+}
+
+function onConfirmInput(e: InputEvent): void {
+  confirmPw.value = String((e.detail as any).value ?? "");
+}
+
+function isEmail(text: string): boolean {
+  return text.indexOf("@") > 0 && text.indexOf(".") > text.indexOf("@");
+}
+
+async function submit(): Promise<void> {
+  const pass = password.value;
+  let name = "";
+
+  if (mode.value == "login") {
+    name = account.value.trim();
+    if (name.length == 0 || pass.length == 0) {
+      uni.showToast({ title: "请输入账号和密码", icon: "none" });
+      return;
+    }
+    if (name.length < 3 || name.length > 30) {
+      uni.showToast({ title: "账号长度为 3-30 个字符", icon: "none" });
+      return;
+    }
+  } else {
+    // 注册：用户名 + 邮箱 + 密码 + 确认密码 全部必输
+    const uname = regUsername.value.trim();
+    const email = regEmail.value.trim();
+    if (uname.length == 0) {
+      uni.showToast({ title: "请输入用户名", icon: "none" });
+      return;
+    }
+    if (uname.length < 3 || uname.length > 30) {
+      uni.showToast({ title: "用户名长度为 3-30 个字符", icon: "none" });
+      return;
+    }
+    if (email.length == 0) {
+      uni.showToast({ title: "请输入邮箱", icon: "none" });
+      return;
+    }
+    if (!isEmail(email)) {
+      uni.showToast({ title: "请输入正确的邮箱地址", icon: "none" });
+      return;
+    }
+    if (pass.length == 0) {
+      uni.showToast({ title: "请输入密码", icon: "none" });
+      return;
+    }
+    if (pass.length < 6 || pass.length > 18) {
+      uni.showToast({ title: "密码长度为 6-18 位", icon: "none" });
+      return;
+    }
+    if (confirmPw.value.length == 0) {
+      uni.showToast({ title: "请输入确认密码", icon: "none" });
+      return;
+    }
+    if (pass !== confirmPw.value) {
+      uni.showToast({ title: "两次输入的密码不一致", icon: "none" });
+      return;
+    }
+    name = uname;
+  }
+
+  loading.value = true;
+  try {
+    let data: UTSJSONObject;
+    if (mode.value == "register") {
+      data = await accountApi.register({
+        username: regUsername.value.trim(),
+        password: pass,
+        passwordConfirm: confirmPw.value,
+        email: regEmail.value.trim(),
+      } as UTSJSONObject);
+    } else {
+      data = await accountApi.login(account.value.trim(), pass);
+    }
+    // 使用 parseTokenResponse 提取 token 信息（含 expiresIn）
+    const tokenInfo = parseTokenResponse(data);
+    if (tokenInfo == null) {
+      throw new Error("登录响应缺少 token");
+    }
+    saveTokens(tokenInfo);
+    // 兼容旧存储
+    uni.setStorageSync("qt-token", tokenInfo.accessToken);
+    const user = data.get("user") as UTSJSONObject | null;
+    // 收藏缓存按账号隔离：检测到换账号登录就清空本地收藏
+    //（服务器是数据源，A 的数据留在 A 的服务器账号里，随后全量拉取恢复 B 的数据）
+    const uidRaw = user != null ? user.get("id") : null;
+    const uid = uidRaw != null ? uidRaw.toString() : "";
+    const prevUid = getUserId();
+    if (prevUid.length > 0 && uid.length > 0 && prevUid != uid) {
+      usePlayerStore().clearLocalLikeData();
+    }
+    if (uid.length > 0) saveUserId(uid);
+    const nicknameValue = user != null ? (user.get("nickname") as string | null) : null;
+    const displayName =
+      nicknameValue != null && nicknameValue.length > 0
+        ? nicknameValue
+        : mode.value == "register"
+        ? regUsername.value.trim()
+        : account.value.trim();
+    uni.setStorageSync("qt-nickname", displayName);
+    // 记录用户邮箱，供播放页判断是否展示「播放地址」调试入口
+    const emailValue = user != null ? (user.get("email") as string | null) : null;
+    if (emailValue != null && emailValue.length > 0) uni.setStorageSync("qt-email", emailValue);
+    // 角色一并缓存（roles 在响应 data 根层），播放页按 qt_admin 角色决定是否展示调试入口
+    persistUserRoles(data);
+    // 登录/注册成功后后台拉一次 /me 写入缓存（本次运行内「我的」页面只读缓存）
+    refreshMe();
+    // 登录成功后从服务器同步收藏：不 await（全量拉取可能好几秒，卡在登录页体感差），
+    // 后台跑 + 慢时单独弹全局加载框提示（见 player.syncLikedFromServerInBackground）
+    usePlayerStore().syncLikedFromServerInBackground();
+    uni.showToast({ title: "登录成功" });
+    loginNavTimer = setTimeout(() => {
+      // 若当前页面栈只有登录页（例如保存资料后被 reLaunch 到登录页），
+      // navigateBack 会无效果导致停在登录页，此时直接回到首页
+      const pages = getCurrentPages();
+      if (pages.length > 1) {
+        uni.navigateBack();
+      } else {
+        uni.reLaunch({ url: "/pages/home/index" });
+      }
+    }, 500) as number;
+  } catch (error) {
+    uni.showToast({ title: (error as Error).message, icon: "none" });
+  } finally {
+    loading.value = false;
+  }
+}
+</script>
+
+<style>
+.login-scroll {
+  flex: 1;
+  width: 100%;
+}
+.page {
+  width: 100%;
+  /* min-height 由脚本按窗口高度注入 px（Vapor 不支持 %，见上方 pageMinHeight）。
+     内容矮时填满视口（宽屏垂直居中依赖），内容高（1:1/短屏）时超出行由外层 scroll-view 滚动，
+     否则登录按钮会被溢出裁掉、点不到。 */
+  padding: 100rpx 50rpx 60rpx;
+}
+
+.logo {
+  align-items: center;
+}
+.logo-img {
+  width: 140rpx;
+  height: 140rpx;
+  border-radius: 32rpx;
+}
+.logo-sub {
+  margin-top: 24rpx;
+  color: #6b7385;
+  font-size: 26rpx;
+}
+.card {
+  margin-top: 64rpx;
+  padding: 44rpx 36rpx 40rpx;
+  background-color: rgba(255, 255, 255, 0.92);
+  border-radius: 32rpx;
+}
+.card-dark {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+.field-row {
+  flex-direction: row;
+  align-items: center;
+  height: 100rpx;
+  margin-top: 26rpx;
+  padding: 0 28rpx;
+  background-color: #f4f5fa;
+  border-width: 1px;
+  border-color: #eef0f5;
+  border-radius: 22rpx;
+}
+.field-row-dark {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+.field-input {
+  flex: 1;
+  height: 100rpx;
+  color: #191d26;
+  font-size: 28rpx;
+}
+.field-ph {
+  color: #6b7385;
+  font-size: 28rpx;
+}
+.eye {
+  width: 64rpx;
+  height: 100rpx;
+  justify-content: center;
+  align-items: center;
+}
+.forget-row {
+  margin-top: 20rpx;
+  align-items: flex-end;
+}
+.forget-link {
+  padding: 8rpx 4rpx;
+}
+.forget-text {
+  color: #6b7385;
+  font-size: 24rpx;
+}
+.action {
+  margin-top: 40rpx;
+}
+.action-text {
+  color: #ffffff;
+  font-size: 32rpx;
+  font-weight: 600;
+}
+
+/* Vapor 宽屏：px 覆盖 rpx，1600x900 下避免按窗口比例放大 2.7 倍 */
+.page-wide {
+  padding: 40px 24px 32px;
+  align-items: center;
+  justify-content: center;
+}
+.logo-wide {
+  align-items: center;
+}
+.logo-img-wide {
+  width: 76px;
+  height: 76px;
+  border-radius: 18px;
+}
+.logo-sub-wide {
+  margin-top: 12px;
+  font-size: 14px;
+}
+.card-wide {
+  margin-top: 20px;
+  padding: 26px 26px 24px;
+  border-radius: 18px;
+  width: 420px;
+}
+.field-row-wide {
+  height: 52px;
+  margin-top: 14px;
+  padding-left: 18px;
+  padding-right: 18px;
+  border-radius: 12px;
+}
+.field-input-wide {
+  height: 52px;
+  font-size: 16px;
+}
+.field-ph-wide {
+  font-size: 16px;
+}
+.eye-wide {
+  width: 36px;
+  height: 52px;
+}
+.forget-row-wide {
+  margin-top: 12px;
+}
+.forget-link-wide {
+  padding: 6px 4px;
+}
+.forget-text-wide {
+  font-size: 13px;
+}
+.action-wide {
+  margin-top: 20px;
+}
+.action-wide.action-text {
+  font-size: 16px;
+}
+.action-text-wide { font-size: 16px; }
+</style>

@@ -1,0 +1,183 @@
+<template>
+  <view class="qrt">
+    <view
+      v-for="(b, bi) in blocks"
+      :key="bi"
+      class="qrt-block"
+      :class="bi > 0 ? 'qrt-gap' : ''"
+    >
+      <!-- 分割线 -->
+      <view v-if="b.kind == 'hr'" class="qrt-hr"></view>
+      <!-- 图片 -->
+      <image
+        v-else-if="b.kind == 'img'"
+        class="qrt-img"
+        :src="b.src"
+        mode="widthFix"
+        @click="onTap(b.href)"
+      />
+      <!-- 列表项 -->
+      <view v-else-if="b.kind == 'li'" class="qrt-li" @click="onTap(blockHref(b))">
+        <view class="qrt-dot" :style="dotStyle()"></view>
+        <text class="qrt-li-text" :style="liStyle(b)">
+          <text v-for="(r, ri) in b.runs" :key="ri" :style="runStyle(r, b)">{{ r.text }}</text>
+        </text>
+      </view>
+      <!-- 段落 / 标题 -->
+      <text v-else :style="paraStyle(b)" @click="onTap(blockHref(b))">
+        <text v-for="(r, ri) in b.runs" :key="ri" :style="runStyle(r, b)">{{ r.text }}</text>
+      </text>
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed } from "vue";
+import { parseRichText } from "@/services/richtext";
+import type { RichBlock, RichRun } from "@/services/richtext";
+import { openNoticeUrl } from "@/services/notice";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+
+const layout = useQtLayout();
+
+const props = defineProps<{
+  /** HTML 字符串（纯文本亦可） */
+  html: string;
+  /** 基础文字颜色 */
+  color?: string;
+  /** 基础字号（rpx） */
+  fontSize?: number;
+  /** 行高倍数 */
+  lineHeight?: number;
+  /** 对齐：left | center | right */
+  align?: string;
+}>();
+
+/** 在 JS 侧同步解析，渲染时已是结构化数据，与标题同帧出现 */
+const blocks = computed<RichBlock[]>(() => parseRichText(props.html ?? ""));
+
+const baseColor = computed(() => (props.color != null && props.color!.length > 0 ? props.color! : "#596173"));
+const baseSize = computed(() => (props.fontSize != null ? props.fontSize! : 26));
+const baseLine = computed(() => (props.lineHeight != null ? props.lineHeight! : 1.7));
+const baseAlign = computed(() => (props.align != null && props.align!.length > 0 ? props.align! : "left"));
+
+/** 标题各级相对基础字号的增量（rpx） */
+function headingDelta(level: number): number {
+  if (level <= 1) return 12;
+  if (level == 2) return 8;
+  if (level == 3) return 6;
+  if (level == 4) return 4;
+  if (level == 5) return 2;
+  return 0;
+}
+
+/** 行高按 rpx 计算：uni-app x 下无单位倍数行高不可靠，会导致文本高度算错、块之间重叠 */
+function lineHeightRpx(size: number): number {
+  return Math.round(size * baseLine.value);
+}
+
+/**
+ * 宽屏下 rpx 随窗口宽度放大（1600x900 时约 2.7 倍、2560x1440 约 3.4 倍），
+ * 富文本若继续按 rpx 渲染，公告/更新说明会被放大到难以阅读。
+ * 这里在宽屏时按 750 设计稿折算为绝对 px（1rpx ≈ 0.7px）。
+ */
+function scaledSize(size: number): number {
+  if (!layout.isWide) return size;
+  return Math.max(11, Math.round(size * 0.7));
+}
+function scaledLine(size: number): number {
+  return Math.round(scaledSize(size) * baseLine.value);
+}
+
+/** 段落/标题容器样式 */
+function paraStyle(b: RichBlock): string {
+  let size = baseSize.value;
+  if (b.kind == "h") size = size + headingDelta(b.level);
+  const out = scaledSize(size);
+  let s = "color:" + baseColor.value + ";";
+  s += "font-size:" + out + (layout.isWide ? "px;" : "rpx;");
+  s += "line-height:" + scaledLine(size) + (layout.isWide ? "px;" : "rpx;");
+  s += "text-align:" + baseAlign.value + ";";
+  if (b.kind == "h") s += "font-weight:700;";
+  return s;
+}
+
+/** 列表项文字样式：始终左对齐，避免居中导致圆点与文字分离 */
+function liStyle(b: RichBlock): string {
+  const size = baseSize.value;
+  const out = scaledSize(size);
+  let s = "color:" + baseColor.value + ";";
+  s += "font-size:" + out + (layout.isWide ? "px;" : "rpx;");
+  s += "line-height:" + scaledLine(size) + (layout.isWide ? "px;" : "rpx;");
+  s += "text-align:left;";
+  return s;
+}
+
+/** 圆点垂直对齐首行文字中线 */
+function dotStyle(): string {
+  const top = Math.round((scaledLine(baseSize.value) - 8) / 2);
+  return "margin-top:" + top + (layout.isWide ? "px;" : "rpx;");
+}
+
+/** 行内片段样式 */
+function runStyle(r: RichRun, b: RichBlock): string {
+  let s = "";
+  if (r.bold || b.kind == "h") s += "font-weight:700;";
+  if (r.italic) s += "font-style:italic;";
+  if (r.color.length > 0) s += "color:" + r.color + ";";
+  if (r.fontSize.length > 0) s += "font-size:" + r.fontSize + ";";
+  if (r.underline) s += "text-decoration-line:underline;";
+  else if (r.strike) s += "text-decoration-line:line-through;";
+  return s;
+}
+
+/** 取块内第一个链接（整块可点击，规避嵌套 text 事件差异） */
+function blockHref(b: RichBlock): string {
+  if (b.href.length > 0) return b.href;
+  for (const r of b.runs) {
+    if (r.href.length > 0) return r.href;
+  }
+  return "";
+}
+
+/** 点击链接 */
+function onTap(href: string): void {
+  if (href != null && href.length > 0) openNoticeUrl(href);
+}
+</script>
+
+<style>
+.qrt {
+  width: 100%;
+}
+.qrt-block {
+  width: 100%;
+}
+.qrt-gap {
+  margin-top: 12rpx;
+}
+.qrt-hr {
+  height: 1px;
+  margin: 10rpx 0;
+  background-color: rgba(154, 161, 178, 0.35);
+}
+.qrt-img {
+  width: 100%;
+  border-radius: 12rpx;
+}
+.qrt-li {
+  flex-direction: row;
+  align-items: flex-start;
+  padding-left: 8rpx;
+}
+.qrt-dot {
+  width: 8rpx;
+  height: 8rpx;
+  margin-right: 14rpx;
+  border-radius: 4rpx;
+  background-color: #9aa1b2;
+}
+.qrt-li-text {
+  flex: 1;
+}
+</style>

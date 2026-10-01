@@ -1,0 +1,186 @@
+<template>
+  <qt-page-frame :max-width="760">
+    <scroll-view class="theme-scroll" direction="vertical" :show-scrollbar="false">
+      <view class="theme-content" :class="layout.isWide ? 'theme-content-wide' : ''">
+        <qt-card title="明暗模式" description="跟随系统会在应用回到前台时同步系统外观。" elevated>
+          <view class="mode-row">
+            <view v-for="item in modeOptions" :key="item.id" class="mode-option" :class="theme.mode == item.id ? 'mode-option-active' : ''" :style="'background-color:' + (theme.mode == item.id ? theme.skin.accentSoft : theme.skin.surfaceMuted) + ';border-color:' + (theme.mode == item.id ? theme.skin.accent : theme.skin.border) + ';'" @click="pickMode(item.id)">
+              <text class="mode-name" :style="'color:' + theme.skin.text + ';'">{{ item.name }}</text>
+              <text class="mode-desc" :style="'color:' + theme.skin.textMuted + ';'">{{ item.description }}</text>
+            </view>
+          </view>
+        </qt-card>
+
+        <qt-card title="视觉基调" description="每个预置均提供浅色和深色令牌；切换预置会保留壁纸。" elevated>
+          <scroll-view class="skin-scroll" direction="horizontal" :show-scrollbar="false">
+            <view class="skin-row" :style="'width:' + skinRowWidth + 'px;'">
+              <view v-for="item in skinOptions" :key="item.id" class="skin-option" :class="theme.skinId == item.id ? 'skin-option-active' : ''" :style="skinOptionStyle(item.id)" @click="pickSkin(item.id)">
+                <view class="skin-swatch" :style="'background-color:' + previewSkin(item.id).accent + ';'" />
+                <text class="skin-name" :style="'color:' + previewSkin(item.id).text + ';'">{{ item.name }}</text>
+                <text class="skin-desc" :style="'color:' + previewSkin(item.id).textMuted + ';'">{{ item.description }}</text>
+                <QtIcon v-if="theme.skinId == item.id" class="skin-check" name="check" :size="layout.isWide ? 20 : 28" :color="previewSkin(item.id).accent" />
+              </view>
+            </view>
+          </scroll-view>
+        </qt-card>
+
+        <qt-card title="当前效果" description="此处始终预览当前实际解析出的皮肤。" elevated>
+          <view class="wallpaper-preview" :style="'background-color:' + theme.skin.background + ';'">
+            <image v-if="previewImage.length > 0" class="wallpaper-image" :src="previewImage" mode="aspectFill" @load="onWallpaperLoad" @error="onWallpaperError" />
+            <view class="wallpaper-overlay" :style="'background-color:' + theme.skin.overlay + ';'" />
+            <view class="wallpaper-content">
+              <QtIcon name="music" :size="layout.isWide ? 24 : 38" :color="theme.skin.accent" />
+              <text class="wallpaper-title" :style="'color:' + theme.skin.text + ';'">Your sound, your space.</text>
+              <text class="wallpaper-caption" :style="'color:' + theme.skin.textMuted + ';'">{{ theme.skin.name }} · {{ theme.dark ? '深色' : '浅色' }}</text>
+            </view>
+          </view>
+          <view class="url-row">
+            <input class="url-input" v-model="backgroundUrl" placeholder="输入 http(s) URL 或 /static/ 路径" :placeholder-style="'color:' + theme.skin.placeholder + ';'" />
+            <qt-button label="应用" size="sm" @click="applyBackground" />
+          </view>
+          <text v-if="wallpaperError.length > 0" class="error-text" :style="'color:' + theme.skin.danger + ';'">{{ wallpaperError }}</text>
+          <qt-button v-if="theme.skin.backgroundImage.length > 0" label="移除当前壁纸" variant="ghost" size="sm" @click="clearBackground" />
+        </qt-card>
+
+        <qt-card title="当前令牌" variant="muted">
+          <view class="token-row"><text class="token-key">模式</text><text class="token-value" :style="'color:' + theme.skin.text + ';'">{{ theme.mode }} / {{ theme.dark ? 'dark' : 'light' }}</text></view>
+          <view class="token-row"><text class="token-key">accent</text><text class="token-value" :style="'color:' + theme.skin.accent + ';'">{{ theme.skin.accent }}</text></view>
+          <view class="token-row"><text class="token-key">surface</text><text class="token-value" :style="'color:' + theme.skin.text + ';'">{{ theme.skin.surface }}</text></view>
+        </qt-card>
+
+        <view class="footer-actions">
+          <qt-button class="footer-button" label="恢复默认" variant="outline" size="md" @click="resetAll" />
+        </view>
+      </view>
+    </scroll-view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import { ref } from "vue";
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import QtCard from "@/uni_modules/qt-ui/components/qt-card/qt-card.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { QT_SKINS, type QtSkin, type QtThemeMode, useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+
+type ModeOption = { id: QtThemeMode; name: string; description: string };
+const theme = useThemeStore();
+const layout = useQtLayout();
+const skinOptions = QT_SKINS;
+const modeOptions: ModeOption[] = [
+  { id: "system", name: "跟随系统", description: "自动同步" },
+  { id: "light", name: "浅色", description: "始终明亮" },
+  { id: "dark", name: "深色", description: "始终深色" },
+];
+const backgroundUrl = ref(theme.skin.backgroundImage);
+const previewImage = ref(theme.skin.backgroundImage);
+const pendingImage = ref("");
+const wallpaperError = ref("");
+
+function pickMode(mode: QtThemeMode): void {
+  theme.setMode(mode);
+}
+function previewSkin(id: string): QtSkin {
+  for (let i = 0; i < QT_SKINS.length; i++) {
+    if (QT_SKINS[i].id == id) return theme.dark ? QT_SKINS[i].dark : QT_SKINS[i].light;
+  }
+  return theme.dark ? QT_SKINS[0].dark : QT_SKINS[0].light;
+}
+function skinOptionStyle(id: string): string {
+  const skin = previewSkin(id);
+  const border = theme.skinId == id ? skin.accent : skin.border;
+  return "background-color:" + skin.background + ";border-color:" + border + ";";
+}
+function pickSkin(id: string): void {
+  theme.setSkin(id);
+}
+// 横向 scroll-view 的内容在原生端不会自动撑开，需要显式 px 宽度（同 playlists 页 cat-rows）
+const skinRowWidth = computed((): number => {
+  const unit = layout.windowWidth / 750;
+  // skin-option 270rpx + margin-right 18rpx，外加行内边距 16rpx
+  return Math.ceil(skinOptions.length * (270 + 18) * unit + 16 * unit);
+});
+function isValidImagePath(value: string): boolean {
+  if (value.startsWith("https://") || value.startsWith("http://")) return true;
+  if (!value.startsWith("/static/")) return false;
+  return value.indexOf("..") < 0 && value.indexOf("\\") < 0 && value.length > 8;
+}
+function applyBackground(): void {
+  const candidate = backgroundUrl.value.trim();
+  wallpaperError.value = "";
+  if (candidate.length == 0) {
+    clearBackground();
+    return;
+  }
+  if (!isValidImagePath(candidate)) {
+    wallpaperError.value = "仅支持 http(s) URL 或不含 .. 的 /static/ 资源路径";
+    return;
+  }
+  pendingImage.value = candidate;
+  previewImage.value = candidate;
+}
+function onWallpaperLoad(): void {
+  if (pendingImage.value.length == 0 || previewImage.value != pendingImage.value) return;
+  theme.setBackgroundImage(pendingImage.value);
+  backgroundUrl.value = pendingImage.value;
+  pendingImage.value = "";
+  wallpaperError.value = "";
+  uni.showToast({ title: "壁纸已应用", icon: "none" });
+}
+function onWallpaperError(_event: any): void {
+  if (pendingImage.value.length == 0) return;
+  pendingImage.value = "";
+  previewImage.value = theme.skin.backgroundImage;
+  wallpaperError.value = "图片加载失败，未保存此壁纸";
+  uni.showToast({ title: "壁纸加载失败", icon: "none" });
+}
+function clearBackground(): void {
+  pendingImage.value = "";
+  previewImage.value = "";
+  backgroundUrl.value = "";
+  wallpaperError.value = "";
+  theme.setBackgroundImage("");
+}
+function resetAll(): void {
+  theme.resetAll();
+  pendingImage.value = "";
+  previewImage.value = "";
+  backgroundUrl.value = "";
+  wallpaperError.value = "";
+  uni.showToast({ title: "已恢复 Linen、跟随系统并移除壁纸", icon: "none" });
+}
+</script>
+
+<style>
+.theme-scroll { flex: 1; min-height: 0; }
+.theme-content { padding: 28rpx 24rpx 120rpx; }
+.theme-content-wide { padding: 18px 24px 72px; }
+.mode-row { flex-direction: row; }
+.mode-option { flex: 1; min-height: 104rpx; margin-right: 12rpx; padding: 18rpx; border-width: 1px; border-radius: 16rpx; }
+.mode-option-active { border-width: 2px; }
+.mode-name { font-size: 25rpx; font-weight: 650; }
+.mode-desc { margin-top: 7rpx; font-size: 20rpx; }
+.skin-scroll { margin-left: -8rpx; margin-right: -8rpx; height: 240rpx; }
+.skin-row { flex-direction: row; padding: 4rpx 8rpx 12rpx; flex-wrap: nowrap; }
+.skin-option { width: 270rpx; min-height: 180rpx; margin-right: 18rpx; padding: 22rpx; border-width: 1px; border-radius: 20rpx; position: relative; }
+.skin-option-active { border-width: 2px; }
+.skin-swatch { width: 32rpx; height: 32rpx; border-radius: 16rpx; margin-bottom: 22rpx; }
+.skin-name { font-size: 28rpx; font-weight: 650; }
+.skin-desc { margin-top: 8rpx; font-size: 21rpx; }
+.skin-check { position: absolute; right: 18rpx; top: 18rpx; }
+.wallpaper-preview { height: 250rpx; position: relative; overflow: hidden; border-radius: 18rpx; margin-bottom: 20rpx; }
+.wallpaper-image { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
+.wallpaper-overlay { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
+.wallpaper-content { position: relative; z-index: 2; padding: 30rpx; justify-content: flex-end; flex: 1; }
+.wallpaper-title { margin-top: 24rpx; font-size: 34rpx; font-weight: 700; }
+.wallpaper-caption { margin-top: 8rpx; font-size: 22rpx; }
+.url-row { flex-direction: row; align-items: center; margin-bottom: 10rpx; }
+.url-input { flex: 1; height: 74rpx; padding: 0 20rpx; border-width: 1px; border-color: rgba(25,29,38,0.10); border-radius: 14rpx; margin-right: 14rpx; font-size: 23rpx; background-color: rgba(255,255,255,0.64); }
+.error-text { margin-bottom: 12rpx; font-size: 21rpx; }
+.token-row { flex-direction: row; align-items: center; justify-content: space-between; min-height: 54rpx; }
+.token-key { color: #737b8e; font-size: 22rpx; }
+.token-value { font-size: 22rpx; font-family: monospace; }
+.footer-actions { flex-direction: row; margin-top: 24rpx; }
+.footer-button { flex: 1; }
+</style>

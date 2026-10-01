@@ -1,0 +1,103 @@
+<!--
+  统一加载指示器（全局唯一 loading 组件）
+  - 转圈圆环：SVG 圆弧 + UniElement.animate() 原生无限旋转
+  - 为什么不用 JS(setInterval/RAF)：列表加载时主线程会被渲染阻塞，
+    定时器回调无法执行导致转圈停住；animate() 是原生层动画，
+    由渲染线程驱动，不受 JS 阻塞影响，加载期间持续转动。
+  - 可选淡入淡出过渡：通过 visible 控制 opacity（配合 transition）
+  用法：
+    <qt-loading :visible="loading" size="56" :color="themeStore.skin.accent" />
+-->
+<template>
+  <view v-if="visible" ref="wrapRef" class="qt-loading" :style="wrapStyle">
+    <image class="qt-loading-img" ref="imgRef" :style="imgStyle" mode="aspectFit" :src="src" />
+  </view>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
+import { iconSrc } from "@/uni_modules/qt-ui/services/icons";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+
+const props = defineProps<{
+  visible: boolean;
+  size?: number;
+  color?: string;
+}>();
+
+const themeStore = useThemeStore();
+
+const wrapRef = ref<UniElement | null>(null);
+const imgRef = ref<UniElement | null>(null);
+let anim: UniAnimation | null = null;
+
+const sizePx = computed((): number => (props.size != null ? props.size! : 56));
+const tint = computed((): string => (props.color != null && props.color.length > 0 ? props.color! : themeStore.skin.accent));
+
+const src = computed(() => iconSrc("loader", tint.value, 3));
+
+const wrapStyle = computed(
+  (): string =>
+    "width:" + sizePx.value + "rpx;height:" + sizePx.value + "rpx;opacity:" +
+    (props.visible ? "1" : "0") +
+    ";transition:opacity 0.3s ease;"
+);
+const imgStyle = computed((): string => "width:" + sizePx.value + "rpx;height:" + sizePx.value + "rpx;");
+
+function startSpin(): void {
+  const el = imgRef.value;
+  if (el == null || anim != null) return;
+  const a = el.animate(
+    [
+      { transform: "rotate(0deg)" },
+      { transform: "rotate(360deg)" },
+    ],
+    {
+      duration: 1000,
+      iterations: Infinity,
+      easing: "linear",
+    }
+  );
+  anim = a;
+}
+
+// visible 由 false 切回 true 时，v-if 会销毁并重建旋转元素：
+// 旧动画已 cancel 且元素已换新，必须重启，否则转圈永久定格
+watch(
+  () => props.visible,
+  (visible) => {
+    if (!visible) {
+      if (anim != null) anim!.cancel();
+      anim = null;
+      return;
+    }
+    nextTick(() => {
+      startSpin();
+    });
+  }
+);
+
+onMounted(() => {
+  // 等元素挂载完成后启动原生旋转动画
+  nextTick(() => {
+    startSpin();
+  });
+});
+
+onBeforeUnmount(() => {
+  if (anim != null) {
+    anim!.cancel();
+  }
+  anim = null;
+});
+</script>
+
+<style>
+.qt-loading {
+  justify-content: center;
+  align-items: center;
+}
+.qt-loading-img {
+  flex-shrink: 0;
+}
+</style>

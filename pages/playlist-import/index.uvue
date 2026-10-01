@@ -1,0 +1,445 @@
+<template>
+  <qt-page-frame :max-width="960">
+    <view class="page" :class="layout.isWide ? 'page-wide' : ''">
+      <!-- 顶部说明（随 tag 切换） -->
+      <view class="hint" :class="layout.isWide ? 'hint-wide' : ''">
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';'">{{ hintText }}</text>
+      </view>
+
+      <!-- 两类导入：拷贝歌曲 / 收藏歌单 -->
+      <view class="tag-row" :class="layout.isWide ? 'tag-row-wide' : ''">
+        <QtSegmented v-model="modeTag" :list="['收藏歌单', '导入歌曲']" @change="switchMode" />
+      </view>
+
+      <!-- 第一步：输入链接 + 选平台 -->
+      <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="cardSkin">
+        <text class="step-title" :class="layout.isWide ? 'step-title-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">1 · 歌单链接</text>
+        <view class="input-row" :class="layout.isWide ? 'input-row-wide' : ''">
+          <input
+            v-model="rawInput"
+            class="link-input" :class="layout.isWide ? 'link-input-wide' : ''"
+            :style="'color:' + themeStore.skin.text + ';background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';'"
+            :placeholder-style="'color:' + themeStore.skin.placeholder + ';'"
+            :placeholder="platIndex == 0 ? '例：https://music.163.com/#/playlist?id=123456 或直接输入歌单 ID' : '输入歌单 ID 或分享链接'"
+            confirm-type="done"
+          />
+          <view class="parse-btn" :class="layout.isWide ? 'parse-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @click="onParse">
+            <text class="parse-btn-text" :class="layout.isWide ? 'parse-btn-text-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">{{ parsing ? "解析中" : "解析" }}</text>
+          </view>
+        </view>
+
+        <!-- 平台选择：内联下拉，不用弹窗 -->
+        <view class="plat-row" :class="layout.isWide ? 'plat-row-wide' : ''">
+          <text class="plat-label" :style="'color:' + themeStore.skin.textMuted + ';'">平台</text>
+          <view class="plat-select" :class="layout.isWide ? 'plat-select-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';' " @click="togglePlatMenu">
+            <text class="plat-select-text" :style="'color:' + themeStore.skin.text + ';'">{{ platLabels[platIndex] }}</text>
+            <QtIcon name="chevron-right" :size="24" :color="themeStore.skin.textMuted" />
+          </view>
+        </view>
+        <text class="plat-hint" :class="layout.isWide ? 'plat-hint-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';'">{{ platFormatHint }}</text>
+        <view v-if="platOpen" class="plat-menu" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
+          <view
+            v-for="(label, idx) in platLabels"
+            :key="idx"
+            class="plat-option"
+            :class="idx < platLabels.length - 1 ? 'plat-option-line' : ''"
+            @click="pickPlat(idx)"
+          >
+            <text class="plat-option-text" :style="'color:' + (platIndex == idx ? themeStore.skin.accent : themeStore.skin.text) + ';'">{{ label }}</text>
+            <QtIcon v-if="platIndex == idx" name="check" :size="24" :color="themeStore.skin.accent" />
+          </view>
+        </view>
+      </view>
+
+      <!-- 第二步（导入歌曲）：预览 + 歌单名 + 导入 -->
+      <!-- 第二步（导入歌单）：确认卡用 v-show 而不是 v-if——Vapor 首挂坑是「随大 v-if
+           子树首次挂载的原生 input 不可编辑」，页载时就挂好的 input 没这个问题；
+           解析完成后只切可见性，不再有首挂/重挂动作（:key 重挂会触发 bytecode
+           运行时的「UTS instance is not registered」，2026-09-30 实测） -->
+      <view v-show="modeTag == 1 && detail != null" class="card" :class="layout.isWide ? 'card-wide' : ''" :style="cardSkin">
+        <text class="step-title" :class="layout.isWide ? 'step-title-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">2 · 确认导入</text>
+        <text v-if="platNote.length > 0" class="plat-note" :class="layout.isWide ? 'plat-note-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';'">{{ platNote }}</text>
+        <view class="preview" :class="layout.isWide ? 'preview-wide' : ''">
+          <image class="preview-cover" :class="layout.isWide ? 'preview-cover-wide' : ''" :src="detailPicUrl" mode="aspectFill" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';' " />
+          <view class="preview-info">
+            <text class="preview-name" max-lines="2" :style="'color:' + themeStore.skin.text + ';'">{{ detailName }}</text>
+            <text class="preview-sub" max-lines="1" :style="'color:' + themeStore.skin.textMuted + ';'">{{ detailPlatformLabel }} · {{ detailTrackCount }} 首</text>
+          </view>
+        </view>
+        <text class="field-label" :class="layout.isWide ? 'field-label-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';'">导入到</text>
+        <view class="plat-row target-row" :class="layout.isWide ? 'plat-row-wide target-row-wide' : ''">
+          <view class="plat-select" :class="layout.isWide ? 'plat-select-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';'" @click="toggleTargetMenu">
+            <text class="plat-select-text" max-lines="1" :style="'color:' + themeStore.skin.text + ';'">{{ targetChoiceText }}</text>
+            <QtIcon name="chevron-right" :size="24" :color="themeStore.skin.textMuted" />
+          </view>
+        </view>
+        <view v-if="targetOpen" class="plat-menu" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
+          <view class="plat-option" :class="existingList.length > 0 ? 'plat-option-line' : ''" @click="pickTarget(0)">
+            <text class="plat-option-text" :style="'color:' + (targetChoice == 0 ? themeStore.skin.accent : themeStore.skin.text) + ';'">新建歌单</text>
+            <QtIcon v-if="targetChoice == 0" name="check" :size="24" :color="themeStore.skin.accent" />
+          </view>
+          <view v-for="(pl, i) in existingList" :key="pl.id" class="plat-option" :class="i < existingList.length - 1 ? 'plat-option-line' : ''" @click="pickTarget(i + 1)">
+            <text class="plat-option-text" max-lines="1" :style="'color:' + (targetChoice == i + 1 ? themeStore.skin.accent : themeStore.skin.text) + ';'">{{ pl.name }}</text>
+            <QtIcon v-if="targetChoice == i + 1" name="check" :size="24" :color="themeStore.skin.accent" />
+          </view>
+        </view>
+        <text v-if="targetChoice == 0" class="field-label" :class="layout.isWide ? 'field-label-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';'">歌单名称（留空默认同名）</text>
+        <input
+          v-if="targetChoice == 0"
+          v-model="targetName"
+          class="name-input" :class="layout.isWide ? 'name-input-wide' : ''"
+          :style="'color:' + themeStore.skin.text + ';background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';'"
+          :placeholder-style="'color:' + themeStore.skin.placeholder + ';'"
+          :placeholder="detailPlaceholder"
+          confirm-type="done"
+        />
+        <view class="main-btn" :class="layout.isWide ? 'main-btn-wide' : ''" :style="importing || importDone ? 'background-color:' + themeStore.skin.surfaceMuted + ';' : 'background-color:' + themeStore.skin.accent + ';' " @click="onImport">
+          <text class="main-btn-text" :style="'color:' + (importing || importDone ? themeStore.skin.textMuted : themeStore.skin.onAccent) + ';'">{{ importBtnText }}</text>
+        </view>
+        <text v-if="importProgress.length > 0" class="progress-text" :class="layout.isWide ? 'progress-text-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';'">{{ importProgress }}</text>
+      </view>
+
+      <!-- 第二步（收藏歌单）：预览 + 收藏按钮 -->
+      <view v-if="modeTag == 0 && detail != null" class="card" :class="layout.isWide ? 'card-wide' : ''" :style="cardSkin">
+        <text class="step-title" :class="layout.isWide ? 'step-title-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">2 · 确认收藏</text>
+        <text v-if="platNote.length > 0" class="plat-note" :class="layout.isWide ? 'plat-note-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';'">{{ platNote }}</text>
+        <view class="preview" :class="layout.isWide ? 'preview-wide' : ''">
+          <image class="preview-cover" :class="layout.isWide ? 'preview-cover-wide' : ''" :src="detail.picUrl" mode="aspectFill" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';' " />
+          <view class="preview-info">
+            <text class="preview-name" max-lines="2" :style="'color:' + themeStore.skin.text + ';'">{{ detail.name }}</text>
+            <text class="preview-sub" max-lines="1" :style="'color:' + themeStore.skin.textMuted + ';'">{{ platLabel(detail.platform) }} · {{ detail.tracks != null ? detail.tracks.length : 0 }} 首</text>
+          </view>
+        </view>
+        <view class="main-btn" :class="layout.isWide ? 'main-btn-wide' : ''" :style="importDone ? 'background-color:' + themeStore.skin.surfaceMuted + ';' : 'background-color:' + themeStore.skin.accent + ';' " @click="onCollect">
+          <text class="main-btn-text" :style="'color:' + (importDone ? themeStore.skin.textMuted : themeStore.skin.onAccent) + ';'">{{ importDone ? "已在收藏中" : "收藏到收藏夹" }}</text>
+        </view>
+      </view>
+
+      <!-- 全屏锁定层：拉取/导入进行中挡住整页并禁系统返回，防止中途离开留下半截状态 -->
+      <view v-if="parsing || importing" class="lock-mask">
+        <view class="lock-card" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
+          <QtLoading :visible="true" :size="44" :color="themeStore.skin.accent" />
+          <text class="lock-title" :style="'color:' + themeStore.skin.text + ';'">{{ importing ? "正在导入" : "正在拉取歌单" }}</text>
+          <text class="lock-sub" :style="'color:' + themeStore.skin.textMuted + ';'">{{ importing ? "共 " + importTotal + " 首歌曲" : "歌单较大时需要几秒，请稍候" }}</text>
+        </view>
+      </view>
+    </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
+import QtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { ref, computed } from "vue";
+import { onLoad, onBackPress } from "@dcloudio/uni-app";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { musicApi } from "@/services/music-api";
+import { usePlayerStore } from "@/stores/player";
+import { qtTrackPage } from "@/uni_modules/qt-stat";
+import type { Playlist } from "@/types/music";
+import type { Source } from "@/services/music-api";
+
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+const player = usePlayerStore();
+
+/** 0 收藏歌单（收藏远程引用）/ 1 导入歌曲（拷贝进自建歌单） */
+const modeTag = ref(0);
+const rawInput = ref("");
+const parsing = ref(false);
+const detail = ref<Playlist | null>(null);
+const targetName = ref("");
+const importing = ref(false);
+const importDone = ref(false);
+const importProgress = ref("");
+/** 本次导入的总歌数（锁定层文案用） */
+const importTotal = ref(0);
+/** 平台选择：0 自动识别，1-4 固定平台 */
+const platIndex = ref(0);
+const platOpen = ref(false);
+const platLabels: string[] = ["自动识别（链接）", "网易云", "QQ音乐", "酷狗", "酷我"];
+/** 解析平台与手选不一致时的说明（带链接时域名优先） */
+const platNote = ref("");
+const platValues: string[] = ["", "wyy", "qq", "kg", "kw"];
+
+// 拉取/导入进行中禁系统返回（导航栏返回与手势都走这里）
+onBackPress((_options: OnBackPressOptions): boolean => {
+  return parsing.value || importing.value;
+});
+
+const cardSkin = computed(
+  (): string =>
+    "background-color:" + themeStore.skin.surface + ";border-color:" + themeStore.skin.border + ";"
+);
+const importBtnText = computed((): string => {
+  if (importDone.value) return "导入完成";
+  if (importing.value) return "导入中…";
+  return targetChoice.value == 0 ? "导入到我的歌单" : "导入到已有歌单";
+});
+/**
+ * 确认卡改成 v-show 常挂载后，detail 为空时模板也会求值。带空值守卫的复杂
+ * 表达式（&& + 属性链三元）不能放模板：uvue 模板表达式编译对 && 不保证短路，
+ * 两边都求值，页载即崩「reading 'tracks'」（2026-09-30 实测）。全部收进 computed，
+ * 脚本层短路可靠，模板只绑简单值。
+ */
+const detailName = computed((): string => (detail.value != null ? detail.value.name : ""));
+const detailPicUrl = computed((): string => (detail.value != null ? detail.value.picUrl : ""));
+const detailPlatformLabel = computed((): string =>
+  detail.value != null ? platLabel(detail.value.platform) : ""
+);
+const detailTrackCount = computed((): number => {
+  const d = detail.value;
+  if (d == null || d.tracks == null) return 0;
+  return d.tracks.length;
+});
+const detailPlaceholder = computed((): string =>
+  detail.value != null ? "留空默认同名：" + detail.value.name : "留空默认同名"
+);
+/** 导入目标下拉：0 新建歌单；i>=1 对应 existingList[i-1]（打开时快照自建歌单列表） */
+const targetChoice = ref(0);
+const targetOpen = ref(false);
+const existingList = ref<Playlist[]>([]);
+const targetChoiceText = computed((): string => {
+  if (targetChoice.value == 0) return "新建歌单";
+  const pl = existingList.value[targetChoice.value - 1];
+  return pl != null ? pl.name : "新建歌单";
+});
+
+function toggleTargetMenu(): void {
+  targetOpen.value = !targetOpen.value;
+  if (targetOpen.value) {
+    existingList.value = player.pickerPlaylists();
+    // 上次选的歌单可能已被删掉，越界就回退到新建
+    if (targetChoice.value > existingList.value.length) targetChoice.value = 0;
+  }
+}
+
+function pickTarget(idx: number): void {
+  targetChoice.value = idx;
+  targetOpen.value = false;
+}
+/** 顶部说明：两种模式各有去向，支持的平台固定注明 */
+const hintText = computed((): string => {
+  const head =
+    modeTag.value == 0
+      ? "粘贴歌单分享链接或 ID，把远程歌单收藏进收藏夹，歌单内容跟随远程更新。"
+      : "粘贴歌单分享链接或 ID，拉取全部歌曲拷贝进我的自建歌单，导入后与远程歌单互不影响。";
+  return head + "仅支持" + platLabels.slice(1).join("、") + "四个平台。";
+});
+/** 平台行下方常驻注明：当前选择下该填链接还是歌单 ID */
+const platFormatHint = computed((): string => {
+  if (platIndex.value == 0) {
+    return "输入歌单分享链接，按链接域名自动识别平台；也可以直接填纯数字歌单 ID。";
+  }
+  return "输入" + platLabels[platIndex.value] + "的纯数字歌单 ID；粘贴链接时仍按链接域名识别，以链接为准。";
+});
+
+function platLabel(p: string): string {
+  if (p == "wyy") return "网易云";
+  if (p == "qq") return "QQ音乐";
+  if (p == "kw") return "酷我";
+  if (p == "kg") return "酷狗";
+  return p;
+}
+
+onLoad(() => {
+  qtTrackPage("pages/playlist-import/index");
+});
+
+/** 切 tag：清掉上一步的结果，输入与平台选择保留（同一条链接两种去向） */
+function switchMode(_index: number): void {
+  detail.value = null;
+  importDone.value = false;
+  importProgress.value = "";
+  targetName.value = "";
+  targetOpen.value = false;
+}
+
+function togglePlatMenu(): void {
+  platOpen.value = !platOpen.value;
+}
+
+function pickPlat(idx: number): void {
+  platIndex.value = idx;
+  platOpen.value = false;
+}
+
+/** 按当前平台选择解析输入；识别不出时不再弹窗，直接提示（可手动选平台后重试） */
+function parseInput(): { platform: Source; id: string } | null {
+  const text = rawInput.value.trim();
+  if (text.length == 0) {
+    uni.showToast({ title: "请先粘贴歌单链接", icon: "none" });
+    return null;
+  }
+  const sel = platValues[platIndex.value];
+  const parsed =
+    sel.length > 0
+      ? musicApi.parsePlaylistInput(text, sel as Source)
+      : musicApi.parsePlaylistInput(text);
+  if (parsed == null) {
+    uni.showToast({ title: "无法识别歌单ID，可试试在平台里手动选择", icon: "none", duration: 3000 });
+    return null;
+  }
+  return parsed;
+}
+
+/** 解析链接 → 拉取歌单详情；导入歌曲做全量预览，收藏歌单做确认页 */
+async function onParse(): Promise<void> {
+  if (parsing.value || importing.value) return;
+  const parsed = parseInput();
+  if (parsed == null) return;
+  const sel = platValues[platIndex.value];
+  platNote.value =
+    sel.length > 0 && parsed.platform != sel
+      ? "已按链接识别为" + platLabel(parsed.platform) + "，未按手选的" + platLabel(sel) + "解析"
+      : "";
+  parsing.value = true;
+  detail.value = null;
+  importDone.value = false;
+  importProgress.value = "";
+  try {
+    const remote = await musicApi.playlist(parsed.id, parsed.platform);
+    detail.value = remote;
+  } catch (e) {
+    uni.showToast({ title: (e as Error).message || "歌单获取失败", icon: "none", duration: 3000 });
+  } finally {
+    parsing.value = false;
+  }
+}
+
+/** 建歌单 + 批量拷贝：store 批量入口内存去重登记，落库与推送各一次（断网自动补推） */
+async function onImport(): Promise<void> {
+  if (importing.value || importDone.value) return;
+  if (detail.value == null) return;
+  const tracks = detail.value.tracks != null ? detail.value.tracks! : [];
+  if (tracks.length == 0) {
+    uni.showToast({ title: "该歌单没有可导入的歌曲", icon: "none", duration: 3000 });
+    return;
+  }
+  let targetId = "";
+  let targetNameShow = "";
+  if (targetChoice.value == 0) {
+    // 名称留空 = 默认用远程歌单名。不能往输入框预填值：被代码赋过值的 v-model
+    // 输入框在 Vapor 重渲染时会把敲进去的字打回旧值，表现为无法输入
+    const typed = targetName.value.trim();
+    const name = typed.length > 0 ? typed : detail.value.name;
+    const created = player.createLocalPlaylist(name, detail.value.picUrl);
+    if (created == null) {
+      uni.showToast({ title: "已有同名歌单，换个名字吧", icon: "none", duration: 3000 });
+      return;
+    }
+    targetId = created.id;
+    targetNameShow = created.name;
+  } else {
+    const pl = existingList.value[targetChoice.value - 1];
+    if (pl == null) {
+      uni.showToast({ title: "请选择要导入的歌单", icon: "none" });
+      return;
+    }
+    targetId = pl.id;
+    targetNameShow = pl.name;
+  }
+  importing.value = true;
+  importTotal.value = tracks.length;
+  // 先让锁定层上屏一帧，再做同步的批量登记（大歌单落库期间 UI 不再响应点击）
+  await new Promise<void>((r) => setTimeout(r, 50) as number);
+  const added = player.importSongsToPlaylist(tracks, targetId);
+  importProgress.value = "已导入 " + added + " / " + tracks.length + " 首到「" + targetNameShow + "」";
+  importing.value = false;
+  importDone.value = true;
+  uni.showToast({ title: "已导入 " + added + " 首歌曲", icon: "success" });
+}
+
+/** 收藏远程歌单（引用式）：已收藏过只提示；成功后跳歌单详情 */
+async function onCollect(): Promise<void> {
+  if (parsing.value || importDone.value) return;
+  if (detail.value == null) return;
+  const target = detail.value;
+  parsing.value = true;
+  try {
+    const already = player.isPlaylistSaved(target);
+    if (!already) {
+      player.toggleSavePlaylist(target);
+    }
+    parsing.value = false;
+    importDone.value = true;
+    uni.showToast({
+      title: already ? "歌单已在收藏中" : "已收藏到收藏夹",
+      icon: "none",
+      duration: 3000,
+    });
+    uni.navigateTo({
+      url:
+        "/pages/playlist/index?id=" +
+        encodeURIComponent(target.id) +
+        "&platform=" +
+        encodeURIComponent(target.platform) +
+        "&type=playlist",
+    });
+  } catch (e) {
+    parsing.value = false;
+    uni.showToast({ title: "收藏失败，请稍后再试", icon: "none", duration: 3000 });
+  }
+}
+</script>
+<style>
+.lock-mask { position: fixed; top: 0; right: 0; bottom: 0; left: 0; background-color: rgba(0, 0, 0, 0.45); align-items: center; justify-content: center; z-index: 999; }
+.lock-card { width: 320rpx; border-width: 1px; border-style: solid; border-radius: 20rpx; padding: 40rpx 30rpx; align-items: center; }
+.lock-title { margin-top: 20rpx; font-size: 28rpx; font-weight: bold; }
+.lock-sub { margin-top: 8rpx; font-size: 22rpx; }
+.page { flex: 1; padding: 24rpx; }
+.page-wide { padding: 16px 24px; }
+.hint { margin-bottom: 20rpx; }
+.hint-wide { margin-bottom: 12px; }
+.hint-text { font-size: 24rpx; line-height: 36rpx; }
+.hint-text-wide { font-size: 14px; line-height: 22px; }
+.tag-row { margin-bottom: 20rpx; }
+.tag-row-wide { margin-bottom: 12px; }
+.card { border-width: 1px; border-style: solid; border-radius: 20rpx; padding: 24rpx; margin-bottom: 20rpx; }
+.card-wide { border-radius: 12px; padding: 16px; margin-bottom: 12px; }
+.step-title { font-size: 28rpx; font-weight: bold; margin-bottom: 16rpx; }
+.step-title-wide { font-size: 16px; margin-bottom: 10px; }
+.input-row { flex-direction: row; align-items: center; }
+.input-row-wide { margin-bottom: 4px; }
+.link-input { flex: 1; height: 72rpx; border-width: 1px; border-style: solid; border-radius: 12rpx; padding: 0 20rpx; font-size: 26rpx; }
+.link-input-wide { height: 40px; border-radius: 8px; padding: 0 12px; font-size: 14px; }
+.parse-btn { height: 72rpx; border-radius: 12rpx; padding: 0 30rpx; margin-left: 16rpx; align-items: center; justify-content: center; }
+.parse-btn-wide { height: 40px; border-radius: 8px; padding: 0 18px; }
+.parse-btn-text { font-size: 26rpx; font-weight: bold; }
+.parse-btn-text-wide { font-size: 14px; }
+.plat-row { flex-direction: row; align-items: center; margin-top: 16rpx; }
+.plat-row-wide { margin-top: 10px; }
+.plat-label { width: 80rpx; font-size: 24rpx; }
+.plat-select { flex: 1; height: 64rpx; border-width: 1px; border-style: solid; border-radius: 12rpx; padding: 0 20rpx; flex-direction: row; align-items: center; justify-content: space-between; }
+.plat-select-wide { height: 38px; border-radius: 8px; padding: 0 12px; }
+.plat-select-text { font-size: 26rpx; }
+.plat-menu { margin-top: 12rpx; border-width: 1px; border-style: solid; border-radius: 12rpx; overflow: hidden; }
+.plat-option { height: 72rpx; padding: 0 20rpx; flex-direction: row; align-items: center; justify-content: space-between; }
+.plat-option-line { border-bottom-width: 1px; border-bottom-style: solid; border-bottom-color: rgba(128, 128, 128, 0.2); }
+.plat-option-text { font-size: 26rpx; }
+.plat-hint { margin-top: 10rpx; font-size: 22rpx; line-height: 32rpx; }
+.plat-hint-wide { margin-top: 6px; font-size: 12px; line-height: 18px; }
+.plat-note { margin-bottom: 12rpx; font-size: 22rpx; }
+.plat-note-wide { margin-bottom: 6px; font-size: 12px; }
+.preview { flex-direction: row; align-items: center; margin-bottom: 16rpx; }
+.preview-wide { margin-bottom: 10px; }
+.preview-cover { width: 96rpx; height: 96rpx; border-radius: 12rpx; }
+.preview-cover-wide { width: 56px; height: 56px; border-radius: 8px; }
+.preview-info { flex: 1; margin-left: 20rpx; }
+.preview-name { font-size: 28rpx; font-weight: bold; }
+.preview-sub { margin-top: 6rpx; font-size: 22rpx; }
+.field-label { font-size: 24rpx; margin-bottom: 10rpx; }
+.field-label-wide { font-size: 13px; margin-bottom: 6px; }
+/* 确认卡的目标下拉行：与下方（名称输入或导入按钮）保持一档间距 */
+.target-row { margin-bottom: 20rpx; }
+.target-row-wide { margin-bottom: 12px; }
+.name-input { height: 72rpx; border-width: 1px; border-style: solid; border-radius: 12rpx; padding: 0 20rpx; font-size: 26rpx; margin-bottom: 20rpx; }
+.name-input-wide { height: 40px; border-radius: 8px; padding: 0 12px; font-size: 14px; margin-bottom: 12px; }
+.main-btn { height: 80rpx; border-radius: 16rpx; align-items: center; justify-content: center; }
+.main-btn-wide { height: 44px; border-radius: 10px; }
+.main-btn-text { font-size: 28rpx; font-weight: bold; }
+.progress-text { margin-top: 16rpx; font-size: 24rpx; }
+.progress-text-wide { margin-top: 8px; font-size: 13px; }
+</style>

@@ -1,0 +1,537 @@
+/**
+ * 音源包本地存储（目录布局 + 读写 + 本地状态）
+ *
+ * 目录（Android 私有目录 filesDir 下，路径由 qt-js-engine 插件的 dataDir() 给出）：
+ *   source-bundle/
+ *     state.json                       本地状态（见下方 SourceLocalState）
+ *     pkg/<versionCode>/chain.json     可选覆盖层（manifest 列了才有；custom 直链包必无）
+ *     pkg/<versionCode>/source-bundle.js
+ *
+ * state.json 结构（与《音源包热更新开发方案》§2.3 同源，去掉 builtin 字段）：
+ *   { "installed": {versionCode, versionName, dir, files:{...}, source},
+ *     "previous":  {...}, "bad": [2026091801], "lastCheckAt": 1758200000000 }
+ *
+ * 注意 installed 表示「已落盘」，不等于「引擎已生效」：新包下载完落盘后，
+ * 引擎要重建（重启或设置页「立即应用」）才真正生效，两者用版本号比对判断。
+ *
+ * 仓库不内置任何音源包（公开仓库不含第三方音源实现）：包只有两个来源——
+ *   official：astral manifest 下发，支持自动更新；
+ *   custom：  用户在设置页粘贴直链安装，不自动更新（升级=重新粘贴链接）。
+ * installed 为 null 即「未安装」，在线取链不可用，由设置页/首页引导安装。
+ *
+ * custom 包没有官方版本号：versionCode 用「负的 unix 秒」当目录名，与 official
+ * 的 `yyyyMMddNN` 永不同号；自动更新只认正数官方号，custom 永不进降级基线。
+ *
+ * 为什么不放 uni storage：bundle 约 2MB，storage 是给小数据的；
+ * 文件读写统一走 qt-js-engine 插件（java.io），不依赖 uni.getFileSystemManager 的跨端可用性。
+ */
+
+// #ifdef APP-ANDROID
+import {
+  dataDir as nativeDataDir,
+  readTextFile as nativeReadTextFile,
+  writeTextFile as nativeWriteTextFile,
+  exists as nativeExists,
+  remove as nativeRemove,
+  mkdirs as nativeMkdirs,
+  listDir as nativeListDir,
+} from "@/uni_modules/qt-js-engine";
+// #endif
+
+const UNSUPPORTED = "当前平台不支持音源包存储";
+const ROOT_NAME = "source-bundle";
+const STATE_FILE = "state.json";
+
+/** 产物路径常量（与 manifest 的 artifacts[].path 一致） */
+export const ARTIFACT_CHAIN = "chain.json";
+export const ARTIFACT_BUNDLE = "source-bundle.js";
+
+/** 已落盘的一个音源包 */
+export type SourcePackage = {
+  /**
+   * 源版本号：official 包是后端发号（如 2026091801）；custom 包是「负的
+   * unix 秒」（目录名），只用来区分目录与回退，不参与官方版本比较。
+   */
+  versionCode: number;
+  /** 源版本名（official 如 2026.09.18.1；custom 如 custom:-1758000000） */
+  versionName: string;
+  /** 包目录绝对路径 */
+  dir: string;
+  /** 各产物的单文件版本号：{"chain.json": 8, "source-bundle.js": 3} */
+  files: UTSJSONObject;
+  /**
+   * 包来源：official = astral manifest 下发（自动更新）；
+   * custom = 用户直链安装（不自动更新）。缺失时按 official 兜底
+   * （旧版 state.json 的 installed 都是 official）。
+   */
+  source: string;
+};
+
+/** 本地状态（state.json） */
+export type SourceLocalState = {
+  /** 当前已落盘并应生效的包（null = 未安装，在线取链不可用） */
+  installed: SourcePackage | null;
+  /** 上一个包（回退用；同时是增量下载的复用来源） */
+  previous: SourcePackage | null;
+  /** 冒烟自检失败过的版本号，不再重下（custom 负数号也会进来，重装会落新目录） */
+  bad: number[];
+  /** 上次检查更新时间（毫秒，节流用） */
+  lastCheckAt: number;
+};
+
+// ==================== 平台文件 API ====================
+
+// #ifdef APP-ANDROID
+function fsDataDir(): string {
+  return nativeDataDir();
+}
+
+function fsRead(path: string): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    nativeReadTextFile(path, (ok: boolean, value: string, error: string) => {
+      if (ok) {
+        resolve(value);
+      } else {
+        reject(new Error(error));
+      }
+    });
+  });
+}
+
+function fsWrite(path: string, text: string): Promise<boolean> {
+  return new Promise<boolean>((resolve, reject) => {
+    nativeWriteTextFile(path, text, (ok: boolean, value: string, error: string) => {
+      if (ok) {
+        resolve(true);
+      } else {
+        reject(new Error(error));
+      }
+    });
+  });
+}
+
+function fsExists(path: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    nativeExists(path, (ok: boolean, value: string, error: string) => {
+      resolve(ok && value == "1");
+    });
+  });
+}
+
+function fsRemove(path: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    nativeRemove(path, (ok: boolean, value: string, error: string) => {
+      resolve(ok);
+    });
+  });
+}
+
+function fsMkdirs(path: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    nativeMkdirs(path, (ok: boolean, value: string, error: string) => {
+      resolve(ok);
+    });
+  });
+}
+// #endif
+
+// #ifndef APP-ANDROID
+function fsDataDir(): string {
+  return "";
+}
+
+function fsRead(path: string): Promise<string> {
+  return Promise.reject(new Error(UNSUPPORTED));
+}
+
+function fsWrite(path: string, text: string): Promise<boolean> {
+  return Promise.reject(new Error(UNSUPPORTED));
+}
+
+function fsExists(path: string): Promise<boolean> {
+  return Promise.resolve(false);
+}
+
+function fsRemove(path: string): Promise<boolean> {
+  return Promise.resolve(false);
+}
+
+function fsMkdirs(path: string): Promise<boolean> {
+  return Promise.resolve(false);
+}
+// #endif
+
+// ==================== 路径 ====================
+
+/** 音源包根目录（空串 = 当前平台不可用） */
+export function packageRoot(): string {
+  const base = fsDataDir();
+  if (base.length == 0) return "";
+  return base + "/" + ROOT_NAME;
+}
+
+export function packageDir(versionCode: number): string {
+  return packageRoot() + "/pkg/" + versionCode;
+}
+
+/** 某个产物在包目录里的绝对路径（path 用 ARTIFACT_* 常量） */
+export function artifactPath(versionCode: number, path: string): string {
+  return packageDir(versionCode) + "/" + path;
+}
+
+export function statePath(): string {
+  return packageRoot() + "/" + STATE_FILE;
+}
+
+// ==================== 内存副本 + 读写 ====================
+
+let gState: SourceLocalState = emptyState();
+
+/** restoreLocalState 的单飞句柄：进程内只恢复一次（重复恢复会把内存状态清空重读） */
+let gRestorePromise: Promise<SourceLocalState> | null = null;
+
+/** 同步读本地状态（启动预热后可用；未预热时是空状态） */
+export function localState(): SourceLocalState {
+  return gState;
+}
+
+/**
+ * 引擎该装哪个包：就 installed 一个（null = 未安装音源包，在线取链不可用）。
+ * 仓库不内置音源包，没有「内置版」这条回退底——回退链只有
+ * 「最新 → previous → 未安装（引导安装）」。
+ */
+export function installedPackage(): SourcePackage | null {
+  return gState.installed;
+}
+
+export function emptyState(): SourceLocalState {
+  return { installed: null, previous: null, bad: [], lastCheckAt: 0 } as SourceLocalState;
+}
+
+/**
+ * 从磁盘恢复本地状态到内存（幂等）。
+ * 返回的状态里 installed 可能是 null——此时就是「未安装」，由调用方引导安装。
+ */
+export async function restoreLocalState(): Promise<SourceLocalState> {
+  gState = emptyState();
+  try {
+    const raw = await fsRead(statePath());
+    if (raw.length > 0) {
+      const o = JSON.parse(raw) as UTSJSONObject;
+      const state = stateFromJson(o);
+      // 状态指向的包必须真的在盘上（避免「状态在、文件被清」）。
+      // 只认 bundle：chain.json 是可选覆盖层（其内容与 bundle 内置默认链同源，
+      // 构建期由同一份 chain-config 序列化生成），官方包不带它也能跑。
+      const installed = state.installed;
+      if (installed != null) {
+        const bundleOk = await fsExists(artifactPath(installed.versionCode, ARTIFACT_BUNDLE));
+        if (!bundleOk) {
+          state.installed = null;
+        }
+      }
+      gState = state;
+    }
+  } catch (_) {
+    // 读不到/解析不了 state.json 就当空状态（未安装）
+  }
+  return gState;
+}
+
+/**
+ * 确保本地状态已从磁盘恢复（进程内幂等，只跑一次）。
+ *
+ * 为什么需要：恢复是异步的，而首页等页面现在直接依赖引擎数据（引擎得先有包），
+ * 页面调用完全可能赶在预热完成之前——直接读 installedPackage() 会拿到空状态，
+ * 误报「音源包未就绪：尚未装载」。数据链路（ensurePackageLoaded）必须先过这里。
+ */
+export function ensureLocalStateRestored(): Promise<SourceLocalState> {
+  if (gRestorePromise == null) {
+    gRestorePromise = restoreLocalState();
+    // 恢复失败不该让所有等待方集体报错：失败时 installedPackage() 自然为 null，
+    // 各调用方按「没有可用包」走自己的兜底
+    gRestorePromise.catch(() => {});
+  }
+  return gRestorePromise;
+}
+
+/** 写本地状态（同时更新内存副本） */
+export async function saveLocalState(state: SourceLocalState): Promise<boolean> {
+  try {
+    const o = new UTSJSONObject();
+    o.set("installed", packageToJson(state.installed));
+    o.set("previous", packageToJson(state.previous));
+    o.set("bad", state.bad);
+    o.set("lastCheckAt", state.lastCheckAt);
+    await fsWrite(statePath(), JSON.stringify(o));
+    gState = state;
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/** 只更新 lastCheckAt 并落盘（节流用） */
+export async function touchLastCheck(at: number): Promise<void> {
+  const next = cloneState(gState);
+  next.lastCheckAt = at;
+  await saveLocalState(next);
+}
+
+export function cloneState(s: SourceLocalState): SourceLocalState {
+  const bad: number[] = [];
+  for (let i = 0; i < s.bad.length; i++) bad.push(s.bad[i]);
+  return {
+    installed: s.installed,
+    previous: s.previous,
+    bad: bad,
+    lastCheckAt: s.lastCheckAt,
+  } as SourceLocalState;
+}
+
+// ==================== 产物读写 ====================
+
+export async function ensurePackageDir(versionCode: number): Promise<boolean> {
+  return fsMkdirs(packageDir(versionCode));
+}
+
+/** 写一个产物到包目录（调用前先 ensurePackageDir） */
+export function writeArtifact(versionCode: number, path: string, text: string): Promise<boolean> {
+  return fsWrite(artifactPath(versionCode, path), text);
+}
+
+/** 读一个产物；读不到返回 "" */
+export async function readArtifact(versionCode: number, path: string): Promise<string> {
+  try {
+    return await fsRead(artifactPath(versionCode, path));
+  } catch (_) {
+    return "";
+  }
+}
+
+/** 删一个产物（文件本就不存在也算成功）；发布清单不再列出某产物时用它清掉旧覆盖层 */
+export function removeArtifact(versionCode: number, path: string): Promise<boolean> {
+  return fsRemove(artifactPath(versionCode, path));
+}
+
+/** 按绝对路径读文本（下载中转的临时文件用）；读不到返回 "" */
+export async function readTextFileAt(path: string): Promise<string> {
+  try {
+    return await fsRead(path);
+  } catch (_) {
+    return "";
+  }
+}
+
+/** 按绝对路径写文本 */
+export function writeTextFileAt(path: string, text: string): Promise<boolean> {
+  return fsWrite(path, text);
+}
+
+/** 按绝对路径删除文件/目录 */
+export function removeFileAt(path: string): Promise<boolean> {
+  return fsRemove(path);
+}
+
+/** 按绝对路径判断存在 */
+export function existsFileAt(path: string): Promise<boolean> {
+  return fsExists(path);
+}
+
+/** 包目录里某个产物的版本号（没有则 0） */
+export function fileVersion(pkg: SourcePackage | null, path: string): number {
+  if (pkg == null) return 0;
+  return numOf(pkg.files, path);
+}
+
+/** 删除一个版本目录 */
+export function removePackage(versionCode: number): Promise<boolean> {
+  return fsRemove(packageDir(versionCode));
+}
+
+/**
+ * 清掉所有已安装的音源包（回到「未安装」：在线取链不可用，设置页/首页引导安装）。
+ * state.json 一并清空，pkg/ 目录整棵删除。
+ */
+export async function clearAll(): Promise<void> {
+  gState = emptyState();
+  await fsRemove(packageRoot());
+}
+
+/** 清理旧包目录：只保留 installed / previous 两个 */
+export async function prunePackages(): Promise<void> {
+  const keepA = gState.installed != null ? gState.installed.versionCode : 0;
+  const keepB = gState.previous != null ? gState.previous.versionCode : 0;
+  const codes = await listPackageDirs();
+  for (let i = 0; i < codes.length; i++) {
+    const code = codes[i];
+    if (code != keepA && code != keepB) {
+      await removePackage(code);
+    }
+  }
+}
+
+/** 列出 pkg 下的版本号目录（升序；custom 的负数目录也在内） */
+async function listPackageDirs(): Promise<number[]> {
+  const dir = packageRoot() + "/pkg";
+  const entries = await fsListNames(dir);
+  const out: number[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const code = parseCode(entries[i]);
+    if (code != 0) out.push(code);
+  }
+  out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return out;
+}
+
+// #ifdef APP-ANDROID
+function fsListNames(dir: string): Promise<string[]> {
+  return new Promise<string[]>((resolve) => {
+    nativeListDir(dir, (ok: boolean, value: string, error: string) => {
+      if (!ok) {
+        resolve([] as string[]);
+        return;
+      }
+      const out: string[] = [];
+      try {
+        const arr = JSON.parse(value) as UTSJSONObject[];
+        for (let i = 0; i < arr.length; i++) {
+          const o = arr[i];
+          const isDir = o.get("dir") as boolean | null;
+          const name = o.get("name") as string | null;
+          if (isDir == true && name != null) out.push(name);
+        }
+      } catch (_) {}
+      resolve(out);
+    });
+  });
+}
+// #endif
+
+// #ifndef APP-ANDROID
+function fsListNames(dir: string): Promise<string[]> {
+  return Promise.resolve([] as string[]);
+}
+// #endif
+
+// ==================== 回退 ====================
+
+/**
+ * 回退到上一个包（「最新 → previous → 未安装」这条回退链的中间一环）。
+ * 返回 false 表示没有可用的上一版，调用方应清空状态走「未安装」。
+ */
+export async function rollbackToPrevious(): Promise<boolean> {
+  const prev = gState.previous;
+  if (prev == null) return false;
+  // 只认 bundle：chain.json 是可选覆盖层，缺失时 bundle 用内置默认链跑
+  const bundleOk = await fsExists(artifactPath(prev.versionCode, ARTIFACT_BUNDLE));
+  if (!bundleOk) return false;
+  const next = cloneState(gState);
+  next.installed = prev;
+  next.previous = null;
+  return saveLocalState(next);
+}
+
+/**
+ * 把一个版本号标记为坏包（冒烟失败后调用），并从 installed 里剔除。
+ * custom 的负数号同样拉黑：它没有自动更新，拉黑只影响「这一份落盘目录」，
+ * 用户重新粘贴链接安装会落新目录（新的负数号），不受影响。
+ */
+export async function markBad(versionCode: number): Promise<void> {
+  const next = cloneState(gState);
+  let exists = false;
+  for (let i = 0; i < next.bad.length; i++) {
+    if (next.bad[i] == versionCode) exists = true;
+  }
+  if (!exists) next.bad.push(versionCode);
+  if (next.installed != null && next.installed.versionCode == versionCode) {
+    next.installed = null;
+  }
+  if (next.previous != null && next.previous.versionCode == versionCode) {
+    next.previous = null;
+  }
+  await saveLocalState(next);
+}
+
+export function isBad(versionCode: number): boolean {
+  for (let i = 0; i < gState.bad.length; i++) {
+    if (gState.bad[i] == versionCode) return true;
+  }
+  return false;
+}
+
+// ==================== JSON ↔ 类型 ====================
+
+function packageToJson(pkg: SourcePackage | null): UTSJSONObject | null {
+  if (pkg == null) return null;
+  const o = new UTSJSONObject();
+  o.set("versionCode", pkg.versionCode);
+  o.set("versionName", pkg.versionName);
+  o.set("dir", pkg.dir);
+  o.set("files", pkg.files);
+  o.set("source", pkg.source);
+  return o;
+}
+
+function packageFromJson(v: UTSJSONObject | null): SourcePackage | null {
+  if (v == null) return null;
+  const versionCode = numOf(v, "versionCode");
+  // 0 无效；custom 包的负数号（目录名）是合法值
+  if (versionCode == 0) return null;
+  const files = v.get("files") as UTSJSONObject | null;
+  const source = strOf(v, "source");
+  return {
+    versionCode: versionCode,
+    versionName: strOf(v, "versionName"),
+    dir: strOf(v, "dir"),
+    files: files != null ? files : new UTSJSONObject(),
+    // 旧版 state.json 没有 source 字段：当时的包全是 manifest 下发的 official
+    source: source.length > 0 ? source : "official",
+  } as SourcePackage;
+}
+
+function stateFromJson(o: UTSJSONObject): SourceLocalState {
+  const state = emptyState();
+  state.installed = packageFromJson(o.get("installed") as UTSJSONObject | null);
+  state.previous = packageFromJson(o.get("previous") as UTSJSONObject | null);
+  state.lastCheckAt = numOf(o, "lastCheckAt");
+  const bad = o.get("bad") as number[] | null;
+  if (bad != null) {
+    const list: number[] = [];
+    for (let i = 0; i < bad.length; i++) {
+      const n = bad[i] as number;
+      // 负数（custom 坏包目录号）也保留：挡住同一份目录的重装路径
+      if (n != null && n != 0) list.push(n);
+    }
+    state.bad = list;
+  }
+  return state;
+}
+
+function strOf(o: UTSJSONObject, key: string): string {
+  const v = o.get(key);
+  if (v == null) return "";
+  return `${v}`;
+}
+
+function numOf(o: UTSJSONObject, key: string): number {
+  const v = o.get(key);
+  if (v == null) return 0;
+  const n = v as number;
+  if (n == null) return 0;
+  return n;
+}
+
+/** 数字目录名 → 版本号（custom 的负数目录名如 -1758000000 也认；非法返回 0） */
+function parseCode(name: string): number {
+  if (name.length == 0) return 0;
+  const negative = name.charAt(0) == "-";
+  const digits = negative ? name.substring(1) : name;
+  if (digits.length == 0) return 0;
+  let v = 0;
+  for (let i = 0; i < digits.length; i++) {
+    const c = digits.charCodeAt(i)!;
+    if (c < 48 || c > 57) return 0;
+    v = v * 10 + (c - 48);
+  }
+  return negative ? -v : v;
+}

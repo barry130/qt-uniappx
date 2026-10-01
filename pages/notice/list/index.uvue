@@ -1,0 +1,348 @@
+<template>
+  <qt-page-frame :max-width="760">
+  <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']">
+    <!-- 工具条：未读提示 + 一键已读兜底（未登录时广播公告与登录无关，不展示提示行） -->
+    <view v-if="loggedIn" class="toolbar" :class="layout.isWide ? 'toolbar-wide' : ''">
+      <text class="toolbar-text" :class="layout.isWide ? 'toolbar-text-wide' : ''">{{
+        unreadLocal > 0 ? unreadLocal + " 条未读" : "全部已读"
+      }}</text>
+      <view v-if="unreadLocal > 0" class="readall-btn" :class="layout.isWide ? 'readall-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @tap="onMarkAllRead">
+        <text class="readall-btn-text" :class="layout.isWide ? 'readall-btn-text-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">一键已读</text>
+      </view>
+    </view>
+
+    <list-view class="list" direction="vertical">
+      <list-item v-if="loading" class="empty" :class="layout.isWide ? 'empty-wide' : ''"><text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''">加载中...</text></list-item>
+      <list-item v-else-if="items.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
+        <QtIcon name="bell" :size="layout.isWide ? 44 : 72" color="#c3c9d6" />
+        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''">暂无消息</text>
+        <view v-if="!loggedIn" class="login-btn" :class="layout.isWide ? 'login-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @tap="goLogin">
+          <text class="login-btn-text" :class="layout.isWide ? 'login-btn-text-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">去登录</text>
+        </view>
+      </list-item>
+      <list-item
+        v-for="item in items"
+        :key="item.notice.id"
+        class="n-item" :class="[[layout.isWide ? 'n-item-wide' : ''], [item.read ? 'n-item-read' : (themeStore.dark ? 'n-item-dark' : ''), layout.isWide ? 'n-item-wide' : '']]"
+        
+        @tap="openItem(item)"
+      >
+        <view class="n-icon-wrap" :class="layout.isWide ? 'n-icon-wrap-wide' : ''" :style="'background-color:' + themeStore.skin.accentSoft + ';'">
+          <QtIcon name="bell" :size="layout.isWide ? 22 : 36" :color="themeStore.skin.accent" />
+          <!-- 未读红点：前端缓存判定 -->
+          <view v-if="!item.read" class="n-dot" :class="layout.isWide ? 'n-dot-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'"></view>
+        </view>
+        <view class="n-body" :class="layout.isWide ? 'n-body-wide' : ''">
+          <view class="n-top">
+            <view class="n-title-wrap" :class="layout.isWide ? 'n-title-wrap-wide' : ''">
+              <!-- 类型标签：公告灰 / 反馈蓝 / 需求橙 -->
+              <view class="ntype" :class="layout.isWide ? 'ntype-wide' : ''" :style="'background-color:' + ntypeColor(item.notice)">
+                <text class="ntype-text" :class="layout.isWide ? 'ntype-text-wide' : ''">{{ noticeTypeLabel(item.notice.noticeType) }}</text>
+              </view>
+              <view v-if="(item.notice.isTop ?? 0) == 1" class="n-top-badge" :class="layout.isWide ? 'n-top-badge-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'">
+                <text class="n-top-badge-text" :class="layout.isWide ? 'n-top-badge-text-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">置顶</text>
+              </view>
+              <text class="n-title" :class="layout.isWide ? 'n-title-wide' : ''" :max-lines="1">{{
+                item.notice.title != null && item.notice.title!.length > 0 ? item.notice.title! : "公告"
+              }}</text>
+            </view>
+            <text v-if="item.notice.createTime != null && item.notice.createTime!.length > 0" class="n-time" :class="layout.isWide ? 'n-time-wide' : ''">{{
+              formatTime(item.notice.createTime!)
+            }}</text>
+          </view>
+          <text class="n-content" :class="layout.isWide ? 'n-content-wide' : ''" :max-lines="2">{{
+            item.notice.content != null && item.notice.content!.length > 0 ? stripHtml(item.notice.content!) : "点击查看详情"
+          }}</text>
+        </view>
+        <QtIcon name="chevron-right" :size="layout.isWide ? 18 : 26" color="#c3c9d6" />
+      </list-item>
+      <list-item class="list-bottom-pad" :class="layout.isWide ? 'list-bottom-pad-wide' : ''"></list-item>
+    </list-view>
+  </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { ref, computed } from "vue";
+import { onShow } from "@dcloudio/uni-app";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useNoticeStore } from "@/stores/notice";
+import { fetchMessageCenter, noticeTypeLabel, openNoticeUrl, sortNotices, stripHtml } from "@/services/notice";
+import { isRead, markAllRead, markRead } from "@/services/notice-read";
+import { isLoggedIn } from "@/services/auth";
+import { qtTrackPage } from "@/uni_modules/qt-stat";
+import type { Notice, NoticeListItem } from "@/types/notice";
+
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+const noticeStore = useNoticeStore();
+
+/** 列表项（通知 + 进入页面时的已读快照） */
+const items = ref<NoticeListItem[]>([]);
+const loading = ref(false);
+const loggedIn = computed(() => isLoggedIn());
+const unreadLocal = computed(() => {
+  let unread = 0;
+  for (let i = 0; i < items.value.length; i++) {
+    if (!items.value[i].read) unread++;
+  }
+  return unread;
+});
+
+async function load(): Promise<void> {
+  // 首次加载才显示“加载中”占位；已有数据时静默刷新，避免返回页面时跳动
+  loading.value = items.value.length == 0;
+  try {
+    if (isLoggedIn()) {
+      // 已登录：拉取消息中心（公告 + 反馈/需求通知），已读状态取自本地缓存快照
+      // 未读的保持未读：点一条读一条，或用「一键已读」按钮
+      const list = sortNotices(await fetchMessageCenter());
+      const viewItems: NoticeListItem[] = [];
+      for (let i = 0; i < list.length; i++) {
+        viewItems.push({ notice: list[i], read: isRead(list[i]) });
+      }
+      items.value = viewItems;
+      noticeStore.refreshUnread();
+    } else {
+      // 游客：展示对游客可见的公告（消息中心渠道），不做已读标记
+      if (!noticeStore.loaded) {
+        await noticeStore.load();
+      }
+      const list = sortNotices(noticeStore.dispatch.messageCenter);
+      const viewItems: NoticeListItem[] = [];
+      for (let i = 0; i < list.length; i++) {
+        viewItems.push({ notice: list[i], read: true });
+      }
+      items.value = viewItems;
+    }
+  } catch (_) {
+    // 保留旧数据，不因刷新失败清空
+  } finally {
+    loading.value = false;
+  }
+}
+
+/**
+ * 点击通知：
+ * - 反馈/需求通知（feedbackId 非空）→ 反馈详情
+ * - 配置了跳转链接 → openNoticeUrl
+ * - 其余 → 公告详情页
+ */
+function openItem(item: NoticeListItem): void {
+  const n: Notice = item.notice;
+  if (isLoggedIn()) {
+    if (!item.read) {
+      markRead(n.id);
+      item.read = true;
+      noticeStore.refreshUnread();
+    }
+  }
+  if (n.feedbackId != null) {
+    uni.navigateTo({ url: "/pages/feedback/detail?id=" + n.feedbackId });
+    return;
+  }
+  if (n.url != null && n.url!.length > 0) {
+    openNoticeUrl(n.url);
+    return;
+  }
+  uni.navigateTo({ url: "/pages/notice/detail/index?id=" + n.id });
+}
+
+/** 一键已读（兜底按钮） */
+function onMarkAllRead(): void {
+  const ids: number[] = [];
+  for (let i = 0; i < items.value.length; i++) ids.push(items.value[i].notice.id);
+  markAllRead(ids);
+  for (let i = 0; i < items.value.length; i++) items.value[i].read = true;
+  noticeStore.refreshUnread();
+}
+
+/** 类型标签配色：公告灰 / 反馈蓝 / 需求橙 */
+function ntypeColor(n: Notice): string {
+  const t = n.noticeType ?? "announce";
+  if (t == "feedback") return "#4a7dff";
+  if (t == "request") return "#e8890c";
+  return "#c4c9d4";
+}
+
+function goLogin(): void {
+  uni.navigateTo({ url: "/pages/login/index" });
+}
+
+function formatTime(t: string): string {
+  if (t == null || t.length == 0) return "";
+  if (t.length >= 16) return t.substring(5, 16);
+  return t;
+}
+
+// 仅用 onShow 加载：首屏与从详情返回时各刷新一次，避免 onLoad+onShow 重复请求导致渲染两次
+onShow(() => {
+  qtTrackPage("pages/notice/list/index");
+  load();
+});
+</script>
+
+<style>
+.page {
+  flex: 1;
+}
+
+.toolbar {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20rpx 32rpx 4rpx;
+}
+.toolbar-text {
+  color: #6b7385;
+  font-size: 24rpx;
+}
+.readall-btn {
+  padding: 8rpx 24rpx;
+  justify-content: center;
+  align-items: center;
+  border-radius: 26rpx;
+}
+.readall-btn-text {
+  font-size: 23rpx;
+  font-weight: 600;
+}
+.list {
+  flex: 1;
+}
+.list-bottom-pad {
+  height: 30rpx;
+}
+.empty {
+  padding: 140rpx 32rpx;
+  justify-content: center;
+  align-items: center;
+}
+.empty-text {
+  margin-top: 20rpx;
+  color: #6b7385;
+  font-size: 26rpx;
+}
+.login-btn {
+  margin-top: 36rpx;
+  padding: 16rpx 56rpx;
+  justify-content: center;
+  align-items: center;
+  border-radius: 36rpx;
+}
+.login-btn-text {
+  font-size: 26rpx;
+  font-weight: 600;
+}
+.n-item {
+  flex-direction: row;
+  align-items: center;
+  margin: 20rpx 24rpx 0;
+  padding: 28rpx 24rpx;
+  background-color: rgba(255, 255, 255, 0.62);
+  border-width: 1px;
+  border-color: rgba(255, 255, 255, 0.6);
+  border-radius: 20rpx;
+}
+.n-item-dark {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+.n-item-read {
+  opacity: 0.72;
+}
+.n-icon-wrap {
+  position: relative;
+  width: 72rpx;
+  height: 72rpx;
+  border-radius: 20rpx;
+  justify-content: center;
+  align-items: center;
+}
+.n-dot {
+  position: absolute;
+  right: 4rpx;
+  top: 4rpx;
+  width: 18rpx;
+  height: 18rpx;
+  border-radius: 9rpx;
+}
+.n-body {
+  flex: 1;
+  margin-left: 22rpx;
+}
+.n-top {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+.n-title-wrap {
+  flex: 1;
+  flex-direction: row;
+  align-items: center;
+  margin-right: 8rpx;
+}
+.ntype {
+  flex-shrink: 0;
+  margin-right: 10rpx;
+  padding: 2rpx 12rpx;
+  border-radius: 8rpx;
+}
+.ntype-text {
+  color: #ffffff;
+  font-size: 20rpx;
+  font-weight: 600;
+}
+.n-top-badge {
+  flex-shrink: 0;
+  margin-right: 10rpx;
+  padding: 2rpx 12rpx;
+  border-radius: 8rpx;
+}
+.n-top-badge-text {
+  font-size: 20rpx;
+  font-weight: 600;
+}
+.n-title {
+  flex: 1;
+  color: #191d26;
+  font-size: 30rpx;
+  font-weight: 600;
+}
+.n-time {
+  margin-left: 16rpx;
+  color: #6b7385;
+  font-size: 22rpx;
+}
+.n-content {
+  margin-top: 10rpx;
+  color: #596173;
+  font-size: 25rpx;
+  line-height: 1.5;
+}
+
+/* Vapor 宽屏：px 覆盖 rpx，1600x900 下避免按窗口比例放大 2.7 倍 */
+.toolbar-wide { padding: 12px 24px 4px; }
+.toolbar-text-wide { font-size: 14px; }
+.readall-btn-wide { padding: 6px 16px; border-radius: 14px; }
+.readall-btn-text-wide { font-size: 13px; }
+.list-bottom-pad-wide { height: 16px; }
+.empty-wide { padding: 80px 24px; }
+.empty-text-wide { margin-top: 10px; font-size: 14px; }
+.login-btn-wide { margin-top: 20px; padding: 12px 28px; border-radius: 20px; }
+.login-btn-text-wide { font-size: 14px; }
+.n-item-wide { margin: 14px 24px 0; padding: 20px; border-radius: 14px; }
+.n-icon-wrap-wide { width: 44px; height: 44px; border-radius: 12px; }
+.n-dot-wide { right: 2px; top: 2px; width: 8px; height: 8px; border-radius: 4px; }
+.n-body-wide { margin-left: 12px; }
+.n-title-wrap-wide { margin-right: 4px; }
+.ntype-wide { margin-right: 6px; padding: 2px 8px; border-radius: 5px; }
+.ntype-text-wide { font-size: 11px; }
+.n-top-badge-wide { margin-right: 6px; padding: 2px 8px; border-radius: 5px; }
+.n-top-badge-text-wide { font-size: 11px; }
+.n-title-wide { font-size: 16px; }
+.n-time-wide { margin-left: 8px; font-size: 12px; }
+.n-content-wide { margin-top: 6px; font-size: 14px; }
+</style>

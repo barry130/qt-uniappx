@@ -1,0 +1,403 @@
+<template>
+  <qt-page-frame :max-width="1360">
+  <view class="page" :class="layout.isWide ? 'page-wide' : ''" :style="pageRootStyle">
+    <QtSideNav v-if="layout.isWide" current="/pages/profile/index" :dots="updateDotPaths" />
+    <!-- 宽屏可视高度小于内容高度时能下滑，最后一组不被切掉 -->
+    <scroll-view class="page-body" direction="vertical" :show-scrollbar="false">
+    <!-- 容器一：用户信息。未登录点击进登录注册页；已登录点击进用户信息页 -->
+    <view class="profile" :class="layout.isWide ? 'profile-wide' : ''" :style="cardStyle" @click="onProfileTap">
+      <view class="avatar" :class="layout.isWide ? 'avatar-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'">
+        <image
+          :src="avatarUrl.length > 0 ? avatarUrl : DEFAULT_AVATAR_ASSET"
+          class="avatar-img" :class="layout.isWide ? 'avatar-img-wide' : ''"
+          mode="aspectFill"
+        />
+      </view>
+      <view class="info" :class="layout.isWide ? 'info-wide' : ''">
+        <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">{{
+          loggedIn ? nickname : "登录后同步收藏与歌单"
+        }}</text>
+        <text class="sub" :class="layout.isWide ? 'sub-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';'">{{
+          loggedIn ? "轻听音乐账户 · 个人主页" : "点击登录"
+        }}</text>
+      </view>
+      <QtIcon name="chevron-right" :size="30" :color="themeStore.skin.iconMuted" />
+    </view>
+
+    <!-- 容器二：签到 / 收藏 / 本地 / 下载 四宫格 -->
+    <view class="tiles" :class="layout.isWide ? 'tiles-wide' : ''" :style="cardStyle">
+      <view class="tile" :class="layout.isWide ? 'tile-wide' : ''" @click="doDaka">
+        <view class="tile-icon" :class="layout.isWide ? 'tile-icon-wide' : ''" :style="tileIconStyle">
+          <QtIcon name="check" :size="layout.isWide ? 20 : 38" :color="themeStore.skin.accent" />
+        </view>
+        <text class="tile-label" :class="layout.isWide ? 'tile-label-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">签到</text>
+        <text class="tile-count" :class="layout.isWide ? 'tile-count-wide' : ''" :style="'color:' + themeStore.skin.textSubtle + ';'">{{ todayDakaDone ? "已签" : dakaDays + " 天" }}</text>
+      </view>
+      <view class="tile" :class="layout.isWide ? 'tile-wide' : ''" @click="goCollection">
+        <view class="tile-icon" :class="layout.isWide ? 'tile-icon-wide' : ''" :style="tileIconStyle">
+          <QtIcon name="heart" :size="layout.isWide ? 20 : 38" :color="themeStore.skin.accent" />
+        </view>
+        <text class="tile-label" :class="layout.isWide ? 'tile-label-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">收藏</text>
+        <text class="tile-count" :class="layout.isWide ? 'tile-count-wide' : ''" :style="'color:' + themeStore.skin.textSubtle + ';'">{{ likedCount }}</text>
+      </view>
+      <view class="tile" :class="layout.isWide ? 'tile-wide' : ''" @click="goLocal">
+        <view class="tile-icon" :class="layout.isWide ? 'tile-icon-wide' : ''" :style="tileIconStyle">
+          <QtIcon name="folder" :size="layout.isWide ? 20 : 38" :color="themeStore.skin.accent" />
+        </view>
+        <text class="tile-label" :class="layout.isWide ? 'tile-label-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">本地</text>
+        <text class="tile-count" :class="layout.isWide ? 'tile-count-wide' : ''" :style="'color:' + themeStore.skin.textSubtle + ';'">扫描播放</text>
+      </view>
+      <view class="tile" :class="layout.isWide ? 'tile-wide' : ''" @click="goRecent">
+        <view class="tile-icon" :class="layout.isWide ? 'tile-icon-wide' : ''" :style="tileIconStyle">
+          <QtIcon name="clock" :size="layout.isWide ? 20 : 38" :color="themeStore.skin.accent" />
+        </view>
+        <text class="tile-label" :class="layout.isWide ? 'tile-label-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">最近播放</text>
+        <text class="tile-count" :class="layout.isWide ? 'tile-count-wide' : ''" :style="'color:' + themeStore.skin.textSubtle + ';'">{{ player.history.length }} 首</text>
+      </view>
+      <view class="tile" :class="layout.isWide ? 'tile-wide' : ''" @click="goDownload">
+        <view class="tile-icon" :class="layout.isWide ? 'tile-icon-wide' : ''" :style="tileIconStyle">
+          <QtIcon name="download" :size="layout.isWide ? 20 : 38" :color="themeStore.skin.accent" />
+        </view>
+        <text class="tile-label" :class="layout.isWide ? 'tile-label-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">下载</text>
+        <text class="tile-count" :class="layout.isWide ? 'tile-count-wide' : ''" :style="'color:' + themeStore.skin.textSubtle + ';'">{{ downloads.items.length }}</text>
+      </view>
+    </view>
+
+    <!-- 容器三：设置 / 意见反馈 / 关于轻听 -->
+    <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="cardStyle">
+      <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellBorderStyle" @click="goSettings">
+        <QtIcon class="cell-icon" :class="layout.isWide ? 'cell-icon-wide' : ''" name="settings" :size="36" :color="themeStore.skin.accent" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">设置</text>
+        <view v-if="sourceUpdateStore.updatePending" class="cell-dot" />
+        <QtIcon name="chevron-right" :size="28" :color="themeStore.skin.iconMuted" />
+      </view>
+      <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellBorderStyle" @click="goFeedback">
+        <QtIcon class="cell-icon" :class="layout.isWide ? 'cell-icon-wide' : ''" name="feedback" :size="36" :color="themeStore.skin.accent" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">意见反馈</text>
+        <QtIcon name="chevron-right" :size="28" :color="themeStore.skin.iconMuted" />
+      </view>
+      <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" @click="goAbout">
+        <QtIcon class="cell-icon" :class="layout.isWide ? 'cell-icon-wide' : ''" name="info" :size="36" :color="themeStore.skin.accent" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">关于轻听</text>
+        <QtIcon name="chevron-right" :size="28" :color="themeStore.skin.iconMuted" />
+      </view>
+    </view>
+    </scroll-view>
+      <QtTabBar current="pages/profile/index" :dots="updateDotPaths" />
+  </view>
+  </qt-page-frame>
+</template><script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import QtSideNav from "@/uni_modules/qt-ui/components/qt-side-nav/qt-side-nav.uvue";
+import { useQtTabBarSync, qtSideNavPad } from "@/uni_modules/qt-ui/composables/use-qt-tab-bar";
+import { ref, computed } from "vue";
+import { onShow, onBackPress } from "@dcloudio/uni-app";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout, qtStatusBarPx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { usePlayerStore } from "@/stores/player";
+import { useDownloadsStore } from "@/stores/downloads";
+import { accountApi, persistUserRoles } from "@/services/music-api";
+import { useSourceUpdateStore } from "@/stores/source-update";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtTabBar from "@/uni_modules/qt-ui/components/qt-tab-bar/qt-tab-bar.uvue";
+import { getAccessToken } from "@/services/auth";
+import { getCachedAvatar, DEFAULT_AVATAR_ASSET } from "@/services/media";
+import { meCached } from "@/services/user-cache";
+import { qtTrackPage } from "@/uni_modules/qt-stat";
+
+const token = ref("");
+const userInfo = ref<any>(null);
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+const player = usePlayerStore();
+const downloads = useDownloadsStore();
+const sourceUpdateStore = useSourceUpdateStore();
+// 「我的」tab / 设置行红点：音源包有新包待生效时亮
+const updateDotPaths = computed<string[]>(() => sourceUpdateStore.updatePending ? ["pages/profile/index"] : []);
+// 宽屏隐藏原生 tabbar（左侧 rail 取代），竖屏显示
+useQtTabBarSync();
+// 宽屏时给固定左缘的导航 rail 让位；tab 页统一 1360（与首页/音乐库一致），容器宽度不随 tab 跳变
+const pagePadStyle = computed<string>(() => layout.isWide ? "padding-left:" + qtSideNavPad(layout.windowWidth, 1360) + "px;" : "");
+// 自绘导航后内容需自行让出状态栏
+const pageRootStyle = computed<string>(() => "padding-top:" + (qtStatusBarPx() + 12) + "px;" + pagePadStyle.value);
+
+// 卡片统一样式（颜色全部来自当前皮肤）
+const cardStyle = computed<string>(() =>
+  "background-color:" + themeStore.skin.surface +
+  ";border-color:" + themeStore.skin.border +
+  ";box-shadow:0 10rpx 30rpx " + themeStore.skin.shadow + ";"
+);
+const tileIconStyle = computed<string>(() => "background-color:" + themeStore.skin.accentSoft + ";");
+const cellBorderStyle = computed<string>(() => "border-bottom-color:" + themeStore.skin.divider + ";");
+
+const storedNickname = ref("");
+// 展示头像：先取缓存（上传成功时已写入），onShow 里再向 /me 刷新
+const avatarUrl = ref(getCachedAvatar());
+
+async function fetchUserInfo() {
+  const accessToken = getAccessToken();
+  if (!accessToken) {
+    token.value = "";
+    userInfo.value = null;
+    // 退出登录/未登录时清掉本页缓存的展示头像与昵称：否则「我的」tab 常驻内存，
+    // avatarUrl 仍是上一账号的头像 URL，模板就走不到默认 logo 回退。
+    avatarUrl.value = "";
+    if (storedNickname.value.length > 0) storedNickname.value = "";
+    return;
+  }
+  token.value = accessToken;
+  // /me 走启动/登录时写入的缓存（本次运行只查一次接口），缓存缺失才联网补拉
+  const res = await meCached();
+  if (res == null) {
+    const localNick = uni.getStorageSync("qt-nickname") as string;
+    if (localNick != null && localNick.length > 0) storedNickname.value = localNick;
+    return;
+  }
+  const user = res.get("user") as UTSJSONObject | null;
+  if (user != null) {
+    userInfo.value = user;
+    // roles 在 /me 响应的 data 根层（与 user/expiresIn 并列），不在 user 对象里
+    persistUserRoles(res);
+    const nick = user.get("nickname") as string | null;
+    if (nick != null && nick.length > 0) {
+      storedNickname.value = nick;
+      uni.setStorageSync("qt-nickname", nick);
+    }
+    const email = user.get("email") as string | null;
+    if (email != null && email.length > 0) uni.setStorageSync("qt-email", email);
+    // 头像只在是 http(s) 直链时展示，其他形态（旧服务端路径/空）回退本地默认资源
+    const rawAvatar = user.get("avatar") as string | null;
+    const avatar = rawAvatar != null ? rawAvatar : "";
+    avatarUrl.value = avatar.startsWith("http") ? avatar : "";
+    if (avatarUrl.value.length > 0) uni.setStorageSync("qt-avatar", avatarUrl.value);
+  }
+}
+
+onShow(() => {
+  qtTrackPage("pages/profile/index");
+  downloads.restore();
+  sourceUpdateStore.refresh();
+  fetchUserInfo();
+  fetchDakaInfo();
+});
+// profile 是第二个 tab：返回键先回到首页 tab，由首页统一处理退出
+onBackPress((options: OnBackPressOptions): boolean => {
+  if (options.from != "backbutton") return false;
+  uni.switchTab({ url: "/pages/home/index", fail: (_: any) => {} });
+  return true;
+});
+
+const nickname = computed<string>(() => {
+  if (userInfo.value != null) {
+    const nick = userInfo.value.get("nickname") as string | null;
+    if (nick != null && nick.length > 0) return nick;
+  }
+  return storedNickname.value.length > 0 ? storedNickname.value : "轻听用户";
+});
+
+const loggedIn = computed<boolean>(() => token.value.length > 0);
+
+// 收藏数：自建歌单 + 收藏的远程歌单
+const likedCount = computed<number>(() => player.localPlaylists.length + player.savedPlaylists.length);
+
+// 签到相关
+const dakaLoading = ref(false);
+const todayDakaDone = ref(false);
+const dakaDays = ref(0);
+
+async function fetchDakaInfo() {
+  if (!loggedIn.value) return;
+  try {
+    const res = await accountApi.dakaInfo();
+    const days = res.get("days") as number | null;
+    const todayDone = res.get("todayDone") as boolean | null;
+    if (days != null) dakaDays.value = days;
+    todayDakaDone.value = todayDone != null ? todayDone : false;
+  } catch (_) {
+    // 忽略错误
+  }
+}
+
+/** 点击宫格即签到（未登录先去登录） */
+async function doDaka() {
+  if (!loggedIn.value) {
+    uni.navigateTo({ url: "/pages/login/index" });
+    return;
+  }
+  if (dakaLoading.value || todayDakaDone.value) {
+    uni.showToast({ title: "今日已签到", icon: "none" });
+    return;
+  }
+  dakaLoading.value = true;
+  try {
+    const now = new Date();
+    const time = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0") + "-" + String(now.getDate()).padStart(2, "0");
+    // type: "0" 正常签到（必传，后端依赖该字段）
+    await accountApi.daka({ time, type: "0" } as UTSJSONObject);
+    todayDakaDone.value = true;
+    dakaDays.value = dakaDays.value + 1;
+    uni.showToast({ title: "签到成功！", icon: "success" });
+  } catch (error) {
+    uni.showToast({ title: (error as Error).message || "签到失败", icon: "none" });
+  } finally {
+    dakaLoading.value = false;
+  }
+}
+
+/** 用户卡点击：已登录进用户信息页（含修改资料/退出），未登录进登录注册页 */
+function onProfileTap() {
+  if (loggedIn.value) {
+    uni.navigateTo({ url: "/pages/user/index" });
+  } else {
+    uni.navigateTo({ url: "/pages/login/index" });
+  }
+}
+function goCollection() {
+  uni.navigateTo({ url: "/pages/collection/index" });
+}
+function goLocal() {
+  uni.navigateTo({ url: "/pages/local/index" });
+}
+function goRecent() {
+  uni.navigateTo({ url: "/pages/history/index" });
+}
+function goDownload() {
+  uni.navigateTo({ url: "/pages/download/index" });
+}
+function goSettings() {
+  uni.navigateTo({ url: "/pages/settings/index" });
+}
+function goFeedback() {
+  uni.navigateTo({ url: "/pages/feedback/index" });
+}
+function goAbout() {
+  uni.navigateTo({ url: "/pages/about/index" });
+}
+</script>
+<style>
+.page {
+  flex: 1;
+}
+.page-body {
+  flex: 1;
+  min-width: 0;
+  padding-bottom: 220rpx;
+}
+
+/* ===== 容器一：用户信息 ===== */
+.profile {
+  padding: 56rpx 32rpx 44rpx;
+  flex-direction: row;
+  align-items: center;
+  border-width: 1px;
+  border-radius: 0 0 28rpx 28rpx;
+}
+.avatar {
+  width: 110rpx;
+  height: 110rpx;
+  justify-content: center;
+  align-items: center;
+  border-radius: 36rpx;
+  overflow: hidden;
+}
+.avatar-img {
+  width: 110rpx;
+  height: 110rpx;
+  border-radius: 36rpx;
+}
+.info {
+  margin-left: 28rpx;
+  flex: 1;
+}
+.name {
+  font-size: 31rpx;
+  font-weight: 700;
+}
+.sub {
+  margin-top: 13rpx;
+  font-size: 23rpx;
+}
+
+/* ===== 容器二：四宫格 ===== */
+.tiles {
+  margin: 20rpx 24rpx 0;
+  padding: 30rpx 0 26rpx;
+  flex-direction: row;
+  align-items: center;
+  border-radius: 24rpx;
+  border-width: 1px;
+}
+.tile {
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.tile-icon {
+  width: 84rpx;
+  height: 84rpx;
+  border-radius: 26rpx;
+  align-items: center;
+  justify-content: center;
+}
+.tile-label {
+  margin-top: 14rpx;
+  font-size: 25rpx;
+  font-weight: 600;
+}
+.tile-count {
+  margin-top: 6rpx;
+  font-size: 21rpx;
+}
+
+/* ===== 容器三：功能分组 ===== */
+.group {
+  margin-top: 20rpx;
+  border-radius: 24rpx;
+  margin-left: 24rpx;
+  margin-right: 24rpx;
+  overflow: hidden;
+  border-width: 1px;
+}
+.cell {
+  height: 96rpx;
+  padding: 0 32rpx;
+  flex-direction: row;
+  align-items: center;
+  border-bottom-width: 1px;
+}
+.cell-dot {
+  width: 16rpx;
+  height: 16rpx;
+  border-radius: 8rpx;
+  background-color: #ff4b4b;
+}
+.cell-no-border {
+  border-bottom-width: 0;
+}
+.cell-icon {
+  margin-right: 20rpx;
+}
+.cell-title {
+  flex: 1;
+  font-size: 28rpx;
+  font-weight: 500;
+}
+
+/* ===== 宽屏 ===== */
+/* 三张卡片（用户/磁贴/设置）宽屏统一左右 16px 边距，宽度一致 */
+.profile-wide { margin-left: 16px; margin-right: 16px; padding: 34px 28px 26px; border-radius: 16px; }
+.avatar-wide { width: 72px; height: 72px; border-radius: 24px; }
+.avatar-img-wide { width: 72px; height: 72px; border-radius: 24px; }
+.info-wide { margin-left: 18px; }
+.name-wide { font-size: 22px; }
+.sub-wide { margin-top: 8px; font-size: 15px; }
+.tiles-wide { margin-top: 14px; margin-left: 16px; margin-right: 16px; padding: 20px 0 16px; border-radius: 16px; }
+.tile-icon-wide { width: 52px; height: 52px; border-radius: 16px; }
+.tile-label-wide { margin-top: 10px; font-size: 15px; }
+.tile-count-wide { margin-top: 4px; font-size: 12px; }
+.group-wide { margin-top: 14px; margin-left: 16px; margin-right: 16px; border-radius: 16px; }
+.cell-wide { height: 64px; padding-left: 24px; padding-right: 24px; }
+.cell-title-wide { font-size: 17px; }
+.cell-icon-wide { margin-right: 10px; }
+</style>

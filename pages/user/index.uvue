@@ -1,0 +1,285 @@
+<template>
+  <qt-page-frame :max-width="640">
+    <view class="page" :class="layout.isWide ? 'page-wide' : ''">
+      <scroll-view class="page-body" direction="vertical" :show-scrollbar="false">
+        <!-- 用户信息卡 -->
+        <view class="user-card" :class="layout.isWide ? 'user-card-wide' : ''" :style="cardStyle">
+          <view class="avatar" :class="layout.isWide ? 'avatar-wide' : ''" :style="'background-color:' + theme.skin.accent + ';'">
+            <image
+              :src="avatarUrl.length > 0 ? avatarUrl : DEFAULT_AVATAR_ASSET"
+              class="avatar-img" :class="layout.isWide ? 'avatar-img-wide' : ''"
+              mode="aspectFill"
+            />
+          </view>
+          <view class="info" :class="layout.isWide ? 'info-wide' : ''">
+            <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="'color:' + theme.skin.text + ';'">{{ nickname }}</text>
+            <text class="sub" :class="layout.isWide ? 'sub-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ email.length > 0 ? email : "轻听音乐账户" }}</text>
+          </view>
+        </view>
+
+        <!-- 账户操作 -->
+        <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="cardStyle">
+          <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellBorderStyle" @click="goEditProfile">
+            <QtIcon class="cell-icon" :class="layout.isWide ? 'cell-icon-wide' : ''" name="edit" :size="36" :color="theme.skin.accent" />
+            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">修改个人资料</text>
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+          <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellBorderStyle" @click="goCollection">
+            <QtIcon class="cell-icon" :class="layout.isWide ? 'cell-icon-wide' : ''" name="heart" :size="36" :color="theme.skin.accent" />
+            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">我的收藏</text>
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+          <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" @click="goStats">
+            <QtIcon class="cell-icon" :class="layout.isWide ? 'cell-icon-wide' : ''" name="chart" :size="36" :color="theme.skin.accent" />
+            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">听歌统计</text>
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </view>
+
+        <!-- 退出登录 -->
+        <view class="logout-wrap" :class="layout.isWide ? 'logout-wrap-wide' : ''">
+          <view class="logout-btn" :class="layout.isWide ? 'logout-btn-wide' : ''" :style="'background-color:' + theme.skin.dangerSoft + ';'" @click="confirmLogout">
+            <QtIcon name="close" :size="layout.isWide ? 14 : 26" :color="theme.skin.danger" />
+            <text class="logout-text" :class="layout.isWide ? 'logout-text-wide' : ''" :style="'color:' + theme.skin.danger + ';'">退出登录</text>
+          </view>
+        </view>
+      </scroll-view>
+    </view>
+  </qt-page-frame>
+</template><script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { ref, computed, onMounted } from "vue";
+import { onShow } from "@dcloudio/uni-app";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { usePlayerStore } from "@/stores/player";
+import { accountApi, persistUserRoles } from "@/services/music-api";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { clearTokens, getAccessToken } from "@/services/auth";
+import { getCachedAvatar, DEFAULT_AVATAR_ASSET } from "@/services/media";
+import { meCached, clearCachedMe } from "@/services/user-cache";
+import { qtTrackPage } from "@/uni_modules/qt-stat";
+
+const theme = useThemeStore();
+const layout = useQtLayout();
+
+const cardStyle = computed<string>(() =>
+  "background-color:" + theme.skin.surface +
+  ";border-color:" + theme.skin.border +
+  ";box-shadow:0 10rpx 30rpx " + theme.skin.shadow + ";"
+);
+const cellBorderStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
+
+const token = ref("");
+const userInfo = ref<any>(null);
+const storedNickname = ref("");
+// 展示头像：缓存优先，/me 回来后刷新（http 直链才展示）
+const avatarUrl = ref(getCachedAvatar());
+
+async function fetchUserInfo() {
+  const accessToken = getAccessToken();
+  if (!accessToken) {
+    // 未登录时直接回我的页（本页仅登录态可见）
+    uni.navigateBack();
+    return;
+  }
+  token.value = accessToken;
+  // /me 走启动/登录时写入的缓存（本次运行只查一次接口），缓存缺失才联网补拉
+  const res = await meCached();
+  if (res == null) {
+    // 拉取失败用本地缓存的昵称兜底
+    const localNick = uni.getStorageSync("qt-nickname") as string;
+    if (localNick != null && localNick.length > 0) storedNickname.value = localNick;
+    return;
+  }
+  const user = res.get("user") as UTSJSONObject | null;
+  if (user != null) {
+    userInfo.value = user;
+    // roles 在 /me 响应的 data 根层（与 user/expiresIn 并列），不在 user 对象里
+    persistUserRoles(res);
+    const nick = user.get("nickname") as string | null;
+    if (nick != null && nick.length > 0) storedNickname.value = nick;
+    // 头像 http 直链才展示，否则回退本地默认资源；同时刷新缓存
+    const rawAvatar = user.get("avatar") as string | null;
+    const avatar = rawAvatar != null ? rawAvatar : "";
+    avatarUrl.value = avatar.startsWith("http") ? avatar : "";
+    if (avatarUrl.value.length > 0) uni.setStorageSync("qt-avatar", avatarUrl.value);
+  }
+}
+
+onShow(() => {
+  qtTrackPage("pages/user/index");
+  fetchUserInfo();
+});
+onMounted(() => {
+  fetchUserInfo();
+});
+
+const nickname = computed<string>(() => {
+  if (userInfo.value != null) {
+    const nick = userInfo.value.get("nickname") as string | null;
+    if (nick != null && nick.length > 0) return nick;
+  }
+  return storedNickname.value.length > 0 ? storedNickname.value : "轻听用户";
+});
+const email = computed<string>(() => {
+  if (userInfo.value != null) {
+    const mail = userInfo.value.get("email") as string | null;
+    if (mail != null) return mail;
+  }
+  const cached = uni.getStorageSync("qt-email") as string;
+  return cached != null ? cached : "";
+});
+
+function goEditProfile() {
+  uni.navigateTo({ url: "/pages/profile/edit/index" });
+}
+function goCollection() {
+  uni.navigateTo({ url: "/pages/collection/index" });
+}
+function goStats() {
+  uni.navigateTo({ url: "/pages/stats/index" });
+}
+
+function confirmLogout() {
+  uni.showModal({
+    title: "退出登录",
+    content: "确定退出当前账号吗？本地收藏与下载不会丢失。",
+    confirmText: "退出",
+    confirmColor: theme.skin.danger,
+    success: async (res) => {
+      if (!res.confirm) return;
+      // 断网期间的待推送操作先尽力补推（此时仍带原账号身份），避免退出后队列被清导致丢操作
+      try {
+        await usePlayerStore().flushPendingOps();
+      } catch (_) {}
+      try {
+        await accountApi.logout();
+      } catch (_) {
+        // 忽略登出接口错误，本地清理照常执行
+      } finally {
+        clearTokens();
+        clearCachedMe();
+        uni.removeStorageSync("qt-token");
+        uni.removeStorageSync("qt-nickname");
+        uni.removeStorageSync("qt-email");
+        uni.removeStorageSync("qt-roles");
+        uni.removeStorageSync("qt-permissions");
+        uni.removeStorageSync("qt-avatar");
+        // 收藏同步游标/队列按账号隔离，退出时重置；本地收藏缓存与账号归属标记保留
+        //（同账号重登无缝恢复，换账号登录时由登录页检测归属并清库）
+        usePlayerStore().resetLikeSync();
+        uni.showToast({ title: "已退出登录", icon: "none" });
+        uni.navigateBack();
+      }
+    },
+  });
+}
+</script>
+<style>
+.page {
+  flex: 1;
+}
+.page-body {
+  flex: 1;
+  min-width: 0;
+  padding: 24rpx 24rpx 60rpx;
+}
+.page-wide {
+  padding: 20px 26px 60px;
+}
+
+/* ===== 用户信息卡 ===== */
+.user-card {
+  padding: 72rpx 32rpx 50rpx;
+  flex-direction: row;
+  align-items: center;
+  border-width: 1px;
+  border-radius: 28rpx;
+}
+.avatar {
+  width: 110rpx;
+  height: 110rpx;
+  justify-content: center;
+  align-items: center;
+  border-radius: 36rpx;
+  overflow: hidden;
+}
+.avatar-img {
+  width: 110rpx;
+  height: 110rpx;
+  border-radius: 36rpx;
+}
+.info {
+  margin-left: 28rpx;
+  flex: 1;
+}
+.name {
+  font-size: 31rpx;
+  font-weight: 700;
+}
+.sub {
+  margin-top: 13rpx;
+  font-size: 23rpx;
+}
+
+/* ===== 操作分组 ===== */
+.group {
+  margin-top: 20rpx;
+  border-radius: 24rpx;
+  overflow: hidden;
+  border-width: 1px;
+}
+.cell {
+  height: 96rpx;
+  padding: 0 32rpx;
+  flex-direction: row;
+  align-items: center;
+  border-bottom-width: 1px;
+}
+.cell-no-border {
+  border-bottom-width: 0;
+}
+.cell-icon {
+  margin-right: 20rpx;
+}
+.cell-title {
+  flex: 1;
+  font-size: 28rpx;
+  font-weight: 500;
+}
+
+/* ===== 退出登录 ===== */
+.logout-wrap {
+  margin-top: 24rpx;
+  margin-left: 24rpx;
+  margin-right: 24rpx;
+}
+.logout-btn {
+  height: 92rpx;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  border-radius: 24rpx;
+}
+.logout-text {
+  font-size: 28rpx;
+  font-weight: 600;
+  margin-left: 10rpx;
+}
+
+/* ===== 宽屏 ===== */
+.user-card-wide { padding: 34px 28px 26px; border-radius: 18px; }
+.avatar-wide { width: 72px; height: 72px; border-radius: 24px; }
+.avatar-img-wide { width: 72px; height: 72px; border-radius: 24px; }
+.info-wide { margin-left: 18px; }
+.name-wide { font-size: 22px; }
+.sub-wide { margin-top: 8px; font-size: 15px; }
+.group-wide { margin-top: 14px; border-radius: 16px; }
+.cell-wide { height: 64px; padding-left: 24px; padding-right: 24px; }
+.cell-title-wide { font-size: 17px; }
+.cell-icon-wide { margin-right: 10px; }
+.logout-wrap-wide { margin-top: 16px; }
+.logout-btn-wide { height: 56px; border-radius: 16px; }
+.logout-text-wide { font-size: 16px; margin-left: 8px; }
+</style>

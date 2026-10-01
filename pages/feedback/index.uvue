@@ -1,0 +1,356 @@
+<template>
+  <qt-page-frame :max-width="860">
+  <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']">
+    <!-- 顶部：Tab + 提交按钮 -->
+    <view class="topbar" :class="[themeStore.dark ? 'topbar-dark' : '', layout.isWide ? 'topbar-wide' : '']">
+      <view class="tabs" :class="layout.isWide ? 'tabs-wide' : ''">
+        <view class="tab" :class="[tab == 'mine' ? 'tab-active' : '', layout.isWide ? 'tab-wide' : '']" :style="tab == 'mine' ? 'background-color:' + themeStore.skin.accent + ';' : ''" @tap="switchTab('mine')">
+          <text class="tab-text" :class="[tab == 'mine' ? 'tab-text-active' : '', layout.isWide ? 'tab-text-wide' : '']" :style="tab == 'mine' ? 'color:' + themeStore.skin.onAccent + ';' : ''">我的</text>
+        </view>
+        <view class="tab" :class="[tab == 'public' ? 'tab-active' : '', layout.isWide ? 'tab-wide' : '']" :style="tab == 'public' ? 'background-color:' + themeStore.skin.accent + ';' : ''" @tap="switchTab('public')">
+          <text class="tab-text" :class="[tab == 'public' ? 'tab-text-active' : '', layout.isWide ? 'tab-text-wide' : '']" :style="tab == 'public' ? 'color:' + themeStore.skin.onAccent + ';' : ''">公开</text>
+        </view>
+      </view>
+      <view class="submit-btn" :class="layout.isWide ? 'submit-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @tap="goSubmit">
+        <text class="submit-btn-text" :class="layout.isWide ? 'submit-btn-text-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">+ 提交反馈</text>
+      </view>
+    </view>
+
+    <!-- 未登录兜底（正常入口已限制登录，这里防直达） -->
+    <view v-if="!loggedIn" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
+      <QtIcon name="user" :size="layout.isWide ? 44 : 72" color="#c3c9d6" />
+      <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''">登录后可以提交与查看反馈</text>
+      <view class="login-btn" :class="layout.isWide ? 'login-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @tap="goLogin">
+        <text class="login-btn-text" :class="layout.isWide ? 'login-btn-text-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">去登录</text>
+      </view>
+    </view>
+
+    <scroll-view
+      v-else
+      class="list"
+      direction="vertical"
+      :show-scrollbar="false"
+      @scrolltolower="loadMore"
+    >
+      <view v-if="loading && items.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
+        <QtIcon name="loader" :size="layout.isWide ? 40 : 64" color="#c3c9d6" />
+        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''">加载中...</text>
+      </view>
+      <view v-else-if="items.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
+        <QtIcon name="feedback" :size="layout.isWide ? 44 : 72" color="#c3c9d6" />
+        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''">{{ tab == "mine" ? "还没有反馈，说说你的想法吧" : "暂无公开反馈" }}</text>
+      </view>
+
+      <view
+        v-for="f in items"
+        :key="f.id"
+        class="fb-item" :class="[[layout.isWide ? 'fb-item-wide' : ''], [themeStore.dark ? 'fb-item-dark' : '', layout.isWide ? 'fb-item-wide' : '']]"
+        
+        @tap="openDetail(f)"
+      >
+        <view class="fb-head" :class="layout.isWide ? 'fb-head-wide' : ''">
+          <view class="type-badge" :class="layout.isWide ? 'type-badge-wide' : ''" :style="'background-color:' + feedbackTypeColor(f.type)">
+            <text class="type-badge-text" :class="layout.isWide ? 'type-badge-text-wide' : ''">{{ feedbackTypeLabel(f.type) }}</text>
+          </view>
+          <text class="fb-title" :class="layout.isWide ? 'fb-title-wide' : ''" :max-lines="1">{{ f.title }}</text>
+          <view class="status-badge" :class="layout.isWide ? 'status-badge-wide' : ''" :style="'background-color:' + feedbackStatusColor(f.status)">
+            <text class="status-badge-text" :class="layout.isWide ? 'status-badge-text-wide' : ''">{{ feedbackStatusLabel(f.status) }}</text>
+          </view>
+        </view>
+        <text class="fb-content" :class="layout.isWide ? 'fb-content-wide' : ''" :max-lines="2">{{ f.content }}</text>
+        <view class="fb-foot" :class="layout.isWide ? 'fb-foot-wide' : ''">
+          <text class="fb-time" :class="layout.isWide ? 'fb-time-wide' : ''">{{ formatTime(f.createTime) }}</text>
+          <text v-if="tab == 'mine' && (f.isPublic ?? false)" class="fb-public" :class="layout.isWide ? 'fb-public-wide' : ''">已公开</text>
+        </view>
+      </view>
+
+      <view v-if="items.length > 0" class="list-foot" :class="layout.isWide ? 'list-foot-wide' : ''" @tap="loadMore">
+        <text class="list-foot-text" :class="layout.isWide ? 'list-foot-text-wide' : ''">{{ loading ? "加载中..." : (hasMore ? "加载更多" : "没有更多了") }}</text>
+      </view>
+    </scroll-view>
+  </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { ref, computed } from "vue";
+import { onShow } from "@dcloudio/uni-app";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import {
+  fetchMyFeedback,
+  fetchPublicFeedback,
+  feedbackTypeLabel,
+  feedbackTypeColor,
+  feedbackStatusLabel,
+  feedbackStatusColor,
+  FEEDBACK_PAGE_SIZE,
+} from "@/services/feedback";
+import { isLoggedIn } from "@/services/auth";
+import { qtTrackPage } from "@/uni_modules/qt-stat";
+import type { FeedbackItem, FeedbackPageResult } from "@/types/feedback";
+
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+
+/** 当前 Tab：我的 / 公开 */
+const tab = ref<"mine" | "public">("mine");
+const items = ref<FeedbackItem[]>([]);
+const total = ref(0);
+const pageNum = ref(1);
+const loading = ref(false);
+const loggedIn = computed(() => isLoggedIn());
+const hasMore = computed(() => items.value.length < total.value);
+
+/** 拉取指定 Tab 第 page 页（tab 由调用方快照传入，不读实时 tab） */
+async function fetchPage(page: number, whichTab: "mine" | "public"): Promise<FeedbackPageResult> {
+  if (whichTab == "mine") {
+    return await fetchMyFeedback(page, FEEDBACK_PAGE_SIZE);
+  }
+  return await fetchPublicFeedback(page, FEEDBACK_PAGE_SIZE);
+}
+
+// 列表序号：tab 切换/刷新时旧响应晚到不得写入新 tab（写回前比对）
+let listSeq = 0;
+
+/** 刷新到第一页 */
+async function refresh(): Promise<void> {
+  if (!loggedIn.value) return;
+  const seq = ++listSeq;
+  const whichTab = tab.value;
+  loading.value = true;
+  try {
+    const res = await fetchPage(1, whichTab);
+    if (seq !== listSeq) return;
+    pageNum.value = 1;
+    total.value = res.total;
+    items.value = res.records;
+  } catch (e) {
+    if (seq !== listSeq) return;
+    uni.showToast({ title: (e as Error).message || "加载失败", icon: "none" });
+  } finally {
+    if (seq === listSeq) loading.value = false;
+  }
+}
+
+/** 加载下一页（scrolltolower 触发） */
+async function loadMore(): Promise<void> {
+  if (!loggedIn.value || loading.value || !hasMore.value) return;
+  const seq = listSeq;
+  const whichTab = tab.value;
+  loading.value = true;
+  try {
+    const next = pageNum.value + 1;
+    const res = await fetchPage(next, whichTab);
+    if (seq !== listSeq) return;
+    pageNum.value = next;
+    total.value = res.total;
+    items.value = items.value.concat(res.records);
+  } catch (e) {
+    if (seq !== listSeq) return;
+    uni.showToast({ title: (e as Error).message || "加载失败", icon: "none" });
+  } finally {
+    if (seq === listSeq) loading.value = false;
+  }
+}
+
+function switchTab(t: "mine" | "public"): void {
+  if (tab.value == t) return;
+  tab.value = t;
+  items.value = [];
+  total.value = 0;
+  refresh();
+}
+
+function openDetail(f: FeedbackItem): void {
+  uni.navigateTo({ url: "/pages/feedback/detail?id=" + f.id });
+}
+
+function goSubmit(): void {
+  uni.navigateTo({ url: "/pages/feedback/submit" });
+}
+
+function goLogin(): void {
+  uni.navigateTo({ url: "/pages/login/index" });
+}
+
+function formatTime(t?: string): string {
+  if (t == null || t.length == 0) return "";
+  if (t.length >= 16) return t.substring(5, 16);
+  return t;
+}
+
+onShow(() => {
+  qtTrackPage("pages/feedback/index");
+  refresh();
+});
+</script>
+
+<style>
+.page {
+  flex: 1;
+}
+
+.topbar {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20rpx 24rpx;
+}
+.topbar-dark {
+}
+.tabs {
+  flex-direction: row;
+  align-items: center;
+  background-color: rgba(255, 255, 255, 0.9);
+  border-radius: 36rpx;
+  padding: 6rpx;
+}
+.tab {
+  padding: 12rpx 36rpx;
+  border-radius: 30rpx;
+}
+.tab-active {
+}
+.tab-text {
+  color: #596173;
+  font-size: 26rpx;
+  font-weight: 500;
+}
+.tab-text-active {
+  font-weight: 600;
+}
+.submit-btn {
+  padding: 14rpx 28rpx;
+  justify-content: center;
+  align-items: center;
+  border-radius: 36rpx;
+}
+.submit-btn-text {
+  font-size: 26rpx;
+  font-weight: 600;
+}
+.list {
+  flex: 1;
+}
+.fb-item {
+  margin: 20rpx 24rpx 0;
+  padding: 28rpx 24rpx;
+  background-color: rgba(255, 255, 255, 0.62);
+  border-width: 1px;
+  border-color: rgba(255, 255, 255, 0.6);
+  border-radius: 20rpx;
+}
+.fb-item-dark {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+.fb-head {
+  flex-direction: row;
+  align-items: center;
+}
+.type-badge {
+  flex-shrink: 0;
+  padding: 4rpx 14rpx;
+  border-radius: 8rpx;
+}
+.type-badge-text {
+  color: #ffffff;
+  font-size: 20rpx;
+  font-weight: 600;
+}
+.fb-title {
+  flex: 1;
+  margin-left: 14rpx;
+  margin-right: 14rpx;
+  color: #191d26;
+  font-size: 29rpx;
+  font-weight: 600;
+}
+.status-badge {
+  flex-shrink: 0;
+  padding: 4rpx 14rpx;
+  border-radius: 8rpx;
+}
+.status-badge-text {
+  color: #ffffff;
+  font-size: 20rpx;
+  font-weight: 600;
+}
+.fb-content {
+  margin-top: 14rpx;
+  color: #596173;
+  font-size: 25rpx;
+  line-height: 1.5;
+}
+.fb-foot {
+  margin-top: 14rpx;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+.fb-time {
+  color: #6b7385;
+  font-size: 22rpx;
+}
+.fb-public {
+  color: #4fb186;
+  font-size: 22rpx;
+}
+.list-foot {
+  padding: 24rpx 0 40rpx;
+  justify-content: center;
+  align-items: center;
+}
+.list-foot-text {
+  color: #6b7385;
+  font-size: 24rpx;
+}
+.empty {
+  padding: 140rpx 32rpx;
+  justify-content: center;
+  align-items: center;
+}
+.empty-text {
+  margin-top: 20rpx;
+  color: #6b7385;
+  font-size: 26rpx;
+}
+.login-btn {
+  margin-top: 36rpx;
+  padding: 18rpx 64rpx;
+  justify-content: center;
+  align-items: center;
+  border-radius: 40rpx;
+}
+.login-btn-text {
+  font-size: 27rpx;
+  font-weight: 600;
+}
+
+/* Vapor 宽屏：px 覆盖 rpx，1600x900 下避免按窗口比例放大 2.7 倍 */
+.topbar-wide { padding: 12px 24px; }
+.tabs-wide { border-radius: 18px; padding: 3px; }
+.tab-wide { padding: 8px 20px; border-radius: 15px; }
+.tab-text-wide { font-size: 14px; }
+.submit-btn-wide { padding: 9px 18px; border-radius: 18px; }
+.submit-btn-text-wide { font-size: 14px; }
+.fb-item-wide { margin: 14px 24px 0; padding: 20px; border-radius: 14px; }
+.fb-head-wide { flex-direction: row; align-items: center; }
+.type-badge-wide { padding: 2px 8px; border-radius: 5px; }
+.type-badge-text-wide { font-size: 11px; }
+.fb-title-wide { margin-left: 8px; margin-right: 8px; font-size: 16px; }
+.status-badge-wide { padding: 2px 8px; border-radius: 5px; }
+.status-badge-text-wide { font-size: 11px; }
+.fb-content-wide { margin-top: 8px; font-size: 14px; }
+.fb-foot-wide { margin-top: 8px; }
+.fb-time-wide { font-size: 12px; }
+.fb-public-wide { font-size: 12px; }
+.list-foot-wide { padding: 12px 0 20px; }
+.list-foot-text-wide { font-size: 14px; }
+.empty-wide { padding: 80px 24px; }
+.empty-text-wide { margin-top: 10px; font-size: 14px; }
+.login-btn-wide { margin-top: 20px; padding: 12px 32px; border-radius: 22px; }
+.login-btn-text-wide { font-size: 14px; }
+</style>

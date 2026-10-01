@@ -1,0 +1,67 @@
+/**
+ * qt-audio-player 播放器接口类型定义
+ * 供各平台 index.uts 与前端页面共同引用
+ */
+
+/**
+ * 无参事件回调（播放、暂停、停止、播放完毕、可播放、缓冲中、上一曲、下一曲）
+ */
+export type AudioPlayerVoidCallback = () => void
+
+/**
+ * 播放进度回调
+ * @param currentTime 当前播放位置（秒）
+ * @param duration 音频总时长（秒）
+ */
+export type AudioPlayerTimeCallback = (currentTime: number, duration: number) => void
+
+/**
+ * 播放错误回调
+ * @param message 错误信息
+ */
+export type AudioPlayerErrorCallback = (message: string) => void
+
+/**
+ * 布尔状态回调（桌面歌词悬浮窗显隐：参数 = 当前是否显示）
+ * @param on 悬浮窗当前是否显示
+ */
+export type AudioPlayerStateCallback = (on: boolean) => void
+
+/**
+ * 播放器事件类型（通知栏按钮与播放器状态）
+ */
+export type AudioPlayerEventType = 'play' | 'pause' | 'stop' | 'ended' | 'canplay' | 'waiting' | 'timeupdate' | 'error' | 'prev' | 'next'
+
+/**
+ * 检查/请求「通知栏」运行时权限（POST_NOTIFICATIONS）。
+ * Android 13+：检查并（未授权时）发起系统授权请求；Android 12-：通知权限默认授予，直接回调 true。
+ * @param onGranted 最终授权结果回调（true 已授权 / false 未授权）
+ */
+export type EnsureNotificationPermission = (onGranted: (granted: boolean) => void) => void
+
+/**
+ * 播放队列条目（播放队列归 media3 时间线管理）。
+ * uri 通常传 qt-resolve:// 占位地址（scheme 固定 qt-resolve，query 带 mid=mediaId 的
+ * encodeURIComponent 编码值），原生在真正加载该条目那一刻回调「解析请求」，由 JS 侧
+ * 取到真实地址后回填；本地文件等已知地址也可以直接传真实 URI（原生按 scheme 直过）。
+ */
+export type AudioPlaylistItem = {
+	/** 歌曲唯一标识（store 侧 platform:id），解析回调与切歌事件都按它对账 */
+	mediaId: string,
+	/** 播放地址：qt-resolve:// 占位 或 真实可加载 URI */
+	uri: string,
+	/** 标题（进媒体会话元数据：通知栏/车机蓝牙显示） */
+	title: string,
+	/** 歌手 */
+	artist: string,
+	/** 专辑名（可空串） */
+	album: string,
+	/** 封面地址（可空串；媒体通知按 artworkUri 异步加载） */
+	coverUrl: string,
+}
+
+/** 懒解析请求回调：原生要加载某个 qt-resolve 条目，向 JS 要真实播放地址 */
+export type AudioResolveRequestCallback = (mediaId: string) => void
+
+/** 当前曲目切换事件（原生自动切歌 / JS 跳转 / 换队列定位都会触发），参数为 mediaId */
+export type AudioTrackChangedCallback = (mediaId: string) => void

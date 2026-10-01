@@ -1,0 +1,332 @@
+/**
+ * 引擎 prelude（宿主注入到 JS 上下文里的 JS 代码）
+ *
+ * 作用：把老引擎/老 WebView 缺失的运行时补齐，并把「bundle 需要宿主提供的能力」接成一条
+ * **原生可拉取的队列**（见《qt-uniappx-V8引擎方案.md》）：
+ *
+ *   JS → 原生：不直接调用原生函数，而是把待办推进队列（httpQueue / timerQueue / results）
+ *   原生 → JS：唯一入口是 evaluate("__qtEnvPump()")（webview.uts 的 bootstrap 把下面这些
+ *              裸函数用 __qtEnv 包成信封），拿到待办后处理，
+ *              再用 evaluate("__qtEnvResolveHttp(...)") / evaluate("__qtEnvFireTimer(id)") 回投结果
+ *
+ * 这样跨语言边界上只有「字符串进、字符串出」，不需要 UTS 去实现 Java 的变参接口
+ * （JSCallFunction），也不需要 hybrid.kt，风险和实现量都最小。
+ *
+ * 注意：这里只定义**裸函数**（__qtCall / __qtPump / __qtResolveHttp / __qtFireTimer）。
+ * 曾为 QuickJS 的微任务怪癖额外包过一层 `*Async`（只有求值 Promise 才会跑干微任务队列），
+ * 那层包装随 QuickJS 后端一起删除了——evaluateJavascript 对 Promise 表达式只回调 "null"。
+ *
+ * 另一条硬约束：**跨语言边界的字符串一律保持纯 ASCII**。
+ *   - 进 JS 的字符串由原生侧转义成 \uXXXX（见 index.uts 的 quoteAscii）；
+ *   - 出 JS 的 JSON 由下面的 asciiJson() 把非 ASCII 转义成 \uXXXX，
+ *     原生 JSON.parse 会自动还原成中文。
+ *
+ * 本文件是 UTS 字符串常量，里面嵌的是 JS 源码。为了让转义可控，
+ * JS 里一律不写反斜杠转义（换行用 String.fromCharCode(10)，反斜杠用 String.fromCharCode(92)）。
+ */
+
+/** prelude 的 JS 源码（宿主契约版本 hostApiVersion = 1 的一部分） */
+export const QT_JS_PRELUDE = `
+(function () {
+  var NL = String.fromCharCode(10);
+  var BS = String.fromCharCode(92);
+
+  // ---------- ASCII 化 JSON：保证出 JS 的文本不含非 ASCII（见文件头说明） ----------
+  // 逐字符 out += 拼接在 JS 引擎里是 O(n²)：数据入口动辄几十 KB 的结果会烧掉数秒，
+  // 是真机「所有接口都慢」的元凶之一。改用 C 层实现的 replace 线性完成。
+  var QT_NO_ASCII = new RegExp('[^' + BS + 'x00-' + BS + 'x7e]');
+  var QT_ASCII_ESC = new RegExp('[^' + BS + 'x20-' + BS + 'x7e]', 'g');
+  function asciiJson(value) {
+    var s = JSON.stringify(value);
+    if (s == null) s = 'null';
+    if (QT_NO_ASCII.test(s)) {
+      return s.replace(QT_ASCII_ESC, function (c) {
+        var hex = c.charCodeAt(0).toString(16);
+        return BS + 'u' + '0000'.substring(hex.length) + hex;
+      });
+    }
+    return s;
+  }
+
+  // ---------- 宿主能力：HTTP ----------
+  // id 一律用字符串：原生侧不解析数字（避免 12 / 12.0 两种文本形态对不上）
+  var httpSeq = 0, httpPending = {}, httpQueue = [];
+
+  // 请求头序列化成原生 HttpTask 认的「Name: value」多行文本（按首个冒号切分）。
+  // 注意不能发 JSON 文本：HttpTask 按 "Name: value" 逐行解析，发 JSON 会把
+  // '{"User-Agent"' 当成头名——所有真实头（Range/UA/Referer/Content-Type）全部
+  // 丢失，Range 失效还会让 verifyPlayable 退化成拉全曲（5s 超时 + 8MB 上限必炸）。
+  function qtHeaderLines(h) {
+    if (!h) return '';
+    var out = '';
+    for (var k in h) {
+      if (!h.hasOwnProperty(k)) continue;
+      var v = h[k];
+      if (typeof v !== 'string' && typeof v !== 'number') continue;
+      out += String(k) + ': ' + String(v) + NL;
+    }
+    return out;
+  }
+
+  globalThis.__qtHost = {
+    // 宿主平台号（1101 安卓 / 1102 iOS）：bundle 的行级 platforms 过滤按它生效，
+    // 与 astral 的 qt_app_update.type 同源
+    platform: 1101,
+    request: function (url, opts) {
+      opts = opts || {};
+      var id = String(++httpSeq);
+      var promise = new Promise(function (resolve, reject) {
+        httpPending[id] = { res: resolve, rej: reject };
+      });
+      httpQueue.push({
+        k: 'H',
+        id: id,
+        url: String(url),
+        method: String(opts.method ? opts.method : 'GET').toUpperCase(),
+        headers: qtHeaderLines(opts.headers),
+        body: opts.body == null ? '' : String(opts.body),
+        timeoutMs: Number(opts.timeoutMs ? opts.timeoutMs : 15000)
+      });
+      return promise;
+    },
+    log: function (msg) {
+      try { console.log(String(msg)); } catch (e) {}
+    }
+  };
+
+  // 原生处理完 HTTP 后回投结果；id 不存在说明该 op 已被放弃，直接丢弃
+  globalThis.__qtResolveHttp = function (id, statusCode, headersJson, body, error) {
+    var item = httpPending[id];
+    if (!item) return;
+    delete httpPending[id];
+    if (error != null && String(error).length > 0) {
+      item.rej(new Error(String(error)));
+      return;
+    }
+    var headers = {};
+    try { headers = JSON.parse(headersJson ? headersJson : '{}'); } catch (e) {}
+    // 与 PC 的 Rust builtin_request 同契约：不看 content-type，先试 JSON 解析，
+    // 失败则原样字符串（上游普遍回 text/plain / text/html 却携带 JSON 体，
+    // 脚本侧按 res.body 直接取对象，不解析字符串）
+    var raw = String(body == null ? '' : body);
+    var parsed;
+    try { parsed = JSON.parse(raw); } catch (e) { parsed = raw; }
+    item.res({
+      statusCode: Number(statusCode),
+      headers: headers,
+      body: parsed
+    });
+  };
+
+  // ---------- 宿主能力：定时器 ----------
+  // ChainBudget 依赖 setTimeout 切分片，所以必须由原生真正推进（QuickJS 自己没有事件循环）
+  var timerSeq = 0, timers = {}, timerQueue = [];
+
+  globalThis.setTimeout = function (fn, ms) {
+    var id = String(++timerSeq);
+    timers[id] = { fn: fn, repeat: 0 };
+    timerQueue.push({ k: 'T', id: id, ms: Number(ms ? ms : 0) });
+    return id;
+  };
+  globalThis.setInterval = function (fn, ms) {
+    var id = String(++timerSeq);
+    var period = Number(ms ? ms : 0);
+    timers[id] = { fn: fn, repeat: period };
+    timerQueue.push({ k: 'T', id: id, ms: period });
+    return id;
+  };
+  globalThis.clearTimeout = function (id) { delete timers[id]; };
+  globalThis.clearInterval = globalThis.clearTimeout;
+
+  globalThis.__qtFireTimer = function (id) {
+    var t = timers[id];
+    if (!t) return;
+    try { t.fn(); } catch (e) { try { console.error(String(e)); } catch (e2) {} }
+    if (t.repeat > 0) { timerQueue.push({ k: 'T', id: id, ms: t.repeat }); } else { delete timers[id]; }
+  };
+
+  // ---------- bundle 入口注册表 ----------
+  // source-bundle.js 末尾会写 globalThis.__qtEntries = { getPlayUrl, verifyPlayable, bundleInfo }
+  globalThis.__qtEntries = {};
+
+  var opSeq = 0, ops = {}, results = [];
+
+  // 原生调用入口：立即返回 opId，结果（含异常）进 results 队列等原生来取
+  globalThis.__qtCall = function (name, argsJson) {
+    var id = String(++opSeq);
+    var fn = globalThis.__qtEntries ? globalThis.__qtEntries[name] : null;
+    if (typeof fn !== 'function') {
+      results.push({ k: 'R', id: id, ok: 0, value: '', error: 'bundle 未注册入口: ' + String(name) });
+      return id;
+    }
+    var args = [];
+    try { args = JSON.parse(argsJson ? argsJson : '[]'); } catch (e) { args = []; }
+    ops[id] = 1;
+    Promise.resolve().then(function () {
+      return fn.apply(null, args);
+    }).then(function (value) {
+      delete ops[id];
+      results.push({
+        k: 'R', id: id, ok: 1,
+        value: (typeof value === 'string') ? value : asciiJson(value === undefined ? null : value),
+        error: ''
+      });
+    }, function (err) {
+      delete ops[id];
+      results.push({
+        k: 'R', id: id, ok: 0, value: '',
+        error: String(err && err.message ? err.message : err)
+      });
+    });
+    return id;
+  };
+
+  // 放弃一个 op（原生侧超时/引擎停用时调用）。
+  // 它挂着的 HTTP 不做清理：原生回投时发现 httpPending 里没有对应 id 会直接丢弃。
+  globalThis.__qtDropOp = function (id) {
+    delete ops[id];
+  };
+
+  // ---------- 原生拉取入口 ----------
+  // 返回「每行一个 ASCII JSON」的待办清单；原生 split 换行后逐行 JSON.parse
+  globalThis.__qtPump = function () {
+    var lines = [];
+    var i;
+    for (i = 0; i < httpQueue.length; i++) { lines.push(asciiJson(httpQueue[i])); }
+    httpQueue = [];
+    for (i = 0; i < timerQueue.length; i++) { lines.push(asciiJson(timerQueue[i])); }
+    timerQueue = [];
+    for (i = 0; i < results.length; i++) { lines.push(asciiJson(results[i])); }
+    results = [];
+    return lines.join(NL);
+  };
+
+  // 还有多少未完成的活（原生据此决定要不要继续轮询，空闲时不占 CPU）
+  globalThis.__qtBusy = function () {
+    var n = 0, key;
+    for (key in ops) { if (ops.hasOwnProperty(key)) n++; }
+    return n + httpQueue.length + timerQueue.length + results.length;
+  };
+
+  // ---------- 老版本 WebView 缺失的运行时补齐 ----------
+  // 全部是「有就不动」的条件补齐：Android 7 自带的 WebView 51 缺 TextEncoder/TextDecoder、
+  // btoa/atob、crypto.getRandomValues，也缺 ES2021 的 replaceAll / Array.prototype.at /
+  // Object.hasOwn / Object.fromEntries，而混淆脚本可能用到。补上比赌引擎版本更稳。
+  var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+  function utf8Encode(str) {
+    var out = [], i, c, c2, cp;
+    for (i = 0; i < str.length; i++) {
+      c = str.charCodeAt(i);
+      if (c < 128) { out.push(c); }
+      else if (c < 2048) { out.push(192 | (c >> 6), 128 | (c & 63)); }
+      else if (c >= 55296 && c <= 56319 && i + 1 < str.length) {
+        c2 = str.charCodeAt(i + 1);
+        if (c2 >= 56320 && c2 <= 57343) {
+          cp = 65536 + ((c - 55296) << 10) + (c2 - 56320);
+          out.push(240 | (cp >> 18), 128 | ((cp >> 12) & 63), 128 | ((cp >> 6) & 63), 128 | (cp & 63));
+          i++;
+        } else { out.push(224 | (c >> 12), 128 | ((c >> 6) & 63), 128 | (c & 63)); }
+      } else { out.push(224 | (c >> 12), 128 | ((c >> 6) & 63), 128 | (c & 63)); }
+    }
+    return new Uint8Array(out);
+  }
+
+  function utf8Decode(bytes) {
+    var out = '', i = 0, b, c, c2, c3, cp;
+    while (i < bytes.length) {
+      b = bytes[i++];
+      if (b < 128) { out += String.fromCharCode(b); }
+      else if (b >= 192 && b < 224) { c = bytes[i++]; out += String.fromCharCode(((b & 31) << 6) | (c & 63)); }
+      else if (b >= 224 && b < 240) {
+        c = bytes[i++]; c2 = bytes[i++];
+        out += String.fromCharCode(((b & 15) << 12) | ((c & 63) << 6) | (c2 & 63));
+      } else {
+        c = bytes[i++]; c2 = bytes[i++]; c3 = bytes[i++];
+        cp = ((b & 7) << 18) | ((c & 63) << 12) | ((c2 & 63) << 6) | (c3 & 63);
+        cp -= 65536;
+        out += String.fromCharCode(55296 + (cp >> 10), 56320 + (cp & 1023));
+      }
+    }
+    return out;
+  }
+
+  if (typeof globalThis.TextEncoder !== 'function') {
+    globalThis.TextEncoder = function () {};
+    globalThis.TextEncoder.prototype.encode = function (str) { return utf8Encode(String(str)); };
+  }
+  if (typeof globalThis.TextDecoder !== 'function') {
+    globalThis.TextDecoder = function () {};
+    globalThis.TextDecoder.prototype.decode = function (bytes) { return utf8Decode(bytes || new Uint8Array(0)); };
+  }
+  if (typeof globalThis.btoa !== 'function') {
+    globalThis.btoa = function (binary) {
+      var out = '', i, b1, b2, b3;
+      binary = String(binary);
+      for (i = 0; i < binary.length; i += 3) {
+        b1 = binary.charCodeAt(i);
+        b2 = i + 1 < binary.length ? binary.charCodeAt(i + 1) : 0;
+        b3 = i + 2 < binary.length ? binary.charCodeAt(i + 2) : 0;
+        out += B64.charAt(b1 >> 2);
+        out += B64.charAt(((b1 & 3) << 4) | (b2 >> 4));
+        out += i + 1 < binary.length ? B64.charAt(((b2 & 15) << 2) | (b3 >> 6)) : '=';
+        out += i + 2 < binary.length ? B64.charAt(b3 & 63) : '=';
+      }
+      return out;
+    };
+  }
+  if (typeof globalThis.atob !== 'function') {
+    globalThis.atob = function (b64) {
+      var clean = '', out = '', i, ch, n, b1, b2, b3, b4;
+      var src = String(b64);
+      for (i = 0; i < src.length; i++) {
+        ch = src.charAt(i);
+        if (B64.indexOf(ch) >= 0) clean += ch;
+      }
+      for (i = 0; i < clean.length; i += 4) {
+        b1 = B64.indexOf(clean.charAt(i));
+        b2 = B64.indexOf(clean.charAt(i + 1));
+        b3 = clean.length > i + 2 ? B64.indexOf(clean.charAt(i + 2)) : -1;
+        b4 = clean.length > i + 3 ? B64.indexOf(clean.charAt(i + 3)) : -1;
+        n = (b1 << 18) | (b2 << 12) | ((b3 & 63) << 6) | (b4 & 63);
+        out += String.fromCharCode((n >> 16) & 255);
+        if (b3 >= 0) out += String.fromCharCode((n >> 8) & 255);
+        if (b4 >= 0) out += String.fromCharCode(n & 255);
+      }
+      return out;
+    };
+  }
+  if (typeof globalThis.crypto !== 'object' || globalThis.crypto == null) {
+    globalThis.crypto = {};
+  }
+  if (typeof globalThis.crypto.getRandomValues !== 'function') {
+    globalThis.crypto.getRandomValues = function (arr) {
+      for (var i = 0; i < arr.length; i++) { arr[i] = Math.floor(Math.random() * 256); }
+      return arr;
+    };
+  }
+
+  // ES2021+ 小补丁：混淆脚本可能用到，补上比赌引擎版本更稳
+  if (typeof String.prototype.replaceAll !== 'function') {
+    String.prototype.replaceAll = function (search, repl) {
+      return this.split(String(search)).join(String(repl));
+    };
+  }
+  if (typeof Array.prototype.at !== 'function') {
+    Array.prototype.at = function (n) {
+      n = Math.trunc(n) || 0;
+      return n < 0 ? this[this.length + n] : this[n];
+    };
+  }
+  if (typeof Object.hasOwn !== 'function') {
+    Object.hasOwn = function (obj, key) { return Object.prototype.hasOwnProperty.call(obj, key); };
+  }
+  if (typeof Object.fromEntries !== 'function') {
+    Object.fromEntries = function (entries) {
+      var out = {}, list = Array.from(entries), i;
+      for (i = 0; i < list.length; i++) { out[list[i][0]] = list[i][1]; }
+      return out;
+    };
+  }
+})();
+`;

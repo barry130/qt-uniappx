@@ -1,0 +1,243 @@
+<template>
+  <view
+    v-if="player.current != null"
+    class="fab-right" :class="layout.isWide ? 'fab-right-wide' : ''"
+    :style="'left:' + fabX + 'px;top:' + fabY + 'px;'"
+    @touchstart="onTouchStart"
+    @touchmove="onTouchMove"
+    @touchend="onTouchEnd"
+    @click="openPlayer"
+  >
+    <view
+      class="fab-inner"
+      :class="layout.isWide ? 'fab-inner-wide' : ''"
+      :style="'background-color:' + theme.skin.mediaSurface + ';border-color:' + theme.skin.mediaBorder + ';'"
+    >
+      <view class="fab-cover-spin" :class="layout.isWide ? 'fab-cover-spin-wide' : ''" :style="discStyle">
+        <image class="fab-cover" :class="layout.isWide ? 'fab-cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="currentCover()" mode="aspectFill" />
+      </view>
+      <view class="fab-state" :class="layout.isWide ? 'fab-state-wide' : ''" :style="'background-color:' + (player.playing ? theme.skin.mediaControl : theme.skin.mediaScrim) + ';'">
+        <QtIcon :name="player.playing ? 'pause' : 'play'" :size="layout.isWide ? 20 : 26" :color="theme.skin.mediaText" />
+      </view>
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { usePlayerStore } from "@/stores/player";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtSideNavWidth } from "@/uni_modules/qt-ui/composables/use-qt-tab-bar";
+import { qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+
+const player = usePlayerStore();
+const layout = useQtLayout();
+const theme = useThemeStore();
+
+/** 悬浮球尺寸（rpx）与默认边距（rpx） */
+const FAB_SIZE = 120;
+const LEFT_MARGIN = 28;
+const BOTTOM_MARGIN = 150;
+/** 位置持久化 key */
+const POS_KEY = "qt-mini-player-fab";
+
+
+
+/** 悬浮球当前位置（px，left/top） */
+const fabX = ref(0);
+const fabY = ref(0);
+
+let startX = 0;
+let startY = 0;
+let origX = 0;
+let origY = 0;
+let dragging = false;
+let moved = false;
+
+// qtRpx 读的是非响应源（uni.getWindowInfo），computed 内必须显式读一次
+// layout.windowWidth 才会在窗口尺寸变化时重算（拖拽边界钳制依赖它）
+const FAB_PX = computed((): number => {
+  layout.windowWidth;
+  return layout.isWide ? 72 : qtRpx(FAB_SIZE);
+});
+
+/** 封面播放旋转（vinyl 效果）：requestAnimationFrame 驱动，仅在播放时旋转 */
+const rotateDeg = ref(0);
+let lastRotateTime = 0;
+let rotationTimer: number | null = null;
+const discStyle = computed(() => "transform: rotate(" + rotateDeg.value + "deg);");
+const rotateStep = (timestamp: number) => {
+  if (lastRotateTime == 0) lastRotateTime = timestamp;
+  const dt = timestamp - lastRotateTime;
+  lastRotateTime = timestamp;
+  if (player.playing && dt > 0) {
+    // 约 12 度/秒，按实际经过时间计算，保证不同帧率下速度一致
+    rotateDeg.value = (rotateDeg.value + dt * 0.012) % 360;
+  }
+  rotationTimer = requestAnimationFrame(rotateStep);
+};
+const startSpin = () => {
+  if (rotationTimer != null) return;
+  lastRotateTime = 0;
+  rotationTimer = requestAnimationFrame(rotateStep);
+};
+const stopSpin = () => {
+  if (rotationTimer != null) {
+    cancelAnimationFrame(rotationTimer);
+    rotationTimer = null;
+  }
+};
+
+/** 初始化位置：优先使用用户上次拖动的坐标，否则默认左侧 */
+function initPosition(): void {
+  const win = uni.getWindowInfo();
+  let x = qtRpx(LEFT_MARGIN);
+  let y = win.windowHeight - (layout.isWide ? 96 : qtRpx(BOTTOM_MARGIN)) - FAB_PX.value;
+  if (layout.isWide) {
+    // 宽屏 tab 页左侧有导航 rail（>=860dp 为 208px 完整 rail，否则 64px 图标栏），
+    // 悬浮球默认落在 rail 右侧，避免压在导航上
+    x = qtSideNavWidth(win.windowWidth) + 16;
+  }
+  try {
+    const saved = uni.getStorageSync(POS_KEY) as string;
+    if (saved.length > 0) {
+      const parts = saved.split(",");
+      if (parts.length == 2) {
+        const sx = parseFloat(parts[0]);
+        const sy = parseFloat(parts[1]);
+        if (!isNaN(sx) && !isNaN(sy)) {
+          x = sx;
+          y = sy;
+        }
+      }
+    }
+  } catch (_) {}
+  if (layout.isWide) {
+    // 旧记录可能是在竖屏下拖到左缘的，宽屏一律让开 rail，避免压在导航上
+    const railEnd = qtSideNavWidth(win.windowWidth) + 8;
+    if (x < railEnd) x = railEnd + 8;
+  }
+  fabX.value = x;
+  fabY.value = y;
+}
+
+function onTouchStart(event: UniTouchEvent): void {
+  const touch = event.touches[0];
+  startX = touch.clientX;
+  startY = touch.clientY;
+  origX = fabX.value;
+  origY = fabY.value;
+  dragging = true;
+  moved = false;
+}
+
+function onTouchMove(event: UniTouchEvent): void {
+  if (!dragging) return;
+  const touch = event.touches[0];
+  const dx = touch.clientX - startX;
+  const dy = touch.clientY - startY;
+  // 超过阈值视为拖动，避免误判为点击
+  if (!moved && Math.abs(dx) > 10 && Math.abs(dy) > 10) {
+    moved = true;
+  }
+  if (!moved) return;
+  const win = uni.getWindowInfo();
+  let nx = origX + dx;
+  let ny = origY + dy;
+  nx = Math.max(0, Math.min(nx, win.windowWidth - FAB_PX.value));
+  ny = Math.max(0, Math.min(ny, win.windowHeight - FAB_PX.value));
+  fabX.value = nx;
+  fabY.value = ny;
+}
+
+function onTouchEnd(): void {
+  if (!dragging) return;
+  dragging = false;
+  // 拖动结束后持久化位置
+  if (moved) {
+    try {
+      uni.setStorageSync(POS_KEY, Math.round(fabX.value) + "," + Math.round(fabY.value));
+    } catch (_) {}
+  }
+}
+
+/** 打开播放页；若为拖动手势则忽略点击 */
+function openPlayer(): void {
+  if (moved) {
+    moved = false;
+    return;
+  }
+  uni.navigateTo({ url: "/pages/player/index" });
+}
+
+function currentCover(): string {
+  const current = player.current;
+  return current != null ? current.picUrl : "";
+}
+
+onMounted(() => {
+  initPosition();
+  // 已处于播放状态则立即开始旋转封面
+  if (player.playing) startSpin();
+});
+
+watch(() => player.playing, (playing) => {
+  if (playing) startSpin();
+  else stopSpin();
+});
+
+onUnmounted(() => {
+  stopSpin();
+});
+</script>
+
+<style>
+.fab-right {
+  position: fixed;
+  z-index: 998;
+  width: 120rpx;
+  height: 120rpx;
+  border-radius: 60rpx;
+}
+.fab-inner {
+  width: 120rpx;
+  height: 120rpx;
+  border-radius: 60rpx;
+  justify-content: center;
+  align-items: center;
+  /* shadow removed: Android 点击穿透（见 ui-review.md P0-1） */
+  overflow: hidden;
+  border-width: 2rpx;
+}
+/* 旋转放在外层容器上，比 image 组件更稳定地支持 transform */
+.fab-cover-spin {
+  width: 120rpx;
+  height: 120rpx;
+  border-radius: 60rpx;
+  transform-origin: center;
+  overflow: hidden;
+}
+.fab-cover {
+  width: 120rpx;
+  height: 120rpx;
+  border-radius: 60rpx;
+}
+.fab-state {
+  position: absolute;
+  width: 56rpx;
+  height: 56rpx;
+  right: 0;
+  bottom: 0;
+  border-radius: 28rpx 0 28rpx 0;
+  justify-content: center;
+  align-items: center;
+}
+
+.fab-right-wide { width: 72px; height: 72px; border-radius: 36px; }
+.fab-inner-wide { width: 72px; height: 72px; border-radius: 36px; border-width: 1px; }
+.fab-cover-spin-wide { width: 72px; height: 72px; border-radius: 36px; }
+.fab-cover-wide { width: 72px; height: 72px; border-radius: 36px; }
+.fab-state-wide { width: 34px; height: 34px; border-radius: 17px 0 17px 0; }
+</style>

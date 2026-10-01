@@ -1,0 +1,1286 @@
+/**
+ * qt-js-engine 安卓端实现（系统 WebView 的 V8 引擎）
+ *
+ * 引擎：系统 WebView（`android.webkit.WebView`）里的 V8/JIT，实现在 ./webview.uts。
+ * 为什么不用内嵌 JS 解释器：远程下发的音源包里有 jsjiami 系列混淆脚本，同一段 init
+ * 在 V8 上约 84ms，在 QuickJS 解释器上要 6361ms（×75.7），一条 8-9s 的 init 会独占
+ * 引擎线程并吃光整链预算。方案与验证见《qt-uniappx-V8引擎方案.md》。
+ *
+ * 历史：2026-09-23 之前这里是「WebView 优先 + 内嵌 QuickJS 兜底」双后端，
+ * QuickJS 分支、libs/*.aar 与 ENGINE_BACKEND 开关已整体删除，现在只有 V8 一条路径。
+ *
+ * ── 线程模型 ────────────────────────────────────────────────────────────
+ * WebView 的创建与求值都必须在有 Looper 的线程上做，因此本插件固定一条
+ * "qt-js-engine" HandlerThread，所有引擎 API 都 post 过去执行；WebView 自身的
+ * 创建/求值再 marshal 到主线程（见 webview.uts 的 v8OnMain / v8EvalSync）。
+ * HTTP 与文件 IO 不占这条线程（HTTP 各起一条 java.lang.Thread，结果再 post 回引擎线程）。
+ *
+ * ── 跨语言调用：原生拉取队列（pump）────────────────────────────────────
+ * 不实现 Java 变参接口（JSCallFunction）来做 JS → 原生 调用，改成**原生主动拉取**：
+ *
+ *   JS 侧（prelude）：__qtHost.request() / setTimeout 把待办推进 httpQueue / timerQueue；
+ *                     每个 op 的结果推进 results 队列。
+ *   原生侧：invoke() → evaluate("__qtEnvCall(...)") 拿到 opId，然后每 20ms 一次
+ *           evaluate("__qtEnvPump()") 取走待办：
+ *             H 行 → 起线程发 HTTP，回来 evaluate("__qtEnvResolveHttp(id,status,headers,body,error)")
+ *             T 行 → Handler.postDelayed → evaluate("__qtEnvFireTimer(id)")
+ *             R 行 → 该 op 结束，回调调用方
+ * 跨语言边界上只有「字符串进、字符串出」。（__qtEnv* 是 webview.uts 的 bootstrap 包的信封；
+ * prelude 里只有裸函数 __qtCall / __qtPump / __qtResolveHttp / __qtFireTimer。）
+ *
+ * ── 两条已实测的引擎行为（决定了上面这套设计可行）─────────────────────
+ * ① evaluateJavascript 对 Promise 表达式只回调 "null"，拿不到值，所以 V8 侧一律求值
+ *    **同步版**（prelude 里的 __qtEnv* 信封函数），微任务由 V8 在每次脚本求值后自行跑
+ *    检查点推进。这与 QuickJS 相反（那边必须求值 Promise 包装版才会跑微任务队列），
+ *    也正是删掉 QuickJS 后 expr* 不再需要按后端分叉的原因。
+ * ② evaluateJavascript **不回传异常**，只回调 "null"。所以求值一律包 __qtEnv 信封
+ *    （ok/value/error），脚本抛错时从信封里取错误文本，见 webview.uts 的 v8LastError()。
+ *
+ * 脚本死循环**无法从外部掐断**（WebView 没有中断接口）。因此这里只能「事后发现 + 隔离」：
+ * 单次求值超过 STALL_MS 判定引擎停用（poisoned），后续调用一律立刻失败。恢复必须
+ * stop() + start() 重建——服务层 services/source-engine.uts 的 ensureEngine() 已实现
+ * 「发现隔离即自动重建」，故隔离的实际影响是「这一次请求失败」，而不是「永久不可用直到手动重启」。
+ */
+
+import Handler from 'android.os.Handler'
+import HandlerThread from 'android.os.HandlerThread'
+import Looper from 'android.os.Looper'
+import Runnable from 'java.lang.Runnable'
+import StringBuilder from 'java.lang.StringBuilder'
+import System from 'java.lang.System'
+import Thread from 'java.lang.Thread'
+import URL from 'java.net.URL'
+import HttpURLConnection from 'java.net.HttpURLConnection'
+import InputStream from 'java.io.InputStream'
+import ByteArrayOutputStream from 'java.io.ByteArrayOutputStream'
+import OutputStreamWriter from 'java.io.OutputStreamWriter'
+import File from 'java.io.File'
+import FileInputStream from 'java.io.FileInputStream'
+import FileOutputStream from 'java.io.FileOutputStream'
+import GZIPInputStream from 'java.util.zip.GZIPInputStream'
+import { UTSAndroid } from 'io.dcloud.uts'
+
+import {
+	v8Available,
+	v8Start,
+	v8Stop,
+	v8EvalSync,
+	v8LoadBundle,
+	v8Version,
+	v8LastError,
+	v8RenderGone,
+	v8ExprCall,
+	v8ExprPump,
+	v8ExprResolveHttp,
+	v8ExprFireTimer,
+	v8ExprDropOp,
+	v8ExprEntriesCount,
+	v8ExprProbe,
+} from './webview.uts'
+
+import type {
+	QtJsStart,
+	QtJsStop,
+	QtJsEvaluate,
+	QtJsIsRunning,
+	QtJsLoadBundle,
+	QtJsInvoke,
+	QtJsDropOp,
+	QtJsIsHealthy,
+	QtJsDataDir,
+	QtJsReadTextFile,
+	QtJsWriteTextFile,
+	QtJsExists,
+	QtJsRemove,
+	QtJsMkdirs,
+	QtJsListDir,
+	QtJsReadAssetText,
+	QtJsSpikeNativeTimer,
+	QtJsStartOptions,
+	QtJsStartCallback,
+	QtJsEvalCallback,
+	QtJsEvalResult,
+	QtJsVoidCallback,
+	QtJsFileCallback,
+	QtJsSpikeTimerCallback,
+	QtJsEngineInfo,
+} from '../interface.uts'
+
+/** 宿主契约版本：request + 定时器 + __qtEntries 入口注册 */
+const HOST_API_VERSION = 1
+/** 引擎线程名 */
+const ENGINE_THREAD_NAME = 'qt-js-engine'
+/** pump 轮询间隔：一次 HTTP 往返最多多花这么久 */
+const PUMP_INTERVAL_MS = 20
+/** invoke 默认超时（含脚本内所有 HTTP 与定时器等待） */
+const DEFAULT_INVOKE_TIMEOUT_MS = 20000
+/**
+ * 单次 evaluate 超过这个耗时即认定脚本卡住（引擎停用 / poison）。
+ *
+ * 取值权衡：evaluate 求值 Promise 时会把**微任务队列跑干**，所以链路里所有 await
+ * 续跑都算进同一次计时——包括合法的「宿主首帧懒 init」（混淆脚本顶层同步执行）。
+ * 实测同一段 init 在 Node(V8) 84ms、在 QuickJS 上 6361ms（约 ×75），按 5s 判死会把
+ * 正常初始化误判成死循环（2026092001 的 QQ 全失败就是这条）。
+ * 15s 足以覆盖最重的合法 init，同时真正的死循环（evaluate 永不返回）仍会被拦下；
+ * 上层服务（services/source-engine.uts）已配套「发现隔离即 stop+start 自动重建」，
+ * 误判的代价只是一次请求失败。
+ */
+const STALL_MS = 15000
+/** HTTP 默认超时 */
+const DEFAULT_HTTP_TIMEOUT_MS = 15000
+/** bundle 未显式带 User-Agent 时的默认 UA：Dalvik 默认 UA 会被部分服务端限速 */
+const DEFAULT_UA =
+	'Mozilla/5.0 (Linux; Android 12; zh-CN) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
+/** 响应体上限（防脚本拉大文件把内存撑爆） */
+const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+const HEX = '0123456789abcdef'
+
+// ==================== 模块级状态 ====================
+
+let gThread: HandlerThread | null = null
+let gHandler: Handler | null = null
+/** 引擎是否已就绪：v8Start 成功并注入完 prelude 后置 true，stop 后置 false */
+let gStarted = false
+/** 实际生效的引擎标识与版本（start 时上报给服务层） */
+let gEngineName = ''
+let gEngineVersion = ''
+/** pump 是否已排队（避免重复 post 出多条轮询链） */
+let gPumpScheduled = false
+/** 引擎是否已被判定卡死：true 后所有调用直接失败，需 stop + start 重建 */
+let gPoisoned = false
+/** 在等结果的调用 */
+let gWaiters: Waiter[] = []
+
+/** 一次 invoke 的等待记录（opId 统一用字符串，避免 number 在不同层被格式化成 12 / 12.0） */
+class Waiter {
+	opId: string
+	deadline: number
+	callback: QtJsEvalCallback
+
+	constructor(opId: string, deadline: number, callback: QtJsEvalCallback) {
+		this.opId = opId
+		this.deadline = deadline
+		this.callback = callback
+	}
+}
+
+// ==================== 小工具 ====================
+
+/** 把异常转成可读字符串（UTS 的 catch 参数是 any） */
+function errText(e: any): string {
+	if (e == null) return 'unknown error'
+	return `${e}`
+}
+
+/** 四位十六进制（不用 number.toString(16)，保持只用字符串 API） */
+function hex4(c: number): string {
+	return (
+		HEX.charAt((c >> 12) & 15) +
+		HEX.charAt((c >> 8) & 15) +
+		HEX.charAt((c >> 4) & 15) +
+		HEX.charAt(c & 15)
+	)
+}
+
+/**
+ * 生成纯 ASCII 的双引号字面量，同时可用作 JS 字符串字面量和 JSON 字符串。
+ * 非 ASCII 一律转成 \uXXXX —— 见 prelude.uts 文件头：跨 JNI 边界的字符串保持纯 ASCII，
+ * 既避开 NewStringUTF（modified UTF-8）的编码坑，也顺手解决了引号/换行注入问题。
+ */
+function quoteAscii(s: string): string {
+	// 逐字符转义必须走 StringBuilder：String += 在 Kotlin 里每次都整串复制，是 O(n²)。
+	// 数据接口的响应体动辄几百 KB，此前这里烧掉几十秒（真机所有接口都慢的元凶）。
+	const sb = new StringBuilder()
+	sb.append('"')
+	for (let i = 0; i < s.length; i++) {
+		const c = s.charCodeAt(i)!
+		if (c == 34) {
+			sb.append('\\"')
+		} else if (c == 92) {
+			sb.append('\\\\')
+		} else if (c >= 32 && c < 127) {
+			sb.append(s.charAt(i))
+		} else {
+			sb.append('\\u')
+			sb.append(hex4(c))
+		}
+	}
+	sb.append('"')
+	return sb.toString()
+}
+
+/** 取 JSON 对象的字符串字段（null → 空串） */
+function fieldStr(o: UTSJSONObject, key: string): string {
+	const v = o.get(key)
+	if (v == null) return ''
+	return `${v}`
+}
+
+/**
+ * 取 JSON 对象的非负整数字段。
+ * JSON.parse 出来的数值可能是 20 也可能是 20.0 的文本形态，这里只按十进制数字累加，
+ * 遇到小数点直接停（ms / timeoutMs 都是整数），避免依赖 parseFloat / toInt 这类 API。
+ */
+function fieldInt(o: UTSJSONObject, key: string): number {
+	const s = fieldStr(o, key)
+	let v = 0
+	for (let i = 0; i < s.length; i++) {
+		const c = s.charCodeAt(i)!
+		if (c >= 48 && c < 58) {
+			v = v * 10 + (c - 48)
+		} else if (c == 46) {
+			break
+		} else if (i > 0) {
+			break
+		}
+	}
+	return v
+}
+
+/** number → Long（Handler.postDelayed / 时间戳比较用） */
+function toLongMs(ms: number): Long {
+	let v: Long = Math.round(ms).toLong()
+	if (v < 0) {
+		v = 0
+	}
+	return v
+}
+
+/**
+ * 回调统一回到主线程执行。
+ * 本项目已有先例：qt-audio-player 的 getHandler() 用 Looper.getMainLooper()，
+ * 所有回调（cbTime / cbPlay / ...）都在主线程 fire。引擎线程是后台线程，
+ * 从后台线程直接调 UTS 回调是踩坑点，这里照抄该做法。
+ */
+let gMainHandler: Handler | null = null
+
+function mainHandler(): Handler {
+	const h = gMainHandler
+	if (h != null) return h
+	const created = new Handler(Looper.getMainLooper())
+	gMainHandler = created
+	return created
+}
+
+/** 一次回调的载体（把闭包 post 到主线程执行） */
+class MainCallback implements Runnable {
+	private fn: () => void
+
+	constructor(fn: () => void) {
+		this.fn = fn
+	}
+
+	override run(): void {
+		this.fn()
+	}
+}
+
+function onMain(fn: () => void): void {
+	try {
+		mainHandler().post(new MainCallback(fn))
+	} catch (e) {
+		console.error('[qt-js-engine] 回调投递失败:', e)
+	}
+}
+
+function deliverStart(cb: QtJsStartCallback, info: QtJsEngineInfo | null, error: string | null): void {
+	onMain(() => {
+		cb(info, error)
+	})
+}
+
+function deliverVoid(cb: QtJsVoidCallback, ok: boolean, error: string): void {
+	onMain(() => {
+		cb({ ok: ok, error: error })
+	})
+}
+
+function deliverEval(cb: QtJsEvalCallback, ok: boolean, value: string, error: string): void {
+	onMain(() => {
+		cb({ ok: ok, value: value, error: error })
+	})
+}
+
+function deliverFile(cb: QtJsFileCallback, ok: boolean, value: string, error: string): void {
+	onMain(() => {
+		cb(ok, value, error)
+	})
+}
+
+function deliverSpike(cb: QtJsSpikeTimerCallback, fired: string, error: string): void {
+	onMain(() => {
+		cb(fired, error)
+	})
+}
+
+/**
+ * 在引擎线程上执行一段 JS，返回值统一按字符串取（约定：进 JS 的代码都 String(...) 收尾）。
+ *
+ * 求值要过主线程（WebView 只能在主线程上 evaluateJavascript），同步等结果回来，
+ * 见 webview.uts 的 v8EvalSync。
+ */
+function evalString(code: string): string {
+	return v8EvalSync(code)
+}
+
+/**
+ * 引擎当前是否可以求值。
+ *
+ * 2026-09-23 真机踩过的坑：旧的双后端实现里这里曾按 `gCtx == null` 判就绪，而 V8 模式下
+ * 根本没有 QuickJS 上下文（gCtx 恒为 null），导致 `LoadBundleTask` 之外的四条路径
+ * （InvokeTask / PumpTask / FireTimerTask / ResolveHttpTask）把每一次求值静默挡掉，
+ * 表现为「bundle 装载成功，但 chain.json 装载失败：引擎未启动」。现在只有 V8 一条路径，
+ * 判据就是「已启动且未被隔离」。
+ */
+function engineEvalReady(): boolean {
+	return gStarted && !gPoisoned
+}
+
+// ==================== 求值表达式（V8 同步版） ====================
+//
+// evaluateJavascript 对 Promise 表达式只回调 "null"，拿不到值，所以一律求值**同步版**
+// （prelude 里的 __qtEnv* 信封函数），微任务由 V8 在每次脚本求值后自行跑检查点推进。
+// 另外 evaluateJavascript 不回传异常，所以求值一律包 __qtEnv 信封（见文件头 ②）。
+
+function exprCall(name: string, argsJson: string): string {
+	return v8ExprCall(quoteAscii(name), quoteAscii(argsJson))
+}
+
+function exprPump(): string {
+	return v8ExprPump()
+}
+
+function exprResolveHttp(id: string, status: number, headersJson: string, body: string, error: string): string {
+	return v8ExprResolveHttp(quoteAscii(id), status, quoteAscii(headersJson), quoteAscii(body), quoteAscii(error))
+}
+
+function exprFireTimer(id: string): string {
+	return v8ExprFireTimer(quoteAscii(id))
+}
+
+function exprDropOp(id: string): string {
+	return v8ExprDropOp(quoteAscii(id))
+}
+
+function engineHandler(): Handler | null {
+	return gHandler
+}
+
+/** 把任务投回引擎线程 */
+function postToEngine(task: Runnable): void {
+	const h = gHandler
+	if (h == null) return
+	h.post(task)
+}
+
+/** 排一次 pump；已有排队时不再重复排（最坏多等一个 PUMP_INTERVAL_MS） */
+function schedulePump(delayMs: number): void {
+	if (gPumpScheduled) return
+	const h = gHandler
+	if (h == null) return
+	gPumpScheduled = true
+	h.postDelayed(new PumpTask(), toLongMs(delayMs))
+}
+
+// ==================== 引擎生命周期 ====================
+
+class StartTask implements Runnable {
+	private options: QtJsStartOptions
+	private callback: QtJsStartCallback
+
+	constructor(options: QtJsStartOptions, callback: QtJsStartCallback) {
+		this.options = options
+		this.callback = callback
+	}
+
+	override run(): void {
+		// 系统 WebView(V8)：混淆脚本 init 比内嵌解释器快约 75 倍，是「白名单与预热都不需要」的根本解。
+		// 失败即失败（旧实现会回退 QuickJS，回退路径已删除）。
+		if (!v8Available()) {
+			deliverStart(this.callback, null, '系统 WebView 不可用')
+			return
+		}
+		const v8err = v8Start()
+		if (v8err.length != 0) {
+			deliverStart(this.callback, null, v8err)
+			return
+		}
+		gStarted = true
+		gPoisoned = false
+		gEngineName = 'webview-v8'
+		gEngineVersion = v8Version()
+		// probe 由 v8Start 内部校验（__qtEnvProbe() 必须回 "2"，否则 v8Start 返回错误）
+		deliverStart(
+			this.callback,
+			{
+				engine: gEngineName,
+				version: gEngineVersion,
+				hostApiVersion: HOST_API_VERSION,
+				probe: '2',
+			},
+			null
+		)
+	}
+}
+
+class StopTask implements Runnable {
+	private callback: QtJsVoidCallback
+
+	constructor(callback: QtJsVoidCallback) {
+		this.callback = callback
+	}
+
+	override run(): void {
+		let error = ''
+		// 销毁 WebView 与那个 1×1 宿主视图
+		try {
+			v8Stop()
+		} catch (e) {
+			error = errText(e)
+		}
+		releaseEngineState()
+		const t = gThread
+		gThread = null
+		gHandler = null
+		if (t != null) {
+			try {
+				t.quitSafely()
+			} catch (e) {
+				// 线程已在退出中，忽略
+			}
+		}
+		deliverVoid(this.callback, error.length == 0, error)
+	}
+}
+
+/** 丢弃引擎状态（不碰 WebView 本体，用于引擎卡死时放弃整条线程） */
+function releaseEngineState(): void {
+	gStarted = false
+	gWaiters = []
+	gPumpScheduled = false
+}
+
+class LoadBundleTask implements Runnable {
+	private code: string
+	private callback: QtJsVoidCallback
+
+	constructor(code: string, callback: QtJsVoidCallback) {
+		this.code = code
+		this.callback = callback
+	}
+
+	override run(): void {
+		if (!gStarted) {
+			deliverVoid(this.callback, false, '引擎未启动')
+			return
+		}
+		if (gPoisoned) {
+			deliverVoid(this.callback, false, '引擎已停用，需重启音源引擎')
+			return
+		}
+		// 落盘 → 页面动态 import（语法错在 reject 里且顶层零执行）→ 数入口
+		const v8err = v8LoadBundle(this.code)
+		deliverVoid(this.callback, v8err.length == 0, v8err)
+	}
+}
+
+// ==================== invoke：原生拉取队列 ====================
+
+class InvokeTask implements Runnable {
+	private name: string
+	private argsJson: string
+	private timeoutMs: number
+	private callback: QtJsEvalCallback
+
+	constructor(name: string, argsJson: string, timeoutMs: number, callback: QtJsEvalCallback) {
+		this.name = name
+		this.argsJson = argsJson
+		this.timeoutMs = timeoutMs
+		this.callback = callback
+	}
+
+	override run(): void {
+		if (gPoisoned) {
+			deliverEval(this.callback, false, '', '引擎已停用，需重启音源引擎')
+			return
+		}
+		if (!engineEvalReady()) {
+			deliverEval(this.callback, false, '', '引擎未启动')
+			return
+		}
+		const t0 = Date.now()
+		let opId = ''
+		let err = ''
+		try {
+			opId = evalString(exprCall(this.name, this.argsJson))
+		} catch (e) {
+			err = errText(e)
+		}
+		const cost = Date.now() - t0
+		if (cost > STALL_MS) {
+			poison(`脚本执行阻塞 ${cost}ms`)
+			deliverEval(this.callback, false, '', '脚本执行阻塞，引擎已停用')
+			return
+		}
+		if (err.length == 0 && opId.length == 0) {
+			// evaluateJavascript 不回传异常，脚本报错被信封收在 v8LastError() 里
+			const v8e = v8LastError()
+			if (v8e.length > 0) err = v8e
+		}
+		if (err.length > 0) {
+			deliverEval(this.callback, false, '', err)
+			return
+		}
+		opId = opId.trim()
+		if (opId.length == 0 || opId == '0') {
+			deliverEval(this.callback, false, '', '未取得 opId')
+			return
+		}
+		let timeout = this.timeoutMs
+		if (timeout <= 0) {
+			timeout = DEFAULT_INVOKE_TIMEOUT_MS
+		}
+		gWaiters.push(new Waiter(opId, Date.now() + timeout, this.callback))
+		// 立刻开始拉取（bundle 里同步部分可能已经排了 HTTP/定时器）
+		schedulePump(0)
+	}
+}
+
+/** 一次拉取：取走 JS 侧待办并分发，然后决定要不要继续轮询 */
+class PumpTask implements Runnable {
+	override run(): void {
+		gPumpScheduled = false
+		if (!engineEvalReady()) return
+		const t0 = Date.now()
+		let out = ''
+		let err = ''
+		try {
+			out = evalString(exprPump())
+		} catch (e) {
+			err = errText(e)
+		}
+		const cost = Date.now() - t0
+		if (cost > STALL_MS) {
+			poison(`单次脚本执行阻塞 ${cost}ms`)
+			return
+		}
+		if (err.length == 0) {
+			// 泵本身返回空串是正常的（无待办），但信封 ok=0 说明脚本抛了异常
+			const v8e = v8LastError()
+			if (v8e.length > 0) err = v8e
+		}
+		if (err.length > 0) {
+			failAll(`脚本拉取失败: ${err}`)
+			return
+		}
+		if (out.length > 0) {
+			dispatchLines(out)
+		}
+		expireWaiters()
+		if (gWaiters.length > 0) {
+			schedulePump(PUMP_INTERVAL_MS)
+		}
+	}
+}
+
+/** 分发 pump 返回的待办行（每行一个 ASCII JSON） */
+function dispatchLines(text: string): void {
+	const lines = text.split('\n')
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]
+		if (line.length == 0) continue
+		try {
+			const o = JSON.parse(line) as UTSJSONObject
+			const k = fieldStr(o, 'k')
+			if (k == 'H') {
+				startHttp(o)
+			} else if (k == 'T') {
+				startTimer(o)
+			} else if (k == 'R') {
+				settleOp(o)
+			}
+		} catch (e) {
+			console.error('[qt-js-engine] pump 行解析失败:', e)
+		}
+	}
+}
+
+function startTimer(o: UTSJSONObject): void {
+	const id = fieldStr(o, 'id')
+	let ms = fieldInt(o, 'ms')
+	if (ms < 0) ms = 0
+	const h = engineHandler()
+	if (h == null) return
+	h.postDelayed(new FireTimerTask(id), toLongMs(ms))
+}
+
+function startHttp(o: UTSJSONObject): void {
+	const id = fieldStr(o, 'id')
+	const url = fieldStr(o, 'url')
+	const method = fieldStr(o, 'method')
+	const headers = fieldStr(o, 'headers')
+	const body = fieldStr(o, 'body')
+	let timeoutMs = fieldInt(o, 'timeoutMs')
+	if (timeoutMs <= 0) timeoutMs = DEFAULT_HTTP_TIMEOUT_MS
+	// HTTP 不占引擎线程：各起一条线程，回来再 post 到引擎线程
+	const t = new Thread(new HttpTask(id, url, method, headers, body, timeoutMs))
+	t.start()
+}
+
+function settleOp(o: UTSJSONObject): void {
+	const opId = fieldStr(o, 'id')
+	const ok = fieldInt(o, 'ok') == 1
+	const value = fieldStr(o, 'value')
+	const error = fieldStr(o, 'error')
+	let target: Waiter | null = null
+	for (let i = 0; i < gWaiters.length; i++) {
+		if (gWaiters[i].opId == opId) {
+			target = gWaiters[i]
+			break
+		}
+	}
+	if (target == null) return
+	removeWaiter(opId)
+	deliverEval(target.callback, ok, value, error)
+}
+
+function removeWaiter(opId: string): void {
+	const keep: Waiter[] = []
+	for (let i = 0; i < gWaiters.length; i++) {
+		if (gWaiters[i].opId != opId) {
+			keep.push(gWaiters[i])
+		}
+	}
+	gWaiters = keep
+}
+
+/** 到点的调用按超时结束（引擎本身仍可用，只是这次没等到结果） */
+function expireWaiters(): void {
+	if (gWaiters.length == 0) return
+	const now = Date.now()
+	const expired: Waiter[] = []
+	for (let i = 0; i < gWaiters.length; i++) {
+		if (gWaiters[i].deadline <= now) {
+			expired.push(gWaiters[i])
+		}
+	}
+	for (let i = 0; i < expired.length; i++) {
+		const w = expired[i]
+		removeWaiter(w.opId)
+		// 告知 bundle 丢掉这个 op，别再往里写结果
+		try {
+			evalString(exprDropOp(w.opId))
+		} catch (e) {
+			// 引擎已在异常状态，忽略
+		}
+		deliverEval(w.callback, false, '', 'timeout')
+	}
+}
+
+/** 引擎停用：把所有在等的调用一次性失败掉 */
+function poison(reason: string): void {
+	if (gPoisoned) return
+	gPoisoned = true
+	gPumpScheduled = false
+	console.error('[qt-js-engine] 引擎停用:', reason)
+	failAll(reason)
+}
+
+function failAll(reason: string): void {
+	const list = gWaiters
+	gWaiters = []
+	for (let i = 0; i < list.length; i++) {
+		deliverEval(list[i].callback, false, '', reason)
+	}
+}
+
+/** 定时器到点：回到 JS 执行回调 */
+class FireTimerTask implements Runnable {
+	private id: string
+
+	constructor(id: string) {
+		this.id = id
+	}
+
+	override run(): void {
+		if (!engineEvalReady()) return
+		try {
+			evalString(exprFireTimer(this.id))
+		} catch (e) {
+			console.error('[qt-js-engine] 定时器回调失败:', e)
+		}
+		schedulePump(0)
+	}
+}
+
+/** HTTP 结果回投 JS */
+class ResolveHttpTask implements Runnable {
+	private id: string
+	private status: number
+	private headersJson: string
+	private body: string
+	private error: string
+
+	constructor(id: string, status: number, headersJson: string, body: string, error: string) {
+		this.id = id
+		this.status = status
+		this.headersJson = headersJson
+		this.body = body
+		this.error = error
+	}
+
+	override run(): void {
+		if (!engineEvalReady()) return
+		const code = exprResolveHttp(this.id, this.status, this.headersJson, this.body, this.error)
+		try {
+			evalString(code)
+		} catch (e) {
+			console.error('[qt-js-engine] HTTP 回投失败:', e)
+		}
+		schedulePump(0)
+	}
+}
+
+// ==================== HTTP（HttpURLConnection，不引 OkHttp） ====================
+
+/** 从 Content-Type 里取 charset，缺省 UTF-8 */
+function charsetOf(contentType: string | null): string {
+	if (contentType == null) return 'UTF-8'
+	const lower = contentType.toLowerCase()
+	const i = lower.indexOf('charset=')
+	if (i < 0) return 'UTF-8'
+	let cs = contentType.substring(i + 8)
+	const semi = cs.indexOf(';')
+	if (semi >= 0) {
+		cs = cs.substring(0, semi)
+	}
+	cs = cs.trim()
+	if (cs.length == 0) return 'UTF-8'
+	return cs
+}
+
+/** 读干一条流（ByteArrayOutputStream.toString(charset) 直接得到字符串，不碰编码细节） */
+function readAll(input: InputStream, charset: string): string {
+	const buf = new ByteArray(8192)
+	const bos = new ByteArrayOutputStream()
+	let n = input.read(buf)
+	while (n > 0) {
+		bos.write(buf, 0, n)
+		if (bos.size() > MAX_RESPONSE_BYTES.toInt()) {
+			throw new Error(`响应体超过 ${MAX_RESPONSE_BYTES} 字节上限`)
+		}
+		n = input.read(buf)
+	}
+	return bos.toString(charset)
+}
+
+/** 收集响应头为 JSON（按索引遍历，重复头只保留最后一次出现）
+ *
+ * 头名一律小写：与 PC 的 Rust builtin_request 同契约（脚本按 res.headers["content-type"]
+ * 这类小写键取值，大小写混用会让脚本取不到头）。
+ */
+function collectHeaders(c: HttpURLConnection): string {
+	let out = '{'
+	let first = true
+	let i: Int = 0
+	let key: string | null = c.getHeaderFieldKey(i)
+	let val: string | null = c.getHeaderField(i)
+	while ((key != null || val != null) && i < 200) {
+		if (key != null && val != null) {
+			if (!first) {
+				out += ','
+			}
+			out += quoteAscii(key!.toLowerCase()) + ':' + quoteAscii(val!)
+			first = false
+		}
+		i++
+		key = c.getHeaderFieldKey(i)
+		val = c.getHeaderField(i)
+	}
+	return out + '}'
+}
+
+class HttpTask implements Runnable {
+	private id: string
+	private url: string
+	private method: string
+	private headers: string
+	private body: string
+	private timeoutMs: number
+
+	constructor(id: string, url: string, method: string, headers: string, body: string, timeoutMs: number) {
+		this.id = id
+		this.url = url
+		this.method = method
+		this.headers = headers
+		this.body = body
+		this.timeoutMs = timeoutMs
+	}
+
+	override run(): void {
+		let status = 0
+		let headersJson = '{}'
+		let body = ''
+		let error = ''
+		let conn: HttpURLConnection | null = null
+		let hostPart = this.url
+		const t0 = Date.now()
+		try {
+			const u = new URL(this.url)
+			hostPart = u.getHost() + u.getPath()
+			const c = u.openConnection() as HttpURLConnection
+			conn = c
+			const t = this.timeoutMs.toInt()
+			c.setConnectTimeout(t)
+			c.setReadTimeout(t)
+			c.setInstanceFollowRedirects(true)
+			c.setRequestMethod(this.method)
+			c.setRequestProperty('Accept-Encoding', 'gzip')
+			// headers 是从 JS 传来的 "Name: value" 多行文本
+			if (this.headers.length > 0) {
+				const hs = this.headers.split('\n')
+				for (let i = 0; i < hs.length; i++) {
+					const one = hs[i]
+					const p = one.indexOf(':')
+					if (p > 0) {
+						c.setRequestProperty(one.substring(0, p).trim(), one.substring(p + 1).trim())
+					}
+				}
+			}
+			if (c.getRequestProperty('User-Agent') == null) {
+				c.setRequestProperty('User-Agent', DEFAULT_UA)
+			}
+			if (this.body.length > 0) {
+				c.setDoOutput(true)
+				const w = new OutputStreamWriter(c.getOutputStream(), 'UTF-8')
+				w.write(this.body)
+				w.flush()
+				w.close()
+			}
+			status = c.getResponseCode()
+			headersJson = collectHeaders(c)
+			// 4xx/5xx 时 getInputStream 会抛，错误体在 getErrorStream
+			let stream: InputStream | null = null
+			if (status >= 400) {
+				stream = c.getErrorStream()
+			} else {
+				stream = c.getInputStream()
+			}
+			if (stream != null) {
+				const enc = c.getContentEncoding()
+				let input: InputStream = stream!
+				if (enc != null && enc.toLowerCase().indexOf('gzip') >= 0) {
+					input = new GZIPInputStream(stream!)
+				}
+				body = readAll(input, charsetOf(c.getContentType()))
+				input.close()
+			}
+		} catch (e) {
+			error = errText(e)
+			// 失败的连接不归还 keep-alive 池，主动断掉防泄漏
+			if (conn != null) {
+				try {
+					conn!.disconnect()
+				} catch (e2) {}
+			}
+		} finally {
+			// 成功时不 disconnect：连接自动归还 JVM keep-alive 池，同宿主的后续请求
+			// （多页链条/同页并发列表）省掉 DNS+TCP+TLS 重付，移动网络下收益明显
+		}
+		console.log('[qt-js-engine] HTTP ' + (Date.now() - t0) + 'ms status=' + status + ' len=' + body.length + ' ' + hostPart + (error.length > 0 ? ' err=' + error : ''))
+		postToEngine(new ResolveHttpTask(this.id, status, headersJson, body, error))
+	}
+}
+
+// ==================== 对外 API ====================
+
+/** 启动引擎（幂等：已启动时直接回调现有 info） */
+export const start: QtJsStart = function (options: QtJsStartOptions, callback: QtJsStartCallback) {
+	if (gStarted && !gPoisoned) {
+		deliverStart(
+			callback,
+			{
+				engine: gEngineName,
+				version: gEngineVersion,
+				hostApiVersion: HOST_API_VERSION,
+				probe: '',
+			},
+			null
+		)
+		return
+	}
+	try {
+		// 移动网络下常见「AAAA 黑洞」（v6 路由不通但 DNS 仍返回 v6 地址）：
+		// 连接会先在 v6 上挂满 connectTimeout 才轮到 v4，表现为所有请求都慢好几秒。
+		// 音乐平台接口全部有 v4，进程内直接偏好 v4（须在任何请求前设置，幂等）。
+		try {
+			System.setProperty('java.net.preferIPv4Stack', 'true')
+		} catch (e) {}
+		if (gHandler == null) {
+			const t = new HandlerThread(ENGINE_THREAD_NAME)
+			t.start()
+			gThread = t
+			gHandler = new Handler(t.getLooper())
+		}
+		const h = engineHandler()
+		if (h == null) {
+			deliverStart(callback, null, '引擎线程创建失败')
+			return
+		}
+		h.post(new StartTask(options, callback))
+	} catch (e) {
+		deliverStart(callback, null, errText(e))
+	}
+}
+
+/**
+ * 停止并销毁引擎。
+ * 引擎若已被判定卡死（脚本死循环，线程还堵在里面），post 过去也不会执行，
+ * 这里直接放弃整条线程与 context，让调用方 start() 重建 —— 旧线程会泄漏，但 App 能继续用。
+ */
+export const stop: QtJsStop = function (callback: QtJsVoidCallback) {
+	if (gPoisoned) {
+		// 被隔离时 WebView 还挂在 Activity 上，必须先销毁再放弃状态
+		try {
+			v8Stop()
+		} catch (e) {
+			console.error('[qt-js-engine] 隔离后销毁 WebView 失败:', e)
+		}
+		releaseEngineState()
+		gPoisoned = false
+		gThread = null
+		gHandler = null
+		deliverVoid(callback, true, '')
+		return
+	}
+	const h = engineHandler()
+	if (h == null) {
+		releaseEngineState()
+		deliverVoid(callback, true, '')
+		return
+	}
+	h.post(new StopTask(callback))
+}
+
+/** 执行一段 JS（调试/冒烟用） */
+class EvalTask implements Runnable {
+	private code: string
+	private callback: QtJsEvalCallback
+
+	constructor(code: string, callback: QtJsEvalCallback) {
+		this.code = code
+		this.callback = callback
+	}
+
+	override run(): void {
+		const t0 = Date.now()
+		try {
+			const value = evalString(this.code)
+			const cost = Date.now() - t0
+			if (cost > STALL_MS) {
+				poison(`脚本执行阻塞 ${cost}ms`)
+				deliverEval(this.callback, false, '', '脚本执行阻塞，引擎已停用')
+				return
+			}
+			deliverEval(this.callback, true, value, '')
+		} catch (e) {
+			deliverEval(this.callback, false, '', errText(e))
+		}
+	}
+}
+
+export const evaluate: QtJsEvaluate = function (code: string, callback: QtJsEvalCallback) {
+	const h = engineHandler()
+	if (h == null) {
+		deliverEval(callback, false, '', '引擎未启动')
+		return
+	}
+	h.post(new EvalTask(code, callback))
+}
+
+/** 装载音源包脚本（compile 校验 + execute） */
+export const loadBundle: QtJsLoadBundle = function (code: string, callback: QtJsVoidCallback) {
+	const h = engineHandler()
+	if (h == null) {
+		deliverVoid(callback, false, '引擎未启动')
+		return
+	}
+	h.post(new LoadBundleTask(code, callback))
+}
+
+/** 调用 bundle 入口（回调式，内部走 pump 协议） */
+export const invoke: QtJsInvoke = function (
+	name: string,
+	argsJson: string,
+	timeoutMs: number,
+	callback: QtJsEvalCallback
+) {
+	const h = engineHandler()
+	if (h == null) {
+		deliverEval(callback, false, '', '引擎未启动')
+		return
+	}
+	h.post(new InvokeTask(name, argsJson, timeoutMs, callback))
+}
+
+/** 放弃一个 op（一般不用：invoke 超时后插件会自己调） */
+export const dropOp: QtJsDropOp = function (opId: number) {
+	const h = engineHandler()
+	if (h == null) return
+	h.post(new EvalTask(exprDropOp(`${opId}`), (r: QtJsEvalResult) => {}))
+}
+
+/** 引擎是否已启动 */
+export const isRunning: QtJsIsRunning = function (): boolean {
+	return gStarted
+}
+
+/** 引擎是否健康（脚本卡死过、或 V8 渲染进程崩溃，都会变 false，需 stop + start 重建） */
+export const isHealthy: QtJsIsHealthy = function (): boolean {
+	if (gPoisoned) return false
+	// 渲染进程被系统回收后所有求值都不会再返回，视同不健康，
+	// 由 services/source-engine.uts 的 ensureEngine() 触发 stop + start 重建
+	if (gStarted && v8RenderGone()) return false
+	return true
+}
+
+// ==================== 音源包文件读写（java.io，不依赖 uni.getFileSystemManager） ====================
+
+/** 应用私有目录绝对路径（音源包就放这儿） */
+export const dataDir: QtJsDataDir = function (): string {
+	const ctx = UTSAndroid.getAppContext()
+	if (ctx == null) return ''
+	const dir = ctx.filesDir
+	if (dir == null) return ''
+	return dir.getAbsolutePath()
+}
+
+/** 递归删除 */
+function deleteRecursive(f: File): boolean {
+	if (f.isDirectory()) {
+		const children = f.listFiles()
+		if (children != null) {
+			for (let i = 0; i < children.size; i++) {
+				deleteRecursive(children[i.toInt()])
+			}
+		}
+	}
+	return f.delete()
+}
+
+export const readTextFile: QtJsReadTextFile = function (path: string, callback: QtJsFileCallback) {
+	try {
+		const input = new FileInputStream(path)
+		const text = readAll(input, 'UTF-8')
+		input.close()
+		deliverFile(callback, true, text, '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+export const writeTextFile: QtJsWriteTextFile = function (
+	path: string,
+	text: string,
+	callback: QtJsFileCallback
+) {
+	try {
+		const f = new File(path)
+		const parent = f.getParentFile()
+		if (parent != null && !parent.exists()) {
+			parent.mkdirs()
+		}
+		const w = new OutputStreamWriter(new FileOutputStream(f), 'UTF-8')
+		w.write(text)
+		w.flush()
+		w.close()
+		deliverFile(callback, true, '', '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+export const exists: QtJsExists = function (path: string, callback: QtJsFileCallback) {
+	try {
+		deliverFile(callback, true, new File(path).exists() ? '1' : '0', '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+export const remove: QtJsRemove = function (path: string, callback: QtJsFileCallback) {
+	try {
+		const f = new File(path)
+		if (!f.exists()) {
+			deliverFile(callback, true, '', '')
+			return
+		}
+		deliverFile(callback, deleteRecursive(f), '', '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+export const mkdirs: QtJsMkdirs = function (path: string, callback: QtJsFileCallback) {
+	try {
+		const f = new File(path)
+		if (f.exists()) {
+			deliverFile(callback, true, '', '')
+			return
+		}
+		deliverFile(callback, f.mkdirs(), '', '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+export const listDir: QtJsListDir = function (dir: string, callback: QtJsFileCallback) {
+	try {
+		const list = new File(dir).listFiles()
+		if (list == null) {
+			deliverFile(callback, true, '[]', '')
+			return
+		}
+		let out = '['
+		for (let i = 0; i < list.size; i++) {
+			const f = list[i.toInt()]
+			if (i > 0) {
+				out += ','
+			}
+			out +=
+				'{"name":' +
+				quoteAscii(f.getName()) +
+				',"dir":' +
+				(f.isDirectory() ? 'true' : 'false') +
+				',"size":' +
+				`${f.length()}` +
+				'}'
+		}
+		deliverFile(callback, true, out + ']', '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+// ==================== APK 内置资源（assets）读取 ====================
+
+/**
+ * www 目录在 assets 里的候选前缀。
+ *
+ * uni-app x 打出来的资源在 `assets/apps/<appid>/www/` 下，appid 是打包时定的，
+ * 插件不该写死它，所以从 `assets.list("apps")` 现场发现；两个候选前缀分别对应
+ * 「www 下有这一级」与「www 被平铺」两种情况，最后兜一个裸路径。
+ */
+function assetPrefixes(): string[] {
+	const out: string[] = []
+	try {
+		const ctx = UTSAndroid.getAppContext()
+		if (ctx != null) {
+			const names = ctx.assets.list('apps')
+			if (names != null) {
+				for (let i = 0; i < names.size; i++) {
+					const appid = names[i.toInt()]
+					out.push('apps/' + appid + '/www/')
+					out.push('apps/' + appid + '/')
+				}
+			}
+		}
+	} catch (e) {
+		// 列不出 apps 就只试裸路径
+	}
+	out.push('')
+	return out
+}
+
+/** 打开一个内置资源（依次试候选前缀）；都不存在返回 null */
+function openAsset(path: string): InputStream | null {
+	const ctx = UTSAndroid.getAppContext()
+	if (ctx == null) return null
+	const assets = ctx.assets
+	const prefixes = assetPrefixes()
+	for (let i = 0; i < prefixes.length; i++) {
+		try {
+			return assets.open(prefixes[i] + path)
+		} catch (e) {
+			// 这个前缀下没有，试下一个
+		}
+	}
+	return null
+}
+
+/**
+ * 读 APK 内置资源文本（通用资源读取接口）。
+ * path 相对 www 根目录，如 "static/theme.json"。
+ */
+export const readAssetText: QtJsReadAssetText = function (path: string, callback: QtJsFileCallback) {
+	try {
+		const input = openAsset(path)
+		if (input == null) {
+			deliverFile(callback, false, '', '内置资源不存在：' + path)
+			return
+		}
+		const text = readAll(input, 'UTF-8')
+		input.close()
+		deliverFile(callback, true, text, '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+// ==================== J0 spike：原生 → JS 回调链路 ====================
+
+/** spike：读回 JS 侧记录值 */
+class SpikeReadTask implements Runnable {
+	private callback: QtJsSpikeTimerCallback
+
+	constructor(callback: QtJsSpikeTimerCallback) {
+		this.callback = callback
+	}
+
+	override run(): void {
+		try {
+			const fired = evalString('String(globalThis.__qtTimerFired)')
+			deliverSpike(this.callback, fired, '')
+		} catch (e) {
+			deliverSpike(this.callback, '', errText(e))
+		}
+	}
+}
+
+/**
+ * J0 spike：验证「原生 → JS」回调链路。
+ * 先装 JS 侧记录器，再用原生 Handler 延时调用 __qtFireTimer(7)，最后读回记录值。
+ * 返回 fired == "7" 即通过。
+ */
+export const spikeNativeTimer: QtJsSpikeNativeTimer = function (
+	delayMs: number,
+	callback: QtJsSpikeTimerCallback
+) {
+	const h = engineHandler()
+	if (h == null) {
+		deliverSpike(callback, '', '引擎未启动')
+		return
+	}
+	try {
+		h.post(
+			new EvalTask(
+				'globalThis.__qtTimerFired = 0;' +
+					'globalThis.__qtFireTimer = function (id) { globalThis.__qtTimerFired = id };' +
+					'String("installed")',
+				(result: QtJsEvalResult) => {
+					if (!result.ok) {
+						deliverSpike(callback, '', result.error)
+						return
+					}
+					// 延时后从原生侧进入 JS
+					h.postDelayed(new FireTimerTask('7'), toLongMs(delayMs))
+					// 再等一拍读回结果
+					h.postDelayed(new SpikeReadTask(callback), toLongMs(delayMs + 200))
+				}
+			)
+		)
+	} catch (e) {
+		deliverSpike(callback, '', errText(e))
+	}
+}

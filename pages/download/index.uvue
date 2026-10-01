@@ -1,0 +1,271 @@
+<template>
+  <qt-page-frame :max-width="860">
+  <view class="page" :class="layout.isWide ? 'page-wide' : ''">
+    <list-view class="scroll" :class="layout.isWide ? 'scroll-wide' : ''" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';box-shadow:0 10rpx 30rpx ' + theme.skin.shadow + ';'" direction="vertical" v-if="allItems.length > 0" :scroll-top="scrollTop" @scroll="onListScroll">
+      <list-item
+        v-for="entry in allItems"
+        :key="entry.key"
+        class="row" :class="[[layout.isWide ? 'row-wide' : ''], [entry.type == 'task' ? 'task-row' : '', layout.isWide ? 'row-wide' : '']]"
+        :style="'border-bottom-color:' + theme.skin.divider + ';'"
+      >
+        <!-- 任务（下载中/等待/失败） -->
+        <template v-if="entry.type == 'task'">
+          <image class="cover" :class="layout.isWide ? 'cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="entry.data.song.picUrl" mode="aspectFill" />
+          <view class="info" :class="layout.isWide ? 'info-wide' : ''">
+            <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="'color:' + theme.skin.text + ';'" :max-lines="1">{{ entry.data.song.name }}</text>
+            <view v-if="entry.data.status == 'downloading'" class="progress-wrap" :class="layout.isWide ? 'progress-wrap-wide' : ''">
+              <view class="progress-bar" :class="layout.isWide ? 'progress-bar-wide' : ''" :style="'width:' + entry.data.progress + '%;background-color:' + theme.skin.accent + ';'"></view>
+              <text class="progress-text" :class="layout.isWide ? 'progress-text-wide' : ''" :style="'color:' + theme.skin.accent + ';'">{{ Math.round(entry.data.progress) }}%</text>
+            </view>
+            <text v-else class="meta" :class="layout.isWide ? 'meta-wide' : ''" :style="'color:' + (entry.data.status == 'failed' ? theme.skin.danger : theme.skin.textMuted) + ';'" :max-lines="1">{{ statusText(entry.data) }}</text>
+          </view>
+          <QtIcon
+            v-if="entry.data.status == 'failed'"
+            class="row-act" :class="[[layout.isWide ? 'row-act-wide' : ''], layout.isWide ? 'row-act-wide' : '']"
+
+            name="refresh"
+            :size="36"
+            :color="theme.skin.danger"
+            @click="retry(entry.data.song)"
+          />
+          <QtIcon
+            class="row-act" :class="[[layout.isWide ? 'row-act-wide' : ''], layout.isWide ? 'row-act-wide' : '']"
+
+            name="close"
+            :size="36"
+            :color="theme.skin.iconMuted"
+            @click="removeTask(entry.data.song)"
+          />
+        </template>
+        <!-- 已下载项 -->
+        <template v-else>
+          <view class="main" @click="play(entry.data)">
+            <image class="cover" :class="layout.isWide ? 'cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="entry.data.song.picUrl" mode="aspectFill" />
+            <view class="info" :class="layout.isWide ? 'info-wide' : ''">
+              <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="'color:' + theme.skin.text + ';'" :max-lines="1">{{ entry.data.song.name }}</text>
+              <text class="meta" :class="layout.isWide ? 'meta-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" :max-lines="1">{{ entry.data.song.singer }} - {{ entry.data.song.album }}</text>
+            </view>
+          </view>
+          <QtIcon class="row-act" :class="layout.isWide ? 'row-act-wide' : ''" name="trash" :size="36" :color="theme.skin.danger" @click="remove(entry.data)" />
+        </template>
+      </list-item>
+      <list-item class="pad" :class="[layout.isWide ? 'pad-wide' : '']"></list-item>
+    </list-view>
+    <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+    <view
+      v-if="allItems.length == 0"
+      class="empty" :class="[[layout.isWide ? 'empty-wide' : ''], layout.isWide ? 'empty-wide' : '']"
+
+    >
+      <QtIcon name="download" :size="80" :color="theme.skin.placeholder" />
+      <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">还没有下载任何歌曲</text>
+      <text class="link" :class="layout.isWide ? 'link-wide' : ''" :style="'color:' + theme.skin.accent + ';'" @click="discover">去发现音乐</text>
+    </view>
+    <MiniPlayer />
+  </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { onShow } from "@dcloudio/uni-app";
+import { computed, ref } from "vue";
+import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import { useDownloadsStore, type DownloadItem, type DownloadTask } from "@/stores/downloads";
+import { usePlayerStore } from "@/stores/player";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import type { Song } from "@/types/music";
+
+const downloads = useDownloadsStore();
+const player = usePlayerStore();
+const layout = useQtLayout();
+const theme = useThemeStore();
+
+// 回到顶部
+const scrollTop = ref(0);
+const showBackToTop = ref(false);
+function onListScroll(e: any) {
+  const st = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
+  showBackToTop.value = st > 600;
+}
+function backToTop() {
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  showBackToTop.value = false;
+}
+
+onShow(() => {
+  downloads.restore();
+});
+
+const allItems = computed(() => {
+  const items: { key: string; type: string; data: any }[] = [];
+  // 添加任务（下载中/等待/失败）
+  for (const task of downloads.tasks) {
+    items.push({ key: 'task-' + task.song.id + task.song.platform, type: 'task', data: task });
+  }
+  // 添加已下载项
+  for (const item of downloads.items) {
+    items.push({ key: 'item-' + item.song.id + item.song.platform, type: 'item', data: item });
+  }
+  return items;
+});
+
+function statusText(task: DownloadTask): string {
+  if (task.status == "downloading") return "下载中...";
+  if (task.status == "failed")
+    return "失败：" + (task.error.length > 0 ? task.error : "未知错误");
+  return "等待中";
+}
+
+function play(item: DownloadItem): void {
+  const song = item.song;
+  const queue = downloads.items.map((d) => d.song);
+  const local: Song = {
+    id: song.id,
+    name: song.name,
+    singer: song.singer,
+    album: song.album,
+    picUrl: song.picUrl,
+    platform: song.platform,
+    url: item.path,
+    duration: song.duration,
+  };
+  player.playSingle(local);
+}
+
+function remove(item: DownloadItem): void {
+  downloads.remove(item.song);
+}
+
+function retry(song: Song): void {
+  downloads.retry(song);
+}
+
+function removeTask(song: Song): void {
+  downloads.removeTask(song);
+}
+
+function discover(): void {
+  uni.switchTab({ url: "/pages/home/index" });
+}
+</script>
+
+<style>
+.page {
+  flex: 1;
+}
+.scroll {
+  flex: 1;
+  margin: 20rpx 24rpx 0;
+
+  border-width: 1px;
+
+  border-radius: 24rpx;
+
+}
+.row {
+  height: 128rpx;
+  padding: 0 32rpx;
+  flex-direction: row;
+  align-items: center;
+  border-bottom-width: 1px;
+
+}
+.task-row {
+  height: 124rpx;
+}
+.main {
+  flex: 1;
+  flex-direction: row;
+  align-items: center;
+  overflow: hidden;
+}
+.cover {
+  width: 88rpx;
+  height: 88rpx;
+  border-radius: 14rpx;
+
+}
+.info {
+  flex: 1;
+  margin-left: 22rpx;
+  overflow: hidden;
+}
+.name {
+
+  font-size: 28rpx;
+  font-weight: 500;
+  text-overflow: ellipsis;
+}
+.meta {
+  margin-top: 10rpx;
+
+  font-size: 23rpx;
+  text-overflow: ellipsis;
+}
+.progress-wrap {
+  margin-top: 10rpx;
+  width: 100%;
+  height: 16rpx;
+  border-radius: 8rpx;
+  background-color: rgba(0,0,0,0.08);
+  position: relative;
+  overflow: hidden;
+}
+.progress-bar {
+  height: 16rpx;
+  border-radius: 8rpx;
+
+  transition: width 0.3s;
+}
+.progress-text {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+
+  font-size: 18rpx;
+  font-weight: 500;
+}
+.row-act {
+  margin-left: 24rpx;
+}
+.empty {
+  flex: 1;
+  padding-top: 200rpx;
+  align-items: center;
+}
+.empty-text {
+  margin-top: 20rpx;
+
+  font-size: 27rpx;
+}
+.link {
+  margin-top: 20rpx;
+
+  font-size: 27rpx;
+}
+.pad {
+  height: 40rpx;
+}
+
+/* Vapor 宽屏：使用 px 覆盖移动端 rpx，避免 1600x900 下按窗口比例放大 */
+
+.scroll-wide { margin-top: 14px; margin-left: 24px; margin-right: 24px; border-radius: 14px; }
+.row-wide { height: 64px; padding-left: 20px; padding-right: 20px; }
+.cover-wide { width: 52px; height: 52px; border-radius: 10px; }
+.info-wide { margin-left: 16px; }
+.name-wide { font-size: 16px; }
+.meta-wide { margin-top: 6px; font-size: 14px; }
+.progress-wrap-wide { margin-top: 6px; height: 8px; border-radius: 4px; }
+.progress-bar-wide { height: 8px; border-radius: 4px; }
+.progress-text-wide { font-size: 12px; }
+.row-act-wide { margin-left: 16px; }
+.empty-wide { padding-top: 90px; }
+.empty-text-wide { margin-top: 12px; font-size: 16px; }
+.link-wide { margin-top: 12px; font-size: 16px; }
+.pad-wide { height: 20px; }
+.task-row-wide { padding: 10px 14px; border-radius: 12px; }
+</style>

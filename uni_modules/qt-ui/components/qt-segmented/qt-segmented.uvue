@@ -1,0 +1,87 @@
+<template>
+  <view
+    class="seg"
+    :class="layout.isWide ? 'seg-wide' : ''"
+    :style="'background-color:' + theme.skin.surfaceMuted + ';'"
+  >
+    <view
+      v-for="(item, index) in list"
+      :key="index"
+      class="seg-item"
+      :class="layout.isWide ? 'seg-item-wide' : ''"
+      :style="itemStyle(index)"
+      @click="select(index)"
+    >
+      <text
+        class="seg-text"
+        :class="layout.isWide ? 'seg-text-wide' : ''"
+        :style="'color:' + (modelValue == index ? theme.skin.accent : theme.skin.textSubtle) + ';'"
+        >{{ item }}</text
+      >
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed } from "vue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+const props = defineProps<{
+  list: string[];
+  modelValue: number;
+  /**
+   * 相邻 tag 之间的水平间隔（px），默认 0 保持原紧凑样式。
+   * 只有两个短标签时（如「歌曲卡片 / 歌词卡片」）文字会贴在一起，页面可把它调大。
+   */
+  itemGap?: number;
+}>();
+const layout = useQtLayout();
+const theme = useThemeStore();
+const emit = defineEmits<{ "update:modelValue": [value: number]; change: [value: number] }>();
+
+const itemGap = computed((): number => props.itemGap != null ? props.itemGap! : 0);
+
+/**
+ * 选中态底色 + tag 间隔。
+ * Vapor 下不能用 `:first-child` / 兄弟选择器，只能按 index 绑内联样式；
+ * 左右各留一半，则相邻两项之间正好是 itemGap，胶囊两端也不再贴着文字。
+ */
+function itemStyle(index: number): string {
+  let style = props.modelValue == index ? "background-color:" + theme.skin.surface + ";" : "";
+  if (itemGap.value > 0) {
+    const half = itemGap.value / 2;
+    style += "padding-left:" + half + "px;padding-right:" + half + "px;";
+  }
+  return style;
+}
+
+function select(index: number): void {
+  if (index == props.modelValue) return;
+  emit("update:modelValue", index);
+  emit("change", index);
+}
+</script>
+
+<style>
+.seg {
+  flex-direction: row;
+  border-radius: 999rpx;
+  padding: 6rpx;
+}
+.seg-item {
+  flex: 1;
+  height: 60rpx;
+  justify-content: center;
+  align-items: center;
+  border-radius: 999rpx;
+}
+.seg-text {
+  font-size: 26rpx;
+  font-weight: 500;
+}
+
+/* 宽屏 px 覆盖（rpx 会随窗口放大，见 design.md §6.6） */
+.seg-wide { padding: 4px; }
+.seg-item-wide { height: 36px; }
+.seg-text-wide { font-size: 14px; }
+</style>

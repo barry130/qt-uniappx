@@ -1,0 +1,157 @@
+<template>
+  <view v-show="visible" class="as-mask" :class="layout.isWide ? 'as-mask-wide' : ''" :style="'background-color:' + theme.skin.scrim + ';'" @click="close">
+    <view class="as-sheet" :class="layout.isWide ? 'as-sheet-wide' : ''" :style="'background-color:' + theme.skin.sheetSurface + ';'" @click.stop>
+      <view v-if="title.length > 0" class="as-title" :class="layout.isWide ? 'as-title-wide' : ''" :style="'border-bottom-color:' + theme.skin.divider + ';'">
+        <text class="as-title-text" :class="layout.isWide ? 'as-title-text-wide' : ''" :style="'color:' + theme.skin.textSubtle + ';'">{{ title }}</text>
+      </view>
+      <scroll-view
+        class="as-list"
+        :class="layout.isWide ? 'as-list-wide' : ''"
+        direction="vertical"
+        :show-scrollbar="false"
+        @click.stop
+      >
+        <view
+          v-for="(action, index) in actions"
+          :key="index"
+          class="as-item"
+          :class="[action.disabled ? 'as-item-disabled' : '', layout.isWide ? 'as-item-wide' : '']"
+          :style="'border-bottom-color:' + theme.skin.divider + ';'"
+          @click="pick(index)"
+        >
+          <text
+            class="as-item-text"
+            :class="layout.isWide ? 'as-item-text-wide' : ''"
+            :style="'color:' + (action.color != null && action.color.length > 0 ? action.color : theme.skin.text) + ';'"
+            >{{ action.name }}</text
+          >
+        </view>
+      </scroll-view>
+      <view class="as-cancel" :class="layout.isWide ? 'as-cancel-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'" @click="close">
+        <text class="as-cancel-text" :class="layout.isWide ? 'as-cancel-text-wide' : ''" :style="'color:' + theme.skin.textSubtle + ';'">取消</text>
+      </view>
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed } from "vue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+
+export type SheetAction = {
+  name: string;
+  color?: string;
+  disabled?: boolean;
+};
+
+const layout = useQtLayout();
+const theme = useThemeStore();
+const props = defineProps<{
+  visible: boolean;
+  title?: string;
+  actions: SheetAction[];
+}>();
+const emit = defineEmits<{
+  "update:visible": [value: boolean];
+  select: [action: SheetAction, index: number];
+  close: [];
+}>();
+const title = computed((): string => props.title != null ? props.title! : "");
+
+function close(): void {
+  emit("update:visible", false);
+  emit("close");
+}
+function pick(index: number): void {
+  const action = props.actions[index];
+  if (action == null || action.disabled) return;
+  emit("update:visible", false);
+  emit("select", action, index);
+}
+</script>
+
+<style>
+.as-mask {
+  position: fixed;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  justify-content: flex-end;
+  z-index: 999;
+}
+.as-mask-wide {
+  flex-direction: row;
+}
+.as-sheet {
+  border-radius: 32rpx 32rpx 0 0;
+  overflow: hidden;
+  padding-bottom: 24rpx;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.as-sheet-wide {
+  width: 420px;
+  height: 100%;
+  border-radius: 0;
+  padding-bottom: 0;
+}
+.as-title {
+  padding: 30rpx 32rpx 18rpx;
+  border-bottom-width: 1rpx;
+}
+.as-title-wide {
+  padding: 16px 20px 10px;
+  border-bottom-width: 1px;
+}
+.as-title-text {
+  font-size: 24rpx;
+  text-align: center;
+}
+.as-title-text-wide {
+  text-align: left;
+  font-size: 13px;
+}
+.as-list {
+  max-height: 540rpx;
+}
+.as-list-wide {
+  max-height: 480px;
+}
+.as-item {
+  height: 104rpx;
+  justify-content: center;
+  align-items: center;
+  border-bottom-width: 1rpx;
+}
+.as-item-wide {
+  height: 52px;
+  border-bottom-width: 1px;
+}
+.as-item-disabled {
+  opacity: 0.45;
+}
+.as-item-text {
+  font-size: 29rpx;
+  font-weight: 500;
+}
+.as-item-text-wide {
+  font-size: 15px;
+}
+.as-cancel {
+  height: 108rpx;
+  margin-top: 12rpx;
+  justify-content: center;
+  align-items: center;
+}
+.as-cancel-wide {
+  height: 54px;
+  margin-top: 6px;
+}
+.as-cancel-text {
+  font-size: 29rpx;
+}
+.as-cancel-text-wide {
+  font-size: 15px;
+}
+</style>

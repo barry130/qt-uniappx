@@ -1,0 +1,540 @@
+<template>
+  <qt-page-frame :max-width="640">
+  <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']">
+    <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
+      <!-- 头像：点击图片放大预览（不展示文字）；放大视图左「保存图片」右「更换图片」 -->
+      <view class="avatar-row" :class="layout.isWide ? 'avatar-row-wide' : ''">
+        <view class="avatar" :class="layout.isWide ? 'avatar-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @click="openPreview">
+          <image
+            :src="displayAvatar"
+            class="avatar-img" :class="layout.isWide ? 'avatar-img-wide' : ''"
+            mode="aspectFill"
+            @error="onAvatarError"
+          />
+        </view>
+      </view>
+
+      <!-- 昵称 -->
+      <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+        <input
+          :value="nickname"
+          @input="onNicknameInput"
+          class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
+          placeholder="昵称"
+          :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
+          :maxlength="30"
+        />
+      </view>
+
+      <!-- 邮箱 -->
+      <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+        <input
+          :value="email"
+          @input="onEmailInput"
+          class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
+          placeholder="邮箱"
+          :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
+          :maxlength="50"
+        />
+      </view>
+
+      <!-- 新密码（可选） -->
+      <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+        <input
+          :value="password"
+          @input="onPasswordInput"
+          class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
+          :type="pwVisible ? 'text' : 'password'"
+          placeholder="新密码（留空则不修改）"
+          :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
+          :maxlength="18"
+        />
+        <view class="eye" :class="layout.isWide ? 'eye-wide' : ''" @click="pwVisible = !pwVisible">
+          <QtIcon :name="pwVisible ? 'eye' : 'eye-off'" :size="layout.isWide ? 22 : 40" color="#6b7385" />
+        </view>
+      </view>
+
+      <text v-if="tip.length > 0" class="tip" :class="layout.isWide ? 'tip-wide' : ''">{{ tip }}</text>
+
+      <qt-button
+        class="action"
+        :class="layout.isWide ? 'action-wide' : ''"
+        label="保存修改"
+        size="lg"
+        :disabled="loading"
+        @click="submit"
+      />
+    </view>
+  </view>
+
+      <!-- 头像放大预览遮罩：点击图片放大；下方左「保存图片」右「更换图片」 -->
+      <view v-if="previewOpen" class="avatar-preview-mask" @click="closePreview">
+        <view class="avatar-preview-body" @click.stop>
+          <view class="avatar-preview-close" @click="closePreview">
+            <QtIcon name="close" :size="layout.isWide ? 22 : 44" color="#ffffff" />
+          </view>
+          <image :src="displayAvatar" class="avatar-preview-img" mode="aspectFit" @error="onAvatarError" />
+          <view class="avatar-preview-actions" :class="layout.isWide ? 'avatar-preview-actions-wide' : ''">
+            <view class="avatar-preview-btn avatar-preview-btn-save" :class="layout.isWide ? 'avatar-preview-btn-wide' : ''" @click="saveImage">
+              <text class="avatar-preview-btn-text avatar-preview-btn-text-dark" :class="layout.isWide ? 'avatar-preview-btn-text-wide' : ''">保存图片</text>
+            </view>
+            <view class="avatar-preview-btn avatar-preview-btn-change" :class="layout.isWide ? 'avatar-preview-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @click="onChangeImage">
+              <text class="avatar-preview-btn-text avatar-preview-btn-text-light" :class="layout.isWide ? 'avatar-preview-btn-text-wide' : ''">更换图片</text>
+            </view>
+          </view>
+        </view>
+      </view>
+  </qt-page-frame>
+</template>
+
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
+import { accountApi } from "@/services/music-api";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import { getAccessToken, clearTokens } from "@/services/auth";
+import { meCached, refreshMe, clearCachedMe } from "@/services/user-cache";
+import {
+  uploadAvatar, chooseImage, getCachedAvatar,
+  DEFAULT_AVATAR_ASSET,
+} from "@/services/media";
+
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+const nickname = ref("");
+const email = ref("");
+const password = ref("");
+const pwVisible = ref(false);
+const loading = ref(false);
+const tip = ref("");
+/** 保存成功后延迟跳转登录页的定时器：页面卸载时必须清掉，避免在已注销的实例上触发回调 */
+let editReloadTimer: number | null = null;
+// 展示用头像：http(s) 直链才渲染（相对路径/服务端路径 webview 外加载不出来），否则用本地默认资源
+const DEFAULT_AVATAR = "/files/qt-upload/avatar/default.png";
+const avatar = ref("");
+const avatarUrl = ref(getCachedAvatar());
+// 头像地址加载失败（如指向不可达的存储域名）：渲染兜底到本地默认资源，
+// 避免页面上留一个空白圆。只在换地址时复位，不在 @load 复位——否则
+// 「死链 → 默认图 → @load 复位 → 死链」会来回振荡。
+const avatarBroken = ref(false);
+const displayAvatar = computed<string>(() =>
+  avatarUrl.value.length > 0 && !avatarBroken.value ? avatarUrl.value : DEFAULT_AVATAR_ASSET
+);
+function onAvatarError(): void {
+  avatarBroken.value = true;
+}
+const avatarBusy = ref(false);
+// 头像放大预览遮罩
+const previewOpen = ref(false);
+function openPreview(): void {
+  if (avatarBusy.value) return;
+  previewOpen.value = true;
+}
+function closePreview(): void {
+  previewOpen.value = false;
+}
+/** 更换图片：关闭预览后，执行与「现在展示图片」相同的选图→直传→回显逻辑 */
+function onChangeImage(): void {
+  if (avatarBusy.value) return;
+  previewOpen.value = false;
+  changeAvatar();
+}
+
+
+function onNicknameInput(e: InputEvent): void {
+  nickname.value = String((e.detail as any).value ?? "");
+}
+function onEmailInput(e: InputEvent): void {
+  const raw = String((e.detail as any).value ?? "");
+  email.value = raw.replace(/[^a-zA-Z0-9@.]/g, "");
+}
+function onPasswordInput(e: InputEvent): void {
+  password.value = String((e.detail as any).value ?? "");
+}
+
+function isEmail(text: string): boolean {
+  return text.indexOf("@") > 0 && text.indexOf(".") > text.indexOf("@");
+}
+
+/** 加载当前用户信息 */
+async function loadProfile(): Promise<void> {
+  if (!getAccessToken()) return;
+  // /me 走启动/登录时写入的缓存（本次运行只查一次接口），缓存缺失才联网补拉
+  const res = await meCached();
+  if (res == null) return;
+  const user = res.get("user") as UTSJSONObject | null;
+  if (user != null) {
+    nickname.value = (user.get("nickname") as string) ?? "";
+    email.value = (user.get("email") as string) ?? "";
+    avatar.value = (user.get("avatar") as string) ?? "";
+    const raw = avatar.value;
+    avatarUrl.value = raw.startsWith("http") ? raw : "";
+    avatarBroken.value = false;
+    if (avatarUrl.value.length > 0) uni.setStorageSync("qt-avatar", avatarUrl.value);
+    const em = user.get("email") as string | null;
+    if (em != null && em.length > 0) uni.setStorageSync("qt-email", em);
+  }
+}
+
+/**
+ * 换头像：选图 → 客户端直传存储端 → 回执登记。
+ * 走独立接口（avatar/ticket+complete），后端直接写 sys_user.avatar，
+ * 不触发 update 接口的强制下线；失败文案（大小/类型/每日限次）由 storage 插件下发，原样展示。
+ */
+async function changeAvatar(): Promise<void> {
+  if (avatarBusy.value) return;
+  let path = "";
+  try {
+    path = await chooseImage();
+  } catch (_) {
+    return; // 用户取消选图，静默返回
+  }
+  avatarBusy.value = true;
+  uni.showLoading({ title: "上传中..." });
+  try {
+    const url = await uploadAvatar(path);
+    avatarUrl.value = url;
+    avatarBroken.value = false;
+    uni.hideLoading();
+    uni.showToast({ title: "头像已更新", icon: "none" });
+    // 头像走 ticket+complete 直写服务端，不经 updateProfile；后台刷新一次 /me 缓存保持一致
+    refreshMe();
+  } catch (e) {
+    uni.hideLoading();
+    uni.showToast({ title: (e as Error).message || "上传失败", icon: "none", duration: 3000 });
+  } finally {
+    avatarBusy.value = false;
+  }
+}
+
+// ==================== 保存图片到相册 ====================
+const DOWNLOAD_TIMEOUT_MS = 15000;
+
+function downloadToTemp(url: string): Promise<string> {
+  return new Promise<string>((resolve) => {
+    // uni.downloadFile 只有全局 networkTimeout（默认 60s）：地址指向不可达的存储域名时
+    // 会白转一分钟圈，这里 15s 主动放弃，由调用方给明确文案
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve("");
+    }, DOWNLOAD_TIMEOUT_MS);
+    uni.downloadFile({
+      url,
+      success: (res) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const t = res.tempFilePath;
+        resolve((res.statusCode >= 200 && res.statusCode < 300 && t.length > 0) ? t : "");
+      },
+      fail: () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve("");
+      },
+    });
+  });
+}
+
+function saveToAlbum(filePath: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    uni.saveImageToPhotosAlbum({
+      filePath,
+      success: () => resolve(),
+      fail: () => reject(new Error("保存到相册失败，请检查相册权限")),
+    });
+  });
+}
+
+async function saveImage(): Promise<void> {
+  const src = avatarUrl.value;
+  if (src.length === 0) {
+    uni.showToast({ title: "暂无可保存的头像", icon: "none" });
+    return;
+  }
+  uni.showLoading({ title: "保存中..." });
+  try {
+    const temp = await downloadToTemp(src);
+    if (temp.length === 0) throw new Error("图片地址无法访问，下载超时或失败");
+    await saveToAlbum(temp);
+    uni.hideLoading();
+    uni.showToast({ title: "已保存到相册", icon: "success" });
+  } catch (e) {
+    uni.hideLoading();
+    uni.showToast({ title: (e as Error).message || "保存失败", icon: "none", duration: 3000 });
+  }
+}
+
+onMounted(() => {
+  loadProfile();
+});
+
+async function submit(): Promise<void> {
+  if (nickname.value.trim().length == 0) {
+    uni.showToast({ title: "请输入昵称", icon: "none" });
+    return;
+  }
+  const mail = email.value.trim();
+  if (mail.length == 0) {
+    uni.showToast({ title: "请输入邮箱", icon: "none" });
+    return;
+  }
+  if (!isEmail(mail)) {
+    uni.showToast({ title: "请输入正确的邮箱地址", icon: "none" });
+    return;
+  }
+  if (password.value.length > 0 && (password.value.length < 6 || password.value.length > 18)) {
+    uni.showToast({ title: "密码长度为 6-18 位", icon: "none" });
+    return;
+  }
+
+  loading.value = true;
+  try {
+    // avatar 原样回传：改头像走独立直传接口，这里保留当前值（后端 @NotBlank 必填）
+    const data: UTSJSONObject = {
+      nickname: nickname.value.trim(),
+      email: mail,
+      avatar: avatarUrl.value.length > 0
+        ? avatarUrl.value
+        : (avatar.value.length > 0 ? avatar.value : DEFAULT_AVATAR),
+    } as UTSJSONObject;
+    if (password.value.length > 0) {
+      data.set("password", password.value);
+    }
+    await accountApi.updateProfile(data);
+    // 后端更新资料后会强制下线，此处清除本地登录态并跳转登录页
+    clearTokens();
+    clearCachedMe();
+    uni.removeStorageSync("qt-token");
+    uni.removeStorageSync("qt-nickname");
+    uni.removeStorageSync("qt-email");
+    uni.removeStorageSync("qt-avatar");
+    uni.showToast({ title: "资料已更新，请重新登录", icon: "success" });
+    editReloadTimer = setTimeout(() => {
+      uni.reLaunch({ url: "/pages/login/index" });
+    }, 800) as number;
+  } catch (error) {
+    uni.showToast({ title: (error as Error).message || "保存失败", icon: "none" });
+  } finally {
+    loading.value = false;
+  }
+}
+onUnmounted(() => {
+  if (editReloadTimer != null) {
+    clearTimeout(editReloadTimer);
+    editReloadTimer = null;
+  }
+});
+</script>
+
+<style>
+.page {
+  flex: 1;
+  padding: 30rpx 30rpx 60rpx;
+}
+
+.card {
+  padding: 44rpx 36rpx 40rpx;
+  background-color: rgba(255, 255, 255, 0.92);
+  border-radius: 32rpx;
+}
+.card-dark {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+.avatar-row {
+  align-items: center;
+  margin-bottom: 8rpx;
+}
+.avatar {
+  width: 132rpx;
+  height: 132rpx;
+  justify-content: center;
+  align-items: center;
+  border-radius: 36rpx;
+  overflow: hidden;
+}
+.avatar-img {
+  width: 132rpx;
+  height: 132rpx;
+  border-radius: 36rpx;
+}
+.avatar-preview-mask {
+  position: fixed;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 999;
+  background-color: rgba(0, 0, 0, 0.92);
+  justify-content: center;
+  align-items: center;
+}
+.avatar-preview-body {
+  width: 100%;
+  height: 100%;
+  justify-content: center;
+  align-items: center;
+}
+.avatar-preview-close {
+  position: absolute;
+  top: 100rpx;
+  right: 40rpx;
+  width: 72rpx;
+  height: 72rpx;
+  justify-content: center;
+  align-items: center;
+}
+.avatar-preview-img {
+  width: 480rpx;
+  height: 480rpx;
+  border-radius: 40rpx;
+}
+.avatar-preview-actions {
+  position: absolute;
+  bottom: 140rpx;
+  left: 0;
+  right: 0;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+}
+.avatar-preview-btn {
+  height: 92rpx;
+  justify-content: center;
+  align-items: center;
+  border-radius: 46rpx;
+}
+.avatar-preview-btn-save {
+  margin-right: 36rpx;
+  padding-left: 58rpx;
+  padding-right: 58rpx;
+  background-color: rgba(255, 255, 255, 0.94);
+}
+.avatar-preview-btn-change {
+  margin-left: 36rpx;
+  padding-left: 58rpx;
+  padding-right: 58rpx;
+}
+.avatar-preview-btn-text {
+  font-size: 30rpx;
+  font-weight: 600;
+}
+.avatar-preview-btn-text-dark {
+  color: #191d26;
+}
+.avatar-preview-btn-text-light {
+  color: #ffffff;
+}
+.field-row {
+  flex-direction: row;
+  align-items: center;
+  height: 100rpx;
+  margin-top: 26rpx;
+  padding: 0 28rpx;
+  background-color: #f4f5fa;
+  border-width: 1px;
+  border-color: #eef0f5;
+  border-radius: 22rpx;
+}
+.field-row-dark {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+.field-input {
+  flex: 1;
+  height: 100rpx;
+  color: #191d26;
+  font-size: 28rpx;
+}
+.field-ph {
+  color: #6b7385;
+  font-size: 28rpx;
+}
+.eye {
+  width: 64rpx;
+  height: 100rpx;
+  justify-content: center;
+  align-items: center;
+}
+.tip {
+  margin-top: 20rpx;
+  color: #4a7dff;
+  font-size: 23rpx;
+}
+.action {
+  margin-top: 48rpx;
+}
+.action-text {
+  color: #ffffff;
+  font-size: 32rpx;
+  font-weight: 600;
+}
+
+/* Vapor 宽屏：px 覆盖 rpx，1600x900 下避免按窗口比例放大 2.7 倍 */
+.page-wide {
+  padding: 32px 24px;
+  align-items: center;
+  justify-content: center;
+}
+.card-wide {
+  padding: 26px 26px 24px;
+  border-radius: 18px;
+  width: 460px;
+}
+.avatar-row-wide {
+  margin-bottom: 4px;
+}
+.avatar-wide {
+  width: 72px;
+  height: 72px;
+  border-radius: 20px;
+}
+.avatar-img-wide {
+  width: 72px;
+  height: 72px;
+  border-radius: 20px;
+}
+.avatar-preview-actions-wide {
+  bottom: 64px;
+}
+.avatar-preview-btn-wide {
+  height: 48px;
+  padding-left: 34px;
+  padding-right: 34px;
+  border-radius: 24px;
+}
+.avatar-preview-btn-text-wide {
+  font-size: 16px;
+}
+.field-row-wide {
+  height: 52px;
+  margin-top: 14px;
+  padding-left: 18px;
+  padding-right: 18px;
+  border-radius: 12px;
+}
+.field-input-wide {
+  height: 52px;
+  font-size: 16px;
+}
+.field-ph-wide {
+  font-size: 16px;
+}
+.eye-wide {
+  width: 36px;
+  height: 52px;
+}
+.tip-wide {
+  font-size: 13px;
+}
+.action-wide {
+  margin-top: 20px;
+}
+.action-text-wide { font-size: 15px; }
+</style>

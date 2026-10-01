@@ -1,0 +1,1426 @@
+<template>
+  <qt-page-frame :max-width="860">
+    <view class="page" :class="layout.isWide ? 'page-wide' : ''">
+      <!-- 扫描中 -->
+      <view v-if="scanning" class="empty">
+        <QtLoading />
+        <text class="empty-text" :style="'color:' + theme.skin.text + ';'">正在扫描手机里的歌曲…</text>
+        <text class="empty-sub" :style="'color:' + theme.skin.textMuted + ';'">首次扫描需要授权访问音频文件</text>
+      </view>
+
+      <!-- 首次打开：扫描引导 -->
+      <scroll-view v-else-if="viewMode == 'onboard'" class="onboard-scroll" direction="vertical" :show-scrollbar="false">
+        <view class="onboard" :class="layout.isWide ? 'onboard-wide' : ''">
+          <view class="onboard-inner" :class="layout.isWide ? 'onboard-inner-wide' : ''">
+            <view class="hero-ring" :class="layout.isWide ? 'hero-ring-wide' : ''" :style="'border-color:' + theme.skin.accentSoft + ';background-color:' + theme.skin.accentSoft + ';'">
+              <view class="hero-chip" :class="layout.isWide ? 'hero-chip-wide' : ''" :style="'background-color:' + theme.skin.accent + ';'">
+                <QtIcon name="music" :size="layout.isWide ? 34 : 72" :color="theme.skin.onAccent" />
+              </view>
+            </view>
+            <text class="hero-title" :class="layout.isWide ? 'hero-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">一键扫描手机内歌曲文件</text>
+            <text class="hero-sub" :class="layout.isWide ? 'hero-sub-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">扫描结果会保存到本地，下次进入直接展示，随时可以重新扫描</text>
+
+            <view class="scan-primary" :class="layout.isWide ? 'scan-primary-wide' : ''" :style="'background-color:' + theme.skin.accent + ';'" @click="startScan('all')">
+              <QtIcon name="search" :size="layout.isWide ? 16 : 30" :color="theme.skin.onAccent" />
+              <text class="scan-primary-text" :class="layout.isWide ? 'scan-primary-text-wide' : ''" :style="'color:' + theme.skin.onAccent + ';'">全盘扫描</text>
+            </view>
+            <view class="scan-ghost" :class="layout.isWide ? 'scan-ghost-wide' : ''" :style="'border-color:' + theme.skin.border + ';background-color:' + theme.skin.surface + ';'">
+              <view class="scan-ghost-btn" @click="startScan('folder')">
+                <QtIcon name="folder" :size="layout.isWide ? 14 : 26" :color="theme.skin.text" />
+                <text class="scan-ghost-text" :class="layout.isWide ? 'scan-ghost-text-wide' : ''" :style="'color:' + theme.skin.text + ';'">文件夹扫描</text>
+              </view>
+            </view>
+            <text class="perm-hint" :class="layout.isWide ? 'perm-hint-wide' : ''" :style="'color:' + theme.skin.textSubtle + ';'">扫描会申请“音乐和音频”文件访问权限，仅用于读取本地歌曲</text>
+          </view>
+        </view>
+      </scroll-view>
+
+      <!-- 导入配置：勾选要导入的目录 + 扫描规则 -->
+      <template v-else-if="viewMode == 'folderPick'">
+        <view class="head-card" :class="layout.isWide ? 'head-card-wide' : ''" :style="cardStyle">
+          <view class="head-copy">
+            <text class="head-title" :class="layout.isWide ? 'head-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">导入配置</text>
+            <text class="head-sub" :class="layout.isWide ? 'head-sub-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ pickSummary }}</text>
+          </view>
+          <view class="head-btn" :class="layout.isWide ? 'head-btn-wide' : ''" :style="'border-color:' + theme.skin.border + ';'">
+            <text class="head-btn-text" :class="layout.isWide ? 'head-btn-text-wide' : ''" :style="'color:' + theme.skin.text + ';'" @click="toggleAll">{{ allChecked ? "取消全选" : "全选" }}</text>
+          </view>
+          <view class="head-btn primary" :class="layout.isWide ? 'head-btn-wide' : ''" :style="'background-color:' + theme.skin.accent + ';border-color:' + theme.skin.accent + ';'">
+            <text class="head-btn-text" :class="layout.isWide ? 'head-btn-text-wide' : ''" :style="'color:' + theme.skin.onAccent + ';'" @click="confirmImport">导入</text>
+          </view>
+        </view>
+        <!-- 扫描规则：留空 = 不限制，改动即时反映到下方目录数量与导入结果 -->
+        <view class="rule-card" :class="layout.isWide ? 'rule-card-wide' : ''" :style="cardStyle">
+          <text class="rule-label" :class="layout.isWide ? 'rule-label-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">屏蔽少于</text>
+          <view class="rule-field" :class="layout.isWide ? 'rule-field-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'">
+            <input class="rule-input" :class="layout.isWide ? 'rule-input-wide' : ''" type="number" :value="minSecondsText" @input="onMinSecondsInput" placeholder="不限" :placeholder-class="layout.isWide ? 'rule-ph-wide' : 'rule-ph'" />
+            <text class="rule-unit" :class="layout.isWide ? 'rule-unit-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">秒</text>
+          </view>
+          <view class="rule-field" :class="layout.isWide ? 'rule-field-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'">
+            <input class="rule-input" :class="layout.isWide ? 'rule-input-wide' : ''" type="digit" :value="minSizeText" @input="onMinSizeInput" placeholder="不限" :placeholder-class="layout.isWide ? 'rule-ph-wide' : 'rule-ph'" />
+            <text class="rule-unit" :class="layout.isWide ? 'rule-unit-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">MB</text>
+          </view>
+        </view>
+        <!-- 文件夹容器独立成弹性区域：配置卡片不压缩，列表占满剩余高度并自行滚动 -->
+        <view class="pick-list" :class="layout.isWide ? 'pick-list-wide' : ''">
+          <scroll-view class="list-scroll" direction="vertical" :show-scrollbar="false">
+            <view
+              v-for="folder in pickFolders"
+              :key="folder.path"
+              class="row" :class="layout.isWide ? 'row-wide' : ''"
+              @click="toggleFolder(folder.path)"
+            >
+              <view class="cover" :class="layout.isWide ? 'cover-wide' : ''" :style="'background-color:' + theme.skin.accentSoft + ';'">
+                <QtIcon name="folder" :size="layout.isWide ? 16 : 30" :color="theme.skin.accent" />
+              </view>
+              <view class="info" :class="layout.isWide ? 'info-wide' : ''">
+                <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="'color:' + theme.skin.text + ';'" :max-lines="1">{{ folder.name }}</text>
+                <text class="meta" :class="layout.isWide ? 'meta-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" :max-lines="1">{{ folder.path }} · {{ folder.count }} 首</text>
+              </view>
+              <view class="checkbox" :class="layout.isWide ? 'checkbox-wide' : ''" :style="isChecked(folder.path) ? 'background-color:' + theme.skin.accent + ';border-color:' + theme.skin.accent + ';' : 'border-color:' + theme.skin.border + ';'">
+                <QtIcon v-if="isChecked(folder.path)" name="check" :size="layout.isWide ? 12 : 22" :color="theme.skin.onAccent" />
+              </view>
+              <view class="row-divider" :class="layout.isWide ? 'row-divider-wide' : ''" :style="'background-color:' + theme.skin.divider + ';'" />
+            </view>
+            <view class="foot-space" :class="layout.isWide ? 'foot-space-wide' : ''"></view>
+          </scroll-view>
+        </view>
+      </template>
+
+      <!-- 已有扫描结果：本地音乐列表（布局参照系统播放器本地页：
+           页签行(分类+搜索+菜单)、播放全部行、歌曲列表） -->
+      <template v-else>
+        <!-- 页签行：分类页签居左，搜索/三点按钮居右；选择态右侧等高换成「取消」。
+             页签常驻、行高固定，勾选歌曲时页面零位移 -->
+        <view class="head-row" :class="layout.isWide ? 'head-row-wide' : ''">
+          <view class="seg-row">
+            <view
+              v-for="opt in viewOptions"
+              :key="opt.value"
+              class="seg-btn"
+              :class="[layout.isWide ? 'seg-btn-wide' : '', listView == opt.value ? 'seg-active' : 'seg-idle']"
+              :style="listView == opt.value ? 'background-color:' + theme.skin.accentSoft + ';color:' + theme.skin.accent + ';' : 'color:' + theme.skin.text + ';'"
+              @click="listView = opt.value"
+            >{{ opt.label }}</view>
+          </view>
+          <view v-if="!selecting" class="head-acts">
+            <view class="head-act" :class="layout.isWide ? 'head-act-wide' : ''" @click="toggleSearch">
+              <QtIcon name="search" :size="layout.isWide ? 16 : 30" :color="theme.skin.text" />
+            </view>
+            <view class="head-act" :class="layout.isWide ? 'head-act-wide' : ''" @click="menuOpen = true">
+              <QtIcon name="more" :size="layout.isWide ? 16 : 30" :color="theme.skin.text" />
+            </view>
+          </view>
+          <view v-if="selecting" class="select-cancel" :class="layout.isWide ? 'select-cancel-wide' : ''" @click="toggleSelect">
+            <text class="select-cancel-text" :class="layout.isWide ? 'select-cancel-text-wide' : ''" :style="'color:' + theme.skin.accent + ';'">取消</text>
+          </view>
+        </view>
+
+        <!-- 搜索行：点放大镜展开，收起时清空关键词恢复全量 -->
+        <view v-if="searchOpen" class="search-row" :class="layout.isWide ? 'search-row-wide' : ''">
+          <view class="search-field" :class="layout.isWide ? 'search-field-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'">
+            <QtIcon name="search" :size="layout.isWide ? 12 : 22" :color="theme.skin.textMuted" />
+            <input class="search-input" :class="layout.isWide ? 'search-input-wide' : ''" :value="query" @input="onQueryInput" placeholder="搜索标题 / 歌手 / 专辑" :placeholder-class="layout.isWide ? 'search-ph-wide' : 'search-ph'" :style="'color:' + theme.skin.text + ';'" />
+          </view>
+        </view>
+
+        <!-- 播放全部 / 选择态操作：固定行高等高替换，勾选歌曲不会顶动列表 -->
+        <view class="all-line" :class="layout.isWide ? 'all-line-wide' : ''">
+          <view v-if="!selecting" class="all-left" @click="playAll">
+            <view class="all-play-chip" :class="layout.isWide ? 'all-play-chip-wide' : ''" :style="'background-color:' + theme.skin.accentSoft + ';'">
+              <QtIcon name="play" :size="layout.isWide ? 12 : 22" :color="theme.skin.accent" />
+            </view>
+            <text class="all-text" :class="layout.isWide ? 'all-text-wide' : ''" :style="'color:' + theme.skin.text + ';'">播放全部</text>
+            <text class="all-count" :class="layout.isWide ? 'all-count-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">({{ filteredItems.length }})</text>
+          </view>
+          <text v-else class="all-text" :class="layout.isWide ? 'all-text-wide' : ''" :style="'color:' + theme.skin.text + ';'">已选 {{ selected.length }} 首</text>
+          <view class="line-right">
+            <view v-if="!selecting" class="sort-act" :class="layout.isWide ? 'sort-act-wide' : ''" @click="toggleSortDir">
+              <QtIcon :name="sortAsc ? 'arrow-up' : 'arrow-down'" :size="layout.isWide ? 14 : 26" :color="theme.skin.text" />
+            </view>
+            <view v-if="selecting" class="manage-btn" :class="layout.isWide ? 'manage-btn-wide' : ''" :style="'border-color:' + theme.skin.border + ';'" @click="toggleSelectAll">
+              <text class="manage-btn-text" :class="layout.isWide ? 'manage-btn-text-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ allSel ? "取消全选" : "全选" }}</text>
+            </view>
+            <view v-if="selecting && selected.length > 0" class="manage-btn danger" :class="layout.isWide ? 'manage-btn-wide' : ''" :style="'background-color:' + theme.skin.danger + ';border-color:' + theme.skin.danger + ';'" @click="confirmBatchDelete">
+              <text class="manage-btn-text" :class="layout.isWide ? 'manage-btn-text-wide' : ''" :style="'color:#ffffff;'">删除（{{ selected.length }}）</text>
+            </view>
+          </view>
+        </view>
+
+        <scroll-view class="list" direction="vertical" :show-scrollbar="false">
+          <!-- 空态：扫描规则/搜索把列表滤空时不再是整块空白 -->
+          <view v-if="filteredItems.length == 0" class="empty">
+            <text class="empty-text" :style="'color:' + theme.skin.text + ';'">没有匹配的歌曲</text>
+            <text class="empty-sub" :style="'color:' + theme.skin.textMuted + ';'">{{ searchOpen ? "换个关键词试试" : "可在右上菜单重新扫描或调整导入配置" }}</text>
+          </view>
+          <template v-if="listView != 'songs'">
+            <view v-for="group in groups" :key="group.name">
+              <view class="group-head" :class="layout.isWide ? 'group-head-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ group.name }} · {{ group.list.length }} 首</view>
+              <view
+                v-for="item in group.list"
+                :key="item.id"
+                class="row" :class="layout.isWide ? 'row-wide' : ''"
+                @click="onRowTap(item)"
+              >
+                <view v-if="selecting" class="checkbox" :class="layout.isWide ? 'checkbox-wide' : ''" :style="isSel(item.id) ? 'background-color:' + theme.skin.accent + ';border-color:' + theme.skin.accent + ';' : 'border-color:' + theme.skin.border + ';'">
+                  <QtIcon v-if="isSel(item.id)" name="check" :size="layout.isWide ? 12 : 22" :color="theme.skin.onAccent" />
+                </view>
+                <view v-if="!selecting && currentId == item.id" class="row-ind" :class="layout.isWide ? 'row-ind-wide' : ''" :style="'background-color:' + theme.skin.accent + ';'" />
+                <view class="info" :class="layout.isWide ? 'info-wide' : ''">
+                  <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="'color:' + (selecting ? theme.skin.text : (currentId == item.id ? theme.skin.accent : theme.skin.text)) + ';'" :max-lines="1">{{ item.title }}</text>
+                  <text class="meta" :class="layout.isWide ? 'meta-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" :max-lines="1">{{ rowMeta(item) }}</text>
+                </view>
+                <text class="row-dur" :class="layout.isWide ? 'row-dur-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ formatDuration(item.duration) }}</text>
+                <view v-if="!selecting" class="row-more" :class="layout.isWide ? 'row-more-wide' : ''" @click.stop="onRowMore(item)">
+                  <QtIcon name="more" :size="layout.isWide ? 14 : 26" :color="theme.skin.textMuted" />
+                </view>
+                <view class="row-divider" :class="layout.isWide ? 'row-divider-wide' : ''" :style="'background-color:' + theme.skin.divider + ';'" />
+              </view>
+            </view>
+          </template>
+          <template v-else>
+            <view
+              v-for="item in filteredItems"
+              :key="item.id"
+              class="row" :class="layout.isWide ? 'row-wide' : ''"
+              @click="onRowTap(item)"
+            >
+              <view v-if="selecting" class="checkbox" :class="layout.isWide ? 'checkbox-wide' : ''" :style="isSel(item.id) ? 'background-color:' + theme.skin.accent + ';border-color:' + theme.skin.accent + ';' : 'border-color:' + theme.skin.border + ';'">
+                <QtIcon v-if="isSel(item.id)" name="check" :size="layout.isWide ? 12 : 22" :color="theme.skin.onAccent" />
+              </view>
+              <view v-if="!selecting && currentId == item.id" class="row-ind" :class="layout.isWide ? 'row-ind-wide' : ''" :style="'background-color:' + theme.skin.accent + ';'" />
+              <view class="info" :class="layout.isWide ? 'info-wide' : ''">
+                <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="'color:' + (selecting ? theme.skin.text : (currentId == item.id ? theme.skin.accent : theme.skin.text)) + ';'" :max-lines="1">{{ item.title }}</text>
+                <text class="meta" :class="layout.isWide ? 'meta-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" :max-lines="1">{{ rowMeta(item) }}</text>
+              </view>
+              <text class="row-dur" :class="layout.isWide ? 'row-dur-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ formatDuration(item.duration) }}</text>
+              <view v-if="!selecting" class="row-more" :class="layout.isWide ? 'row-more-wide' : ''" @click.stop="onRowMore(item)">
+                <QtIcon name="more" :size="layout.isWide ? 14 : 26" :color="theme.skin.textMuted" />
+              </view>
+              <view class="row-divider" :class="layout.isWide ? 'row-divider-wide' : ''" :style="'background-color:' + theme.skin.divider + ';'" />
+            </view>
+          </template>
+          <view class="foot-space" :class="layout.isWide ? 'foot-space-wide' : ''"></view>
+        </scroll-view>
+
+        <!-- 三点下拉菜单：浮层盖住整页点空白处收起，面板锚在标题行下方右侧 -->
+        <view v-if="menuOpen" class="menu-mask" @click="menuOpen = false" />
+        <view v-if="menuOpen" class="menu-panel" :class="layout.isWide ? 'menu-panel-wide' : ''" :style="cardStyle">
+          <view class="menu-item" :class="layout.isWide ? 'menu-item-wide' : ''" @click="onMenuItem('rescan')">
+            <QtIcon name="refresh" :size="layout.isWide ? 14 : 26" :color="theme.skin.text" />
+            <text class="menu-item-text" :class="layout.isWide ? 'menu-item-text-wide' : ''" :style="'color:' + theme.skin.text + ';'">重新扫描</text>
+          </view>
+          <view class="menu-item" :class="layout.isWide ? 'menu-item-wide' : ''" @click="onMenuItem('folder')">
+            <QtIcon name="folder" :size="layout.isWide ? 14 : 26" :color="theme.skin.text" />
+            <text class="menu-item-text" :class="layout.isWide ? 'menu-item-text-wide' : ''" :style="'color:' + theme.skin.text + ';'">导入配置</text>
+          </view>
+          <view class="menu-item" :class="layout.isWide ? 'menu-item-wide' : ''" @click="onMenuItem('sort')">
+            <QtIcon name="list" :size="layout.isWide ? 14 : 26" :color="theme.skin.text" />
+            <text class="menu-item-text" :class="layout.isWide ? 'menu-item-text-wide' : ''" :style="'color:' + theme.skin.text + ';'">选择排序方式</text>
+          </view>
+          <view class="menu-item" :class="layout.isWide ? 'menu-item-wide' : ''" @click="onMenuItem('delmode')">
+            <QtIcon name="settings" :size="layout.isWide ? 14 : 26" :color="theme.skin.text" />
+            <text class="menu-item-text" :class="layout.isWide ? 'menu-item-text-wide' : ''" :style="'color:' + theme.skin.text + ';'">删除设置</text>
+          </view>
+          <view class="menu-item" :class="layout.isWide ? 'menu-item-wide' : ''" @click="onMenuItem('select')">
+            <QtIcon name="trash" :size="layout.isWide ? 14 : 26" :color="theme.skin.text" />
+            <text class="menu-item-text" :class="layout.isWide ? 'menu-item-text-wide' : ''" :style="'color:' + theme.skin.text + ';'">批量删除</text>
+          </view>
+        </view>
+      </template>
+      <MiniPlayer />
+    </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
+import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { ref, computed } from "vue";
+import { scanLocalAudio, deleteLocalMedia } from "@/uni_modules/qt-app-native";
+import type { LocalAudioItem } from "@/uni_modules/qt-app-native";
+import { usePlayerStore } from "@/stores/player";
+import type { Song } from "@/types/music";
+import { qtTrackPage } from "@/uni_modules/qt-stat";
+import { onShow } from "@dcloudio/uni-app";
+
+const theme = useThemeStore();
+const layout = useQtLayout();
+const player = usePlayerStore();
+
+// 扫描结果持久化：第二次进入直接展示，不再自动扫描
+const STORE_KEY = "qt-local-audio-v1";
+// 扫描规则持久化：留空 = 不限制
+const RULE_SEC_KEY = "qt-local-rule-min-seconds";
+const RULE_SIZE_KEY = "qt-local-rule-min-size-mb";
+const MIN_SIZE_BYTES_PER_MB = 1024 * 1024;
+
+// 删除歌曲时是否连本地文件一起删（应用内设置：默认只移记录、文件保留）
+const DELETE_FILE_KEY = "qt-local-delete-file-v1";
+const deleteFileWithSong = ref(false);
+
+/** 删除设置：弹窗二选一（删除歌曲时是否连本地文件一起删），当前项带 ✓ 标记 */
+function showDeleteModeSheet(): void {
+  const onlyRemove = "删除时仅从列表移除，保留文件";
+  const alsoDelete = "删除时同时删除本地文件";
+  uni.showActionSheet({
+    itemList: deleteFileWithSong.value
+      ? [onlyRemove, "✓ " + alsoDelete]
+      : ["✓ " + onlyRemove, alsoDelete],
+    success: (res) => {
+      const idx = res.tapIndex as number;
+      deleteFileWithSong.value = idx == 1;
+      uni.setStorageSync(DELETE_FILE_KEY, deleteFileWithSong.value);
+    },
+  });
+}
+
+const minSecondsText = ref("");
+const minSizeText = ref("");
+
+/** 输入框文本 -> 数值；空/非法/非正数一律视为「不限制」（0） */
+function parseRuleValue(text: string): number {
+  const t = text.trim();
+  if (t.length == 0) return 0;
+  const n = parseFloat(t);
+  return n > 0 ? n : 0;
+}
+
+/**
+ * 按扫描规则过滤：少于设定时长/体积的条目不计入。
+ * 时长或体积未知（0、老缓存无 size 字段）的条目不参与该项过滤，避免误伤。
+ */
+function applyRule(src: LocalAudioItem[]): LocalAudioItem[] {
+  const minSeconds = parseRuleValue(minSecondsText.value);
+  const minBytes = parseRuleValue(minSizeText.value) * MIN_SIZE_BYTES_PER_MB;
+  if (minSeconds <= 0 && minBytes <= 0) return src;
+  const out: LocalAudioItem[] = [];
+  for (let i = 0; i < src.length; i++) {
+    const it = src[i];
+    if (minSeconds > 0 && it.duration > 0 && it.duration < minSeconds) continue;
+    const size = it.size != null ? it.size! : 0;
+    if (minBytes > 0 && size > 0 && size < minBytes) continue;
+    out.push(it);
+  }
+  return out;
+}
+
+function loadRule(): void {
+  const sec = uni.getStorageSync(RULE_SEC_KEY) as string;
+  if (sec != null && sec.length > 0) minSecondsText.value = sec;
+  const size = uni.getStorageSync(RULE_SIZE_KEY) as string;
+  if (size != null && size.length > 0) minSizeText.value = size;
+}
+
+function onMinSecondsInput(e: InputEvent): void {
+  const v = String((e.detail as any).value ?? "");
+  minSecondsText.value = v;
+  uni.setStorageSync(RULE_SEC_KEY, v);
+}
+
+function onMinSizeInput(e: InputEvent): void {
+  const v = String((e.detail as any).value ?? "");
+  minSizeText.value = v;
+  uni.setStorageSync(RULE_SIZE_KEY, v);
+}
+
+const cardStyle = computed<string>(() =>
+  "background-color:" + theme.skin.surface +
+  ";border-color:" + theme.skin.border +
+  ";box-shadow:0 10rpx 30rpx " + theme.skin.shadow + ";"
+);
+
+// onboard = 首次引导；folderPick = 文件夹扫描时勾选目录；list = 展示已收录歌曲
+const viewMode = ref<string>("onboard");
+const scanning = ref(false);
+const allItems = ref<LocalAudioItem[]>([]);
+const pickItems = ref<LocalAudioItem[]>([]);
+const checked = ref<string[]>([]);
+
+type FolderEntry = { path: string; name: string; count: number };
+
+function folderOf(path: string): string {
+  const cut = path.lastIndexOf("/");
+  return cut > 0 ? path.substring(0, cut) : "/";
+}
+
+function groupFolders(items: LocalAudioItem[]): FolderEntry[] {
+  const map = new Map<string, number>();
+  for (let i = 0; i < items.length; i++) {
+    const dir = folderOf(items[i].path);
+    map.set(dir, (map.get(dir) ?? 0) + 1);
+  }
+  const list: FolderEntry[] = [];
+  map.forEach((count: number, dir: string) => {
+    const cut = dir.lastIndexOf("/");
+    const name = cut >= 0 && cut < dir.length - 1 ? dir.substring(cut + 1) : dir;
+    list.push({ path: dir, name: name, count: count } as FolderEntry);
+  });
+  list.sort((x: FolderEntry, y: FolderEntry): number => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0));
+  return list;
+}
+
+/** 导入页待导入条目：规则改动即时反映到目录数量与导入结果，不需要重新扫描 */
+const filteredPickItems = computed<LocalAudioItem[]>(() => applyRule(pickItems.value));
+const pickFolders = computed<FolderEntry[]>(() => groupFolders(filteredPickItems.value));
+
+/** 已勾选目录下的歌曲数（按规则过滤后） */
+const selectedCount = computed<number>(() => {
+  let n = 0;
+  const pool = filteredPickItems.value;
+  for (let i = 0; i < pool.length; i++) {
+    if (checked.value.indexOf(folderOf(pool[i].path)) >= 0) n++;
+  }
+  return n;
+});
+const pickSummary = computed<string>(() => {
+  const hidden = pickItems.value.length - filteredPickItems.value.length;
+  let text = "共 " + filteredPickItems.value.length + " 首 · 已选 " + selectedCount.value + " 首";
+  if (hidden > 0) text += " · 规则隐藏 " + hidden + " 首";
+  return text;
+});
+
+const allChecked = computed<boolean>(() => pickFolders.value.length > 0 && checked.value.length >= pickFolders.value.length);
+
+const currentId = computed<string>(() => {
+  const cur = player.current;
+  return cur != null ? cur.id : "";
+});
+
+function isChecked(path: string): boolean {
+  return checked.value.indexOf(path) >= 0;
+}
+
+/** 按当前扫描规则过滤后的基础列表（规则改完即时生效，无需重新扫描） */
+const ruleItems = computed<LocalAudioItem[]>(() => applyRule(allItems.value));
+
+// ---- 搜索 / 排序 / 分类视图 ----
+const query = ref<string>("");
+const searchOpen = ref<boolean>(false);
+const listView = ref<string>("songs");
+const sortKey = ref<string>("title");
+const sortAsc = ref<boolean>(true);
+// 三点下拉菜单开关（自定义浮层，见模板 menu-mask / menu-panel）
+const menuOpen = ref<boolean>(false);
+
+const viewOptions: { value: string; label: string }[] = [
+  { value: "songs", label: "歌曲" },
+  { value: "artists", label: "歌手" },
+  { value: "albums", label: "专辑" },
+  { value: "folders", label: "文件夹" },
+];
+
+const sortOptions: { value: string; name: string }[] = [
+  { value: "title", name: "标题" },
+  { value: "singer", name: "歌手" },
+  { value: "album", name: "专辑" },
+  { value: "duration", name: "时长" },
+  { value: "size", name: "大小" },
+  { value: "mtime", name: "修改时间" },
+];
+
+function onQueryInput(e: InputEvent): void {
+  query.value = String((e.detail as any).value ?? "");
+}
+
+function showSortSheet(): void {
+  const names: string[] = [];
+  for (let i = 0; i < sortOptions.length; i++) names.push(sortOptions[i].name);
+  uni.showActionSheet({
+    itemList: names,
+    success: (res) => {
+      const idx = res.tapIndex as number;
+      if (idx >= 0 && idx < sortOptions.length) sortKey.value = sortOptions[idx].value;
+    },
+  });
+}
+
+/** 标题行放大镜：展开/收起搜索行；收起时清空关键词，列表恢复全量 */
+function toggleSearch(): void {
+  searchOpen.value = !searchOpen.value;
+  if (!searchOpen.value) query.value = "";
+}
+
+/** 右上角三点下拉菜单：重新扫描 / 导入配置 / 选择排序方式 / 删除设置 / 批量删除 */
+function onMenuItem(kind: string): void {
+  menuOpen.value = false;
+  if (kind == "rescan") startScan("all");
+  else if (kind == "folder") startScan("folder");
+  else if (kind == "sort") showSortSheet();
+  else if (kind == "delmode") showDeleteModeSheet();
+  else if (kind == "select") toggleSelect();
+}
+
+function toggleSortDir(): void {
+  sortAsc.value = !sortAsc.value;
+}
+
+function sortCompare(a: LocalAudioItem, b: LocalAudioItem): number {
+  let r = 0;
+  switch (sortKey.value) {
+    case "singer":
+      r = a.singer.localeCompare(b.singer, "zh-Hans-CN");
+      if (r == 0) r = a.title.localeCompare(b.title, "zh-Hans-CN");
+      break;
+    case "album":
+      r = a.album.localeCompare(b.album, "zh-Hans-CN");
+      if (r == 0) r = a.title.localeCompare(b.title, "zh-Hans-CN");
+      break;
+    case "duration":
+      r = a.duration - b.duration;
+      break;
+    case "size":
+      r = (a.size ?? 0) - (b.size ?? 0);
+      break;
+    case "mtime":
+      r = (a.mtime ?? 0) - (b.mtime ?? 0);
+      break;
+    default:
+      r = a.title.localeCompare(b.title, "zh-Hans-CN");
+  }
+  return sortAsc.value ? r : -r;
+}
+
+/** 规则过滤 -> 搜索 -> 排序 后的展示列表（全部播放也用这份） */
+const filteredItems = computed<LocalAudioItem[]>(() => {
+  const q = query.value.trim().toLowerCase();
+  let list = ruleItems.value;
+  if (q.length > 0) {
+    const out: LocalAudioItem[] = [];
+    for (let i = 0; i < list.length; i++) {
+      const it = list[i];
+      if (
+        it.title.toLowerCase().indexOf(q) >= 0 ||
+        (it.singer.length > 0 && it.singer.toLowerCase().indexOf(q) >= 0) ||
+        (it.album.length > 0 && it.album.toLowerCase().indexOf(q) >= 0)
+      ) {
+        out.push(it);
+      }
+    }
+    list = out;
+  }
+  const sorted = [...list];
+  sorted.sort(sortCompare);
+  return sorted;
+});
+
+type LocalGroup = { name: string; list: LocalAudioItem[] };
+
+/** 分类视图（歌手 / 专辑 / 文件夹）分组 */
+const groups = computed<LocalGroup[]>(() => {
+  if (listView.value == "songs") return [];
+  const keyOf = (t: LocalAudioItem): string => {
+    if (listView.value == "artists") return t.singer.length > 0 ? t.singer : "未知歌手";
+    if (listView.value == "albums") return t.album.length > 0 ? t.album : "未知专辑";
+    return folderOf(t.path);
+  };
+  const map = new Map<string, LocalAudioItem[]>();
+  const list = filteredItems.value;
+  for (let i = 0; i < list.length; i++) {
+    const k = keyOf(list[i]);
+    const arr = map.get(k);
+    if (arr != null) arr.push(list[i]);
+    else map.set(k, [list[i]]);
+  }
+  const names: string[] = [];
+  map.forEach((_v: LocalAudioItem[], k: string) => {
+    names.push(k);
+  });
+  names.sort((x: string, y: string): number => x.localeCompare(y, "zh-Hans-CN"));
+  const out: LocalGroup[] = [];
+  for (let i = 0; i < names.length; i++) out.push({ name: names[i], list: map.get(names[i])! });
+  return out;
+});
+
+// ---- 批量删除（从本地音乐移除记录，不删除手机里的源文件） ----
+const selecting = ref<boolean>(false);
+const selected = ref<string[]>([]);
+
+function isSel(id: string): boolean {
+  return selected.value.indexOf(id) >= 0;
+}
+
+const allSel = computed<boolean>(
+  () => filteredItems.value.length > 0 && selected.value.length >= filteredItems.value.length,
+);
+
+function toggleSelect(): void {
+  selecting.value = !selecting.value;
+  if (!selecting.value) selected.value = [];
+}
+
+function toggleSelectAll(): void {
+  if (allSel.value) {
+    selected.value = [];
+  } else {
+    const ids: string[] = [];
+    const list = filteredItems.value;
+    for (let i = 0; i < list.length; i++) ids.push(list[i].id);
+    selected.value = ids;
+  }
+}
+
+function onRowTap(item: LocalAudioItem): void {
+  if (selecting.value) {
+    if (isSel(item.id)) {
+      selected.value = selected.value.filter((id: string): boolean => id != item.id);
+    } else {
+      selected.value = [...selected.value, item.id];
+    }
+    return;
+  }
+  play(item);
+}
+
+function confirmBatchDelete(): void {
+  if (selected.value.length == 0) return;
+  const delFile = deleteFileWithSong.value;
+  const removed: LocalAudioItem[] = [];
+  const keep: LocalAudioItem[] = [];
+  for (let i = 0; i < allItems.value.length; i++) {
+    const it = allItems.value[i];
+    if (selected.value.indexOf(it.id) < 0) keep.push(it);
+    else removed.push(it);
+  }
+  // 只移除记录时保持原有“无确认直接删”的轻量交互；要删本地文件时先确认，避免误删
+  if (!delFile) {
+    commitBatchDelete(keep, removed, false);
+    return;
+  }
+  uni.showModal({
+    title: "删除歌曲",
+    content: "将删除选中的 " + removed.length + " 首歌曲，并在手机上删除其本地文件？",
+    confirmText: "删除",
+    confirmColor: theme.skin.danger,
+    success: (res) => {
+      if (res.confirm) commitBatchDelete(keep, removed, true);
+    },
+  });
+}
+
+function commitBatchDelete(keep: LocalAudioItem[], removed: LocalAudioItem[], delFile: boolean): void {
+  if (delFile) {
+    const r = deleteLocalMedia(removed);
+    if (r.pending > 0) {
+      // 需开通「所有文件访问」才能删第三方文件：保留记录，用户开通后可重试
+      uni.showToast({ title: "请开启「所有文件访问」后重试", icon: "none" });
+      selected.value = [];
+      selecting.value = false;
+      return;
+    }
+    saveItems(keep);
+    if (r.failed == 0) uni.showToast({ title: "已删除 " + r.deleted + " 首（含本地文件）", icon: "none" });
+    else uni.showToast({ title: "已删除 " + r.deleted + " 首，" + r.failed + " 个文件未能删除", icon: "none" });
+  } else {
+    saveItems(keep);
+    uni.showToast({ title: "已移除 " + removed.length + " 首", icon: "none" });
+  }
+  selected.value = [];
+  selecting.value = false;
+}
+
+/** 行尾三点：单曲操作。@click.stop 阻止冒泡，避免触发整行播放 */
+function onRowMore(item: LocalAudioItem): void {
+  uni.showActionSheet({
+    itemList: ["播放", "移除"],
+    success: (res) => {
+      const idx = res.tapIndex as number;
+      if (idx == 0) play(item);
+      else if (idx == 1) removeOne(item);
+    },
+  });
+}
+
+/** 单曲移除：受「删除时同时删除本地文件」开关控制——开则连源文件一起删（尽力而为） */
+function removeOne(item: LocalAudioItem): void {
+  const delFile = deleteFileWithSong.value;
+  uni.showModal({
+    title: "移除歌曲",
+    content: delFile
+      ? "将「" + item.title + "」从本地音乐移除，并删除手机上的本地文件？"
+      : "将「" + item.title + "」从本地音乐中移除？",
+    confirmText: delFile ? "删除" : "移除",
+    confirmColor: theme.skin.danger,
+    success: (res) => {
+      if (res.confirm) {
+        if (delFile) {
+          const r = deleteLocalMedia([item]);
+          if (r.pending > 0) {
+            // 需开通「所有文件访问」才能删第三方文件：保留记录，用户开通后可重试
+            uni.showToast({ title: "需开启「所有文件访问」后重试删除", icon: "none" });
+          } else {
+            saveItems(allItems.value.filter((it: LocalAudioItem): boolean => it.id != item.id));
+            if (r.deleted > 0) uni.showToast({ title: "已删除，含本地文件", icon: "none" });
+            else uni.showToast({ title: "已移除，但未能删除文件", icon: "none" });
+          }
+        } else {
+          saveItems(allItems.value.filter((it: LocalAudioItem): boolean => it.id != item.id));
+          uni.showToast({ title: "已移除", icon: "none" });
+        }
+      }
+    },
+  });
+}
+
+/** 行副标题只留 歌手 · 专辑：时长右对齐单独展示，文件大小是库管理信息不再占行 */
+function rowMeta(item: LocalAudioItem): string {
+  let t = item.singer.length > 0 ? item.singer : "未知歌手";
+  if (item.album.length > 0) t += " · " + item.album;
+  return t;
+};
+
+function formatDuration(total: number): string {
+  const sec = total > 0 ? Math.floor(total) : 0;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return m + ":" + (s < 10 ? "0" : "") + s;
+}
+
+function loadSaved(): void {
+  const raw = uni.getStorageSync(STORE_KEY);
+  if (raw == null || raw == "") return;
+  const arr = raw as LocalAudioItem[];
+  if (!Array.isArray(arr)) return;
+  allItems.value = arr;
+}
+
+function saveItems(items: LocalAudioItem[]): void {
+  allItems.value = items;
+  uni.setStorageSync(STORE_KEY, items);
+}
+
+/**
+ * kind = "all" 全盘扫描直接收录；kind = "folder" 扫描后先勾选目录再导入。
+ * 权限申请在 scanLocalAudio 内部处理（拒绝时回调空列表）。
+ */
+function startScan(kind: string): void {
+  if (scanning.value) return;
+  scanning.value = true;
+  scanLocalAudio((items: LocalAudioItem[]) => {
+    scanning.value = false;
+    if (items.length == 0) {
+      uni.showToast({ title: "未在手机上找到音频文件", icon: "none" });
+      return;
+    }
+    if (kind == "folder") {
+      // 保留全量：扫描规则在导入页配置并即时过滤，放宽规则无需重新扫描
+      pickItems.value = items;
+      const paths: string[] = [];
+      const folders = groupFolders(items);
+      for (let i = 0; i < folders.length; i++) paths.push(folders[i].path);
+      checked.value = paths;
+      viewMode.value = "folderPick";
+    } else {
+      // 全盘扫描：保存全量，展示按规则过滤（改规则即时生效）
+      saveItems(items);
+      viewMode.value = "list";
+    }
+  });
+}
+
+function toggleFolder(path: string): void {
+  if (isChecked(path)) {
+    checked.value = checked.value.filter((p: string): boolean => p != path);
+  } else {
+    checked.value = [...checked.value, path];
+  }
+}
+
+function toggleAll(): void {
+  if (allChecked.value) {
+    checked.value = [];
+  } else {
+    const paths: string[] = [];
+    const folders = pickFolders.value;
+    for (let i = 0; i < folders.length; i++) paths.push(folders[i].path);
+    checked.value = paths;
+  }
+}
+
+function confirmImport(): void {
+  // 按导入页当前规则过滤后导入：规则改动即时生效，无需重新扫描
+  const pool = filteredPickItems.value;
+  if (pool.length == 0) {
+    uni.showToast({ title: "当前规则下没有可导入的歌曲", icon: "none" });
+    return;
+  }
+  const picked: LocalAudioItem[] = [];
+  for (let i = 0; i < pool.length; i++) {
+    const it = pool[i];
+    if (checked.value.indexOf(folderOf(it.path)) >= 0) picked.push(it);
+  }
+  if (picked.length == 0) {
+    uni.showToast({ title: "请至少选择一个文件夹", icon: "none" });
+    return;
+  }
+  saveItems(picked);
+  viewMode.value = "list";
+  uni.showToast({ title: "已收录 " + picked.length + " 首本地歌曲", icon: "none" });
+}
+
+/** 本地音频条目 -> 播放用歌曲：直接用 content:// 地址播放，不走在线取址 */
+function toSong(item: LocalAudioItem): Song {
+  return {
+    id: item.id,
+    name: item.title,
+    singer: item.singer,
+    album: item.album,
+    picUrl: "",
+    platform: "local",
+    duration: item.duration,
+    url: item.uri,
+  } as Song;
+}
+
+function play(item: LocalAudioItem): void {
+  player.playSingle(toSong(item));
+}
+
+/** 全部播放：用当前展示列表（已按规则过滤）整体替换播放队列，从第一首开始 */
+async function playAll(): Promise<void> {
+  const list = filteredItems.value;
+  if (list.length == 0) return;
+  const songs: Song[] = [];
+  for (let i = 0; i < list.length; i++) songs.push(toSong(list[i]));
+  try {
+    await player.play(songs[0], songs);
+  } catch (_) {
+    uni.showToast({ title: "暂时无法播放全部", icon: "none" });
+  }
+}
+
+onShow(() => {
+  qtTrackPage("pages/local/index");
+  // 扫描中 / 勾选目录时不要打断当前流程
+  if (scanning.value || viewMode.value == "folderPick") return;
+  deleteFileWithSong.value = uni.getStorageSync(DELETE_FILE_KEY) === true;
+  loadRule();
+  loadSaved();
+  viewMode.value = allItems.value.length > 0 ? "list" : "onboard";
+});
+</script>
+<style>
+.page {
+  flex: 1;
+  min-height: 0;
+  padding: 20rpx 24rpx 0;
+}
+.page-wide {
+  padding: 20px 26px 0;
+}
+
+/* ===== 首次扫描引导 ===== */
+.onboard-scroll {
+  flex: 1;
+  min-height: 0;
+}
+.onboard {
+  flex: 1;
+  align-items: center;
+  padding-top: 100rpx;
+}
+.onboard-wide {
+  padding-top: 60px;
+}
+.onboard-inner {
+  width: 600rpx;
+  align-items: center;
+}
+.onboard-inner-wide {
+  width: 400px;
+}
+.hero-ring {
+  width: 300rpx;
+  height: 300rpx;
+  border-radius: 150rpx;
+  border-width: 2px;
+  align-items: center;
+  justify-content: center;
+}
+.hero-ring-wide {
+  width: 180px;
+  height: 180px;
+  border-radius: 90px;
+}
+.hero-chip {
+  width: 200rpx;
+  height: 200rpx;
+  border-radius: 100rpx;
+  align-items: center;
+  justify-content: center;
+}
+.hero-chip-wide {
+  width: 120px;
+  height: 120px;
+  border-radius: 60px;
+}
+.hero-title {
+  margin-top: 50rpx;
+  font-size: 38rpx;
+  font-weight: 700;
+  text-align: center;
+}
+.hero-title-wide {
+  margin-top: 28px;
+  font-size: 22px;
+}
+.hero-sub {
+  margin-top: 16rpx;
+  font-size: 24rpx;
+  text-align: center;
+}
+.hero-sub-wide {
+  margin-top: 10px;
+  font-size: 13px;
+}
+.scan-primary {
+  margin-top: 70rpx;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  width: 600rpx;
+  height: 92rpx;
+  border-radius: 46rpx;
+}
+.scan-primary-wide {
+  margin-top: 40px;
+  width: 400px;
+  height: 48px;
+  border-radius: 24px;
+}
+.scan-primary-text {
+  margin-left: 12rpx;
+  font-size: 30rpx;
+  font-weight: 600;
+}
+.scan-primary-text-wide {
+  margin-left: 8px;
+  font-size: 16px;
+}
+.scan-ghost {
+  margin-top: 26rpx;
+  width: 600rpx;
+  height: 88rpx;
+  border-radius: 44rpx;
+  border-width: 1px;
+}
+.scan-ghost-wide {
+  margin-top: 14px;
+  width: 400px;
+  height: 44px;
+  border-radius: 22px;
+}
+.scan-ghost-btn {
+  flex: 1;
+  height: 88rpx;
+  border-radius: 44rpx;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+}
+.scan-ghost-text {
+  margin-left: 10rpx;
+  font-size: 28rpx;
+  font-weight: 500;
+}
+.scan-ghost-text-wide {
+  margin-left: 6px;
+  height: 44px;
+  font-size: 15px;
+  line-height: 44px;
+}
+.perm-hint {
+  margin-top: 36rpx;
+  font-size: 22rpx;
+  text-align: center;
+}
+.perm-hint-wide {
+  margin-top: 20px;
+  font-size: 12px;
+}
+
+/* ===== 头部卡片（列表/勾选目录共用） ===== */
+.head-card {
+  flex-direction: row;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 26rpx 28rpx;
+  border-radius: 24rpx;
+  border-width: 1px;
+}
+.head-card-wide {
+  padding: 20px 22px;
+  border-radius: 16px;
+}
+.head-copy {
+  flex: 1;
+  min-width: 0;
+}
+.head-title {
+  font-size: 32rpx;
+  font-weight: 700;
+}
+.head-title-wide {
+  font-size: 20px;
+}
+/* 页签行：分类页签居左、搜索/三点按钮居右（space-between）；选择态右侧等高换成「取消」 */
+.head-row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8rpx 12rpx 4rpx;
+}
+.head-row-wide {
+  padding: 6px 10px 2px;
+}
+.head-acts {
+  flex-direction: row;
+  align-items: center;
+}
+.head-act {
+  align-items: center;
+  justify-content: center;
+  padding: 12rpx;
+  margin-left: 8rpx;
+}
+.head-act-wide {
+  padding: 8px;
+  margin-left: 6px;
+}
+.head-sub {
+  margin-top: 8rpx;
+  font-size: 23rpx;
+}
+.head-sub-wide {
+  margin-top: 6px;
+  font-size: 13px;
+}
+.head-btn {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  height: 64rpx;
+  padding: 0 22rpx;
+  border-radius: 32rpx;
+  border-width: 1px;
+  margin-left: 16rpx;
+}
+.head-btn-wide {
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 18px;
+  margin-left: 10px;
+}
+.head-btn-text {
+  margin-left: 6rpx;
+  font-size: 24rpx;
+  font-weight: 600;
+}
+.head-btn-text-wide {
+  margin-left: 4px;
+  font-size: 14px;
+}
+
+/* ===== 扫描规则（少于 N 秒 / N MB 的条目不收录） ===== */
+.rule-card {
+  flex-direction: row;
+  align-items: center;
+  flex-shrink: 0;
+  margin-top: 16rpx;
+  padding: 16rpx 22rpx;
+  border-radius: 20rpx;
+  border-width: 1px;
+}
+.rule-card-wide {
+  margin-top: 12px;
+  padding: 10px 16px;
+  border-radius: 12px;
+}
+.rule-label {
+  font-size: 24rpx;
+  flex-shrink: 0;
+}
+.rule-label-wide { font-size: 13px; }
+.rule-field {
+  flex-direction: row;
+  align-items: center;
+  margin-left: 16rpx;
+  padding: 6rpx 16rpx;
+  border-radius: 16rpx;
+}
+.rule-field-wide {
+  margin-left: 10px;
+  padding: 3px 10px;
+  border-radius: 8px;
+}
+.rule-input {
+  width: 110rpx;
+  height: 48rpx;
+  font-size: 24rpx;
+  text-align: right;
+  color: #191d26;
+}
+.rule-input-wide {
+  width: 62px;
+  height: 26px;
+  font-size: 13px;
+}
+.rule-unit {
+  margin-left: 8rpx;
+  font-size: 22rpx;
+}
+.rule-unit-wide {
+  margin-left: 5px;
+  font-size: 12px;
+}
+.rule-ph { color: #9aa1b1; font-size: 24rpx; text-align: right; }
+.rule-ph-wide { color: #9aa1b1; font-size: 13px; text-align: right; }
+
+/* ===== 导入页：文件夹列表独占剩余高度，自行滚动 ===== */
+.pick-list {
+  flex: 1;
+  min-height: 0;
+  margin-top: 20rpx;
+}
+.pick-list-wide { margin-top: 14px; }
+.list-scroll {
+  width: 100%;
+  height: 100%;
+}
+
+/* ===== 列表 ===== */
+.list {
+  flex: 1;
+  min-height: 0;
+  margin-top: 4rpx;
+}
+.row {
+  flex-direction: row;
+  align-items: center;
+  padding: 22rpx 20rpx;
+}
+.row-wide {
+  padding: 12px 14px;
+}
+/* 播放中行的左侧 accent 竖条：绝对定位贴行左缘，出现/消失不引起布局位移 */
+.row-ind {
+  position: absolute;
+  left: 0;
+  top: 20rpx;
+  bottom: 20rpx;
+  width: 6rpx;
+  border-radius: 3rpx;
+}
+.row-ind-wide {
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 1.5px;
+}
+/* 分隔线内嵌到文字起始处，比全宽分隔线更有层次 */
+.row-divider {
+  position: absolute;
+  left: 40rpx;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+}
+.row-divider-wide {
+  left: 34px;
+}
+/* 时长右对齐：音乐列表通用范式，文件大小不再占用行空间 */
+.row-dur {
+  margin-left: 12rpx;
+  font-size: 23rpx;
+}
+.row-dur-wide {
+  margin-left: 8px;
+  font-size: 13px;
+}
+/* 行尾三点：单曲菜单（播放/移除）；选择态隐藏只留勾选框 */
+.row-more {
+  align-items: center;
+  justify-content: center;
+  padding: 12rpx;
+  margin-left: 4rpx;
+}
+.row-more-wide {
+  padding: 8px;
+  margin-left: 2px;
+}
+.cover {
+  width: 80rpx;
+  height: 80rpx;
+  border-radius: 20rpx;
+  align-items: center;
+  justify-content: center;
+}
+.cover-wide {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+}
+.info {
+  flex: 1;
+  min-width: 0;
+  margin-left: 20rpx;
+  margin-right: 16rpx;
+}
+.info-wide {
+  margin-left: 14px;
+  margin-right: 12px;
+}
+.name {
+  font-size: 28rpx;
+  font-weight: 500;
+}
+.name-wide {
+  font-size: 16px;
+}
+.meta {
+  margin-top: 6rpx;
+  font-size: 23rpx;
+}
+.meta-wide {
+  margin-top: 4px;
+  font-size: 13px;
+}
+.checkbox {
+  width: 44rpx;
+  height: 44rpx;
+  border-radius: 22rpx;
+  border-width: 2px;
+  align-items: center;
+  justify-content: center;
+}
+.checkbox-wide {
+  width: 24px;
+  height: 24px;
+  border-radius: 12px;
+}
+.foot-space {
+  height: 210rpx;
+}
+.foot-space-wide {
+  height: 120px;
+}
+
+/* ===== 分类页签 / 搜索行 / 统计行 / 播放全部行 ===== */
+/* 页签组：页签行左侧的分类胶囊组（无外框，参照系统播放器本地页） */
+.seg-row {
+  flex-direction: row;
+  align-items: center;
+}
+/* 搜索行：点标题行放大镜展开/收起 */
+.search-row {
+  flex-direction: row;
+  margin-top: 16rpx;
+}
+.search-row-wide {
+  margin-top: 10px;
+}
+/* 播放全部行：固定行高；选择态左侧「已选 N 首」、右侧「全选/删除」等高替换 */
+.all-line {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  height: 84rpx;
+}
+.all-line-wide {
+  height: 50px;
+}
+.all-left {
+  flex-direction: row;
+  align-items: center;
+}
+.all-play-chip {
+  width: 56rpx;
+  height: 56rpx;
+  border-radius: 28rpx;
+  margin-right: 14rpx;
+  align-items: center;
+  justify-content: center;
+}
+.all-play-chip-wide {
+  width: 32px;
+  height: 32px;
+  border-radius: 16px;
+  margin-right: 10px;
+}
+.all-text {
+  font-size: 28rpx;
+  font-weight: 600;
+}
+.all-text-wide {
+  font-size: 16px;
+}
+.all-count {
+  margin-left: 8rpx;
+  font-size: 24rpx;
+}
+.all-count-wide {
+  margin-left: 6px;
+  font-size: 13px;
+}
+/* 排序方向按钮：无边框图标钮，点击在升/降序间切换；选排序字段走三点菜单 */
+.sort-act {
+  align-items: center;
+  justify-content: center;
+  padding: 12rpx;
+}
+.sort-act-wide {
+  padding: 8px;
+}
+.line-right {
+  flex-direction: row;
+  align-items: center;
+}
+.select-cancel {
+  padding: 10rpx 18rpx;
+}
+.select-cancel-wide {
+  padding: 6px 12px;
+}
+.select-cancel-text {
+  font-size: 24rpx;
+  font-weight: 600;
+}
+.select-cancel-text-wide {
+  font-size: 13px;
+}
+.search-field {
+  flex-direction: row;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  margin-right: 14rpx;
+  padding: 10rpx 18rpx;
+  border-radius: 30rpx;
+}
+.search-field-wide {
+  margin-right: 10px;
+  padding: 6px 12px;
+  border-radius: 16px;
+}
+.search-input {
+  flex: 1;
+  min-width: 0;
+  margin-left: 12rpx;
+  font-size: 26rpx;
+  height: 40rpx;
+}
+.search-input-wide {
+  margin-left: 8px;
+  font-size: 14px;
+  height: 22px;
+}
+.search-ph { color: #9aa1b1; font-size: 26rpx; }
+.search-ph-wide { color: #9aa1b1; font-size: 14px; }
+.seg-btn {
+  padding: 10rpx 20rpx;
+  margin-right: 12rpx;
+  font-size: 24rpx;
+  font-weight: 500;
+  border-radius: 30rpx;
+}
+.seg-btn-wide {
+  padding: 6px 12px;
+  margin-right: 8px;
+  font-size: 13px;
+  border-radius: 16px;
+}
+.manage-btn {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  margin-left: 14rpx;
+  padding: 10rpx 18rpx;
+  border-radius: 30rpx;
+  border-width: 1px;
+}
+.manage-btn-wide {
+  margin-left: 8px;
+  padding: 6px 12px;
+  border-radius: 16px;
+}
+.manage-btn-text {
+  margin-left: 6rpx;
+  font-size: 24rpx;
+  font-weight: 500;
+}
+.manage-btn-text-wide {
+  margin-left: 4px;
+  font-size: 13px;
+}
+.group-head {
+  margin-top: 20rpx;
+  padding: 6rpx 10rpx;
+  font-size: 24rpx;
+  font-weight: 600;
+}
+.group-head-wide {
+  margin-top: 12px;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+/* ===== 三点下拉菜单：透明遮罩收起点击，面板浮在标题行下方右侧 ===== */
+.menu-mask {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+}
+.menu-panel {
+  position: absolute;
+  top: 100rpx;
+  right: 24rpx;
+  width: 340rpx;
+  border-radius: 20rpx;
+  padding: 10rpx 0;
+}
+.menu-panel-wide {
+  top: 64px;
+  right: 20px;
+  width: 220px;
+  border-radius: 12px;
+  padding: 6px 0;
+}
+.menu-item {
+  flex-direction: row;
+  align-items: center;
+  padding: 22rpx 26rpx;
+}
+.menu-item-wide {
+  padding: 12px 16px;
+}
+.menu-item-text {
+  margin-left: 16rpx;
+  font-size: 26rpx;
+}
+.menu-item-text-wide {
+  margin-left: 10px;
+  font-size: 14px;
+}
+
+/* ===== 空状态 / 扫描中 ===== */
+.empty {
+  flex: 1;
+  padding-top: 200rpx;
+  align-items: center;
+}
+.empty-text {
+  margin-top: 30rpx;
+  font-size: 30rpx;
+  font-weight: 700;
+}
+.empty-sub {
+  margin-top: 12rpx;
+  font-size: 24rpx;
+  text-align: center;
+}
+</style>

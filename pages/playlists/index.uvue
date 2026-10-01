@@ -1,0 +1,655 @@
+<template>
+  <qt-page-frame :max-width="960">
+  <view class="page" :class="layout.isWide ? 'page-wide' : ''">
+    <!-- 分类标签：固定两行铺排，整体可左右滑动 -->
+    <scroll-view
+      v-if="categories.length > 1"
+      class="cat-scroll" :class="layout.isWide ? 'cat-scroll-wide' : ''"
+      direction="horizontal"
+      :show-scrollbar="false"
+    >
+      <view class="cat-rows" :class="layout.isWide ? 'cat-rows-wide' : ''" :style="'width:' + rowsWidth + 'px;'">
+        <view v-for="(row, rowIndex) in categoryRows" :key="rowIndex" class="cat-row" :class="layout.isWide ? 'cat-row-wide' : ''">
+          <view
+            v-for="cell in row"
+            :key="cell.id"
+            class="cat-tag" :class="[layout.isWide ? 'cat-tag-wide' : '', selectedCategory == cell.id ? 'cat-tag-on' : '']"
+            
+            :style="'width:' + cell.width + 'px;'"
+            @click="selectCategory(cell.id)"
+          >
+            <text
+              class="cat-text" :class="[layout.isWide ? 'cat-text-wide' : '', selectedCategory == cell.id ? 'cat-text-on' : '']"
+              
+              :max-lines="1"
+              >{{ cell.name }}</text
+            >
+          </view>
+        </view>
+      </view>
+    </scroll-view>
+
+    <!-- 用 list-view + list-item 承载卡片（App 端原生复用回收）：
+         之前是整页 scroll-view + flex-wrap 网格，加载到 150+ 条时所有卡片
+         （view + image + text，还带圆角/阴影）都常驻在原生视图树里，滚动必然掉帧。
+
+         结构对齐 App 里其它已验证的 list-view 页面（歌手/搜索/歌单详情）：
+         只保留「头部条目 + 一个 v-for + 尾部条目」，中间不再夹 list-item，
+         避免原生侧对多段子节点的分组影响触底事件。 -->
+    <list-view
+      id="pl-scroll"
+      class="scroll"
+      direction="vertical"
+      :lower-threshold="200"
+      :show-scrollbar="false"
+      :scroll-top="scrollTop"
+      @scroll="onListScroll"
+      @scrollend="onListScroll"
+      @scrolltolower="onScrollToLower"
+    >
+      <!-- 头部条目：上留白 + 首屏骨架（占位尺寸与真实卡片一致，避免加载完时布局跳动） -->
+      <list-item class="head-item">
+        <view class="head-inner" :class="layout.isWide ? 'head-inner-wide' : ''">
+          <view class="pad-top" :class="layout.isWide ? 'pad-top-wide' : ''" />
+          <view
+            v-if="playlists.length == 0 && loading"
+            class="grid-row-inner" :class="layout.isWide ? 'grid-row-inner-wide' : ''"
+          >
+            <view
+              v-for="n in skeletonCount"
+              :key="'sk' + n"
+              class="card" :class="layout.isWide ? 'card-wide' : ''"
+              :style="cardStyle"
+            >
+              <view class="sk-cover" :class="layout.isWide ? 'sk-cover-wide' : ''" :style="coverStyle"></view>
+              <view class="sk-line" :class="layout.isWide ? 'sk-line-wide' : ''"></view>
+              <view class="sk-line sk-line-short" :class="layout.isWide ? 'sk-line-short-wide' : ''"></view>
+            </view>
+          </view>
+        </view>
+      </list-item>
+      <list-item v-for="(row, rowIndex) in playlistRows" :key="'r' + rowIndex" class="grid-row">
+        <view class="grid-row-inner" :class="layout.isWide ? 'grid-row-inner-wide' : ''">
+          <view
+            v-for="item in row"
+            :key="item.platform + ':' + item.id"
+            class="card" :class="layout.isWide ? 'card-wide' : ''"
+            :style="cardStyle"
+            @click="openPlaylist(item)"
+          >
+            <image class="cover" :style="coverStyle" :src="item.picUrl" mode="aspectFill" />
+            <text class="name" :class="layout.isWide ? 'name-wide' : ''" :max-lines="2">{{ item.name }}</text>
+          </view>
+        </view>
+      </list-item>
+      <!-- 尾部条目：空态 / 加载中 / 已加载全部，底部留白也由它承担 -->
+      <list-item class="foot-item">
+        <view class="foot-inner" :class="layout.isWide ? 'foot-inner-wide' : ''">
+          <text v-if="playlists.length == 0 && !loading" class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''">暂无歌单</text>
+          <qt-loading v-else-if="loadingMore" :visible="true" :size="44" />
+          <text v-else-if="!hasMore" class="foot-text" :class="layout.isWide ? 'foot-text-wide' : ''">已加载全部</text>
+        </view>
+      </list-item>
+    </list-view>
+    <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+  </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
+import { onShow } from "@dcloudio/uni-app";
+import { musicApi } from "@/services/music-api";
+import { useSourceStore } from "@/stores/source";
+import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
+import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtTrackError } from "@/uni_modules/qt-stat";
+import type { Playlist } from "@/types/music";
+import type { Source } from "@/services/music-api";
+
+type PlaylistCategory = {
+  id: string;
+  name: string;
+};
+
+/** 已计算好宽度的标签单元，用于固定行布局 */
+type CategoryCell = {
+  id: string;
+  name: string;
+  width: number;
+};
+
+const ROW_COUNT = 2;
+const CAT_FONT_RPX = 25;
+const CAT_PAD_RPX = 56; // 左右内边距合计
+const CAT_GAP_RPX = 14;
+
+const playlists = ref<Playlist[]>([]);
+const categories = ref<PlaylistCategory[]>([]);
+const selectedCategory = ref("");
+const loading = ref(false);
+const loadingMore = ref(false);
+const hasMore = ref(true);
+const page = ref(1);
+const sourceStore = useSourceStore();
+const layout = useQtLayout();
+const screenWidth = ref(375);
+
+// 回到顶部
+const scrollTop = ref(0);
+const showBackToTop = ref(false);
+/** list-view 可视高度（px），@scroll 兜底判断触底用 */
+const viewportHeight = ref(0);
+/** 兜底触底的判定距离（px）。刻意小于原生的 lower-threshold(200)：
+ *  原生事件可用时永远由它先触发，这里只在原生事件失效时做第二道保险 */
+const NEAR_BOTTOM_PX = 120;
+/** 滚过这么多 px 还没收到原生 scrolltolower，就认为原生事件可疑，上报一次现场 */
+const DEEP_SCROLL_PX = 2000;
+/** 原生 scrolltolower 是否派发过；没派发过而滚得很深时上报现场 */
+let lowerFired = false;
+let diagReported = false;
+let measureFailReported = false;
+/** 本页所有延迟/重试定时器句柄：页面卸载时统一清掉，避免在已注销的实例上触发回调 */
+let viewportTimers: number[] = [];
+
+/**
+ * 量 list-view 自身高度。
+ * Android 上 list-view 偶发不派发 scrolltolower（同一页面的 scroll-view 正常），
+ * 所以除了 @scrolltolower，还用 @scroll 的 scrollTop/scrollHeight 自己算一次触底。
+ */
+function measureViewport(attempt: number = 0): void {
+  try {
+    uni.createSelectorQuery()
+      .select("#pl-scroll")
+      .boundingClientRect((rect: UniNodeInfo) => {
+        if (rect != null && rect.height > 0) {
+          viewportHeight.value = rect.height;
+          return;
+        }
+        if (attempt < 3) {
+          viewportTimers.push(setTimeout(() => {
+            measureViewport(attempt + 1);
+          }, 200) as number);
+          return;
+        }
+        // 量不到高度就没有兜底，上报一次（否则线上只看得到"没触发"看不到原因）
+        if (viewportHeight.value <= 0 && !measureFailReported) {
+          measureFailReported = true;
+          qtTrackError("list-view-viewport-measure-failed", "boundingClientRect height=0", "", "/pages/playlists/index");
+        }
+      })
+      .exec();
+  } catch (_) {}
+}
+
+function onListScroll(e: any) {
+  const detail = e != null ? e.detail : null;
+  const st = detail != null ? Number(detail.scrollTop ?? 0) : 0;
+  showBackToTop.value = st > 600;
+  const sh = detail != null ? Number(detail.scrollHeight ?? 0) : 0;
+  // 已经滚得很深了、原生 scrolltolower 却一次都没派发过 —— 上报一次现场（去重）
+  if (st >= DEEP_SCROLL_PX) reportBottomDiag(st, sh);
+  // 兜底触底：scrollHeight 至少要"一屏多"才可信（只比可视区大一点点说明它没统计全量内容，
+  // 那种情况宁可不兜底，也不能误判成一直在底部、把整条推荐流一次性拉下来）
+  if (viewportHeight.value <= 0 || st <= 0) return;
+  if (sh <= viewportHeight.value * 1.2 + 120) return;
+  if (st + viewportHeight.value >= sh - NEAR_BOTTOM_PX) loadMore();
+}
+
+/** @scrolltolower 原生事件的包装：命中即说明原生事件是好的 */
+function onScrollToLower() {
+  lowerFired = true;
+  loadMore();
+}
+
+/**
+ * 「滚了很深但原生 scrolltolower 没响过」的现场快照：不是给用户看的错误，
+ * 是用来判断 list-view 触底事件到底有没有失效（顺带能看出 scrollHeight 是否可信）。
+ */
+function reportBottomDiag(scrollTopPx: number, scrollHeightPx: number): void {
+  if (lowerFired || diagReported) return;
+  diagReported = true;
+  qtTrackError(
+    "list-view-no-scrolltolower",
+    "scrollTop=" + scrollTopPx + " scrollHeight=" + scrollHeightPx + " viewport=" + viewportHeight.value,
+    "",
+    "/pages/playlists/index"
+  );
+}
+function backToTop() {
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  showBackToTop.value = false;
+}
+let loadedSource = "";
+
+/** 1rpx 对应的 px 值 */
+const unit = computed((): number => screenWidth.value / 750);
+
+const columns = computed((): number => {
+  // 宽屏（>=720px 或横屏）走 isWide 分支，下面只覆盖竖屏手机区间
+  if (layout.isWide) return 5;
+  const width = screenWidth.value;
+  if (width >= 560) return 4;
+  // 360~560px 的主流手机统一 3 列，封面约 92~128px。
+  // 旧逻辑要 width>=420 才有 3 列，360~412px 的常见机型只能排 2 列、卡片过大。
+  // 只有极窄屏（<340px）才退回 2 列，避免卡片窄到 <78px。
+  if (width >= 340) return 3;
+  return 2;
+});
+const cardWidth = computed((): number => {
+  if (layout.isWide) return 140;
+  const gap = 12;
+  const available = screenWidth.value - 24 * 2 - gap * columns.value;
+  return Math.floor(available / columns.value);
+});
+const cardStyle = computed(
+  (): string =>
+    "width:" + cardWidth.value + "px;margin-right:" + (layout.isWide ? 14 : 12) + "px;margin-bottom:" + (layout.isWide ? 14 : 18) + "px;"
+);
+const coverStyle = computed(
+  (): string => "width:" + cardWidth.value + "px;height:" + cardWidth.value + "px;"
+);
+
+/** 骨架屏占位卡数量：铺满两行即可 */
+const skeletonCount = computed((): number => columns.value * 2);
+
+/**
+ * 把歌单切成「一行 columns 张」的行数组。
+ * list-item 的复用是按条目结构分池的：固定「一行 = columns 张卡」后每行子节点数一致，
+ * 回收复用的命中率最高；只保留可视区附近的行，长列表也不会再有成千上万个常驻原生视图。
+ */
+const playlistRows = computed((): Playlist[][] => {
+  const cols = columns.value;
+  const rows: Playlist[][] = [];
+  if (cols <= 0) return rows;
+  const list = playlists.value;
+  for (let index = 0; index < list.length; index += cols) {
+    rows.push(list.slice(index, index + cols));
+  }
+  return rows;
+});
+
+/**
+ * 把分类按预估宽度贪心分配到固定行数里，让每行长度尽量接近。
+ * 中文按一个字宽计算，非中文按 0.6 字宽估算。
+ */
+const categoryRows = computed((): CategoryCell[][] => {
+  const rows: CategoryCell[][] = [];
+  const widths: number[] = [];
+  for (let index = 0; index < ROW_COUNT; index++) {
+    rows.push([]);
+    widths.push(0);
+  }
+  const items = categories.value;
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index];
+    const cell: CategoryCell = {
+      id: item.id,
+      name: item.name,
+      width: layout.isWide
+        ? textWidthPx(item.name)
+        : Math.ceil(textWidthRpx(item.name) * unit.value),
+    };
+    // 选出当前最短的一行，保证两行长度均衡
+    let target = 0;
+    for (let r = 1; r < ROW_COUNT; r++) if (widths[r] < widths[target]) target = r;
+    rows[target].push(cell);
+    widths[target] += cell.width + (layout.isWide ? 14 : Math.ceil(CAT_GAP_RPX * unit.value));
+  }
+  return rows;
+});
+
+/** 两行中较长的一行决定滚动内容总宽 */
+const rowsWidth = computed((): number => {
+  // 宽屏下 rpx 仍按窗口宽度换算（1rpx≈1.42dp），标签行会被放大近 3 倍，
+  // 因此宽屏改用固定 px 间距与尾部留白，避免横向列表溢出可视区数倍
+  const gap = layout.isWide ? 14 : Math.ceil(CAT_GAP_RPX * unit.value);
+  let max = 0;
+  const rows = categoryRows.value;
+  for (let r = 0; r < rows.length; r++) {
+    let sum = 0;
+    for (let c = 0; c < rows[r].length; c++) sum += rows[r][c].width + gap;
+    if (sum > max) max = sum;
+  }
+  return max + (layout.isWide ? 28 : Math.ceil(28 * unit.value));
+});
+
+/** 预估标签宽度（rpx），避免依赖 flex-wrap 在原生端的换行行为 */
+function textWidthRpx(text: string): number {
+  let units = 0.0;
+  for (let index = 0; index < text.length; index++) {
+    const code = text.charCodeAt(index);
+    units += code > 127 ? 1.0 : 0.6;
+  }
+  return Math.ceil(units * CAT_FONT_RPX) + CAT_PAD_RPX;
+}
+
+/** 宽屏专用标签宽度预估（px）：字号 15px + 左右内边距合计 20px */
+function textWidthPx(text: string): number {
+  let units = 0.0;
+  for (let index = 0; index < text.length; index++) {
+    const code = text.charCodeAt(index);
+    units += code > 127 ? 1.0 : 0.6;
+  }
+  return Math.ceil(units * 15) + 20;
+}
+
+function categoryFromRaw(item: UTSJSONObject): PlaylistCategory {
+  const id = item.get("id");
+  const name = item.get("name");
+  return {
+    id: id != null ? id.toString() : "",
+    name: name != null ? name.toString() : "",
+  };
+}
+
+async function loadCategories(source: Source): Promise<void> {
+  const seq = ++categorySeq;
+  const raw = await musicApi.playlistCategories(source);
+  const next: PlaylistCategory[] = [{ id: "", name: "全部" }];
+  for (let index = 0; index < raw.length; index++) {
+    const category = categoryFromRaw(raw[index] as UTSJSONObject);
+    if (category.id.length > 0 && category.name.length > 0) next.push(category);
+  }
+  if (seq !== categorySeq) return;
+  categories.value = next;
+}
+
+/** 首屏 / 切换分类后的首页加载 */
+// 加载序号：快速切分类/切音源时旧响应晚到不得覆盖新数据（写回前比对）
+let loadSeq = 0;
+let categorySeq = 0;
+
+async function load(): Promise<void> {
+  const seq = ++loadSeq;
+  loading.value = true;
+  page.value = 1;
+  hasMore.value = true;
+  try {
+    const list = await musicApi.recommendations(
+      sourceStore.current as Source,
+      selectedCategory.value,
+      1
+    );
+    if (seq !== loadSeq) return;
+    playlists.value = list;
+    // 各平台单页条数不同（网易云/QQ 30 条、酷狗 20 条），
+    // 因此只用“空结果”判定到底，不按固定页长推断
+    if (list.length == 0) hasMore.value = false;
+  } catch (error) {
+    console.error("[QT Music Playlists Load]", sourceStore.current, selectedCategory.value, error);
+    if (seq !== loadSeq) return;
+    uni.showToast({ title: "歌单加载失败", icon: "none" });
+  } finally {
+    if (seq === loadSeq) loading.value = false;
+  }
+}
+
+/** 触底加载下一页，按 platform:id 去重 */
+async function loadMore(): Promise<void> {
+  if (loading.value || loadingMore.value || !hasMore.value) return;
+  if (playlists.value.length == 0) return;
+  loadingMore.value = true;
+  const seq = loadSeq;
+  try {
+    const next = page.value + 1;
+    const list = await musicApi.recommendations(
+      sourceStore.current as Source,
+      selectedCategory.value,
+      next
+    );
+    // 在途期间发生了切分类/切音源（loadSeq 已变）：丢弃旧页，避免串进新列表
+    if (seq !== loadSeq) return;
+    if (list.length == 0) {
+      hasMore.value = false;
+      return;
+    }
+    const seen = new Set<string>();
+    for (let index = 0; index < playlists.value.length; index++) {
+      const item = playlists.value[index];
+      seen.add(item.platform + ":" + item.id);
+    }
+    let added = 0;
+    for (let index = 0; index < list.length; index++) {
+      const item = list[index];
+      const key = item.platform + ":" + item.id;
+      if (!seen.has(key)) {
+        seen.add(key);
+        playlists.value.push(item);
+        added++;
+      }
+    }
+    page.value = next;
+    // 整页都是已有项，说明该接口不再返回新数据
+    if (added == 0) hasMore.value = false;
+  } catch (error) {
+    console.error("[QT Music Playlists More]", sourceStore.current, page.value, error);
+    uni.showToast({ title: "加载更多失败，请重试", icon: "none" });
+  } finally {
+    loadingMore.value = false;
+  }
+}
+
+async function ensureLoad(): Promise<void> {
+  if (loadedSource == sourceStore.current) return;
+  loadedSource = sourceStore.current;
+  const source = sourceStore.current;
+  selectedCategory.value = "";
+  playlists.value = [];
+  categories.value = [{ id: "", name: "全部" }];
+  // 作废在途的旧音源分类请求（loadCategories 写回前按序号比对）
+  categorySeq++;
+  try {
+    await loadCategories(source as Source);
+  } catch (error) {
+    console.error("[QT Music Playlist Categories]", source, error);
+    if (loadedSource == source) uni.showToast({ title: "分类加载失败", icon: "none" });
+  }
+  if (loadedSource !== source) return;
+  await load();
+}
+
+function selectCategory(category: string): void {
+  if (selectedCategory.value == category) return;
+  selectedCategory.value = category;
+  playlists.value = [];
+  load();
+}
+
+function openPlaylist(list: Playlist): void {
+  uni.navigateTo({
+    url: "/pages/playlist/index?id=" + encodeURIComponent(list.id) + "&platform=" + encodeURIComponent(list.platform),
+  });
+}
+
+onMounted(() => {
+  sourceStore.restore();
+  try {
+    screenWidth.value = uni.getWindowInfo().windowWidth;
+  } catch (_) {}
+  ensureLoad();
+  // 首帧 list-view 还没完成布局，晚一点量（measureViewport 内部还有重试）
+  viewportTimers.push(setTimeout(() => {
+    measureViewport();
+  }, 300) as number);
+});
+onShow(() => {
+  sourceStore.restore();
+  ensureLoad();
+  if (viewportHeight.value <= 0) measureViewport();
+});
+onUnmounted(() => {
+  // 页面卸载时清掉全部延迟/重试定时器，避免在已注销的 UTS 实例上触发回调
+  for (const t of viewportTimers) {
+    if (t != null) clearTimeout(t);
+  }
+  viewportTimers = [];
+});
+</script>
+
+<style>
+.page {
+  flex: 1;
+  position: relative;
+}
+.cover-load {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  justify-content: center;
+  align-items: center;
+  z-index: 10;
+}
+.bar {
+  padding: 22rpx 28rpx 14rpx;
+  flex-direction: row;
+  align-items: center;
+  background-color: rgba(255, 255, 255, 0.62);
+  border-width: 1px;
+  border-color: rgba(255, 255, 255, 0.6);
+}
+.title {
+  color: #191d26;
+  font-size: 40rpx;
+  font-weight: 700;
+}
+.cat-scroll {
+  height: 190rpx;
+  flex-grow: 0;
+  flex-shrink: 0;
+  background-color: rgba(255, 255, 255, 0.4);
+}
+.cat-rows {
+  height: 190rpx;
+  padding: 16rpx 28rpx;
+  flex-direction: column;
+}
+.cat-row {
+  height: 72rpx;
+  margin-bottom: 14rpx;
+  flex-direction: row;
+  align-items: center;
+}
+.cat-tag {
+  height: 64rpx;
+  margin-right: 14rpx;
+  border-radius: 32rpx;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(255, 255, 255, 0.85);
+  border-width: 1px;
+  border-color: rgba(16, 22, 38, 0.06);
+}
+.cat-tag-on {
+  background-color: #6c5ce7;
+  border-color: #6c5ce7;
+}
+.cat-text {
+  color: #596173;
+  font-size: 25rpx;
+  font-weight: 500;
+  text-align: center;
+}
+.cat-text-on {
+  color: #ffffff;
+  font-weight: 600;
+}
+/* list-view 需要明确的高度小于内容高度才会滚动（flex:1 + min-height:0 限定在可视区内） */
+.scroll {
+  flex: 1;
+  min-height: 0;
+}
+/* 卡片行：list-item 只做复用条目，行内布局交给内层 view
+   （flex 行 + 左右留白与旧网格一致，行间距由卡片自身 margin-bottom 提供） */
+.grid-row-inner {
+  flex-direction: row;
+  padding-left: 24px;
+  padding-right: 24px;
+}
+/* 头部/尾部条目：list-item 不支持 margin，间距一律用内层 view 的 padding/height 表达 */
+.head-inner {
+  flex-direction: column;
+}
+.foot-inner {
+  height: 88rpx;
+  padding-bottom: 40rpx;
+  justify-content: center;
+  align-items: center;
+}
+.pad-top {
+  height: 16rpx;
+}
+.card {
+  background-color: rgba(255, 255, 255, 0.72);
+  border-width: 1px;
+  border-color: rgba(255, 255, 255, 0.7);
+  border-radius: 22rpx;
+  overflow: hidden;
+}
+.cover {
+  background-color: #e6e8ec;
+}
+/* 骨架屏占位：与 .cover/.name 尺寸对齐，用半透明灰以兼容深浅两种底 */
+.sk-cover {
+  background-color: rgba(25,29,38,0.08);
+  border-radius: 16rpx;
+}
+.sk-line {
+  height: 22rpx;
+  margin: 14rpx 16rpx 0;
+  background-color: rgba(25,29,38,0.08);
+  border-radius: 8rpx;
+}
+.sk-line-short {
+  width: 120rpx;
+  margin-top: 10rpx;
+  margin-bottom: 18rpx;
+}
+.sk-cover-wide { border-radius: 12px; }
+.sk-line-wide { height: 13px; border-radius: 7px; }
+.sk-line-short-wide { width: 96px; }
+.name {
+  margin: 14rpx 16rpx 18rpx;
+  color: #191d26;
+  font-size: 26rpx;
+  font-weight: 500;
+  text-overflow: ellipsis;
+}
+.empty-text {
+  color: #6b7385;
+  font-size: 27rpx;
+}
+.foot-text {
+  color: #6b7385;
+  font-size: 24rpx;
+}
+
+.bar-dark {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+.card-dark {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+/* 宽屏：px 覆盖 rpx，避免宽屏下按窗口比例放大 */
+
+.bar-wide { padding-top: 14px; padding-left: 24px; padding-right: 24px; padding-bottom: 10px; }
+.title-wide { font-size: 20px; }
+.cat-scroll-wide { height: 104px; }
+.cat-rows-wide { height: 104px; padding-top: 14px; padding-left: 24px; padding-right: 24px; padding-bottom: 6px; }
+.cat-row-wide { height: 34px; margin-bottom: 8px; }
+.cat-tag-wide { height: 32px; margin-right: 14px; border-radius: 16px; }
+.cat-text-wide { font-size: 14px; }
+.grid-row-inner-wide { padding-left: 20px; padding-right: 20px; }
+.foot-inner-wide { height: 52px; padding-bottom: 24px; }
+.pad-top-wide { height: 14px; }
+.card-wide { border-radius: 12px; }
+.name-wide { margin-top: 8px; margin-left: 10px; margin-right: 10px; margin-bottom: 12px; font-size: 15px; }
+.empty-text-wide { font-size: 16px; }
+.foot-text-wide { font-size: 14px; }
+</style>

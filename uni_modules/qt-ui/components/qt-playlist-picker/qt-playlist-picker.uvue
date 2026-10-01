@@ -1,0 +1,227 @@
+<template>
+  <view v-if="visible" class="picker-mask" @click="close">
+    <view
+      class="picker-panel"
+      :style="panelStyle"
+      @click.stop
+    >
+      <view class="picker-triangle"></view>
+      <view class="picker-header">
+        <text class="picker-title">{{ title }}</text>
+        <text class="picker-header-sub">选择歌单</text>
+      </view>
+      <scroll-view class="picker-list" direction="vertical" :show-scrollbar="false">
+        <view
+          v-for="playlist in playlists"
+          :key="playlist.id"
+          class="picker-item"
+          @click="togglePlaylist(playlist)"
+        >
+          <view class="picker-item-left">
+            <image
+              v-if="playlist.picUrl"
+              class="picker-item-cover"
+              :src="playlist.picUrl"
+              mode="aspectFill"
+            />
+            <view v-else class="picker-item-cover placeholder">
+              <text class="picker-item-cover-text">{{ playlist.name.charAt(0) }}</text>
+            </view>
+            <text class="picker-item-name">{{ playlist.name }}</text>
+          </view>
+          <view class="picker-item-check">
+            <view v-if="selectedPlaylistIds.includes(playlist.id)" class="picker-check-icon">
+              <QtIcon name="check" :size="28" color="#ffffff" />
+            </view>
+          </view>
+        </view>
+      </scroll-view>
+      <view class="picker-footer">
+        <qt-button label="取消" variant="outline" size="sm" @click="close" />
+        <qt-button label="确定" variant="primary" size="sm" @click="confirm" />
+      </view>
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, watch } from 'vue';
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import type { Playlist } from '@/types/music';
+
+const props = withDefaults(defineProps<{
+  visible: boolean;
+  song: any; // Song
+  playlists: Playlist[];
+  selectedIds: string[];
+  title?: string;
+  anchorTop?: number; // 像素坐标，来自触发元素；为空则居中偏上
+}>(), {
+  title: '选择歌单',
+  anchorTop: -1,
+});
+
+const emit = defineEmits<{
+  (e: 'update:visible', value: boolean): void;
+  (e: 'confirm', selectedIds: string[]): void;
+}>();
+
+const selectedPlaylistIds = ref<string[]>([...props.selectedIds]);
+
+watch(() => props.selectedIds, (newVal) => {
+  selectedPlaylistIds.value = [...newVal];
+});
+
+// 面板定位：若给了 anchorTop（px）则该点下方展开；否则屏幕约 28% 处
+const panelStyle = computed(() => {
+  const screenW = uni.getSystemInfoSync().windowWidth;
+  const screenH = uni.getSystemInfoSync().windowHeight;
+  const panelW = Math.min(screenW - 40, 340);
+  const pct = screenW / 750;
+  const defaultY = screenH * 0.28;
+  const top = props.anchorTop >= 0 ? props.anchorTop + 10 : defaultY;
+  const left = (screenW - panelW) / 2;
+  return 'top:' + Math.round(top) + 'px;left:' + Math.round(left) + 'px;width:' + Math.round(panelW) + 'px;';
+});
+
+function togglePlaylist(playlist: Playlist) {
+  const index = selectedPlaylistIds.value.indexOf(playlist.id);
+  if (index !== -1) {
+    selectedPlaylistIds.value.splice(index, 1);
+  } else {
+    selectedPlaylistIds.value.push(playlist.id);
+  }
+}
+
+function confirm() {
+  emit('confirm', selectedPlaylistIds.value);
+  close();
+}
+
+function close() {
+  emit('update:visible', false);
+}
+</script>
+
+<style scoped>
+.picker-mask {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0,0,0,0.35);
+  z-index: 999;
+}
+.picker-panel {
+  position: fixed;
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 16px;
+  box-sizing: border-box;
+}
+.picker-triangle {
+  position: absolute;
+  top: -8px;
+  left: 50%;
+  margin-left: -8px;
+  width: 0;
+  height: 0;
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-bottom: 8px solid #ffffff;
+}
+.picker-header {
+  flex-direction: row;
+  align-items: center;
+  margin-bottom: 12px;
+  border-bottom-width: 1px;
+  border-bottom-color: #f0f0f0;
+  padding-bottom: 10px;
+}
+.picker-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #191d26;
+}
+.picker-header-sub {
+  margin-left: 8px;
+  font-size: 12px;
+  color: #6b7385;
+}
+.picker-list {
+  max-height: 300px;
+}
+.picker-item {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0;
+}
+.picker-item-left {
+  flex-direction: row;
+  align-items: center;
+  flex: 1;
+  overflow: hidden;
+}
+.picker-item-cover {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  margin-right: 10px;
+}
+.placeholder {
+  background: #e0e0e0;
+  align-items: center;
+  justify-content: center;
+}
+.picker-item-cover-text {
+  font-size: 16px;
+  color: #666;
+}
+.picker-item-name {
+  font-size: 14px;
+  color: #191d26;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.picker-item-check {
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+}
+.picker-check-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #4CAF50;
+  color: #fff;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+}
+.picker-footer {
+  flex-direction: row;
+  justify-content: flex-end;
+  padding-top: 14px;
+}
+.picker-btn {
+  height: 34px;
+  padding: 0 18px;
+  margin-left: 12px;
+  border-radius: 17px;
+  background: #f2f3f5;
+  color: #596173;
+  font-size: 14px;
+  line-height: 34px;
+  border: none;
+  text-align: center;
+}
+.picker-btn.primary {
+  background: #ff5a6e;
+  color: #ffffff;
+}
+</style>

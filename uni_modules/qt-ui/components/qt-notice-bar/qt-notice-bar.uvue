@@ -1,0 +1,187 @@
+<template>
+  <view v-if="notice != null" class="bar-root" :class="layout.isWide ? 'bar-root-wide' : ''" :style="'background-color:' + themeStore.skin.accentSoft + ';border-color:' + themeStore.skin.border + ';'" @click="onTap">
+    <view class="bar-icon-wrap" :class="layout.isWide ? 'bar-icon-wrap-wide' : ''">
+      <QtIcon name="bell" :size="layout.isWide ? 16 : 30" :color="themeStore.skin.accent" />
+    </view>
+    <view class="bar-viewport" :class="layout.isWide ? 'bar-viewport-wide' : ''" ref="viewportRef">
+      <view class="bar-track" ref="trackRef">
+        <text
+          class="bar-text"
+          :class="[layout.isWide ? 'bar-text-wide' : '']"
+          :style="'color:' + themeStore.skin.text + ';'"
+          :max-lines="1"
+          >{{ stripHtml(notice!.content) }}</text
+        >
+        <text
+          v-if="marquee"
+          class="bar-text bar-text-copy"
+          :class="[layout.isWide ? 'bar-text-wide' : '']"
+          :style="'color:' + themeStore.skin.text + ';'"
+          ref="copyRef"
+          >{{ stripHtml(notice!.content) }}</text
+        >
+      </view>
+    </view>
+    <view class="bar-close" :class="layout.isWide ? 'bar-close-wide' : ''" @click.stop="onClose">
+      <QtIcon name="close" :size="layout.isWide ? 14 : 28" :color="themeStore.skin.iconMuted" />
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from "vue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import type { Notice } from "@/types/notice";
+import { openNoticeUrl, closeNoticeBarSession, stripHtml } from "@/services/notice";
+
+const props = defineProps<{
+  notice: Notice | null;
+}>();
+
+const emit = defineEmits<{
+  closed: [];
+}>();
+
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+
+const viewportRef = ref<UniElement | null>(null);
+const trackRef = ref<UniElement | null>(null);
+const copyRef = ref<UniElement | null>(null);
+let anim: UniAnimation | null = null;
+
+/** 是否启用跑马灯 */
+const marquee = computed(() => props.notice != null && (props.notice!.marquee ?? 0) == 1);
+
+/** 点击通告栏：打开链接 */
+function onTap(): void {
+  const url = props.notice != null ? props.notice!.url : "";
+  openNoticeUrl(url);
+}
+
+/** 关闭通告栏（本轮会话内不再显示） */
+function onClose(): void {
+  closeNoticeBarSession();
+  emit("closed");
+}
+
+/** 启动跑马灯动画 */
+function startMarquee(): void {
+  if (!marquee.value) return;
+  const track = trackRef.value;
+  const copy = copyRef.value;
+  const viewport = viewportRef.value;
+  if (track == null || copy == null || viewport == null) return;
+  try {
+    const trackRect = (track as any).getBoundingClientRect();
+    const copyRect = (copy as any).getBoundingClientRect();
+    if (trackRect == null || copyRect == null) return;
+    // 副本相对 track 起点的偏移 = 原文本宽 + 间距；动画平移该距离后副本恰好占据原文本位置，实现无缝循环
+    const distance = Number(copyRect.left - trackRect.left);
+    // NaN/0 防护（!（x>0）对 NaN 也为 true，能挡住异常测量）
+    if (!(distance > 0)) return;
+    // 以约 40px/s 匀速移动；marquee=1 即滚动，不做“内容放得下就不滚”的推断（测量在 Vapor 下不可靠，易误判）
+    const duration = Math.max(3000, Math.round((distance / 40) * 1000));
+    const a = track.animate(
+      [
+        { transform: "translateX(0)" },
+        { transform: "translateX(-" + distance + "px)" },
+      ],
+      {
+        duration,
+        iterations: Infinity,
+        easing: "linear",
+      }
+    );
+    anim = a;
+  } catch (e) {
+    console.log("[NoticeBar] marquee error", e);
+  }
+}
+
+/** 停止跑马灯 */
+function stopMarquee(): void {
+  if (anim != null) {
+    try {
+      anim!.cancel();
+    } catch (_) {}
+  }
+  anim = null;
+}
+
+onMounted(() => {
+  nextTick(() => {
+    startMarquee();
+  });
+});
+
+onBeforeUnmount(() => {
+  stopMarquee();
+});
+
+// 公告变化时重新启动跑马灯
+watch(
+  () => props.notice,
+  () => {
+    stopMarquee();
+    nextTick(() => {
+      startMarquee();
+    });
+  }
+);
+</script>
+
+<style>
+.bar-root {
+  flex-direction: row;
+  align-items: center;
+  height: 76rpx;
+  margin: 20rpx 24rpx 0;
+  padding: 0 18rpx;
+  border-width: 1px;
+  border-radius: 18rpx;
+}
+.bar-icon-wrap {
+  width: 44rpx;
+  height: 76rpx;
+  justify-content: center;
+  align-items: center;
+}
+.bar-viewport {
+  flex: 1;
+  /* 显式横向：全局默认 flex-direction:column 会令 track 被交叉轴拉伸成视口宽，导致文字被裁/测量错乱 */
+  flex-direction: row;
+  height: 76rpx;
+  margin-left: 6rpx;
+  overflow: hidden;
+  align-items: center;
+}
+.bar-track {
+  flex-direction: row;
+  flex-shrink: 0;
+  align-items: center;
+}
+.bar-text {
+  flex-shrink: 0;
+  font-size: 25rpx;
+  line-height: 76rpx;
+  white-space: nowrap;
+}
+.bar-text-copy {
+  margin-left: 60rpx;
+}
+.bar-close {
+  width: 56rpx;
+  height: 76rpx;
+  justify-content: center;
+  align-items: center;
+}
+
+.bar-root-wide { height: 40px; margin: 10px 16px 0; padding: 0 12px; border-radius: 10px; }
+.bar-icon-wrap-wide { width: 24px; height: 40px; }
+.bar-viewport-wide { height: 40px; margin-left: 4px; }
+.bar-text-wide { font-size: 13px; line-height: 40px; }
+.bar-close-wide { width: 28px; height: 40px; }
+</style>

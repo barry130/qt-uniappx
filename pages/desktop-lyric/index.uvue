@@ -1,0 +1,953 @@
+<!--
+  桌面歌词设置页
+
+  版式与 pages/settings/index.uvue 的分组列表（.group + .cell）保持一致：
+  同样的分组外边距、圆角、行高与标题字号，手机用小号值、宽屏用 -wide 大号值。
+  区别只在于样式全部写成 px：Vapor 运行时只把「相对单位 rpx」的样式登记进每个页面的
+  待重算集合（判定条件是 UniCSSUnitValue.getUnit() == RPX，见 k0.a(int, UniCSSUnitValue)
+  与 hc.a(int, Object, int)），布局回调 x9.onComplete 在 UI 线程遍历这些集合时，若另一
+  个线程又登记了新节点，就会抛 java.util.ConcurrentModificationException。
+  手机私有控件样式仍为定值 px；分组列表的版式尺寸（行高/内边距/字号/分组边距）改为
+  JS 按窗口宽把设置页的 rpx 值换算成 px 后内联（u()/sz()），见 script 里的说明——
+  rpx 实际渲染随设备宽变化，定值 px 在宽屏手机上会比设置页系统性偏小。
+-->
+<template>
+  <qt-page-frame :max-width="640">
+    <scroll-view class="list" :class="layout.isWide ? 'list-wide' : ''" :style="listStyle" direction="vertical" :show-scrollbar="false">
+
+      <!-- 开关与锁定 -->
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="music" :size="36" color="#4fb186" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">启用桌面歌词</text>
+          <view class="cell-right">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ lyricOn ? "已开启" : "已关闭" }}</text>
+            <view class="switch" :class="lyricOn ? 'switch-on' : ''" :style="lyricOn ? 'background-color:' + theme.skin.accent + ';' : 'background-color:' + theme.skin.surfaceMuted + ';'" @click="toggleEnabled">
+              <view class="switch-dot" :style="lyricOn ? '' : 'background-color:' + theme.skin.iconMuted + ';'"></view>
+            </view>
+          </view>
+        </view>
+        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="lock" :size="36" color="#9b82d9" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">锁定歌词窗口</text>
+          <view class="cell-right">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ lyricLocked ? "点击穿透" : "可拖动" }}</text>
+            <view class="switch" :class="lyricLocked ? 'switch-on' : ''" :style="lyricLocked ? 'background-color:' + theme.skin.accent + ';' : 'background-color:' + theme.skin.surfaceMuted + ';'" @click="toggleLocked">
+              <view class="switch-dot" :style="lyricLocked ? '' : 'background-color:' + theme.skin.iconMuted + ';'"></view>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 实时预览 -->
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="eye" :size="36" color="#6d8fd6" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">实时预览</text>
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">跟随下方设置</text>
+        </view>
+        <view class="cell-body cell-body-pad cell-no-border" :class="layout.isWide ? 'cell-body-pad-wide' : ''" :style="cellStyle">
+          <view class="preview-box" :class="layout.isWide ? 'preview-box-wide' : ''">
+            <text class="preview-main" :class="previewFontClass" :style="previewMainStyle">轻听桌面歌词</text>
+            <text class="preview-tr" :class="previewFontClass" :style="previewTrStyle">Desktop Lyric Preview</text>
+          </view>
+        </view>
+      </view>
+
+      <!-- 字号 -->
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="type" :size="36" color="#d99b3f" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">字号</text>
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ liveSize }} sp</text>
+        </view>
+        <view class="cell-body cell-no-border" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
+          <!--
+            自绘拖拽条，不用内置 slider 组件：Vapor 模式下 slider 只能用 track-class /
+            track-active-class / thumb-class 定制样式，而这三个属性只对 iOS / 鸿蒙有文档，
+            Android 端在布局完成回调里重设这些原生子视图样式更容易撞上同一个并发问题。
+            结构照抄播放页 .prog-range（已在 Android 稳定运行）。
+          -->
+          <view
+            class="size-track"
+            :class="layout.isWide ? 'size-track-wide' : ''"
+            @touchstart="onSizeTouchStart"
+            @touchmove="onSizeTouchMove"
+            @touchend="onSizeTouchEnd"
+            @touchcancel="onSizeTouchCancel"
+          >
+            <view class="size-rail" :class="layout.isWide ? 'size-rail-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'"></view>
+            <view class="size-fill" :class="layout.isWide ? 'size-fill-wide' : ''" :style="'width:' + sizePct() + '%;background-color:' + theme.skin.accent + ';'"></view>
+            <view class="size-thumb" :class="layout.isWide ? 'size-thumb-wide' : ''" :style="'left:' + sizeThumbLeft() + 'px;background-color:' + theme.skin.accent + ';'"></view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 歌词窗宽度 -->
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="settings" :size="36" color="#4fb186" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">歌词窗宽度</text>
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ liveWidth }}%</text>
+        </view>
+        <view class="cell-body cell-no-border" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
+          <view
+            class="width-track"
+            :class="layout.isWide ? 'width-track-wide' : ''"
+            @touchstart="onWidthTouchStart"
+            @touchmove="onWidthTouchMove"
+            @touchend="onWidthTouchEnd"
+            @touchcancel="onWidthTouchCancel"
+          >
+            <view class="width-rail" :class="layout.isWide ? 'width-rail-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'"></view>
+            <view class="width-fill" :class="layout.isWide ? 'width-fill-wide' : ''" :style="'width:' + widthPct() + '%;background-color:' + theme.skin.accent + ';'"></view>
+            <view class="width-thumb" :class="layout.isWide ? 'width-thumb-wide' : ''" :style="'left:' + widthThumbLeft() + 'px;background-color:' + theme.skin.accent + ';'"></view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 颜色 -->
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="droplet" :size="36" color="#7c6cf2" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">颜色</text>
+          <view class="cell-right">
+            <view class="value-dot" :style="'background-color:' + color + ';border-color:' + theme.skin.border + ';'"></view>
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ color }}</text>
+          </view>
+        </view>
+        <view class="cell-body" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
+          <view class="swatch-wrap">
+            <view
+              v-for="c in presetColors"
+              :key="c.hex"
+              class="swatch"
+              :class="[isCurrentColor(c.hex) ? 'swatch-active' : '', layout.isWide ? 'swatch-wide' : '']"
+              :style="'background-color:' + c.hex + ';border-color:' + (isCurrentColor(c.hex) ? theme.skin.accent : theme.skin.border) + ';'"
+              @click="pickColor(c.hex)"
+            >
+              <QtIcon v-if="isCurrentColor(c.hex)" name="check" :size="22" :color="c.ink" />
+            </view>
+          </view>
+        </view>
+        <view class="cell-body cell-body-pad cell-no-border" :class="layout.isWide ? 'cell-body-pad-wide' : ''" :style="cellStyle">
+          <view class="custom-row" :class="layout.isWide ? 'custom-row-wide' : ''" :style="'border-color:' + theme.skin.border + ';background-color:' + theme.skin.surfaceMuted + ';'">
+            <view class="custom-preview" :class="layout.isWide ? 'custom-preview-wide' : ''" :style="'background-color:' + (customValid ? customColor : 'transparent') + ';border-color:' + theme.skin.border + ';'"></view>
+            <input
+              class="custom-input"
+              :class="layout.isWide ? 'custom-input-wide' : ''"
+              :value="customText"
+              @input="onCustomInput"
+              placeholder="#RRGGBB"
+              :placeholder-class="layout.isWide ? 'ph-wide' : 'ph'"
+            />
+          </view>
+          <text class="custom-hint" :style="'color:' + (customText.length > 0 && !customValid ? theme.skin.danger : theme.skin.textMuted) + ';'">{{ customHint }}</text>
+        </view>
+      </view>
+
+      <!-- 字体 -->
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="edit" :size="36" color="#4fb186" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">字体</text>
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ currentFontName }}</text>
+        </view>
+        <view class="cell-body cell-no-border" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
+          <view class="font-wrap">
+            <view
+              v-for="(name, i) in fontNames"
+              :key="i"
+              class="font-chip"
+              :class="[isCurrentFont(i) ? 'font-chip-active' : '', layout.isWide ? 'font-chip-wide' : '']"
+              :style="'background-color:' + (isCurrentFont(i) ? theme.skin.accentSoft : theme.skin.surfaceMuted) + ';border-color:' + (isCurrentFont(i) ? theme.skin.accent : theme.skin.border) + ';'"
+              @click="pickFont(i)"
+            >
+              <text class="font-chip-text" :class="[fontClasses[i], layout.isWide ? 'font-chip-text-wide' : '']" :style="'color:' + theme.skin.text + ';'">{{ name }}</text>
+            </view>
+          </view>
+        </view>
+      </view>
+
+    </scroll-view>
+  </qt-page-frame>
+</template>
+
+<script setup lang="ts">
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { onShow } from "@dcloudio/uni-app";
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { desktopLyric } from "@/services/desktop-lyric";
+
+const layout = useQtLayout();
+const theme = useThemeStore();
+/** 本页轨道测量重试定时器句柄：页面卸载时统一清掉，避免在已注销的实例上触发回调 */
+let measureRetryTimers: number[] = [];
+
+// 字体表：index 与 service.setTypefaceIndex / 原生 typefaceForIndex 对应。
+// font-family 用 class 而不是内联 style：字体族不是尺寸，没必要走动态样式通道。
+const fontNames = ref<string[]>(["黑体", "宋体", "楷体", "等宽"]);
+const fontClasses = ref<string[]>(["ff-sans", "ff-serif", "ff-cursive", "ff-mono"]);
+
+// 预设色：ink 是选中勾的颜色（浅色底用深勾、深色底用白勾）
+type ColorPreset = { hex: string; ink: string };
+const presetColors = ref<ColorPreset[]>([
+  { hex: "#FFFFFF", ink: "#1b1f27" },
+  { hex: "#FFD54A", ink: "#1b1f27" },
+  { hex: "#FF9F45", ink: "#1b1f27" },
+  { hex: "#F48FB1", ink: "#1b1f27" },
+  { hex: "#EF5350", ink: "#FFFFFF" },
+  { hex: "#66BB6A", ink: "#1b1f27" },
+  { hex: "#4DD0E1", ink: "#1b1f27" },
+  { hex: "#64B5F6", ink: "#FFFFFF" },
+]);
+
+const lyricOn = ref(desktopLyric.isEnabled());
+const lyricLocked = ref(desktopLyric.isLocked());
+// liveSize 拖动期间跟随手指刷新预览，松手才落盘（写存储 + 下发原生悬浮窗）
+const liveSize = ref(desktopLyric.getFontSp());
+const liveWidth = ref(desktopLyric.getWidthPct());
+const color = ref(desktopLyric.getColor());
+const fontIndex = ref(desktopLyric.getTypefaceIndex());
+
+const customText = ref("");
+const customColor = ref("");
+const customValid = ref(false);
+
+// 分组行样式，与设置页 groupStyle / cellStyle 同一套取色。
+// 版式尺寸对齐设置页的 rpx 值：rpx 实际渲染随设备宽变化（28rpx 在 480 宽设备 ≈18px），
+// 本页为规避 Vapor rpx 重算并发崩溃必须走 px（见文件头说明），所以按窗口宽把
+// 设置页的 rpx 值换算成 px 后内联——值恒定、不进 rpx 待重算集合，但任何屏宽下
+// 都与设置页一致。宽屏仍用设置页 -wide 的固定 px 值。
+function u(rpx: number): number {
+  const w = layout.windowWidth > 0 ? layout.windowWidth : 375;
+  return Math.round((rpx / 750) * w * 100) / 100;
+}
+function sz(phoneRpx: number, widePx: number): string {
+  return (layout.isWide ? widePx : u(phoneRpx)) + "px";
+}
+const listStyle = computed<string>((): string => "padding-top:" + sz(16, 12) + ";padding-bottom:" + sz(40, 24) + ";");
+const groupStyle = computed<string>((): string =>
+  "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border +
+  ";margin-top:" + sz(20, 14) + ";margin-left:" + sz(24, 24) + ";margin-right:" + sz(24, 24) +
+  ";border-radius:" + sz(24, 14) + ";");
+const rowStyle = computed<string>((): string =>
+  "border-bottom-color:" + theme.skin.divider + ";min-height:" + sz(96, 64) +
+  ";padding-left:" + sz(32, 24) + ";padding-right:" + sz(32, 24) + ";");
+// cellStyle 只落在 cell-body（内容区）上：左右内边距与行一致，内容才和标题对齐
+const cellStyle = computed<string>((): string =>
+  "border-bottom-color:" + theme.skin.divider +
+  ";padding-left:" + sz(32, 24) + ";padding-right:" + sz(32, 24) + ";");
+const titleStyle = computed<string>((): string => "color:" + theme.skin.text + ";font-size:" + sz(28, 17) + ";");
+const valueStyle = computed<string>((): string => "color:" + theme.skin.textMuted + ";font-size:" + sz(24, 14) + ";margin-right:" + sz(12, 6) + ";");
+
+function refresh(): void {
+  // 先与原生真相对账：通知栏「词」按钮直接改原生窗口，回调万一漏达时这里的开关会显示错
+  desktopLyric.refreshFromNative();
+  lyricOn.value = desktopLyric.isEnabled();
+  lyricLocked.value = desktopLyric.isLocked();
+  liveSize.value = desktopLyric.getFontSp();
+  liveWidth.value = desktopLyric.getWidthPct();
+  color.value = desktopLyric.getColor();
+  fontIndex.value = desktopLyric.getTypefaceIndex();
+}
+
+/** 点了「去开启」跳系统权限页：回来时若已授权就自动打开，省掉再点一次开关 */
+let pendingOverlayGrant = false;
+
+// 从系统授权页返回后要刷新开关真实状态
+onShow(() => {
+  refresh();
+  if (pendingOverlayGrant && desktopLyric.hasPermission()) {
+    pendingOverlayGrant = false;
+    const ok = desktopLyric.enable();
+    lyricOn.value = ok;
+    if (ok) uni.showToast({ title: "权限已开启，桌面歌词已打开", icon: "none" });
+  }
+  // 页面隐藏期间拿不到布局，重新进入时再测一次轨道宽度，否则圆点会停在起点
+  nextTick(() => {
+    measureSizeTrack(0);
+    measureWidthTrack(0);
+  });
+});
+
+onMounted(() => {
+  nextTick(() => {
+    measureSizeTrack(0);
+    measureWidthTrack(0);
+  });
+});
+onUnmounted(() => {
+  // 页面卸载时清掉全部测量重试定时器，避免在已注销的 UTS 实例上触发回调
+  for (const t of measureRetryTimers) {
+    if (t != null) clearTimeout(t);
+  }
+  measureRetryTimers = [];
+});
+
+// ---------- 开关 ----------
+
+function toggleEnabled(): void {
+  if (lyricOn.value) {
+    desktopLyric.disable();
+    lyricOn.value = false;
+    return;
+  }
+  if (!desktopLyric.hasPermission()) {
+    uni.showModal({
+      title: "需要悬浮窗权限",
+      content:
+        "桌面歌词需要「悬浮窗 / 显示在其他应用上层」权限。\n" +
+        "点「去开启」会跳到系统权限页；如果那一页没有本应用的开关，请手动进入：\n" +
+        "· vivo / iQOO：i管家 → 权限管理 → 悬浮窗（或 设置 → 应用与权限 → 权限管理 → 悬浮窗）\n" +
+        "· 其它机型：设置 → 应用 → 轻听 → 权限\n" +
+        "找到「轻听」并允许后返回本页即可自动开启。",
+      confirmText: "去开启",
+      success: (res) => {
+        if (!res.confirm) return;
+        pendingOverlayGrant = true;
+        const opened = desktopLyric.requestPermission();
+        if (!opened) {
+          uni.showToast({ title: "没能打开系统设置页，请手动到「权限管理 → 悬浮窗」开启", icon: "none" });
+        }
+      },
+    });
+    return;
+  }
+  const ok = desktopLyric.enable();
+  lyricOn.value = ok;
+  if (!ok) uni.showToast({ title: "开启失败，请重试", icon: "none" });
+}
+
+function toggleLocked(): void {
+  if (!lyricOn.value) {
+    uni.showToast({ title: "请先开启桌面歌词", icon: "none" });
+    return;
+  }
+  const next = !lyricLocked.value;
+  desktopLyric.setLocked(next);
+  lyricLocked.value = next;
+  uni.showToast({ title: next ? "已锁定（点击穿透）" : "已解锁（可拖动）", icon: "none" });
+}
+
+// ---------- 字号 ----------
+
+const SIZE_MIN = 6;
+const SIZE_MAX = 60;
+
+/** 圆点直径（px）：手机 16 / 宽屏 24，与 <style> 里的 .size-thumb 保持一致 */
+function thumbSize(): number {
+  return layout.isWide ? 24 : 16;
+}
+
+/** 轨道左边界与宽度（px），把手指横坐标换算成字号；未测到前不动当前值 */
+let sizeLeft = 0;
+const sizeWidth = ref(0);
+const sizeDragging = ref(false);
+
+/** 归一化到 6~60 的整数 */
+function clampSize(value: number): number {
+  let v = Math.round(value);
+  if (!(v >= SIZE_MIN)) v = SIZE_MIN;
+  if (v > SIZE_MAX) v = SIZE_MAX;
+  return v;
+}
+
+/** 填充百分比（0..100）；百分比不是 rpx，不会进 rpx 重算集合 */
+function sizePct(): number {
+  const span = SIZE_MAX - SIZE_MIN;
+  if (span <= 0) return 0;
+  const p = ((liveSize.value - SIZE_MIN) / span) * 100;
+  return Math.max(0, Math.min(100, p));
+}
+
+/** 圆点 left（px），圆心对齐填充终点；读响应式 ref，模板调用会被追踪依赖 */
+function sizeThumbLeft(): number {
+  const width = sizeWidth.value;
+  if (width <= 0) return 0;
+  const span = SIZE_MAX - SIZE_MIN;
+  const fillPx = ((liveSize.value - SIZE_MIN) / span) * width;
+  const size = thumbSize();
+  return Math.max(0, Math.min(width - size, fillPx - size / 2));
+}
+
+/** 手指横坐标 -> 字号；未测到轨道宽度时保持当前值，避免起手乱跳 */
+function sizeFromClientX(clientX: number): number {
+  const width = sizeWidth.value;
+  if (width <= 0) return liveSize.value;
+  const frac = Math.max(0, Math.min(1, (clientX - sizeLeft) / width));
+  return SIZE_MIN + frac * (SIZE_MAX - SIZE_MIN);
+}
+
+/**
+ * 测量轨道几何。首帧 / 从后台恢复时 boundingClientRect 可能返回 0 宽度，最多重试 3 次；
+ * 期间拖拽仍可用（sizeFromClientX 会保持当前值），测到后立即对齐。
+ */
+function measureSizeTrack(attempt: number): void {
+  const query = uni.createSelectorQuery();
+  query
+    .select(".size-track")
+    .boundingClientRect((rect: UniNodeInfo) => {
+      if (rect != null && rect.width > 0) {
+        sizeLeft = rect.left;
+        sizeWidth.value = rect.width;
+        return;
+      }
+      if (attempt < 3) {
+        measureRetryTimers.push(setTimeout(() => {
+          measureSizeTrack(attempt + 1);
+        }, 120) as number);
+      }
+    })
+    .exec();
+}
+
+// ---------- 歌词窗宽度 ----------
+
+const WIDTH_MIN = 50;
+const WIDTH_MAX = 95;
+
+/** 轨道左边界与宽度（px）：把手指横坐标换算成宽度百分比；未测到前不动当前值 */
+let widthLeft = 0;
+const widthWidth = ref(0);
+const widthDragging = ref(false);
+
+/** 归一化到 50~95 的整数 */
+function clampWidth(value: number): number {
+  let v = Math.round(value);
+  if (!(v >= WIDTH_MIN)) v = WIDTH_MIN;
+  if (v > WIDTH_MAX) v = WIDTH_MAX;
+  return v;
+}
+
+/** 填充百分比（0..100）；百分比不是 rpx，不会进 rpx 重算集合 */
+function widthPct(): number {
+  const span = WIDTH_MAX - WIDTH_MIN;
+  if (span <= 0) return 0;
+  const p = ((liveWidth.value - WIDTH_MIN) / span) * 100;
+  return Math.max(0, Math.min(100, p));
+}
+
+/** 圆点 left（px），圆心对齐填充终点 */
+function widthThumbLeft(): number {
+  const width = widthWidth.value;
+  if (width <= 0) return 0;
+  const span = WIDTH_MAX - WIDTH_MIN;
+  const fillPx = ((liveWidth.value - WIDTH_MIN) / span) * width;
+  const size = thumbSize();
+  return Math.max(0, Math.min(width - size, fillPx - size / 2));
+}
+
+/** 手指横坐标 -> 宽度百分比；未测到轨道宽度时保持当前值 */
+function widthFromClientX(clientX: number): number {
+  const width = widthWidth.value;
+  if (width <= 0) return liveWidth.value;
+  const frac = Math.max(0, Math.min(1, (clientX - widthLeft) / width));
+  return WIDTH_MIN + frac * (WIDTH_MAX - WIDTH_MIN);
+}
+
+/** 测量宽度轨道几何。首帧可能返回 0 宽度，最多重试 3 次 */
+function measureWidthTrack(attempt: number): void {
+  const query = uni.createSelectorQuery();
+  query
+    .select(".width-track")
+    .boundingClientRect((rect: UniNodeInfo) => {
+      if (rect != null && rect.width > 0) {
+        widthLeft = rect.left;
+        widthWidth.value = rect.width;
+        return;
+      }
+      if (attempt < 3) {
+        measureRetryTimers.push(setTimeout(() => {
+          measureWidthTrack(attempt + 1);
+        }, 120) as number);
+      }
+    })
+    .exec();
+}
+
+/** 拖动中只更新预览，松手才落盘并下发原生，避免拖动期间反复写存储 */
+function onWidthTouchStart(event: UniTouchEvent): void {
+  const touch = event.touches[0];
+  if (touch == null) return;
+  widthDragging.value = true;
+  measureWidthTrack(0);
+  liveWidth.value = clampWidth(widthFromClientX(touch.clientX));
+}
+
+function onWidthTouchMove(event: UniTouchEvent): void {
+  if (!widthDragging.value) return;
+  const touch = event.touches[0];
+  if (touch == null) return;
+  liveWidth.value = clampWidth(widthFromClientX(touch.clientX));
+}
+
+function onWidthTouchCancel(): void {
+  // 来电/系统手势打断 touch 序列后不会来 touchend：必须复位拖拽态，
+  // 否则 liveWidth 不落盘、后续拖动判定也卡死（与 player 进度条 touchcancel 同理）
+  if (!widthDragging.value) return;
+  widthDragging.value = false;
+  desktopLyric.setWidthPct(liveWidth.value);
+}
+
+function onWidthTouchEnd(event: UniTouchEvent): void {
+  if (!widthDragging.value) return;
+  const changed = event.changedTouches;
+  const touch = changed != null && changed.length > 0 ? changed[0] : null;
+  widthDragging.value = false;
+  const v = touch != null ? clampWidth(widthFromClientX(touch.clientX)) : liveWidth.value;
+  liveWidth.value = v;
+  desktopLyric.setWidthPct(v);
+}
+
+/** 拖动中只更新预览，松手才落盘并下发原生，避免拖动期间反复写存储 */
+function onSizeTouchStart(event: UniTouchEvent): void {
+  const touch = event.touches[0];
+  if (touch == null) return;
+  sizeDragging.value = true;
+  measureSizeTrack(0);
+  liveSize.value = clampSize(sizeFromClientX(touch.clientX));
+}
+
+function onSizeTouchMove(event: UniTouchEvent): void {
+  if (!sizeDragging.value) return;
+  const touch = event.touches[0];
+  if (touch == null) return;
+  liveSize.value = clampSize(sizeFromClientX(touch.clientX));
+}
+
+function onSizeTouchCancel(): void {
+  if (!sizeDragging.value) return;
+  sizeDragging.value = false;
+  desktopLyric.setFontSp(liveSize.value);
+}
+
+function onSizeTouchEnd(event: UniTouchEvent): void {
+  if (!sizeDragging.value) return;
+  const changed = event.changedTouches;
+  const touch = changed != null && changed.length > 0 ? changed[0] : null;
+  sizeDragging.value = false;
+  const v = touch != null ? clampSize(sizeFromClientX(touch.clientX)) : liveSize.value;
+  liveSize.value = v;
+  desktopLyric.setFontSp(v);
+}
+
+// ---------- 预览样式 ----------
+
+/** 字体族 class（只有 font-family，不含尺寸） */
+const previewFontClass = computed<string>((): string => {
+  const i = fontIndex.value;
+  if (i >= 0 && i < fontClasses.value.length) return fontClasses.value[i];
+  return "ff-sans";
+});
+
+const previewMainStyle = computed<string>((): string => {
+  return "font-size:" + liveSize.value + "px;color:" + color.value + ";";
+});
+
+const previewTrStyle = computed<string>((): string => {
+  let tr = Math.round(liveSize.value * 0.8);
+  if (tr < 5) tr = 5;
+  return "font-size:" + tr + "px;color:" + color.value + ";";
+});
+
+// ---------- 颜色 ----------
+
+function isCurrentColor(hex: string): boolean {
+  return color.value.toUpperCase() == hex.toUpperCase();
+}
+
+function pickColor(hex: string): void {
+  color.value = hex;
+  customText.value = "";
+  customColor.value = "";
+  customValid.value = false;
+  desktopLyric.setColor(hex);
+}
+
+/** 归一化用户输入：允许省略 #、大小写不限；非法返回空串 */
+function normalizeHex(text: string): string {
+  let t = text.trim().toUpperCase();
+  if (t.length == 0) return "";
+  if (t.charAt(0) != "#") t = "#" + t;
+  if (t.length != 7) return "";
+  for (let i = 1; i < 7; i++) {
+    if ("0123456789ABCDEF".indexOf(t.charAt(i)) < 0) return "";
+  }
+  return t;
+}
+
+function onCustomInput(e: InputEvent): void {
+  const raw = String((e.detail as any).value ?? "");
+  customText.value = raw;
+  const hex = normalizeHex(raw);
+  const valid = hex.length == 7;
+  customValid.value = valid;
+  customColor.value = hex;
+  if (valid) {
+    color.value = hex;
+    desktopLyric.setColor(hex);
+  }
+}
+
+const customHint = computed<string>((): string => {
+  if (customText.value.length == 0) return "自定义颜色：#RRGGBB";
+  if (customValid.value) return "已应用 " + customColor.value;
+  return "格式不正确，示例 #FFD54A";
+});
+
+// ---------- 字体 ----------
+
+const currentFontName = computed<string>((): string => {
+  const i = fontIndex.value;
+  if (i >= 0 && i < fontNames.value.length) return fontNames.value[i];
+  return fontNames.value[0];
+});
+
+function isCurrentFont(index: number): boolean {
+  return fontIndex.value == index;
+}
+
+function pickFont(index: number): void {
+  fontIndex.value = index;
+  desktopLyric.setTypefaceIndex(index);
+}
+</script>
+
+<style>
+/* 手机值 = 原 rpx 值 / 2；-wide 为宽屏值，与设置页两套值一一对应 */
+.list {
+  flex: 1;
+  padding: 8px 0 20px;
+}
+.list-wide {
+  padding: 12px 0 24px;
+}
+.group {
+  margin-top: 10px;
+  margin-left: 12px;
+  margin-right: 12px;
+  border-radius: 12px;
+  border-width: 1px;
+  overflow: hidden;
+}
+.group-wide {
+  margin-top: 14px;
+  margin-left: 24px;
+  margin-right: 24px;
+  border-radius: 14px;
+}
+.cell {
+  min-height: 48px;
+  padding-left: 16px;
+  padding-right: 16px;
+  flex-direction: row;
+  align-items: center;
+  border-bottom-width: 1px;
+}
+.cell-wide {
+  min-height: 64px;
+  padding-left: 24px;
+  padding-right: 24px;
+}
+.cell-no-border {
+  border-bottom-width: 0;
+}
+.cell-icon {
+  margin-right: 10px;
+}
+/* 行标题/取值手机字号 = 设置页 rpx / 2（标题 28rpx→14px、取值 24rpx→12px）：
+   此前误把 rpx 数值原样写成 px，比设置页整整大一圈 */
+.cell-title {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 500;
+}
+.cell-title-wide {
+  font-size: 17px;
+}
+.cell-right {
+  flex-direction: row;
+  align-items: center;
+}
+.cell-value {
+  font-size: 12px;
+  margin-right: 6px;
+}
+.cell-value-wide {
+  font-size: 14px;
+}
+/* 控件行：标题在 .cell 里，控件本体在下面这块，左右内边距与 .cell 对齐。
+   包裹型内容（色块、字体按钮）用 margin-top 做行间距，末行不会多出下边距 */
+.cell-body {
+  padding: 1px 16px 5px;
+  flex-direction: column;
+  border-bottom-width: 1px;
+}
+.cell-body-wide {
+  padding: 2px 24px 10px;
+}
+.cell-body-pad {
+  padding: 5px 16px 8px;
+}
+.cell-body-pad-wide {
+  padding: 10px 24px 16px;
+}
+
+/* 字体族：预览与字体按钮共用，只有 font-family */
+.ff-sans { font-family: sans-serif; }
+.ff-serif { font-family: serif; }
+.ff-cursive { font-family: cursive; }
+.ff-mono { font-family: monospace; }
+
+/* 开关（uni-app x 无现成 switch，自绘：胶囊 + 圆点） */
+.switch {
+  margin-left: 8px;
+  width: 44px;
+  height: 24px;
+  border-radius: 12px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 2px;
+}
+.switch-on {
+  justify-content: flex-end;
+}
+.switch-dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 10px;
+  background-color: #ffffff;
+}
+
+/* 实时预览：固定深色底，模拟悬浮窗在壁纸上的观感，颜色判断才准 */
+.preview-box {
+  min-height: 85px;
+  padding: 17px 10px;
+  border-radius: 9px;
+  background-color: #12161d;
+  align-items: center;
+  justify-content: center;
+}
+.preview-box-wide {
+  min-height: 108px;
+  padding: 22px 16px;
+}
+.preview-main {
+  text-align: center;
+}
+.preview-tr {
+  margin-top: 5px;
+  text-align: center;
+}
+
+/* 字号拖拽条（几何常量与脚本里的 thumbSize() 必须同步） */
+.size-track {
+  position: relative;
+  height: 30px;
+}
+.size-track-wide {
+  height: 44px;
+}
+.size-rail {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  top: 13px;
+  height: 4px;
+  border-radius: 2px;
+}
+.size-rail-wide {
+  top: 19px;
+  height: 6px;
+  border-radius: 3px;
+}
+.size-fill {
+  position: absolute;
+  left: 0;
+  top: 13px;
+  height: 4px;
+  border-radius: 2px;
+}
+.size-fill-wide {
+  top: 19px;
+  height: 6px;
+  border-radius: 3px;
+}
+.size-thumb {
+  position: absolute;
+  top: 7px;
+  width: 16px;
+  height: 16px;
+  border-radius: 8px;
+}
+.size-thumb-wide {
+  top: 10px;
+  width: 24px;
+  height: 24px;
+  border-radius: 12px;
+}
+
+/* 歌词窗宽度拖拽条（与字号条同一套几何常量） */
+.width-track {
+  position: relative;
+  height: 30px;
+}
+.width-track-wide {
+  height: 44px;
+}
+.width-rail {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  top: 13px;
+  height: 4px;
+  border-radius: 2px;
+}
+.width-rail-wide {
+  top: 19px;
+  height: 6px;
+  border-radius: 3px;
+}
+.width-fill {
+  position: absolute;
+  left: 0;
+  top: 13px;
+  height: 4px;
+  border-radius: 2px;
+}
+.width-fill-wide {
+  top: 19px;
+  height: 6px;
+  border-radius: 3px;
+}
+.width-thumb {
+  position: absolute;
+  top: 7px;
+  width: 16px;
+  height: 16px;
+  border-radius: 8px;
+}
+.width-thumb-wide {
+  top: 10px;
+  width: 24px;
+  height: 24px;
+  border-radius: 12px;
+}
+
+/* 颜色 */
+.value-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 7px;
+  border-width: 1px;
+  margin-right: 6px;
+}
+.swatch-wrap {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.swatch {
+  width: 38px;
+  height: 38px;
+  margin-top: 8px;
+  margin-right: 10px;
+  border-radius: 19px;
+  border-width: 1px;
+  align-items: center;
+  justify-content: center;
+}
+.swatch-wide {
+  width: 46px;
+  height: 46px;
+  margin-top: 10px;
+  margin-right: 12px;
+  border-radius: 23px;
+}
+.swatch-active {
+  border-width: 2px;
+}
+.custom-row {
+  margin-top: 3px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  border-width: 1px;
+  flex-direction: row;
+  align-items: center;
+}
+.custom-row-wide {
+  margin-top: 2px;
+  padding: 8px 12px;
+  border-radius: 9px;
+}
+.custom-preview {
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  border-width: 1px;
+}
+.custom-preview-wide {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+}
+.custom-input {
+  flex: 1;
+  height: 30px;
+  margin-left: 8px;
+  font-size: 13px;
+}
+.custom-input-wide {
+  height: 38px;
+  margin-left: 10px;
+  font-size: 15px;
+}
+.ph {
+  color: #9aa1ae;
+  font-size: 13px;
+}
+.ph-wide {
+  color: #9aa1ae;
+  font-size: 15px;
+}
+.custom-hint {
+  margin-top: 6px;
+  font-size: 11px;
+}
+
+/* 字体 */
+.font-wrap {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.font-chip {
+  min-width: 65px;
+  margin-top: 8px;
+  margin-right: 9px;
+  padding: 8px 13px;
+  border-radius: 8px;
+  border-width: 1px;
+  align-items: center;
+  justify-content: center;
+}
+.font-chip-wide {
+  min-width: 78px;
+  margin-top: 10px;
+  margin-right: 11px;
+  padding: 10px 16px;
+  border-radius: 10px;
+}
+.font-chip-active {
+  border-width: 2px;
+}
+.font-chip-text {
+  font-size: 14px;
+}
+.font-chip-text-wide {
+  font-size: 17px;
+}
+</style>

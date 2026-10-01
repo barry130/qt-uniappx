@@ -1,0 +1,229 @@
+<template>
+  <view v-if="notice != null" class="nts-mask" @click="onMaskTap">
+    <view class="nts-card" :class="layout.isWide ? 'nts-card-wide' : ''" @click.stop>
+      <view v-if="hasTitle" class="nts-title-wrap" :class="layout.isWide ? 'nts-title-wrap-wide' : ''">
+        <text class="nts-title" :class="layout.isWide ? 'nts-title-wide' : ''">{{ notice!.title }}</text>
+      </view>
+      <scroll-view
+        v-if="hasContent"
+        class="nts-content"
+        direction="vertical"
+        :show-scrollbar="false"
+        :style="layout.isWide ? 'height:360px;margin-top:14px;' : 'margin-top:24rpx;margin-bottom:4rpx;max-height:760rpx;'"
+      >
+        <QtRichText
+          :html="notice!.content ?? ''"
+          color="#596173"
+          :font-size="26"
+          :line-height="1.7"
+          align="left"
+        />
+      </scroll-view>
+      <view class="nts-btn nts-btn-primary" :class="layout.isWide ? 'nts-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @click="onKnow">
+        <text class="nts-btn-text-primary" :class="layout.isWide ? 'nts-btn-text-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">我知道了</text>
+      </view>
+      <view v-if="hasJump" class="nts-btn nts-btn-secondary" :class="layout.isWide ? 'nts-btn-wide' : ''" @click="onJump">
+        <text class="nts-btn-text-secondary" :class="layout.isWide ? 'nts-btn-text-wide' : ''">点击跳转</text>
+      </view>
+      <view v-if="hasClose" class="nts-check-row" :class="layout.isWide ? 'nts-check-row-wide' : ''" @click.stop="toggleHideToday">
+        <view class="nts-checkbox" :class="[hideToday ? 'nts-checkbox-on' : '', layout.isWide ? 'nts-checkbox-wide' : '']" :style="hideToday ? 'background-color:' + themeStore.skin.accent + ';border-color:' + themeStore.skin.accent + ';' : ''">
+          <QtIcon v-if="hideToday" name="check" :size="layout.isWide ? 12 : 20" :color="themeStore.skin.onAccent" />
+        </view>
+        <text class="nts-check-text" :class="layout.isWide ? 'nts-check-text-wide' : ''">今天不显示</text>
+      </view>
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, watch } from "vue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtRichText from "@/uni_modules/qt-ui/components/qt-rich-text/qt-rich-text.uvue";
+import type { Notice } from "@/types/notice";
+import { openNoticeUrl } from "@/services/notice";
+import { exitApp } from "@/services/app-native";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+
+const layout = useQtLayout();
+const themeStore = useThemeStore();
+
+const props = defineProps<{
+  notice: Notice | null;
+}>();
+
+const emit = defineEmits<{
+  // 回传是否勾选“今天不显示”
+  closed: [value: boolean];
+}>();
+
+const hideToday = ref(false);
+
+/** 是否可关闭（决定了“我知道了”行为与复选框显隐） */
+const isClosable = computed(() => props.notice != null && (props.notice!.dialogClosable ?? 1) == 1);
+const hasTitle = computed(() => props.notice != null && props.notice!.title != null && props.notice!.title!.length > 0);
+// 内容富文本：在 JS 侧同步解析后用原生 <text> 渲染，与标题同帧出现（不走异步的 rich-text）
+const hasContent = computed(() => props.notice != null && props.notice!.content != null && props.notice!.content!.length > 0);
+/** 是否存在跳转链接 */
+const hasJump = computed(() => props.notice != null && props.notice!.url != null && props.notice!.url!.length > 0);
+const hasClose = isClosable;
+
+/** 切换“今天不显示” */
+function toggleHideToday(): void {
+  hideToday.value = !hideToday.value;
+}
+
+/** “我知道了”：可关闭则关闭当前弹窗；不可关闭则退出APP */
+function onKnow(): void {
+  if (!isClosable.value) {
+    exitApp();
+    return;
+  }
+  emit("closed", hideToday.value);
+}
+
+/** “点击跳转”：打开跳转链接并关闭当前弹窗 */
+function onJump(): void {
+  const url = props.notice != null ? props.notice!.url : "";
+  openNoticeUrl(url);
+  emit("closed", hideToday.value);
+}
+
+/** 点击遮罩：仅可关闭时关闭 */
+function onMaskTap(): void {
+  if (isClosable.value) {
+    emit("closed", hideToday.value);
+  }
+}
+
+// 切换到下一条开屏时重置勾选状态
+watch(
+  () => props.notice,
+  () => {
+    hideToday.value = false;
+  }
+);
+</script>
+
+<style>
+.nts-mask {
+  position: fixed;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.55);
+  justify-content: center;
+  align-items: center;
+  z-index: 999;
+}
+.nts-card {
+  width: 620rpx;
+  max-height: 1100rpx;
+  border-radius: 32rpx;
+  background-color: #ffffff;
+  padding: 40rpx 40rpx 32rpx;
+  overflow: hidden;
+}
+.nts-title-wrap {
+  justify-content: center;
+  align-items: center;
+}
+.nts-title {
+  color: #191d26;
+  font-size: 34rpx;
+  font-weight: 700;
+  line-height: 48rpx;
+  text-align: center;
+}
+.nts-content {
+  margin-top: 24rpx;
+  margin-bottom: 4rpx;
+}
+.nts-btn {
+  height: 72rpx;
+  justify-content: center;
+  align-items: center;
+  border-radius: 36rpx;
+  margin-top: 28rpx;
+}
+.nts-btn-primary {
+}
+.nts-btn-text-primary {
+  font-size: 26rpx;
+  font-weight: 600;
+}
+.nts-btn-secondary {
+  margin-top: 16rpx;
+  background-color: #f2f3f7;
+}
+.nts-btn-text-secondary {
+  color: #596173;
+  font-size: 24rpx;
+}
+.nts-check-row {
+  margin-top: 24rpx;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+}
+.nts-checkbox {
+  width: 38rpx;
+  height: 38rpx;
+  border-radius: 8rpx;
+  border-style: solid;
+  border-width: 2px;
+  border-color: #b9bfcc;
+  background-color: #ffffff;
+  justify-content: center;
+  align-items: center;
+}
+.nts-checkbox-on {
+}
+.nts-check-text {
+  margin-left: 14rpx;
+  color: #6b7385;
+  font-size: 24rpx;
+}
+
+/* Vapor 宽屏：px 覆盖 rpx。弹窗限宽 560px 居中，避免 620rpx 在
+   1600x900 / 2560x1440 上被放大到 800-940dp 占满整屏 */
+.nts-card-wide {
+  width: 560px;
+  max-height: 560px;
+  border-radius: 16px;
+  padding: 24px 24px 20px;
+}
+.nts-title-wrap-wide {
+  justify-content: center;
+  align-items: center;
+}
+.nts-title-wide {
+  font-size: 20px;
+  line-height: 28px;
+}
+.nts-content-wide {
+  margin-top: 14px;
+  margin-bottom: 2px;
+}
+.nts-btn-wide {
+  height: 44px;
+  border-radius: 22px;
+  margin-top: 16px;
+}
+.nts-btn-text-wide {
+  font-size: 15px;
+}
+.nts-check-row-wide {
+  margin-top: 14px;
+}
+.nts-checkbox-wide {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+}
+.nts-check-text-wide {
+  margin-left: 8px;
+  font-size: 13px;
+}
+</style>

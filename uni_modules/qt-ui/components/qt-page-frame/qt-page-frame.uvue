@@ -1,0 +1,87 @@
+<template>
+  <view class="qt-page-frame" :style="rootStyle">
+    <image
+      v-if="backgroundImage.length > 0"
+      class="qt-page-frame-wallpaper"
+      :src="backgroundImage"
+      mode="aspectFill"
+    />
+    <view
+      v-if="backgroundImage.length > 0"
+      class="qt-page-frame-overlay"
+      :style="overlayStyle"
+    />
+    <view class="qt-page-frame-content" :class="layout.isWide ? 'qt-page-frame-wide' : ''" :style="contentStyle">
+      <slot />
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed } from "vue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+
+const props = defineProps<{
+  /** 宽屏时内容列的最大宽度（px / dp），仅在窗口比它更宽时生效 */
+  maxWidth?: number;
+  /** 沉浸式页面不限制内容列宽度 */
+  fullWidth?: boolean;
+}>();
+
+const theme = useThemeStore();
+const layout = useQtLayout(720);
+const maxWidth = computed((): number => props.maxWidth != null ? props.maxWidth! : 1280);
+const fullWidth = computed((): boolean => props.fullWidth == true);
+const backgroundImage = computed((): string => theme.skin.backgroundImage != null ? theme.skin.backgroundImage : "");
+const rootStyle = computed((): string => "background-color:" + theme.skin.background + ";");
+const overlayStyle = computed((): string => "background-color:" + theme.skin.overlay + ";");
+const contentStyle = computed((): string => {
+  if (!layout.isWide || fullWidth.value) return "";
+  // 宽屏统一内容列宽度：页面自带的 max-width 只能更宽、不能更窄，
+  // 否则各页容器宽窄不一（设置 760 / 排行榜 1280 …），切换页面时宽度跳变
+  const effective = Math.max(maxWidth.value, 1360);
+  const width = layout.windowWidth < effective ? layout.windowWidth : effective;
+  return "width:" + width + "px;";
+});
+</script>
+
+<style>
+.qt-page-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+.qt-page-frame-wallpaper {
+  position: absolute;
+  left: 0;
+  top: 0;
+  /* uni-app x 的 image 对 left/right/top/bottom 拉伸约束支持不稳，
+     会按内容尺寸渲染（壁纸只显示一角），必须显式铺满 */
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+}
+.qt-page-frame-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+}
+.qt-page-frame-content {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  flex-direction: column;
+  align-self: center;
+  position: relative;
+  z-index: 2;
+}
+.qt-page-frame-wide {
+  align-self: center;
+}
+</style>

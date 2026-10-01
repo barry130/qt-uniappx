@@ -1,0 +1,1081 @@
+<template>
+  <qt-page-frame :max-width="960">
+  <view class="page" :class="layout.isWide ? 'page-wide' : ''"
+    ><view class="bar" :class="layout.isWide ? 'bar-wide' : ''" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';'"
+      ><input
+        v-model="keyword"
+        class="input" :class="layout.isWide ? 'input-wide' : ''"
+        :style="'color:' + theme.skin.text + ';background-color:' + theme.skin.surfaceInset + ';border-color:' + theme.skin.border + ';'"
+        :placeholder-style="'color:' + theme.skin.placeholder + ';'"
+        placeholder="搜索歌曲、歌手、歌单、专辑"
+        confirm-type="search"
+        @confirm="doSearch"
+      /><view class="button" :class="layout.isWide ? 'button-wide' : ''" :style="'background-color:' + theme.skin.accent + ';'" @click="doSearch"
+        ><QtIcon name="search" :size="32" :color="theme.skin.onAccent" /></view
+      ><view class="bar-switch" :class="layout.isWide ? 'bar-switch-wide' : ''"
+        ><SourceSwitcher @change="ensureSource" /></view
+      ></view
+    >
+    <!-- 搜索中：仅首屏且无缓存数据时显示全屏居中遮罩（切换 tag 用 foot 提示，避免闪屏） -->
+    <view
+      v-if="searched && searching && songs.length == 0 && playlists.length == 0 && artists.length == 0 && albums.length == 0"
+      class="cover-load"
+    >
+      <qt-loading :visible="true" />
+    </view>
+    <scroll-view v-if="!searched" class="hot-wrap" direction="vertical">
+      <view class="section" :class="layout.isWide ? 'section-wide' : ''">
+        <text class="section-title" :class="[layout.isWide ? 'section-title-wide' : '']" :style="'color:' + theme.skin.text + ';'">搜索历史</text>
+        <view v-if="history.length > 0" class="history" :class="[layout.isWide ? 'history-wide' : '']">
+          <view
+            v-for="word in history"
+            :key="word"
+            class="history-item" :class="layout.isWide ? 'history-item-wide' : ''"
+            :style="'background-color:' + theme.skin.surfaceMuted + ';border-color:' + theme.skin.border + ';'"
+            @click="useWord(word)"
+            ><text class="history-text" :class="[layout.isWide ? 'history-text-wide' : '']" :style="'color:' + theme.skin.textMuted + ';'">{{ word }}</text
+            ><QtIcon class="history-close" :class="[layout.isWide ? 'history-close-wide' : '']" name="close" :size="22" :color="theme.skin.iconMuted" @click.stop="removeWord(word)" /></view
+          >
+        </view>
+        <view v-if="history.length > 0" class="clear-row" :class="[layout.isWide ? 'clear-row-wide' : '']"
+          ><text class="clear-link" :class="[layout.isWide ? 'clear-link-wide' : '']" :style="'color:' + theme.skin.textMuted + ';'" @click="clearHistory">清空历史</text></view
+        >
+      </view>
+      <view class="section" :class="layout.isWide ? 'section-wide' : ''">
+        <text class="section-title" :class="[layout.isWide ? 'section-title-wide' : '']" :style="'color:' + theme.skin.text + ';'">热门搜索</text>
+        <view class="tags" :class="[layout.isWide ? 'tags-wide' : '']">
+          <text
+            v-for="word in words"
+            :key="word"
+            class="tag" :class="layout.isWide ? 'tag-wide' : ''"
+            :style="'color:' + theme.skin.textMuted + ';background-color:' + theme.skin.surfaceMuted + ';border-color:' + theme.skin.border + ';'"
+            @click="useWord(word)"
+            >{{ word }}</text
+          >
+        </view>
+      </view>
+    </scroll-view>
+    <template v-else>
+      <view class="type-row" :class="layout.isWide ? 'type-row-wide' : ''" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';'">
+        <qt-segmented :list="typeLabels" v-model="typeIndex" @change="switchType" />
+      </view>
+      <!-- 全部：四类型分节预览（主流搜索默认页形态），各节「查看更多」跳对应 tag -->
+      <scroll-view v-show="type == 'all'" class="results" direction="vertical" :show-scrollbar="false">
+        <view v-if="allReady && allSongRows.length > 0" class="all-section" :class="layout.isWide ? 'all-section-wide' : ''">
+          <view class="all-head" :class="layout.isWide ? 'all-head-wide' : ''">
+            <text class="all-head-title" :class="layout.isWide ? 'all-head-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">单曲</text>
+            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" @click="gotoType(1)">查看更多</text>
+          </view>
+          <view v-for="item in allSongRows" :key="item.key" class="all-row">
+            <QtSongRowLite :song="item.song!" :showBadge="false" @play="play(item.song!)" @more="openSheet" />
+          </view>
+        </view>
+        <view v-if="allReady && allPlaylistRows.length > 0" class="all-section" :class="layout.isWide ? 'all-section-wide' : ''">
+          <view class="all-head" :class="layout.isWide ? 'all-head-wide' : ''">
+            <text class="all-head-title" :class="layout.isWide ? 'all-head-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">歌单</text>
+            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" @click="gotoType(2)">查看更多</text>
+          </view>
+          <view v-for="row in allPlaylistRows" :key="row.key" class="all-media-row" :class="layout.isWide ? 'all-media-row-wide' : ''" @click="openPlaylist(row.playlist!)">
+            <image class="all-cover" :class="layout.isWide ? 'all-cover-wide' : ''" :src="row.playlist!.picUrl" mode="aspectFill" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" />
+            <view class="all-media-info" :class="layout.isWide ? 'all-media-info-wide' : ''">
+              <text class="all-media-name" :class="layout.isWide ? 'all-media-name-wide' : ''" :max-lines="1" :style="'color:' + theme.skin.text + ';'">{{ row.playlist!.name }}</text>
+              <text class="all-media-sub" :class="layout.isWide ? 'all-media-sub-wide' : ''" :max-lines="1" :style="'color:' + theme.skin.textMuted + ';'">{{ platLabel(row.playlist!.platform) }} 歌单</text>
+            </view>
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </view>
+        <view v-if="allReady && allArtistRows.length > 0" class="all-section" :class="layout.isWide ? 'all-section-wide' : ''">
+          <view class="all-head" :class="layout.isWide ? 'all-head-wide' : ''">
+            <text class="all-head-title" :class="layout.isWide ? 'all-head-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">歌手</text>
+            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" @click="gotoType(3)">查看更多</text>
+          </view>
+          <view v-for="row in allArtistRows" :key="row.key" class="all-media-row" :class="layout.isWide ? 'all-media-row-wide' : ''" @click="openArtist(row.artist!)">
+            <image class="all-cover all-cover-round" :class="layout.isWide ? 'all-cover-wide' : ''" :src="row.artist!.picUrl" mode="aspectFill" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" />
+            <view class="all-media-info" :class="layout.isWide ? 'all-media-info-wide' : ''">
+              <text class="all-media-name" :class="layout.isWide ? 'all-media-name-wide' : ''" :max-lines="1" :style="'color:' + theme.skin.text + ';'">{{ row.artist!.name }}</text>
+              <text class="all-media-sub" :class="layout.isWide ? 'all-media-sub-wide' : ''" :max-lines="1" :style="'color:' + theme.skin.textMuted + ';'">{{ platLabel(row.artist!.platform) }} 歌手</text>
+            </view>
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </view>
+        <view v-if="allReady && allAlbumRows.length > 0" class="all-section" :class="layout.isWide ? 'all-section-wide' : ''">
+          <view class="all-head" :class="layout.isWide ? 'all-head-wide' : ''">
+            <text class="all-head-title" :class="layout.isWide ? 'all-head-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">专辑</text>
+            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" @click="gotoType(4)">查看更多</text>
+          </view>
+          <view v-for="row in allAlbumRows" :key="row.key" class="all-media-row" :class="layout.isWide ? 'all-media-row-wide' : ''" @click="openAlbum(row.album!)">
+            <image class="all-cover" :class="layout.isWide ? 'all-cover-wide' : ''" :src="row.album!.picUrl" mode="aspectFill" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" />
+            <view class="all-media-info" :class="layout.isWide ? 'all-media-info-wide' : ''">
+              <text class="all-media-name" :class="layout.isWide ? 'all-media-name-wide' : ''" :max-lines="1" :style="'color:' + theme.skin.text + ';'">{{ row.album!.name }}</text>
+              <text class="all-media-sub" :class="layout.isWide ? 'all-media-sub-wide' : ''" :max-lines="1" :style="'color:' + theme.skin.textMuted + ';'">{{ row.album!.artist.length > 0 ? row.album!.artist : "专辑" }}</text>
+            </view>
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </view>
+        <view v-if="searching && !allReady" class="all-empty" :class="layout.isWide ? 'all-empty-wide' : ''">
+          <text class="all-empty-text" :class="layout.isWide ? 'all-empty-text-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">加载中...</text>
+        </view>
+        <view v-if="allReady && allEmpty && !searching" class="all-empty" :class="layout.isWide ? 'all-empty-wide' : ''">
+          <text class="all-empty-text" :class="layout.isWide ? 'all-empty-text-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">没有找到相关结果</text>
+        </view>
+      </scroll-view>
+      <!-- 歌曲 -->
+      <list-view
+        v-show="type == 'song'"
+        class="results"
+        direction="vertical"
+        :lower-threshold="200"
+        :show-scrollbar="false"
+        @scrolltolower="loadMoreResults"
+        :scroll-top="scrollTop"
+        @scroll="onListScroll"
+      >
+        <list-item
+          v-for="item in songRows"
+          :key="item.key"
+          class="row-item" :class="layout.isWide ? 'row-item-wide' : ''"
+          @click="openResult(item)"
+        >
+          <QtSongRowLite
+            :song="item.song!"
+            :showBadge="false"
+            @play="play(item.song!)"
+            @more="openSheet"
+          />
+        </list-item>
+        <!-- 尾部状态条目统一放最后、list-item 恒只有一个 view 子节点：
+             list-item 复用是按条目结构分池的（见 playlists 页注释），v-for 和尾部之间
+             不夹条目、状态内容包在内层 view 里，避免长列表回收时行错乱
+             （歌源四歌单 30 条/页必现：行重叠成串 + 整行高空白） -->
+        <list-item v-if="resultsLoadingMore && type == 'song'" class="foot-item" :class="[layout.isWide ? 'foot-item-wide' : '']">
+          <view class="foot-inner" :class="[layout.isWide ? 'foot-inner-wide' : '']">
+            <qt-loading :visible="true" :size="44" />
+          </view>
+        </list-item>
+        <list-item v-else-if="!resultsHasMore.song && !emptyShowSong" class="foot-item" :class="[layout.isWide ? 'foot-item-wide' : '']">
+          <view class="foot-inner" :class="[layout.isWide ? 'foot-inner-wide' : '']">
+            <text class="foot-text" :class="[layout.isWide ? 'foot-text-wide' : '']" :style="'color:' + theme.skin.textSubtle + ';'">已加载全部</text>
+          </view>
+        </list-item>
+        <list-item v-if="emptyShowSong && !searching" class="empty-item" :class="[layout.isWide ? 'empty-item-wide' : '']">
+          <view class="empty-inner" :class="[layout.isWide ? 'empty-inner-wide' : '']">
+            <text class="empty-text" :class="[layout.isWide ? 'empty-text-wide' : '']" :style="'color:' + theme.skin.textMuted + ';'">没有找到相关结果</text>
+          </view>
+        </list-item>
+      </list-view>
+
+      <!-- 歌单 -->
+      <list-view
+        v-show="type == 'playlist'"
+        class="results"
+        direction="vertical"
+        :lower-threshold="200"
+        :show-scrollbar="false"
+        @scrolltolower="loadMoreResults"
+        :scroll-top="scrollTop"
+        @scroll="onListScroll"
+      >
+        <list-item
+          v-for="item in playlistRows"
+          :key="item.key"
+          class="row-item" :class="layout.isWide ? 'row-item-wide' : ''"
+          @click="openResult(item)"
+        >
+          <view class="row" :class="layout.isWide ? 'row-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';border-top-color:' + theme.skin.divider + ';'">
+            <image class="row-cover" :class="layout.isWide ? 'row-cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="item.playlist!.picUrl" mode="aspectFill" />
+            <view class="row-info" :class="[layout.isWide ? 'row-info-wide' : '']"
+              ><text class="row-name" :class="layout.isWide ? 'row-name-wide' : ''" :style="'color:' + theme.skin.text + ';'" :max-lines="1">{{ item.playlist!.name }}</text
+              ><text class="row-meta" :class="layout.isWide ? 'row-meta-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" :max-lines="1"
+                >{{ shortName(item.playlist!.platform) }} · {{ item.playlist!.playCount }} 播放</text
+              ></view
+            >
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </list-item>
+        <list-item v-if="resultsLoadingMore && type == 'playlist'" class="foot-item" :class="[layout.isWide ? 'foot-item-wide' : '']">
+          <view class="foot-inner" :class="[layout.isWide ? 'foot-inner-wide' : '']">
+            <qt-loading :visible="true" :size="44" />
+          </view>
+        </list-item>
+        <list-item v-else-if="!resultsHasMore.playlist && !emptyShowPlaylist" class="foot-item" :class="[layout.isWide ? 'foot-item-wide' : '']">
+          <view class="foot-inner" :class="[layout.isWide ? 'foot-inner-wide' : '']">
+            <text class="foot-text" :class="[layout.isWide ? 'foot-text-wide' : '']" :style="'color:' + theme.skin.textSubtle + ';'">已加载全部</text>
+          </view>
+        </list-item>
+        <list-item v-if="emptyShowPlaylist && !searching" class="empty-item" :class="[layout.isWide ? 'empty-item-wide' : '']">
+          <view class="empty-inner" :class="[layout.isWide ? 'empty-inner-wide' : '']">
+            <text class="empty-text" :class="[layout.isWide ? 'empty-text-wide' : '']" :style="'color:' + theme.skin.textMuted + ';'">没有找到相关结果</text>
+          </view>
+        </list-item>
+      </list-view>
+
+      <!-- 歌手 -->
+      <list-view
+        v-show="type == 'artist'"
+        class="results"
+        direction="vertical"
+        :lower-threshold="200"
+        :show-scrollbar="false"
+        @scrolltolower="loadMoreResults"
+        :scroll-top="scrollTop"
+        @scroll="onListScroll"
+      >
+        <list-item
+          v-for="item in artistRows"
+          :key="item.key"
+          class="row-item" :class="layout.isWide ? 'row-item-wide' : ''"
+          @click="openResult(item)"
+        >
+          <view class="row" :class="layout.isWide ? 'row-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';border-top-color:' + theme.skin.divider + ';'">
+            <image class="row-cover round" :class="[layout.isWide ? 'row-cover-wide' : '', layout.isWide ? 'round-wide' : '']" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="item.artist!.picUrl" mode="aspectFill" />
+            <view class="row-info" :class="[layout.isWide ? 'row-info-wide' : '']"
+              ><text class="row-name" :class="layout.isWide ? 'row-name-wide' : ''" :style="'color:' + theme.skin.text + ';'" :max-lines="1">{{ item.artist!.name }}</text
+              ><text class="row-meta" :class="layout.isWide ? 'row-meta-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" :max-lines="1">{{ shortName(item.artist!.platform) }} · 歌手</text></view
+            >
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </list-item>
+        <list-item v-if="resultsLoadingMore && type == 'artist'" class="foot-item" :class="[layout.isWide ? 'foot-item-wide' : '']">
+          <view class="foot-inner" :class="[layout.isWide ? 'foot-inner-wide' : '']">
+            <qt-loading :visible="true" :size="44" />
+          </view>
+        </list-item>
+        <list-item v-else-if="!resultsHasMore.artist && !emptyShowArtist" class="foot-item" :class="[layout.isWide ? 'foot-item-wide' : '']">
+          <view class="foot-inner" :class="[layout.isWide ? 'foot-inner-wide' : '']">
+            <text class="foot-text" :class="[layout.isWide ? 'foot-text-wide' : '']" :style="'color:' + theme.skin.textSubtle + ';'">已加载全部</text>
+          </view>
+        </list-item>
+        <list-item v-if="emptyShowArtist && !searching" class="empty-item" :class="[layout.isWide ? 'empty-item-wide' : '']">
+          <view class="empty-inner" :class="[layout.isWide ? 'empty-inner-wide' : '']">
+            <text class="empty-text" :class="[layout.isWide ? 'empty-text-wide' : '']" :style="'color:' + theme.skin.textMuted + ';'">没有找到相关结果</text>
+          </view>
+        </list-item>
+      </list-view>
+
+      <!-- 专辑 -->
+      <list-view
+        v-show="type == 'album'"
+        class="results"
+        direction="vertical"
+        :lower-threshold="200"
+        :show-scrollbar="false"
+        @scrolltolower="loadMoreResults"
+        :scroll-top="scrollTop"
+        @scroll="onListScroll"
+      >
+        <list-item
+          v-for="item in albumRows"
+          :key="item.key"
+          class="row-item" :class="layout.isWide ? 'row-item-wide' : ''"
+          @click="openResult(item)"
+        >
+          <view class="row" :class="layout.isWide ? 'row-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';border-top-color:' + theme.skin.divider + ';'">
+            <image class="row-cover" :class="layout.isWide ? 'row-cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="item.album!.picUrl" mode="aspectFill" />
+            <view class="row-info" :class="[layout.isWide ? 'row-info-wide' : '']"
+              ><text class="row-name" :class="layout.isWide ? 'row-name-wide' : ''" :style="'color:' + theme.skin.text + ';'" :max-lines="1">{{ item.album!.name }}</text
+              ><text class="row-meta" :class="layout.isWide ? 'row-meta-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" :max-lines="1"
+                >{{ shortName(item.album!.platform) }} · {{ item.album!.artist }}</text
+              ></view
+            >
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </list-item>
+        <list-item v-if="resultsLoadingMore && type == 'album'" class="foot-item" :class="[layout.isWide ? 'foot-item-wide' : '']">
+          <view class="foot-inner" :class="[layout.isWide ? 'foot-inner-wide' : '']">
+            <qt-loading :visible="true" :size="44" />
+          </view>
+        </list-item>
+        <list-item v-else-if="!resultsHasMore.album && !emptyShowAlbum" class="foot-item" :class="[layout.isWide ? 'foot-item-wide' : '']">
+          <view class="foot-inner" :class="[layout.isWide ? 'foot-inner-wide' : '']">
+            <text class="foot-text" :class="[layout.isWide ? 'foot-text-wide' : '']" :style="'color:' + theme.skin.textSubtle + ';'">已加载全部</text>
+          </view>
+        </list-item>
+        <list-item v-if="emptyShowAlbum && !searching" class="empty-item" :class="[layout.isWide ? 'empty-item-wide' : '']">
+          <view class="empty-inner" :class="[layout.isWide ? 'empty-inner-wide' : '']">
+            <text class="empty-text" :class="[layout.isWide ? 'empty-text-wide' : '']" :style="'color:' + theme.skin.textMuted + ';'">没有找到相关结果</text>
+          </view>
+        </list-item>
+      </list-view>
+    </template>
+    <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+    <QtActionSheet
+      v-model:visible="sheetVisible"
+      :title="sheetTitle()"
+      :actions="sheetActions"
+      @select="onSheetSelect"
+    />
+    <MiniPlayer
+  /></view>
+  </qt-page-frame>
+</template><script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { ref, reactive, computed, onMounted } from "vue";
+import { onShow } from "@dcloudio/uni-app";
+import QtSongRowLite from "@/uni_modules/qt-ui/components/qt-song-row-lite/qt-song-row-lite.uvue";
+import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
+import SourceSwitcher from "@/uni_modules/qt-ui/components/qt-source-switcher/qt-source-switcher.uvue";
+import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import qtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
+import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import { useSongSheet } from "@/composables/use-song-sheet";
+import { musicApi } from "@/services/music-api";
+import { usePlayerStore } from "@/stores/player";
+import { useSourceStore } from "@/stores/source";
+import { platformShort } from "@/services/platform";
+import { qtTrackPage } from "@/uni_modules/qt-stat";
+import type { Song, Playlist, Artist, Album } from "@/types/music";
+import type { Source } from "@/services/music-api";
+
+/** 搜索结果统一行：混排歌曲/歌单/歌手/专辑，供 list-view 虚拟滚动复用 */
+type ResultRow = {
+  type: "song" | "playlist" | "artist" | "album";
+  key: string;
+  song?: Song;
+  playlist?: Playlist;
+  artist?: Artist;
+  album?: Album;
+};
+
+const keyword = ref("");
+const songs = ref<Song[]>([]);
+const playlists = ref<Playlist[]>([]);
+const artists = ref<Artist[]>([]);
+const albums = ref<Album[]>([]);
+const searched = ref(false);
+const searching = ref(false);
+// 每种类型独立维护分页：切换 tag 时互不影响
+const resultsPage = reactive<Record<string, number>>({
+  song: 1,
+  playlist: 1,
+  artist: 1,
+  album: 1,
+});
+const resultsHasMore = reactive<Record<string, boolean>>({
+  song: true,
+  playlist: true,
+  artist: true,
+  album: true,
+});
+const resultsLoadingMore = ref(false);
+const type = ref<string>("all");
+const typeIndex = ref<number>(0);
+const words = ref<string[]>([]);
+const history = ref<string[]>([]);
+const layout = useQtLayout();
+const player = usePlayerStore();
+const sourceStore = useSourceStore();
+const theme = useThemeStore();
+
+// 回到顶部
+const scrollTop = ref(0);
+const showBackToTop = ref(false);
+function onListScroll(e: any) {
+  const st = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
+  showBackToTop.value = st > 600;
+}
+function backToTop() {
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  showBackToTop.value = false;
+}
+const { sheetVisible, sheetActions, openSheet, onSheetSelect, sheetTitle } =
+  useSongSheet();
+let loadedSource = "";
+// 搜索代号：每次新搜索/切音源 +1。切音源会连发多次搜索，慢返回的旧响应会覆盖新结果，
+// 表现为"切了音源页面却没反应"。所有异步写回前都校验代号是否仍是最新。
+let searchSeq = 0;
+let hotSeq = 0;
+// 「全部」视图当前关键词+音源下是否已拉到四节首页（切回 tag 时免重复请求）
+let allLoaded = false;
+/** 「全部」聚合的展示门：四个板块全部返回后才整体展示，不边回边刷 */
+const allReady = ref(false);
+const types: string[] = ["all", "song", "playlist", "artist", "album"];
+const typeLabels: string[] = ["全部", "歌曲", "歌单", "歌手", "专辑"];
+const HISTORY_KEY = "qt-search-history";
+
+function typeLabel(value: string): string {
+  if (value == "all") return "全部";
+  if (value == "song") return "歌曲";
+  if (value == "playlist") return "歌单";
+  if (value == "artist") return "歌手";
+  if (value == "album") return "专辑";
+  return "歌曲";
+}
+function shortName(p: string): string {
+  return platformShort(p);
+}
+
+function loadHistory(): void {
+  try {
+    const raw = uni.getStorageSync(HISTORY_KEY) as string;
+    if (raw.length == 0) return;
+    const arr = JSON.parse(raw) as string[];
+    history.value = arr;
+  } catch (_) {
+    history.value = [];
+  }
+}
+function saveHistory(): void {
+  try {
+    uni.setStorageSync(HISTORY_KEY, JSON.stringify(history.value));
+  } catch (_) {}
+}
+function pushHistory(word: string): void {
+  const next: string[] = [word];
+  for (let index = 0; index < history.value.length; index++) {
+    const item = history.value[index];
+    if (item != word) next.push(item);
+    if (next.length >= 10) break;
+  }
+  history.value = next;
+  saveHistory();
+}
+function removeWord(word: string): void {
+  const next: string[] = [];
+  for (let index = 0; index < history.value.length; index++) {
+    if (history.value[index] != word) next.push(history.value[index]);
+  }
+  history.value = next;
+  saveHistory();
+}
+function clearHistory(): void {
+  history.value = [];
+  saveHistory();
+}
+
+async function loadHot(): Promise<void> {
+  const seq = ++hotSeq;
+  try {
+    const list = await musicApi.hotWords(sourceStore.current as Source);
+    if (seq != hotSeq) return; // 已切到别的音源，丢弃过期热词
+    words.value = list;
+  } catch (_) {
+    if (seq != hotSeq) return;
+    words.value = ["周杰伦", "陈奕迅", "晴天", "告白气球", "Taylor Swift"];
+  }
+}
+
+function ensureSource(): void {
+  const current = sourceStore.current;
+  if (loadedSource == current) return;
+  loadedSource = current;
+  if (searched.value && keyword.value.trim().length > 0) doSearch();
+  else loadHot();
+}
+
+onMounted(() => {
+  sourceStore.restore();
+  loadHistory();
+  ensureSource();
+});
+onShow(() => {
+  qtTrackPage("pages/search/index");
+  sourceStore.restore();
+  ensureSource();
+});
+
+const emptyShowSong = computed(() => songs.value.length == 0);
+const emptyShowPlaylist = computed(() => playlists.value.length == 0);
+const emptyShowArtist = computed(() => artists.value.length == 0);
+const emptyShowAlbum = computed(() => albums.value.length == 0);
+
+const songRows = computed<ResultRow[]>(() => {
+  const rows: ResultRow[] = [];
+  for (let index = 0; index < songs.value.length; index++) {
+    const song = songs.value[index] as Song;
+    rows.push({ type: "song", key: "s" + song.id + song.platform, song });
+  }
+  return rows;
+});
+const playlistRows = computed<ResultRow[]>(() => {
+  const rows: ResultRow[] = [];
+  for (let index = 0; index < playlists.value.length; index++) {
+    const pl = playlists.value[index] as Playlist;
+    rows.push({ type: "playlist", key: "p" + pl.id + pl.platform, playlist: pl });
+  }
+  return rows;
+});
+const artistRows = computed<ResultRow[]>(() => {
+  const rows: ResultRow[] = [];
+  for (let index = 0; index < artists.value.length; index++) {
+    const ar = artists.value[index] as Artist;
+    rows.push({ type: "artist", key: "a" + ar.id + ar.platform, artist: ar });
+  }
+  return rows;
+});
+const albumRows = computed<ResultRow[]>(() => {
+  const rows: ResultRow[] = [];
+  for (let index = 0; index < albums.value.length; index++) {
+    const al = albums.value[index] as Album;
+    rows.push({ type: "album", key: "l" + al.id + al.platform, album: al });
+  }
+  return rows;
+});
+
+// 「全部」视图分节切片：复用各类型已拉取的首页数据
+const allSongRows = computed<ResultRow[]>(() => songRows.value.slice(0, 20));
+const allPlaylistRows = computed<ResultRow[]>(() => playlistRows.value.slice(0, 6));
+const allArtistRows = computed<ResultRow[]>(() => artistRows.value.slice(0, 8));
+const allAlbumRows = computed<ResultRow[]>(() => albumRows.value.slice(0, 6));
+const allEmpty = computed(
+  () => songs.value.length == 0 && playlists.value.length == 0 && artists.value.length == 0 && albums.value.length == 0
+);
+
+function platLabel(p: string): string {
+  if (p == "wyy") return "网易云";
+  if (p == "qq") return "QQ音乐";
+  if (p == "kw") return "酷我";
+  if (p == "kg") return "酷狗";
+  return p;
+}
+/** 分节「查看更多」：带 index 跳对应 tag（与 segmented 的 v-model 保持同步） */
+function gotoType(index: number): void {
+  typeIndex.value = index;
+  switchType(index);
+}
+
+function openResult(item: ResultRow): void {
+  if (item.type == "song" && item.song != null) {
+    play(item.song);
+  } else if (item.type == "playlist" && item.playlist != null) {
+    openPlaylist(item.playlist);
+  } else if (item.type == "artist" && item.artist != null) {
+    openArtist(item.artist);
+  } else if (item.type == "album" && item.album != null) {
+    openAlbum(item.album);
+  }
+}
+
+async function fetchPlaylists(text: string, page: number): Promise<Playlist[]> {
+  return musicApi.searchPlaylists(text, sourceStore.current as Source, page, 30);
+}
+async function fetchArtists(text: string, page: number): Promise<Artist[]> {
+  return musicApi.searchArtists(text, sourceStore.current as Source, page, 30);
+}
+async function fetchAlbums(text: string, page: number): Promise<Album[]> {
+  return musicApi.searchAlbums(text, sourceStore.current as Source, page, 30);
+}
+
+/** 按 platform+id 去重：源接口翻页可能重叠返回同一批条目，重复 key 会让 list-view 复用错乱 */
+function uniquePlaylists(list: Playlist[]): Playlist[] {
+  const seen: string[] = [];
+  const out: Playlist[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const pl = list[i] as Playlist;
+    const k = pl.platform + ":" + pl.id;
+    if (seen.indexOf(k) != -1) continue;
+    seen.push(k);
+    out.push(pl);
+  }
+  return out;
+}
+function uniqueArtists(list: Artist[]): Artist[] {
+  const seen: string[] = [];
+  const out: Artist[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const it = list[i] as Artist;
+    const k = it.platform + ":" + it.id;
+    if (seen.indexOf(k) != -1) continue;
+    seen.push(k);
+    out.push(it);
+  }
+  return out;
+}
+function uniqueAlbums(list: Album[]): Album[] {
+  const seen: string[] = [];
+  const out: Album[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const it = list[i] as Album;
+    const k = it.platform + ":" + it.id;
+    if (seen.indexOf(k) != -1) continue;
+    seen.push(k);
+    out.push(it);
+  }
+  return out;
+}
+function uniqueSongs(list: Song[]): Song[] {
+  const seen: string[] = [];
+  const out: Song[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const it = list[i] as Song;
+    const k = it.platform + ":" + it.id;
+    if (seen.indexOf(k) != -1) continue;
+    seen.push(k);
+    out.push(it);
+  }
+  return out;
+}
+async function runSearch(text: string, page: number, seq: number): Promise<void> {
+  // seq 是发起时记录的搜索代号。返回时若代号已变，说明用户又搜了一次或切了音源，
+  // 本批结果必须丢弃——否则旧音源的响应晚到就会覆盖新音源的数据。
+  const append = page > 1;
+  if (type.value == "playlist") {
+    const list = await fetchPlaylists(text, page);
+    if (seq != searchSeq) return;
+    playlists.value = append ? uniquePlaylists(playlists.value.concat(list)) : uniquePlaylists(list);
+    return;
+  }
+  if (type.value == "artist") {
+    const list = await fetchArtists(text, page);
+    if (seq != searchSeq) return;
+    artists.value = append ? uniqueArtists(artists.value.concat(list)) : uniqueArtists(list);
+    return;
+  }
+  if (type.value == "album") {
+    const list = await fetchAlbums(text, page);
+    if (seq != searchSeq) return;
+    albums.value = append ? uniqueAlbums(albums.value.concat(list)) : uniqueAlbums(list);
+    return;
+  }
+  const list = await musicApi.search(
+    text,
+    sourceStore.current as Source,
+    "song",
+    page,
+    30
+  );
+  if (seq != searchSeq) return;
+  songs.value = append ? uniqueSongs(songs.value.concat(list)) : uniqueSongs(list);
+}
+async function doSearch(): Promise<void> {
+  const text = keyword.value.trim();
+  if (!text) return;
+  const seq = ++searchSeq; // 作废所有在途的旧搜索
+  pushHistory(text);
+  searched.value = true;
+  searching.value = true;
+  resultsLoadingMore.value = false;
+  // 新搜索：重置所有类型的分页与数据，从当前类型的第 1 页开始
+  resultsPage.song = 1;
+  resultsPage.playlist = 1;
+  resultsPage.artist = 1;
+  resultsPage.album = 1;
+  resultsHasMore.song = true;
+  resultsHasMore.playlist = true;
+  resultsHasMore.artist = true;
+  resultsHasMore.album = true;
+  songs.value = [];
+  playlists.value = [];
+  artists.value = [];
+  albums.value = [];
+  try {
+    if (type.value == "all") {
+      allLoaded = false;
+      await runAllSections(text, seq);
+      if (seq == searchSeq) allLoaded = true;
+    } else {
+      await runSearch(text, 1, seq);
+    }
+  } catch (_) {
+    if (seq == searchSeq) uni.showToast({ title: "搜索服务暂不可用", icon: "none" });
+  } finally {
+    if (seq == searchSeq) searching.value = false;
+  }
+}
+/** 「全部」视图：四类型并行拉首页（复用各类型数组与去重，单节失败不拖垮其他节） */
+async function runAllSections(text: string, seq: number): Promise<void> {
+  // 展示门重置：本次聚合结束（四节齐了）才放开，中途切换标签重进也不会半截展示
+  allReady.value = false;
+  const src = sourceStore.current as Source;
+  const songTask = musicApi
+    .search(text, src, "song", 1, 30)
+    .then((list) => {
+      if (seq == searchSeq) songs.value = uniqueSongs(list);
+    })
+    .catch(() => {});
+  const playlistTask = musicApi
+    .searchPlaylists(text, src, 1, 10)
+    .then((list) => {
+      if (seq == searchSeq) playlists.value = uniquePlaylists(list);
+    })
+    .catch(() => {});
+  const artistTask = musicApi
+    .searchArtists(text, src, 1, 10)
+    .then((list) => {
+      if (seq == searchSeq) artists.value = uniqueArtists(list);
+    })
+    .catch(() => {});
+  const albumTask = musicApi
+    .searchAlbums(text, src, 1, 10)
+    .then((list) => {
+      if (seq == searchSeq) albums.value = uniqueAlbums(list);
+    })
+    .catch(() => {});
+  await Promise.all([songTask, playlistTask, artistTask, albumTask]);
+  if (seq == searchSeq) allReady.value = true;
+}
+async function loadMoreResults(): Promise<void> {
+  const text = keyword.value.trim();
+  if (!text) return;
+  const curType = type.value;
+  const curPage = resultsPage[curType];
+  const curHasMore = resultsHasMore[curType];
+  if (searching.value || resultsLoadingMore.value || !curHasMore) return;
+  resultsLoadingMore.value = true;
+  const seq = searchSeq;
+  const next = curPage + 1;
+  try {
+    const before =
+      curType == "playlist"
+        ? playlists.value.length
+        : curType == "artist"
+          ? artists.value.length
+          : curType == "album"
+            ? albums.value.length
+            : songs.value.length;
+    await runSearch(text, next, seq);
+    if (seq != searchSeq) return;
+    const after =
+      curType == "playlist"
+        ? playlists.value.length
+        : curType == "artist"
+          ? artists.value.length
+          : curType == "album"
+            ? albums.value.length
+            : songs.value.length;
+    resultsPage[curType] = next;
+    if (after == before) resultsHasMore[curType] = false;
+  } catch (_) {
+    if (seq == searchSeq) uni.showToast({ title: "加载失败", icon: "none" });
+  } finally {
+    if (seq == searchSeq) resultsLoadingMore.value = false;
+  }
+}
+function useWord(word: string): void {
+  keyword.value = word;
+  doSearch();
+}
+function switchType(index: number): void {
+  const value = types[index];
+  if (type.value == value) return;
+  type.value = value;
+  // 切换结果标签时回到顶部，避免共享 scrollTop 造成位置跳变
+  scrollTop.value = 0;
+  showBackToTop.value = false;
+  if (!searched.value || keyword.value.trim().length == 0) return;
+  if (value == "all") {
+    if (allLoaded) return;
+    searchCurrent("all");
+    return;
+  }
+  // 已加载过该类型的数据则保持缓存（v-show 切换，位置原生保留），否则从第 1 页开始加载
+  const loaded =
+    value == "playlist"
+      ? playlists.value.length > 0
+      : value == "artist"
+        ? artists.value.length > 0
+        : value == "album"
+          ? albums.value.length > 0
+          : songs.value.length > 0;
+  if (loaded) return;
+  searchCurrent(value);
+}
+async function searchCurrent(curType: string): Promise<void> {
+  const text = keyword.value.trim();
+  // load-more 在途时不能直接丢弃本 tab 的首页加载：等它结束再补拉，
+  // 否则新切到的 tab 永远不加载数据、还显示假「没有找到相关结果」空态。
+  // （load-more 的写回按发起时的类型分支落盘，不会串类型，等待是安全的）
+  let waited = 0;
+  while (resultsLoadingMore.value && waited < 20000) {
+    await new Promise<void>((r) => setTimeout(r, 200) as number);
+    waited += 200;
+    if (type.value !== curType || !searched.value) return; // 用户已切走
+  }
+  if (resultsLoadingMore.value) return;
+  resultsLoadingMore.value = true;
+  const seq = searchSeq;
+  try {
+    if (curType == "all") {
+      await runAllSections(text, seq);
+      if (seq == searchSeq) allLoaded = true;
+    } else {
+      await runSearch(text, 1, seq);
+    }
+  } catch (_) {
+    if (seq == searchSeq) uni.showToast({ title: "搜索服务暂不可用", icon: "none" });
+  } finally {
+    if (seq == searchSeq) resultsLoadingMore.value = false;
+  }
+}
+async function play(song: Song): Promise<void> {
+  try {
+    song.url = await musicApi.playUrl(song, player.quality);
+    player.playSingle(song);
+  } catch (_) {
+    uni.showToast({ title: "该歌曲暂时无法播放", icon: "none" });
+  }
+}
+function openPlaylist(pl: Playlist): void {
+  uni.navigateTo({
+    url: "/pages/playlist/index?id=" + encodeURIComponent(pl.id) + "&platform=" + encodeURIComponent(pl.platform),
+  });
+}
+function openArtist(ar: Artist): void {
+  uni.navigateTo({
+    url:
+      "/pages/artist/index?name=" +
+      encodeURIComponent(ar.name) +
+      "&platform=" +
+      ar.platform,
+  });
+}
+function openAlbum(al: Album): void {
+  // 必须带 name/pic/desc：163 对版权受限专辑返回 HTTP 200 + code:404，albumDetail 拿到空数据，
+  // 靠入口页（搜索结果）带来的信息兜底，否则专辑页整页无封面无名字。
+  uni.navigateTo({
+    url:
+      "/pages/playlist/index?id=" +
+      encodeURIComponent(al.id) +
+      "&platform=" +
+      encodeURIComponent(al.platform) +
+      "&type=album" +
+      "&name=" +
+      encodeURIComponent(al.name) +
+      "&desc=" +
+      encodeURIComponent(al.artist.length > 0 ? "艺人：" + al.artist : "") +
+      "&pic=" +
+      encodeURIComponent(al.picUrl),
+  });
+}
+</script>
+<style>
+.page {
+  flex: 1;
+  position: relative;
+}
+.cover-load {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  justify-content: center;
+  align-items: center;
+  z-index: 10;
+}
+/* 不能加 box-shadow：uni-app x Android 上 shadow 落在可点击元素或其祖先上会导致点击穿透/命中丢失
+   （qt-ui/docs/ui-review.md P0-1，settings 页实证）。.bar 里的音源切换器、搜索按钮正是受害者。
+   已有 1px border 表达边缘，去掉 shadow 不会掉层级。 */
+.bar {
+  padding: 20rpx 28rpx;
+  flex-direction: row;
+
+  border-width: 1px;
+
+  border-radius: 0 0 24rpx 24rpx;
+}
+.input {
+  flex: 1;
+  height: 76rpx;
+  padding: 0 30rpx;
+
+  border-width: 1px;
+
+  border-radius: 38rpx;
+  font-size: 27rpx;
+}
+.button {
+  width: 76rpx;
+  height: 76rpx;
+  margin-left: 12rpx;
+  justify-content: center;
+  align-items: center;
+
+  border-radius: 38rpx;
+}
+.bar-switch {
+  margin-left: 18rpx;
+}
+.type-row {
+  padding: 22rpx 28rpx;
+
+  border-width: 1px;
+
+  border-radius: 24rpx;
+}
+.hot-wrap {
+  flex: 1;
+}
+.section {
+  padding: 30rpx 32rpx;
+}
+.section-title {
+
+  font-size: 30rpx;
+  font-weight: 600;
+}
+.history {
+  margin-top: 22rpx;
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.history-item {
+  height: 56rpx;
+  margin: 0 16rpx 16rpx 0;
+  padding: 0 20rpx 0 26rpx;
+  flex-direction: row;
+  align-items: center;
+
+  border-width: 1px;
+
+  border-radius: 28rpx;
+}
+.history-text {
+
+  font-size: 24rpx;
+}
+.history-close {
+  margin-left: 14rpx;
+}
+.clear-row {
+  margin-top: 4rpx;
+  align-items: flex-end;
+}
+.clear-link {
+
+  font-size: 23rpx;
+}
+.tags {
+  margin-top: 22rpx;
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.tag {
+  margin: 0 18rpx 18rpx 0;
+  padding: 13rpx 24rpx;
+
+
+  border-width: 1px;
+
+  border-radius: 30rpx;
+  font-size: 25rpx;
+}
+.results {
+  flex: 1;
+}
+.empty-text {
+
+  font-size: 27rpx;
+}
+.foot-text {
+
+  font-size: 24rpx;
+}
+.row {
+  height: 128rpx;
+  padding: 0 32rpx;
+  flex-direction: row;
+  align-items: center;
+
+  border-top-width: 1px;
+
+}
+/* list-view 虚拟滚动：所有 list-item 固定高度，避免预估高度错乱抖动 */
+.row-item {
+  height: 128rpx;
+  justify-content: center;
+}
+.empty-item {
+  height: 240rpx;
+}
+.empty-inner {
+  height: 240rpx;
+  justify-content: center;
+  align-items: center;
+}
+.foot-item {
+  height: 88rpx;
+}
+.foot-inner {
+  height: 88rpx;
+  justify-content: center;
+  align-items: center;
+}
+.row-cover {
+  width: 92rpx;
+  height: 92rpx;
+  border-radius: 14rpx;
+
+}
+.round {
+  border-radius: 46rpx;
+}
+.row-info {
+  flex: 1;
+  margin-left: 22rpx;
+  overflow: hidden;
+}
+.row-name {
+
+  font-size: 28rpx;
+  font-weight: 500;
+  text-overflow: ellipsis;
+}
+.row-meta {
+  margin-top: 10rpx;
+
+  font-size: 23rpx;
+  text-overflow: ellipsis;
+}
+.empty {
+  padding: 120rpx 0;
+  align-items: center;
+}
+
+.bar-wide { padding: 12px 24px; border-radius: 0 0 18px 18px; }
+.input-wide { height: 48px; padding-left: 20px; padding-right: 20px; border-radius: 24px; font-size: 16px; }
+.button-wide { width: 48px; height: 48px; margin-left: 10px; border-radius: 24px; }
+.bar-switch-wide { margin-left: 14px; }
+.type-row-wide { padding: 14px 24px; border-radius: 18px; }
+.section-wide { padding: 22px 24px; }
+.history-item-wide { height: 38px; margin-right: 12px; margin-bottom: 12px; padding-left: 16px; padding-right: 12px; border-radius: 19px; }
+.tag-wide { margin-right: 12px; margin-bottom: 12px; padding: 8px 16px; border-radius: 20px; font-size: 15px; }
+.row-wide { height: 82px; padding-left: 24px; padding-right: 24px; }
+.row-item-wide { height: 82px; }
+.row-cover-wide { width: 58px; height: 58px; border-radius: 10px; }
+.row-name-wide { font-size: 17px; }
+.row-meta-wide { margin-top: 6px; font-size: 14px; }
+.empty-inner-wide { height: 120px; }
+.foot-inner-wide { height: 44px; }
+.section-title-wide { font-size: 15px; }
+.history-wide { margin-top: 11px; }
+.history-text-wide { font-size: 12px; }
+.history-close-wide { margin-left: 7px; }
+.clear-row-wide { margin-top: 2px; }
+.clear-link-wide { font-size: 12px; }
+.tags-wide { margin-top: 11px; }
+.empty-item-wide { height: 120px; }
+.empty-text-wide { font-size: 14px; }
+.foot-item-wide { height: 44px; }
+.foot-text-wide { font-size: 12px; }
+.row-info-wide { margin-left: 11px; }
+.round-wide { border-radius: 23px; }
+
+/* 全部聚合视图 */
+.all-section { margin: 0 0 12rpx; }
+.all-section-wide { margin: 0 0 10px; }
+.all-head { flex-direction: row; align-items: center; justify-content: space-between; height: 80rpx; margin: 0 24rpx; }
+.all-head-wide { height: 52px; margin: 0 16px; }
+.all-head-title { font-size: 30rpx; font-weight: 700; }
+.all-head-title-wide { font-size: 20px; }
+.all-head-more { font-size: 24rpx; }
+.all-head-more-wide { font-size: 15px; }
+.all-media-row { flex-direction: row; align-items: center; height: 108rpx; margin: 0 24rpx; }
+.all-media-row-wide { height: 68px; margin: 0 16px; }
+.all-cover { width: 84rpx; height: 84rpx; border-radius: 12rpx; margin-right: 20rpx; flex-shrink: 0; }
+.all-cover-wide { width: 52px; height: 52px; border-radius: 8px; margin-right: 12px; }
+.all-cover-round { border-radius: 42rpx; }
+.all-media-info { flex: 1; margin-right: 12rpx; }
+.all-media-info-wide { margin-right: 8px; }
+.all-media-name { font-size: 28rpx; }
+.all-media-name-wide { font-size: 17px; }
+.all-media-sub { font-size: 22rpx; margin-top: 4rpx; }
+.all-media-sub-wide { font-size: 13px; margin-top: 2px; }
+.all-empty { padding: 120rpx 0; align-items: center; }
+.all-empty-wide { padding: 80px 0; align-items: center; }
+.all-empty-text { font-size: 26rpx; }
+.all-empty-text-wide { font-size: 16px; }
+</style>

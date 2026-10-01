@@ -1,0 +1,95 @@
+<template>
+  <view
+    class="qt-page"
+    :class="isWide ? 'qt-page-wide' : 'qt-page-compact'"
+    :style="pageStyle"
+  >
+    <image
+      v-if="theme.skin.backgroundImage.length > 0"
+      class="qt-page-wallpaper"
+      :src="theme.skin.backgroundImage"
+      mode="aspectFill"
+    />
+    <view
+      v-if="theme.skin.backgroundImage.length > 0"
+      class="qt-page-wallpaper-overlay"
+      :style="overlayStyle"
+    />
+    <view class="qt-page-content" :class="isWide ? 'qt-content-wide' : ''" :style="isWide ? wideContentStyle : ''">
+      <view v-if="title.length > 0" class="qt-page-heading">
+        <text class="qt-page-title" :style="'color:' + theme.skin.text + ';'">{{ title }}</text>
+        <text v-if="subtitle.length > 0" class="qt-page-subtitle" :style="'color:' + theme.skin.textMuted + ';'">{{ subtitle }}</text>
+      </view>
+      <slot />
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed } from "vue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+
+const props = defineProps<{
+  title?: string;
+  subtitle?: string;
+  maxWidth?: number;
+}>();
+
+const theme = useThemeStore();
+const layout = useQtLayout(720);
+const title = computed((): string => props.title != null ? props.title! : "");
+const subtitle = computed((): string => props.subtitle != null ? props.subtitle! : "");
+const maxWidth = computed((): number => props.maxWidth != null ? props.maxWidth! : 1200);
+const isWide = computed((): boolean => layout.isWide);
+const pageStyle = computed((): string => "background-color:" + theme.skin.background + ";");
+const wideContentStyle = computed((): string => "width:" + (layout.windowWidth < maxWidth.value ? layout.windowWidth : maxWidth.value) + "px;");
+const overlayStyle = computed((): string => "background-color:" + theme.skin.overlay + ";");
+</script>
+
+<style>
+.qt-page {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+.qt-page-wallpaper {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 0;
+}
+.qt-page-wallpaper-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+}
+.qt-page-content {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 28rpx 24rpx 120rpx;
+}
+.qt-content-wide {
+  align-self: center;
+  padding-left: 40rpx;
+  padding-right: 40rpx;
+}
+.qt-page-heading {
+  margin-bottom: 28rpx;
+}
+.qt-page-title {
+  font-size: 44rpx;
+  font-weight: 700;
+}
+.qt-page-subtitle {
+  margin-top: 8rpx;
+  font-size: 24rpx;
+}
+</style>

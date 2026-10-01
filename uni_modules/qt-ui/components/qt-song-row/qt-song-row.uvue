@@ -1,0 +1,233 @@
+<template>
+  <view
+    class="row"
+    :class="layout.isWide ? 'row-wide' : ''"
+    :style="'background-color:' + themeStore.skin.surface + ';'"
+    @click="emit('play')"
+    @longpress="openSheet"
+  >
+    <view class="cover-wrap" :class="layout.isWide ? 'cover-wrap-wide' : ''">
+      <image class="cover" :class="layout.isWide ? 'cover-wide' : ''" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
+      <view v-if="showBadge" class="pbadge" :class="layout.isWide ? 'pbadge-wide' : ''" :style="badgeStyle"
+        ><text class="pbadge-text" :class="layout.isWide ? 'pbadge-text-wide' : ''" :style="'color:#ffffff;'">{{ shortName(song.platform) }}</text></view
+      >
+      <view v-if="selected" class="select-mark" :style="'background-color:' + themeStore.skin.accentSoft + ';border-color:' + themeStore.skin.accent + ';'"
+        ><QtIcon name="check" :size="24" :color="themeStore.skin.accent" /></view
+      >
+    </view>
+    <view class="info" :class="layout.isWide ? 'info-wide' : ''">
+      <text
+        class="name" :class="layout.isWide ? 'name-wide' : ''"
+        :style="'color:' + themeStore.skin.text + ';'"
+        :max-lines="1"
+        >{{ song.name }}</text
+      >
+      <text
+        class="meta" :class="layout.isWide ? 'meta-wide' : ''"
+        :style="'color:' + themeStore.skin.textMuted + ';'"
+        :max-lines="1"
+        >{{ song.singer }} - {{ song.album }}</text
+      >
+    </view>
+    <view class="actions" :class="layout.isWide ? 'actions-wide' : ''">
+      <QtIcon
+        class="act-heart"
+        :name="liked ? 'heart-fill' : 'heart'"
+        :size="layout.isWide ? 24 : 38"
+        :color="liked ? themeStore.skin.accent : themeStore.skin.iconMuted"
+        @click.stop="toggleLike"
+      />
+      <QtIcon
+        name="more"
+        :size="36"
+        :color="themeStore.skin.iconMuted"
+        @click.stop="openSheet"
+      />
+    </view>
+  </view>
+
+  <qt-action-sheet
+    v-model:visible="sheetVisible"
+    :title="song.name + ' - ' + song.singer"
+    :actions="sheetActions"
+    @select="onSheetSelect"
+  />
+</template>
+<script setup lang="ts">
+import { ref, computed } from "vue";
+import type { Song } from "@/types/music";
+import { usePlayerStore } from "@/stores/player";
+import { useDownloadsStore } from "@/stores/downloads";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { platformShort, platformColor } from "@/services/platform";
+import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+
+const props = defineProps<{
+  song: Song;
+  showBadge?: boolean;
+  inHistory?: boolean;
+  selected?: boolean;
+  usePicker?: boolean;
+}>();
+const emit = defineEmits<{ play: []; more: []; pick: [Song, any] }>();
+
+const player = usePlayerStore();
+const downloads = useDownloadsStore();
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+const liked = computed(() => player.isLiked(props.song));
+const downloaded = computed(() => downloads.has(props.song));
+const sheetVisible = ref(false);
+
+const badgeStyle = computed(() => {
+  const color = platformColor(props.song.platform);
+  return "background-color:" + color + ";";
+});
+
+const sheetActions = computed<SheetAction[]>(() => {
+  const actions: SheetAction[] = [
+    { name: "下一首播放" },
+    {
+      name: liked.value ? "取消收藏" : "收藏到我喜欢",
+      color: liked.value ? themeStore.skin.accent : undefined,
+    },
+    { name: "加入播放队列" },
+    {
+      name: downloaded.value ? "已在下载列表" : "下载到本地",
+      disabled: downloaded.value,
+    },
+    { name: "分享" },
+    { name: "查看歌手" },
+  ];
+  if (props.inHistory) actions.push({ name: "从最近播放移除" });
+  return actions;
+});
+
+function shortName(platform: string): string {
+  return platformShort(platform);
+}
+
+/**
+ * 红心：不再有内置的「我喜欢的歌曲」，收藏必须落到用户自建的歌单上，
+ * 所以点红心 = 「选一个歌单收进去」。
+ * 宿主页面提供了歌单选择器（usePicker）时交给它弹，
+ * 否则就地列出本地歌单；一个歌单都没有时提示先新建。
+ */
+function toggleLike(): void {
+  if (props.usePicker) {
+    emit('pick', props.song, undefined);
+    return;
+  }
+  player.showPlaylistPickerFor(props.song);
+}
+function openSheet(): void {
+  sheetVisible.value = true;
+}
+function onSheetSelect(_action: SheetAction, index: number): void {
+  if (index == 0) {
+    player.playNext(props.song);
+  } else if (index == 1) {
+    toggleLike();
+  } else if (index == 2) {
+    player.addToQueue(props.song);
+  } else if (index == 3) {
+    if (!downloads.has(props.song)) {
+      downloads.download(props.song);
+    }
+  } else if (index == 4) {
+    shareSong(props.song);
+  } else if (index == 5) {
+    uni.navigateTo({
+      url:
+        "/pages/artist/index?name=" +
+        encodeURIComponent(props.song.singer) +
+        "&platform=" +
+        props.song.platform,
+    });
+  } else if (index == 6) {
+    player.removeHistory(props.song);
+    uni.showToast({ title: "已从最近播放移除", icon: "none" });
+  }
+}
+function shareSong(song: Song): void {
+  const text = "《" + song.name + "》 - " + song.singer + "，来自轻听音乐";
+  uni.setClipboardData({
+    data: text,
+    success: () => {
+      uni.showToast({ title: "已复制分享文本", icon: "none" });
+    },
+  });
+}
+</script>
+<style>
+.row {
+  padding: 20rpx 32rpx;
+  flex-direction: row;
+  align-items: center;
+  border-radius: 16rpx;
+}
+.cover-wrap {
+  position: relative;
+  margin-right: 22rpx;
+}
+.cover {
+  width: 88rpx;
+  height: 88rpx;
+  border-radius: 12rpx;
+}
+.pbadge {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  padding: 2rpx 10rpx;
+  border-radius: 0 8rpx 0 12rpx;
+}
+.pbadge-text {
+  font-size: 18rpx;
+}
+.select-mark {
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 40rpx;
+  height: 40rpx;
+  justify-content: center;
+  align-items: center;
+  border-radius: 20rpx;
+  border-width: 2rpx;
+}
+.info {
+  flex: 1;
+  overflow: hidden;
+}
+.name {
+  font-size: 29rpx;
+  font-weight: 500;
+  text-overflow: ellipsis;
+}
+.meta {
+  margin-top: 10rpx;
+  font-size: 23rpx;
+  text-overflow: ellipsis;
+}
+.act-heart {
+  margin-right: 18rpx;
+}
+.actions {
+  flex-direction: row;
+  align-items: center;
+}
+
+.row-wide { padding: 12px 24px; border-radius: 12px; }
+.cover-wrap-wide { margin-right: 16px; }
+.cover-wide { width: 58px; height: 58px; border-radius: 10px; }
+.info-wide { margin-left: 0; }
+.name-wide { font-size: 17px; }
+.meta-wide { margin-top: 6px; font-size: 14px; }
+.actions-wide { min-width: 78px; }
+.pbadge-wide { padding: 2px 6px; border-radius: 0 4px 0 6px; }
+.pbadge-text-wide { font-size: 10px; }
+</style>

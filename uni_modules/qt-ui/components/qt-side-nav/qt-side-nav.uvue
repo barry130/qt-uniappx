@@ -1,0 +1,184 @@
+<!--
+  宽屏侧边导航 rail（平板 / 横屏 / 车机）
+  仅在 layout.isWide 时由 tab 页（发现 / 音乐库 / 我的）挂载，取代底部原生 tabbar；
+  手机竖屏不渲染，仍用原生 tabbar。
+  窗口 >= 860dp 用完整 rail（带品牌与文字），更窄的宽屏（横屏手机、车机矮窗）
+  退化为 64px 图标栏，避免占用过多横向空间。
+  本组件只在宽屏渲染，因此内部尺寸直接用 px。
+-->
+<template>
+  <view class="qsn" :class="compact ? 'qsn-compact' : ''" :style="railStyle">
+    <view v-if="!compact" class="qsn-brand">
+      <image class="qsn-logo" src="/static/icon/xxxhdpi.png" mode="aspectFill" />
+      <view class="qsn-brand-copy">
+        <text class="qsn-brand-name" :style="'color:' + theme.skin.text + ';'">轻听</text>
+        <text class="qsn-brand-sub" :style="'color:' + theme.skin.textSubtle + ';'">你的私人音乐台</text>
+      </view>
+    </view>
+    <image v-else class="qsn-logo qsn-logo-compact" src="/static/icon/xxxhdpi.png" mode="aspectFill" />
+
+    <!-- 矮窗口（横屏手机 / 车机）下菜单项放不下，品牌固定在顶部，菜单区可滚动 -->
+    <scroll-view class="qsn-scroll" direction="vertical" :show-scrollbar="false">
+      <view class="qsn-group">
+        <view
+          v-for="tab in tabs"
+          :key="tab.page"
+          class="qsn-item"
+          :style="itemActive(tab.page) ? 'background-color:' + theme.skin.accentSoft + ';' : ''"
+          @click="goTab(tab.page)"
+        >
+          <QtIcon :name="tab.icon" :size="compact ? 24 : 20" :color="itemActive(tab.page) ? theme.skin.accent : theme.skin.iconMuted" />
+          <text
+            v-if="!compact"
+            class="qsn-label"
+            :style="'color:' + (itemActive(tab.page) ? theme.skin.accent : theme.skin.textSubtle) + ';'"
+          >{{ tab.label }}</text>
+          <view v-if="hasDot(tab.page)" class="qsn-dot" />
+        </view>
+      </view>
+
+      <view class="qsn-divider" :style="'background-color:' + theme.skin.divider + ';'" />
+
+      <view class="qsn-group">
+        <view
+          v-for="tool in tools"
+          :key="tool.page"
+          class="qsn-item"
+          @click="goPage(tool.page)"
+        >
+          <QtIcon :name="tool.icon" :size="compact ? 24 : 20" :color="theme.skin.iconMuted" />
+          <text v-if="!compact" class="qsn-label" :style="'color:' + theme.skin.textSubtle + ';'">{{ tool.label }}</text>
+        </view>
+      </view>
+    </scroll-view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed } from "vue";
+import { useQtLayout, qtStatusBarPx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+
+const props = defineProps<{
+  /** 当前 tab 页路由，用于高亮（如 /pages/home/index） */
+  current?: string;
+  /** 需要亮红点的 tab 路由列表（与 current 同格式，如 /pages/profile/index） */
+  dots?: string[];
+}>();
+
+const layout = useQtLayout();
+const theme = useThemeStore();
+const compact = computed((): boolean => layout.windowWidth < 860);
+/** 固定在窗口左缘（不随 qt-page-frame 限宽居中），高度盖满内容区 */
+const railStyle = computed((): string => {
+  const sb = qtStatusBarPx();
+  return "padding-top:" + sb + "px;height:" + layout.windowHeight + "px;background-color:" + theme.skin.surfaceInset + ";border-right-color:" + theme.skin.divider + ";";
+});
+
+type NavItem = { page: string; label: string; icon: string };
+const tabs: NavItem[] = [
+  { page: "/pages/home/index", label: "发现", icon: "compass" },
+  { page: "/pages/profile/index", label: "我的", icon: "user" },
+];
+const tools: NavItem[] = [
+  { page: "/pages/search/index", label: "搜索", icon: "search" },
+  { page: "/pages/daily/index", label: "每日推荐", icon: "calendar" },
+  { page: "/pages/playlists/index", label: "歌单广场", icon: "disc" },
+  { page: "/pages/chart/index", label: "排行榜", icon: "trending" },
+  { page: "/pages/settings/index", label: "设置", icon: "settings" },
+];
+
+function itemActive(page: string): boolean {
+  return props.current == page;
+}
+function hasDot(page: string): boolean {
+  if (props.dots == null) return false;
+  const bare = page.charAt(0) == "/" ? page.substring(1) : page;
+  return props.dots.indexOf(bare) >= 0;
+}
+function goTab(page: string): void {
+  uni.switchTab({ url: page });
+}
+function goPage(page: string): void {
+  uni.navigateTo({ url: page });
+}
+</script>
+
+<style>
+.qsn {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 900;
+  width: 208px;
+  flex-shrink: 0;
+  padding: 14px 10px;
+  flex-direction: column;
+  align-items: stretch;
+  border-right-width: 1px;
+}
+.qsn-compact {
+  width: 64px;
+  padding: 14px 8px;
+  align-items: center;
+}
+.qsn-brand {
+  flex-direction: row;
+  align-items: center;
+  padding: 4px 8px 14px;
+}
+.qsn-logo {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+}
+.qsn-logo-compact {
+  margin-bottom: 14px;
+}
+.qsn-scroll {
+  flex: 1;
+  min-height: 0;
+}
+.qsn-brand-copy {
+  margin-left: 10px;
+  flex-direction: column;
+}
+.qsn-brand-name {
+  font-size: 17px;
+  font-weight: 700;
+}
+.qsn-brand-sub {
+  margin-top: 2px;
+  font-size: 11px;
+}
+.qsn-group {
+  flex-direction: column;
+}
+.qsn-item {
+  height: 44px;
+  margin-bottom: 2px;
+  padding: 0 12px;
+  flex-direction: row;
+  align-items: center;
+  border-radius: 10px;
+}
+.qsn-dot {
+  position: absolute;
+  top: 12px;
+  right: 10px;
+  width: 8px;
+  height: 8px;
+  border-radius: 4px;
+  background-color: #ff4b4b;
+}
+.qsn-label {
+  margin-left: 10px;
+  font-size: 14px;
+  font-weight: 500;
+}
+.qsn-divider {
+  height: 1px;
+  margin: 10px 8px;
+}
+</style>

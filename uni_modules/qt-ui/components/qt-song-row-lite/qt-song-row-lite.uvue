@@ -1,0 +1,161 @@
+<!--
+  统一内敛歌曲行（list-view 虚拟滚动安全版）
+  - 纯展示组件：仅由 props 驱动，无任何内部可变状态
+  - 为什么不用 qt-song-row：qt-song-row 内部含有 qt-action-sheet（sheetVisible 状态），
+    在 list-view 复用时该状态不会重置，导致首条颤抖/错乱。本组件剔除所有内部状态，
+    供 list-view 长列表使用，复用安全。
+  - 交互：整行点击触发 @play 播放。
+  用法：
+    <qt-song-row-lite :song="song" :showBadge="false" @play="play(song)" />
+-->
+<template>
+  <view
+    class="lite-row"
+    :class="layout.isWide ? 'lite-row-wide' : ''"
+    :style="'background-color:' + themeStore.skin.surface + ';border-top-color:' + themeStore.skin.divider + ';'"
+    @click="emit('play')"
+  >
+    <view class="lite-cover-wrap" :class="layout.isWide ? 'lite-cover-wrap-wide' : ''">
+      <image class="lite-cover" :class="layout.isWide ? 'lite-cover-wide' : ''" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
+      <view v-if="showBadge" class="lite-badge" :class="layout.isWide ? 'lite-badge-wide' : ''" :style="badgeStyle">
+        <text class="lite-badge-text" :class="layout.isWide ? 'lite-badge-text-wide' : ''" :style="'color:#ffffff;'">{{ shortName(song.platform) }}</text>
+      </view>
+    </view>
+    <view class="lite-info">
+      <text
+        class="lite-name" :class="layout.isWide ? 'lite-name-wide' : ''"
+        :style="'color:' + themeStore.skin.text + ';'"
+        :max-lines="1"
+        >{{ song.name }}</text
+      >
+      <text
+        class="lite-meta" :class="layout.isWide ? 'lite-meta-wide' : ''"
+        :style="'color:' + themeStore.skin.textMuted + ';'"
+        :max-lines="1"
+        >{{ song.singer }}{{ song.album.length > 0 ? " - " + song.album : "" }}</text
+      >
+    </view>
+    <view class="lite-actions" :class="layout.isWide ? 'lite-actions-wide' : ''">
+      <QtIcon
+        class="lite-heart" :class="layout.isWide ? 'lite-heart-wide' : ''"
+        :name="liked ? 'heart-fill' : 'heart'"
+        :size="layout.isWide ? 24 : 40"
+        :color="liked ? themeStore.skin.accent : themeStore.skin.iconMuted"
+        @click.stop="props.usePicker ? emit('pick', props.song, $event) : toggleLike()"
+      />
+      <QtIcon
+        class="lite-more" :class="layout.isWide ? 'lite-more-wide' : ''"
+        name="more"
+        :size="layout.isWide ? 24 : 40"
+        :color="themeStore.skin.iconMuted"
+        @click.stop="emit('more', props.song)"
+      />
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed } from "vue";
+import type { Song } from "@/types/music";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { usePlayerStore } from "@/stores/player";
+import { platformShort, platformColor } from "@/services/platform";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+
+const props = defineProps<{
+  song: Song;
+  showBadge?: boolean;
+  usePicker?: boolean;
+}>();
+const emit = defineEmits<{ play: []; more: [Song]; pick: [Song, any] }>();
+
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+const player = usePlayerStore();
+
+const liked = computed(() => player.isLiked(props.song));
+
+const badgeStyle = computed(
+  (): string => "background-color:" + platformColor(props.song.platform) + ";"
+);
+
+/**
+ * 红心：不再有内置的「我喜欢的歌曲」，收藏必须落到用户自建的歌单上，
+ * 所以点红心 = 「选一个歌单收进去」。
+ * 宿主页面提供了歌单选择器（usePicker）时交给它弹，
+ * 否则就地列出本地歌单；一个歌单都没有时提示先新建。
+ */
+function toggleLike(): void {
+  if (props.usePicker) {
+    emit('pick', props.song, undefined);
+    return;
+  }
+  player.showPlaylistPickerFor(props.song);
+}
+
+function shortName(platform: string): string {
+  return platformShort(platform);
+}
+</script>
+
+<style>
+.lite-row {
+  height: 128rpx;
+  padding: 0 32rpx;
+  flex-direction: row;
+  align-items: center;
+  border-top-width: 1px;
+}
+.lite-cover-wrap {
+  position: relative;
+  margin-right: 22rpx;
+}
+.lite-cover {
+  width: 88rpx;
+  height: 88rpx;
+  border-radius: 12rpx;
+}
+.lite-badge {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  padding: 2rpx 10rpx;
+  border-radius: 0 8rpx 0 12rpx;
+}
+.lite-badge-text {
+  font-size: 18rpx;
+}
+.lite-info {
+  flex: 1;
+  overflow: hidden;
+}
+.lite-name {
+  font-size: 29rpx;
+  font-weight: 500;
+  text-overflow: ellipsis;
+}
+.lite-meta {
+  margin-top: 10rpx;
+  font-size: 23rpx;
+  text-overflow: ellipsis;
+}
+.lite-actions {
+  flex-direction: row;
+  align-items: center;
+}
+.lite-heart {
+  margin-right: 18rpx;
+}
+
+.lite-row-wide { height: 82px; padding-left: 24px; padding-right: 24px; }
+.lite-cover-wrap-wide { margin-right: 16px; }
+.lite-cover-wide { width: 58px; height: 58px; border-radius: 10px; }
+.lite-name-wide { font-size: 17px; }
+.lite-meta-wide { margin-top: 6px; font-size: 14px; }
+.lite-actions-wide { min-width: 78px; }
+.lite-heart-wide { margin-right: 12px; }
+.lite-more-wide { margin-right: 0; }
+.lite-badge-wide { padding: 2px 6px; border-radius: 0 4px 0 6px; }
+.lite-badge-text-wide { font-size: 10px; }
+</style>

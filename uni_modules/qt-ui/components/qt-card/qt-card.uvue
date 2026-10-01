@@ -1,0 +1,64 @@
+<template>
+  <view
+    class="qt-card"
+    :class="variantClass"
+    :style="cardStyle"
+  >
+    <view v-if="title.length > 0 || description.length > 0" class="qt-card-header">
+      <text v-if="title.length > 0" class="qt-card-title" :style="'color:' + theme.skin.text + ';'">{{ title }}</text>
+      <text v-if="description.length > 0" class="qt-card-description" :style="'color:' + theme.skin.textMuted + ';'">{{ description }}</text>
+    </view>
+    <slot />
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed } from "vue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+
+const props = defineProps<{
+  title?: string;
+  description?: string;
+  variant?: "default" | "muted" | "outline";
+  elevated?: boolean;
+}>();
+const theme = useThemeStore();
+const title = computed((): string => props.title != null ? props.title! : "");
+const description = computed((): string => props.description != null ? props.description! : "");
+const variantClass = computed((): string => "qt-card-" + (props.variant != null ? props.variant! : "default"));
+const cardStyle = computed((): string => {
+  let style = "border-color:" + theme.skin.border + ";";
+  if (props.variant == "outline") style += "background-color:transparent;";
+  else if (props.variant == "muted") style += "background-color:" + theme.skin.surfaceMuted + ";";
+  else style += "background-color:" + theme.skin.surface + ";";
+  if (props.elevated == true) style += "box-shadow:" + theme.skin.shadow + ";";
+  return style;
+});
+</script>
+
+<style>
+/*
+  卡片度量全部用 px：Vapor 运行时只把 rpx 样式登记进页面的待重算集合，
+  布局回调遍历该集合时若有新登记就会并发修改异常（详见 pages/desktop-lyric/index.uvue 顶部注释）。
+  pages.json 里 rpxCalcBaseDeviceWidth=375 / rpxCalcMaxDeviceWidth=500，
+  窗口超过 500dp 后 1rpx = 0.5px，因此这些 px 值在宽屏上与原来的 rpx 渲染完全一致。
+*/
+.qt-card {
+  border-width: 1px;
+  border-radius: 12px;
+  padding: 14px;
+  overflow: hidden;
+}
+.qt-card-header {
+  margin-bottom: 11px;
+}
+.qt-card-title {
+  font-size: 15px;
+  font-weight: 650;
+}
+.qt-card-description {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 17px;
+}
+</style>

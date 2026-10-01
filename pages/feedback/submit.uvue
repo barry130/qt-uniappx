@@ -1,0 +1,243 @@
+<template>
+  <qt-page-frame :max-width="640">
+  <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']">
+    <scroll-view class="scroll" :class="layout.isWide ? 'scroll-wide' : ''" direction="vertical" :show-scrollbar="false">
+      <!-- 类型选择 -->
+      <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
+        <text class="label" :class="layout.isWide ? 'label-wide' : ''">反馈类型</text>
+        <QtSegmented
+          class="type-seg" :class="[[layout.isWide ? 'type-seg-wide' : ''], layout.isWide ? 'type-seg-wide' : '']"
+          
+          :list="['问题', '需求']"
+          :modelValue="typeIndex"
+          @change="onTypeChange"
+        />
+        <text class="hint" :class="layout.isWide ? 'hint-wide' : ''">{{ type == "issue" ? "功能异常、体验问题等" : "新功能、改进建议等" }}</text>
+      </view>
+
+      <!-- 标题 -->
+      <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
+        <text class="label" :class="layout.isWide ? 'label-wide' : ''">标题</text>
+        <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+          <input
+            :value="title"
+            @input="onTitleInput"
+            class="field-input" :class="[[layout.isWide ? 'field-input-wide' : ''], layout.isWide ? 'field-input-wide' : '']"
+            
+            placeholder="一句话描述您的问题或需求"
+            :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
+            :maxlength="128"
+          />
+        </view>
+        <text class="hint" :class="layout.isWide ? 'hint-wide' : ''">{{ title.length }}/128</text>
+      </view>
+
+      <!-- 内容 -->
+      <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
+        <text class="label" :class="layout.isWide ? 'label-wide' : ''">内容</text>
+        <view class="textarea-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'textarea-row-wide' : '']">
+          <textarea
+            :value="content"
+            @input="onContentInput"
+            class="field-textarea" :class="[[layout.isWide ? 'field-textarea-wide' : ''], layout.isWide ? 'field-textarea-wide' : '']"
+            
+            placeholder="详细描述，例如：在哪个页面、做了什么操作、出现了什么情况"
+            :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
+            :maxlength="5000"
+          />
+        </view>
+        <text class="hint" :class="layout.isWide ? 'hint-wide' : ''">{{ content.length }}/5000</text>
+      </view>
+
+      <!-- 联系方式（选填） -->
+      <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
+        <text class="label" :class="layout.isWide ? 'label-wide' : ''">联系方式（选填）</text>
+        <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+          <input
+            :value="contact"
+            @input="onContactInput"
+            class="field-input" :class="[[layout.isWide ? 'field-input-wide' : ''], layout.isWide ? 'field-input-wide' : '']"
+            
+            placeholder="邮箱 / QQ / 微信，方便回访"
+            :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
+            :maxlength="64"
+          />
+        </view>
+      </view>
+
+      <view class="submit-wrap" :class="layout.isWide ? 'submit-wrap-wide' : ''">
+        <qt-button label="提交反馈" size="lg" :disabled="submitting" @click="doSubmit" />
+        <text class="privacy" :class="layout.isWide ? 'privacy-wide' : ''">提交后设备信息与版本号将一并上传，便于定位问题</text>
+      </view>
+    </scroll-view>
+  </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { ref, computed, onUnmounted } from "vue";
+import { onLoad } from "@dcloudio/uni-app";
+import QtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { submitFeedback } from "@/services/feedback";
+import { qtTrackPage } from "@/uni_modules/qt-stat";
+
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+
+const typeIndex = ref(0);
+const type = computed(() => (typeIndex.value == 1 ? "request" : "issue"));
+const title = ref("");
+const content = ref("");
+const contact = ref("");
+const submitting = ref(false);
+/** 提交成功后延迟返回的定时器：页面卸载时必须清掉，避免在已注销的实例上触发回调 */
+let submitNavTimer: number | null = null;
+
+function onTypeChange(index: number): void {
+  typeIndex.value = index;
+}
+
+function onTitleInput(e: InputEvent): void {
+  title.value = String((e.detail as any).value ?? "");
+}
+function onContentInput(e: InputEvent): void {
+  content.value = String((e.detail as any).value ?? "");
+}
+function onContactInput(e: InputEvent): void {
+  contact.value = String((e.detail as any).value ?? "");
+}
+
+async function doSubmit(): Promise<void> {
+  if (submitting.value) return;
+  const t = title.value.trim();
+  const c = content.value.trim();
+  if (t.length == 0) {
+    uni.showToast({ title: "请填写标题", icon: "none" });
+    return;
+  }
+  if (c.length == 0) {
+    uni.showToast({ title: "请填写内容", icon: "none" });
+    return;
+  }
+  submitting.value = true;
+  try {
+    await submitFeedback(type.value, t, c, contact.value.trim());
+    uni.showToast({ title: "提交成功", icon: "success" });
+    submitNavTimer = setTimeout(() => {
+      uni.navigateBack();
+    }, 600) as number;
+  } catch (e) {
+    uni.showToast({ title: (e as Error).message || "提交失败", icon: "none" });
+  } finally {
+    submitting.value = false;
+  }
+}
+
+onLoad(() => {
+  qtTrackPage("pages/feedback/submit");
+});
+onUnmounted(() => {
+  if (submitNavTimer != null) {
+    clearTimeout(submitNavTimer);
+    submitNavTimer = null;
+  }
+});
+</script>
+
+<style>
+.page {
+  flex: 1;
+}
+
+.scroll {
+  flex: 1;
+}
+.card {
+  margin: 20rpx 24rpx 0;
+  padding: 28rpx 24rpx;
+  background-color: rgba(255, 255, 255, 0.62);
+  border-width: 1px;
+  border-color: rgba(255, 255, 255, 0.6);
+  border-radius: 20rpx;
+}
+.card-dark {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+.label {
+  color: #191d26;
+  font-size: 27rpx;
+  font-weight: 600;
+}
+.type-seg {
+  margin-top: 18rpx;
+}
+.field-row {
+  margin-top: 18rpx;
+  flex-direction: row;
+  align-items: center;
+  height: 88rpx;
+  padding: 0 24rpx;
+  background-color: #f4f5fa;
+  border-radius: 16rpx;
+}
+.field-row-dark {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+.textarea-row {
+  margin-top: 18rpx;
+  padding: 20rpx 24rpx;
+  background-color: #f4f5fa;
+  border-radius: 16rpx;
+}
+.field-input {
+  flex: 1;
+  height: 88rpx;
+  color: #191d26;
+  font-size: 27rpx;
+}
+.field-textarea {
+  width: 100%;
+  height: 240rpx;
+  color: #191d26;
+  font-size: 27rpx;
+  line-height: 1.5;
+}
+.field-ph {
+  color: #6b7385;
+  font-size: 26rpx;
+}
+.hint {
+  margin-top: 12rpx;
+  color: #6b7385;
+  font-size: 22rpx;
+}
+.submit-wrap {
+  padding: 40rpx 48rpx 60rpx;
+}
+/* 提交按钮样式由 qt-button 组件承担（accent 跟随主题皮肤），此处的 .submit/.submit-wide 为遗留死样式已移除 */
+.privacy {
+  margin-top: 20rpx;
+  color: #6b7385;
+  font-size: 22rpx;
+  text-align: center;
+}
+
+/* Vapor 宽屏：px 覆盖 rpx，1600x900 下避免按窗口比例放大 2.7 倍 */
+.page-wide { align-items: center; }
+.scroll-wide { width: 420px; }
+.card-wide { width: 420px; margin: 14px 0 0; padding: 20px; border-radius: 14px; }
+.label-wide { font-size: 16px; }
+.type-seg-wide { margin-top: 12px; }
+.hint-wide { margin-top: 8px; font-size: 12px; }
+.field-row-wide { margin-top: 12px; height: 52px; padding: 0 18px; border-radius: 12px; }
+.textarea-row-wide { margin-top: 12px; padding: 14px 18px; border-radius: 12px; }
+.field-input-wide { height: 52px; font-size: 16px; }
+.field-textarea-wide { height: 140px; font-size: 15px; }
+.field-ph-wide { font-size: 15px; }
+.submit-wrap-wide { padding: 24px 0 40px; }
+.privacy-wide { margin-top: 10px; font-size: 12px; }
+</style>

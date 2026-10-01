@@ -1,0 +1,520 @@
+<template>
+  <qt-page-frame :max-width="1360">
+    <view class="page">
+      <!-- 歌单区标题 + 操作 -->
+      <view class="pl-head" :class="layout.isWide ? 'pl-head-wide' : ''">
+          <view class="pl-head-copy">
+            <text class="pl-kicker" :style="'color:' + themeStore.skin.accent + ';'">COLLECTION</text>
+            <view class="pl-head-title-row">
+              <text class="pl-head-title" :class="layout.isWide ? 'pl-head-title-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">我的收藏歌单</text>
+              <view v-if="allPlaylists.length > 0" class="pl-count-pill" :class="layout.isWide ? 'pl-count-pill-wide' : ''" :style="chipStyle">
+                <text class="pl-count-text" :class="layout.isWide ? 'pl-count-text-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">{{ allPlaylists.length }}</text>
+              </view>
+            </view>
+          </view>
+          <view class="pl-actions">
+            <view class="import-btn" :class="layout.isWide ? 'import-btn-wide' : ''" :style="ghostBtnStyle" @click="goImport">
+              <QtIcon name="download" :size="layout.isWide ? 14 : 22" :color="themeStore.skin.iconMuted" />
+              <text class="import-btn-text" :class="layout.isWide ? 'import-btn-text-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">导入</text>
+            </view>
+            <view class="create-btn" :class="layout.isWide ? 'create-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @click="createPlaylist">
+              <QtIcon name="folder" :size="layout.isWide ? 14 : 22" :color="themeStore.skin.onAccent" />
+              <text class="create-btn-text" :class="layout.isWide ? 'create-btn-text-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">新建</text>
+            </view>
+          </view>
+        </view>
+
+        <!-- 所有歌单合并（自建 + 收藏） -->
+      <scroll-view class="list" direction="vertical" :scroll-top="scrollTop" @scroll="onListScroll">
+          <view v-if="allPlaylists.length > 0" class="pl-grid">
+            <view
+              v-for="pl in allPlaylists"
+              :key="pl.id + pl.platform"
+              class="pl-item" :class="layout.isWide ? 'pl-item-wide' : ''"
+              :style="plItemStyle"
+              @click="openPlaylist(pl)"
+              @longpress="onPlaylistLongPress(pl)"
+            >
+              <view class="pl-cover-wrap" :class="layout.isWide ? 'pl-cover-wrap-wide' : ''" :style="plCoverStyle">
+                <image v-if="pl.picUrl.length > 0" class="pl-cover" :class="layout.isWide ? 'pl-cover-wide' : ''" :style="plCoverStyle" :src="pl.picUrl" mode="aspectFill" />
+                <image v-else class="pl-cover" :class="layout.isWide ? 'pl-cover-wide' : ''" :style="plCoverStyle" :src="DEFAULT_PLAYLIST_COVER_ASSET" mode="aspectFill" />
+                <view
+                  class="pl-badge" :class="layout.isWide ? 'pl-badge-wide' : ''"
+                  :style="'background-color:' + (pl.platform === 'local' ? '#8b93a7' : platformColor(pl.platform))"
+                >
+                  <text class="pl-badge-text" :class="layout.isWide ? 'pl-badge-text-wide' : ''">{{ pl.platform === 'local' ? '本地' : platformShort(pl.platform) }}</text>
+                </view>
+              </view>
+              <text class="pl-name" :class="layout.isWide ? 'pl-name-wide' : ''" :style="'color:' + themeStore.skin.text + ';'" :max-lines="2">{{ pl.name }}</text>
+            </view>
+          </view>
+          <view v-else class="empty" :class="layout.isWide ? 'empty-wide' : ''">
+            <view class="empty-chip" :class="layout.isWide ? 'empty-chip-wide' : ''" :style="chipStyle">
+              <QtIcon name="heart" :size="layout.isWide ? 36 : 64" :color="themeStore.skin.accent" />
+            </view>
+            <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">还没有收藏歌单</text>
+            <text class="empty-sub" :class="layout.isWide ? 'empty-sub-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';'">在发现页找到喜欢的歌单，点收藏即可出现在这里</text>
+            <view class="empty-actions">
+              <view class="empty-ghost" :class="layout.isWide ? 'empty-ghost-wide' : ''" :style="ghostBtnStyle" @click="createPlaylist">
+                <QtIcon name="folder" :size="layout.isWide ? 16 : 28" :color="themeStore.skin.text" />
+                <text class="empty-ghost-text" :class="layout.isWide ? 'empty-ghost-text-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">新建歌单</text>
+              </view>
+              <view class="empty-primary" :class="layout.isWide ? 'empty-primary-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @click="discover">
+                <QtIcon name="compass" :size="layout.isWide ? 16 : 28" :color="themeStore.skin.onAccent" />
+                <text class="empty-primary-text" :class="layout.isWide ? 'empty-primary-text-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">去发现音乐</text>
+              </view>
+            </view>
+          </view>
+        </scroll-view>
+      <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+      <MiniPlayer />
+    </view>
+  </qt-page-frame>
+</template><script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { computed, ref } from "vue";
+import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { usePlayerStore } from "@/stores/player";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { platformShort, platformColor } from "@/services/platform";
+import {
+  uploadPlaylistCover, clearPlaylistCover, chooseImage,
+  DEFAULT_PLAYLIST_COVER_ASSET,
+} from "@/services/media";
+import { getAccessToken } from "@/services/auth";
+
+const player = usePlayerStore();
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+
+const chipStyle = computed<string>(() => "background-color:" + themeStore.skin.accentSoft + ";");
+const ghostBtnStyle = computed<string>(() =>
+  "background-color:" + themeStore.skin.surfaceMuted + ";border-color:" + themeStore.skin.border + ";"
+);
+
+// 回到顶部
+const scrollTop = ref(0);
+const showBackToTop = ref(false);
+function onListScroll(e: any) {
+  const st = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
+  showBackToTop.value = st > 600;
+}
+function backToTop() {
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  showBackToTop.value = false;
+}
+const allPlaylists = computed(() => {
+  const locals = player.localPlaylists.map(p => ({ ...p, isLocal: true }));
+  const saveds = player.savedPlaylists.map(p => ({ ...p, isLocal: false }));
+  return [...locals, ...saveds];
+});
+
+/**
+ * 歌单卡宽（inline px，随窗口实时缩放）：三列起，卡宽 < 92px 退化两列。
+ */
+const plCardWidth = computed<number>(() => {
+  const win = layout.windowWidth;
+  const inner = layout.isWide ? Math.min(win, 1360) - 52 : win - win * (48 / 750);
+  const gap = win * (14 / 750);
+  const cols = layout.isWide ? 4 : 3;
+  const w = Math.floor((inner - gap * cols) / cols);
+  if (layout.isWide) return Math.min(226, w);
+  const three = Math.floor((inner - gap * 3) / 3);
+  const two = Math.floor((inner - gap * 2) / 2);
+  return three >= 92 ? three : two;
+});
+const plItemStyle = computed<string>(() => "width:" + plCardWidth.value + "px;");
+const plCoverStyle = computed<string>(() => "width:" + plCardWidth.value + "px;height:" + plCardWidth.value + "px;");
+
+function openPlaylist(pl: { id: string; platform: string }): void {
+  uni.navigateTo({
+    url:
+      "/pages/playlist/index?id=" +
+      encodeURIComponent(pl.id) +
+      "&platform=" +
+      encodeURIComponent(pl.platform) +
+      "&type=playlist",
+  });
+}
+
+// ==================== 歌单封面（UPDATE_DESIGN.md §5.3） ====================
+// 长按收藏的在线歌单 → ActionSheet 换封面/恢复默认。文件客户端直传存储端，
+// 登记成功后服务端已是新 URL，这里只同步本地缓存；每日所有歌单合计限次由服务端策略控制。
+
+const coverBusy = ref(false);
+
+function onPlaylistLongPress(pl: { id: string; platform: string; picUrl: string; isLocal: boolean }): void {
+  // 本地歌单的封面只是本机展示字段，服务端歌单行是收藏元数据，开放换封面会引起同步歧义
+  if (pl.isLocal) return;
+  if (getAccessToken().length === 0) {
+    uni.showToast({ title: "登录后才能更换封面", icon: "none" });
+    return;
+  }
+  // 自定义封面 = 我们对象键（astral/{publicId}/v1/…）下的直链，此时提供恢复默认入口
+  const isCustom = pl.picUrl.indexOf("/astral/") >= 0;
+  uni.showActionSheet({
+    itemList: isCustom ? ["更换封面", "恢复默认封面"] : ["更换封面"],
+    success: (sel) => {
+      const idx = sel != null && sel.tapIndex != null ? (sel.tapIndex as number) : -1;
+      if (idx === 0) changeCover(pl);
+      else if (idx === 1) restoreCover(pl);
+    },
+  });
+}
+
+async function changeCover(pl: { id: string; platform: string }): Promise<void> {
+  if (coverBusy.value) return;
+  let path = "";
+  try {
+    path = await chooseImage();
+  } catch (_) {
+    return; // 用户取消选图
+  }
+  coverBusy.value = true;
+  uni.showLoading({ title: "上传中..." });
+  try {
+    const url = await uploadPlaylistCover(pl.id, pl.platform, path);
+    player.setSavedPlaylistCover(pl.platform, pl.id, url);
+    uni.hideLoading();
+    uni.showToast({ title: "封面已更新", icon: "none" });
+  } catch (e) {
+    uni.hideLoading();
+    uni.showToast({ title: (e as Error).message || "上传失败", icon: "none", duration: 3000 });
+  } finally {
+    coverBusy.value = false;
+  }
+}
+
+async function restoreCover(pl: { id: string; platform: string }): Promise<void> {
+  if (coverBusy.value) return;
+  coverBusy.value = true;
+  uni.showLoading({ title: "处理中..." });
+  try {
+    await clearPlaylistCover(pl.id, pl.platform);
+    player.setSavedPlaylistCover(pl.platform, pl.id, "");
+    uni.hideLoading();
+    uni.showToast({ title: "已恢复默认封面", icon: "none" });
+  } catch (e) {
+    uni.hideLoading();
+    uni.showToast({ title: (e as Error).message || "操作失败", icon: "none", duration: 3000 });
+  } finally {
+    coverBusy.value = false;
+  }
+}
+function discover() {
+  uni.switchTab({ url: "/pages/home/index" });
+}
+function createPlaylist(): void {
+  uni.showModal({
+    title: '新建歌单',
+    editable: true,
+    placeholderText: '请输入歌单名称',
+    success: (res) => {
+      if (res.confirm) {
+        const name = res.content != null ? res.content.trim() : '';
+        if (name.length === 0) {
+          uni.showToast({ title: '歌单名称不能为空', icon: 'none' });
+          return;
+        }
+        const created = player.createLocalPlaylist(name);
+        if (created == null) {
+          uni.showToast({ title: '该歌单名称已存在', icon: 'none' });
+          return;
+        }
+        uni.showToast({ title: '已创建歌单', icon: 'none' });
+      }
+    }
+  });
+}
+
+/** 打开导入页（拷贝歌曲进自建歌单 / 收藏远程歌单，两种方式在页内切换） */
+function goImport(): void {
+  uni.navigateTo({ url: "/pages/playlist-import/index" });
+}
+</script>
+<style>
+/* ===== 基础布局 ===== */
+.page {
+  flex: 1;
+  min-height: 0;
+  padding: 24rpx 24rpx 0;
+}
+.page-wide {
+  padding: 20px 26px 0;
+}
+
+/* ===== 滚动列表（flex + min-height 才能获得有界高度，否则整页不可滚） ===== */
+.list {
+  flex: 1;
+  min-height: 0;
+  margin-top: 20rpx;
+}
+
+/* ===== 歌单区标题 + 操作 ===== */
+.pl-head {
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 26rpx;
+}
+.pl-head-wide {
+  margin-bottom: 20px;
+}
+.pl-head-copy {
+  flex-direction: column;
+}
+.pl-kicker {
+  font-size: 21rpx;
+  font-weight: 800;
+  letter-spacing: 2rpx;
+  margin-bottom: 6rpx;
+}
+.pl-head-title-row {
+  flex-direction: row;
+  align-items: center;
+}
+.pl-head-title {
+  font-size: 36rpx;
+  font-weight: 800;
+}
+.pl-head-title-wide {
+  font-size: 24px;
+}
+.pl-count-pill {
+  padding: 4rpx 16rpx;
+  border-radius: 22rpx;
+  margin-left: 14rpx;
+}
+.pl-count-pill-wide {
+  margin-left: 12px;
+  padding: 3px 12px;
+  border-radius: 14px;
+}
+.pl-count-text {
+  font-size: 24rpx;
+  font-weight: 700;
+}
+.pl-count-text-wide {
+  font-size: 14px;
+}
+.pl-actions {
+  flex-direction: row;
+  align-items: center;
+}
+.import-btn {
+  flex-direction: row;
+  align-items: center;
+  height: 64rpx;
+  padding: 0 20rpx;
+  margin-right: 12rpx;
+  border-radius: 32rpx;
+  border-width: 1rpx;
+}
+.import-btn-wide {
+  height: 34px;
+  padding: 0 14px;
+  margin-right: 10px;
+  border-radius: 17px;
+}
+.import-btn-text {
+  font-size: 23rpx;
+  font-weight: 500;
+  margin-left: 5rpx;
+}
+.import-btn-text-wide {
+  font-size: 13px;
+  margin-left: 5px;
+}
+.create-btn {
+  flex-direction: row;
+  align-items: center;
+  height: 64rpx;
+  padding: 0 22rpx;
+  border-radius: 32rpx;
+}
+.create-btn-wide {
+  height: 34px;
+  padding: 0 16px;
+  border-radius: 17px;
+}
+.create-btn-text {
+  font-size: 23rpx;
+  font-weight: 600;
+  margin-left: 5rpx;
+}
+.create-btn-text-wide {
+  font-size: 13px;
+  margin-left: 5px;
+}
+
+/* ===== 歌单网格 ===== */
+.pl-grid {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.pl-item {
+  width: 220rpx;
+  /* 实际宽度由 plCardWidth 按窗口实时计算（inline px），rpx 仅为兜底 */
+  margin-right: 14rpx;
+  margin-bottom: 36rpx;
+}
+.pl-item-wide {
+  width: 226px;
+  margin-right: 20px;
+  margin-bottom: 30px;
+}
+.pl-cover-wrap {
+  position: relative;
+  width: 220rpx;
+  height: 220rpx;
+  border-radius: 24rpx;
+  overflow: hidden;
+  background-color: rgba(25,29,38,0.06);
+}
+.pl-cover-wrap-wide {
+  width: 226px;
+  height: 226px;
+  border-radius: 18px;
+}
+.pl-cover {
+  width: 220rpx;
+  height: 220rpx;
+  border-radius: 24rpx;
+}
+.pl-cover-wide {
+  width: 226px;
+  height: 226px;
+  border-radius: 18px;
+}
+.pl-cover-empty {
+  align-items: center;
+  justify-content: center;
+}
+.pl-badge {
+  position: absolute;
+  top: 10rpx;
+  right: 10rpx;
+  padding: 7rpx 13rpx;
+  border-radius: 14rpx;
+}
+.pl-badge-wide {
+  top: 8px;
+  right: 8px;
+  padding: 5px 10px;
+  border-radius: 12px;
+}
+.pl-badge-text {
+  color: #ffffff;
+  font-size: 22rpx;
+  line-height: 1.2;
+}
+.pl-badge-text-wide {
+  font-size: 12px;
+}
+.pl-name {
+  margin-top: 16rpx;
+  font-size: 28rpx;
+  font-weight: 600;
+  line-height: 1.36;
+  text-overflow: ellipsis;
+}
+.pl-name-wide {
+  margin-top: 12px;
+  font-size: 16px;
+  line-height: 1.36;
+}
+
+/* ===== 空状态 ===== */
+.empty {
+  padding: 140rpx 0 60rpx;
+  align-items: center;
+  justify-content: center;
+}
+.empty-wide {
+  padding: 100px 0 50px;
+}
+.empty-chip {
+  width: 144rpx;
+  height: 144rpx;
+  border-radius: 44rpx;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 34rpx;
+}
+.empty-chip-wide {
+  width: 96px;
+  height: 96px;
+  border-radius: 30px;
+  margin-bottom: 26px;
+}
+.empty-text {
+  font-size: 32rpx;
+  font-weight: 700;
+}
+.empty-text-wide {
+  font-size: 20px;
+}
+.empty-sub {
+  font-size: 24rpx;
+  margin-top: 12rpx;
+  text-align: center;
+}
+.empty-sub-wide {
+  font-size: 14px;
+  margin-top: 10px;
+}
+.empty-actions {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  margin-top: 44rpx;
+}
+.empty-ghost {
+  flex-direction: row;
+  align-items: center;
+  height: 80rpx;
+  padding: 0 32rpx;
+  border-radius: 40rpx;
+  border-width: 1rpx;
+  margin-right: 18rpx;
+}
+.empty-ghost-wide {
+  height: 52px;
+  padding: 0 24px;
+  border-radius: 26px;
+  margin-right: 14px;
+}
+.empty-ghost-text {
+  font-size: 28rpx;
+  font-weight: 500;
+  margin-left: 8rpx;
+}
+.empty-ghost-text-wide {
+  font-size: 16px;
+  margin-left: 7px;
+}
+.empty-primary {
+  flex-direction: row;
+  align-items: center;
+  height: 80rpx;
+  padding: 0 34rpx;
+  border-radius: 40rpx;
+}
+.empty-primary-wide {
+  height: 52px;
+  padding: 0 26px;
+  border-radius: 26px;
+}
+.empty-primary-text {
+  font-size: 28rpx;
+  font-weight: 600;
+  margin-left: 8rpx;
+}
+.empty-primary-text-wide {
+  font-size: 16px;
+  margin-left: 7px;
+}
+</style>

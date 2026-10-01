@@ -1,0 +1,817 @@
+/**
+ * 桌面歌词悬浮窗（Android 端，纯 UTS）
+ *
+ * 形态：TYPE_APPLICATION_OVERLAY 悬浮窗，垂直 LinearLayout 内两行 TextView
+ * （当前歌词行 + 可选翻译行），文字白色加黑色阴影保证任意壁纸上可读。
+ * 拖动：OnTouchListener 按下-移动更新窗口位置，松手持久化到 SharedPreferences；
+ *       锁定时置 FLAG_NOT_TOUCHABLE（点击穿透到下层应用，仅展示）。
+ * 数据：JS 端算好当前行文本后调用 nativeUpdateLyricWindow 推送，原生只负责画出来，
+ *       无需自己解析 LRC。
+ *
+ * 注意：悬浮窗的 add/remove/updateViewLayout 必须都在主线程执行（WindowManager 要求），
+ *       因此所有入口方法内部统一 post 到主线程 Handler。
+ */
+
+import { UTSAndroid } from 'io.dcloud.uts'
+import type { AudioPlayerStateCallback } from '../interface.uts'
+
+import Build from 'android.os.Build'
+import Context from 'android.content.Context'
+import Intent from 'android.content.Intent'
+import ComponentName from 'android.content.ComponentName'
+import Uri from 'android.net.Uri'
+import Settings from 'android.provider.Settings'
+import WindowManager from 'android.view.WindowManager'
+import View from 'android.view.View'
+import MotionEvent from 'android.view.MotionEvent'
+import Gravity from 'android.view.Gravity'
+import Color from 'android.graphics.Color'
+import TextPaint from 'android.text.TextPaint'
+import Canvas from 'android.graphics.Canvas'
+import LinearGradient from 'android.graphics.LinearGradient'
+import Shader from 'android.graphics.Shader'
+import System from 'java.lang.System'
+import TextView from 'android.widget.TextView'
+import LinearLayout from 'android.widget.LinearLayout'
+import FrameLayout from 'android.widget.FrameLayout'
+import Toast from 'android.widget.Toast'
+import PixelFormat from 'android.graphics.PixelFormat'
+import Typeface from 'android.graphics.Typeface'
+import TypedValue from 'android.util.TypedValue'
+import SharedPreferences from 'android.content.SharedPreferences'
+import Handler from 'android.os.Handler'
+import Looper from 'android.os.Looper'
+import Runnable from 'java.lang.Runnable'
+
+// ==================== 窗口状态 ====================
+
+let gLyricWindow: FrameLayout | null = null
+let gLyricText: QtLyricMarqueeView | null = null
+let gLyricTr: TextView | null = null
+let gWindowManager: WindowManager | null = null
+let gLyricHandler: Handler | null = null
+let gLocked: boolean = false
+let gFontSizeSp: number = 18
+let gTrFontSizeSp: number = 14
+// 歌词文字颜色（有符号 Int32 形态的 ARGB，JS 侧已把无符号值转成有符号再传；
+// Double.toInt() 超范围是饱和不是回绕，直接存无符号值会全变 0x7FFFFFFF 半透明白）
+let gTextColor: number = -1.0
+// 字体族下标：0 黑体 / 1 宋体 / 2 楷体 / 3 等宽（见 typefaceForIndex）
+let gTypefaceIndex: number = 0
+// 歌词窗宽度：屏宽百分比（50–95，默认 80）。窗口从 WRAP_CONTENT 改为固定宽度后，
+// 长行不再把窗口撑到整个屏宽再截断，配合自绘跑马灯做左右滚动 / 居中。
+let gWidthPct: number = 80
+let gWindowWidthPx: number = 0
+// 拖动坐标（屏幕像素）
+let gWinX: number = 0
+let gWinY: number = 0
+let gHasSavedPos: boolean = false
+
+const LYRIC_PREFS = 'qt-desktop-lyric'
+
+function lyricHandler(): Handler {
+  if (gLyricHandler == null) {
+    gLyricHandler = new Handler(Looper.getMainLooper())
+  }
+  return gLyricHandler!!
+}
+
+function lyricPrefs(): SharedPreferences | null {
+  const ctx = UTSAndroid.getAppContext()
+  if (ctx == null) return null
+  return ctx.getSharedPreferences(LYRIC_PREFS, Context.MODE_PRIVATE)
+}
+
+function loadSavedState(): void {
+  const prefs = lyricPrefs()
+  if (prefs == null) return
+  gWinX = prefs.getInt('x', 0)
+  gWinY = prefs.getInt('y', 0)
+  gLocked = prefs.getBoolean('locked', false)
+  gFontSizeSp = prefs.getInt('font_sp', 18)
+  gTrFontSizeSp = prefs.getInt('tr_font_sp', 14)
+  gHasSavedPos = prefs.getBoolean('has_pos', false)
+  gTextColor = prefs.getInt('color', -1) // 默认白色(-1 = 0xFFFFFFFF)
+  // 兼容旧版本写入的饱和值（0x7FFFFFFF 半透明白）：恢复为默认白，等用户重新选色
+  if (gTextColor == 2147483647.0) gTextColor = -1.0
+  gTypefaceIndex = prefs.getInt('tf', 0)
+  gWidthPct = prefs.getInt('width_pct', 80)
+  // 宽度百分比归一化到 50–95（旧值或非法值兜底）
+  if (!(gWidthPct >= 50)) gWidthPct = 80
+  if (gWidthPct > 95) gWidthPct = 95
+  // 旧版本坐标按「左上角锚点」存（gravity 0），左边缘固定导致文字视觉左右飘；
+  // 改水平居中 gravity 后 x 语义变为「相对屏幕中心的偏移」，旧 x 无法换算
+  // （当时窗口宽度未知），首读旧档丢弃 x 保留 y，直接落在水平居中位置；
+  // 之后拖动会以新语义连同 center_x 一起保存
+  if (gHasSavedPos && !prefs.getBoolean('center_x', false)) {
+    gWinX = 0
+  }
+}
+
+function savePos(): void {
+  const prefs = lyricPrefs()
+  if (prefs == null) return
+  try {
+    prefs.edit().putInt('x', gWinX.toInt()).putInt('y', gWinY.toInt()).putBoolean('has_pos', true).putBoolean('center_x', true).apply()
+  } catch (e) {
+    // 忽略持久化失败
+  }
+}
+
+function saveLocked(): void {
+  const prefs = lyricPrefs()
+  if (prefs == null) return
+  try {
+    prefs.edit().putBoolean('locked', gLocked).apply()
+  } catch (e) {
+    // 忽略
+  }
+}
+
+function saveFonts(): void {
+  const prefs = lyricPrefs()
+  if (prefs == null) return
+  try {
+    prefs.edit().putInt('font_sp', gFontSizeSp.toInt()).putInt('tr_font_sp', gTrFontSizeSp.toInt()).apply()
+  } catch (e) {
+    // 忽略
+  }
+}
+
+function saveColorTf(): void {
+  const prefs = lyricPrefs()
+  if (prefs == null) return
+  try {
+    prefs.edit().putInt('color', gTextColor.toInt()).putInt('tf', gTypefaceIndex.toInt()).apply()
+  } catch (e) {
+    // 忽略
+  }
+}
+
+function saveWidth(): void {
+  const prefs = lyricPrefs()
+  if (prefs == null) return
+  try {
+    prefs.edit().putInt('width_pct', gWidthPct.toInt()).apply()
+  } catch (e) {
+    // 忽略
+  }
+}
+
+/** dp → 像素（文档密度 160dpi 时 1dp = 1px） */
+function dpToPx(dp: number): number {
+  const ctx = UTSAndroid.getAppContext()
+  if (ctx == null) return dp.toInt()
+  const metrics = ctx.getResources()?.getDisplayMetrics()
+  if (metrics == null) return dp.toInt()
+  return (dp * metrics.density).toInt()
+}
+
+/** 歌词窗固定宽度（像素）= 屏宽 × 宽度百分比 */
+function windowWidthPx(): number {
+  const ctx = UTSAndroid.getAppContext()
+  if (ctx == null) return 0
+  const metrics = ctx.getResources()?.getDisplayMetrics()
+  if (metrics == null) return 0
+  return (metrics.widthPixels.toDouble() * gWidthPct / 100.0).toInt()
+}
+
+/**
+ * 按下标取字体族：0 黑体(sans-serif) / 1 宋体(serif) / 2 楷体(cursive) / 3 等宽(monospace)。
+ * 与 services/desktop-lyric.uts 的 LYRIC_FONTS 顺序一致；越界回黑体。
+ * 注：楷体多数机型未内置，Typeface 会自动回退到系统默认字体。
+ */
+function typefaceForIndex(index: number): Typeface {
+  const i = index.toInt()
+  if (i == 1) return Typeface.SERIF
+  if (i == 2) return Typeface.create('cursive', Typeface.NORMAL)
+  if (i == 3) return Typeface.MONOSPACE
+  return Typeface.SANS_SERIF
+}
+
+// ==================== 授权检查 ====================
+
+/** 是否已授予悬浮窗权限（特殊应用访问权限，不可运行时弹窗申请，只能跳系统设置页） */
+export function nativeHasOverlayPermission(): boolean {
+  const ctx = UTSAndroid.getAppContext()
+  if (ctx == null) return false
+  if (Build.VERSION.SDK_INT >= 23) {
+    return Settings.canDrawOverlays(ctx)
+  }
+  return true
+}
+
+/** 尝试拉起一个设置页：成功返回 true，ROM 不认这个页面（ActivityNotFoundException 等）返回 false */
+function tryStartSettings(ctx: Context, intent: Intent): boolean {
+  intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+  try {
+    ctx.startActivity(intent)
+    return true
+  } catch (e) {
+    return false
+  }
+}
+
+/** 厂商私有权限页 intent：包名用多个常见 extra 名同时带上，兼容各 ROM 的不同实现 */
+function romPermissionIntent(componentPkg: string, componentCls: string, targetPkg: string): Intent {
+  const intent = new Intent()
+  intent.setComponent(new ComponentName(componentPkg, componentCls))
+  intent.putExtra('packagename', targetPkg)
+  intent.putExtra('pkgname', targetPkg)
+  intent.putExtra('extra_pkgname', targetPkg)
+  intent.putExtra('tabId', '1')
+  return intent
+}
+
+/**
+ * 打开系统「悬浮窗 / 显示在其他应用上层」授权页。
+ *
+ * 各 ROM 对这个 action 的支持差别极大：vivo(OriginOS/iQOO) 不处理带包名的
+ * ACTION_MANAGE_OVERLAY_PERMISSION —— 要么抛 ActivityNotFoundException，要么打开一个
+ * 根本没有本应用开关的空白页；vivo 的悬浮窗开关实际在 i管家(com.vivo.permissionmanager) 里，
+ * 小米/OPPO/华为也各有私有页。所以这里按「厂商私有页 → AOSP 页 → 应用详情页」逐级降级，
+ * 保证最后一定落到一个能进「权限」的页面，不再出现「点了没反应 / 打开也授不了权」。
+ *
+ * 返回是否成功拉起过某个设置页；false 时调用方应提示用户手动前往设置。
+ */
+export function nativeRequestOverlayPermission(): boolean {
+  const activity = UTSAndroid.getUniActivity()
+  const ctx: Context | null = activity != null ? activity : UTSAndroid.getAppContext()
+  if (ctx == null) return false
+  // Android 6 以下 SYSTEM_ALERT_WINDOW 安装即授予，无需跳转
+  if (Build.VERSION.SDK_INT < 23) return true
+  const pkg = ctx.getPackageName()
+  const brand = (Build.MANUFACTURER + ' ' + Build.BRAND).toLowerCase()
+  const isVivo = brand.indexOf('vivo') >= 0 || brand.indexOf('iqoo') >= 0
+  const isMi = brand.indexOf('xiaomi') >= 0 || brand.indexOf('redmi') >= 0
+  const isOppo = brand.indexOf('oppo') >= 0 || brand.indexOf('realme') >= 0 || brand.indexOf('oneplus') >= 0
+  const isHuawei = brand.indexOf('huawei') >= 0 || brand.indexOf('honor') >= 0
+
+  if (isVivo) {
+    // vivo/iQOO：优先本应用的权限详情页，其次权限管理列表，再退自启动/后台管理页
+    if (tryStartSettings(ctx, romPermissionIntent('com.vivo.permissionmanager', 'com.vivo.permissionmanager.activity.SoftPermissionDetailActivity', pkg))) return true
+    if (tryStartSettings(ctx, romPermissionIntent('com.vivo.permissionmanager', 'com.vivo.permissionmanager.activity.PurviewTabActivity', pkg))) return true
+    if (tryStartSettings(ctx, romPermissionIntent('com.vivo.permissionmanager', 'com.vivo.permissionmanager.activity.BgStartUpManagerActivity', pkg))) return true
+    if (tryStartSettings(ctx, romPermissionIntent('com.iqoo.secure', 'com.iqoo.secure.ui.PermissionSettingActivity', pkg))) return true
+  } else if (isMi) {
+    if (tryStartSettings(ctx, romPermissionIntent('com.miui.securitycenter', 'com.miui.permcenter.permissions.PermissionsEditorActivity', pkg))) return true
+    if (tryStartSettings(ctx, romPermissionIntent('com.miui.securitycenter', 'com.miui.permcenter.permissions.AppPermissionsEditorActivity', pkg))) return true
+  } else if (isOppo) {
+    if (tryStartSettings(ctx, romPermissionIntent('com.coloros.safecenter', 'com.coloros.safecenter.permission.floatwindow.FloatWindowListActivity', pkg))) return true
+    if (tryStartSettings(ctx, romPermissionIntent('com.coloros.safecenter', 'com.coloros.safecenter.permission.PermissionManagerActivity', pkg))) return true
+  } else if (isHuawei) {
+    if (tryStartSettings(ctx, romPermissionIntent('com.huawei.systemmanager', 'com.huawei.systemmanager.addviewmonitor.AddViewMonitorActivity', pkg))) return true
+  }
+
+  // AOSP：带包名直达本应用页，再退总列表页
+  if (tryStartSettings(ctx, new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse('package:' + pkg)))) return true
+  if (tryStartSettings(ctx, new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION))) return true
+  // 最终兜底：应用详情页一定有，用户可以从这里进「权限」
+  if (tryStartSettings(ctx, new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse('package:' + pkg)))) return true
+  return false
+}
+
+// ==================== 视图与窗口 ====================
+
+class QtLyricDragListener implements View.OnTouchListener {
+  private downX: number = 0.0
+  private downY: number = 0.0
+  private startX: number = 0
+  private startY: number = 0
+  private moving: boolean = false
+
+  constructor() {
+    super()
+  }
+
+  override onTouch(v: View, event: MotionEvent): boolean {
+    if (gLocked) return false
+    const action = event.getActionMasked()
+    if (action == MotionEvent.ACTION_DOWN) {
+      this.downX = event.getRawX().toDouble()
+      this.downY = event.getRawY().toDouble()
+      this.startX = gWinX.toInt()
+      this.startY = gWinY.toInt()
+      this.moving = false
+      return true
+    } else if (action == MotionEvent.ACTION_MOVE) {
+      const dx = event.getRawX().toDouble() - this.downX
+      const dy = event.getRawY().toDouble() - this.downY
+      // UTS number 在 Kotlin 侧是 Double，java.lang.Math.abs 无 Double 重载（Int/Float/Long），
+      // 用符号比较代替绝对值判断
+      const farX = dx > 4 || dx < -4
+      const farY = dy > 4 || dy < -4
+      if (this.moving || farX || farY) {
+        this.moving = true
+        gWinX = this.startX + dx
+        gWinY = this.startY + dy
+        gHasSavedPos = true
+        updateWindowPosition()
+      }
+      return true
+    } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+      if (this.moving) {
+        savePos()
+        return true
+      }
+      return false
+    }
+    return false
+  }
+}
+
+/** 用当前 gWinX/gWinY 请求 WindowManager 更新悬浮窗位置。
+ *  LayoutParams 的 x/y 是 Java 公开字段，UTS 不合成属性访问，
+ *  因此每次重建 6 参构造的 LayoutParams（宽高 WRAP_CONTENT 开销可忽略）再 updateViewLayout 整体替换 */
+function updateWindowPosition(): void {
+  const view = gLyricWindow
+  const wm = gWindowManager
+  if (view == null || wm == null) return
+  try {
+    wm.updateViewLayout(view, createLayoutParams())
+  } catch (e) {
+    // 窗口已失效
+  }
+}
+
+function windowFlags(isLocked: boolean): number {
+  // 锁定时点击穿透（FLAG_NOT_TOUCHABLE），未锁定可拖动
+  let flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+  if (isLocked) {
+    flags = flags | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+  }
+  return flags
+}
+
+function buildLyricView(context: Context): FrameLayout {
+  const root = new FrameLayout(context)
+  root.setOnTouchListener(new QtLyricDragListener())
+  const box = new LinearLayout(context)
+  box.setOrientation(LinearLayout.VERTICAL)
+  box.setGravity(Gravity.CENTER_HORIZONTAL)
+
+  // 主行：自绘跑马灯（放得下居中静止，溢出左右滚动 + 两端渐隐），替代普通 TextView
+  const text = new QtLyricMarqueeView(context)
+  text.applyStyle(gFontSizeSp, gTextColor.toInt(), gTypefaceIndex)
+  box.addView(text, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT.toInt(), LinearLayout.LayoutParams.WRAP_CONTENT.toInt()))
+
+  const tr = new TextView(context)
+  tr.setTextColor(gTextColor.toInt())
+  tr.setTypeface(typefaceForIndex(gTypefaceIndex))
+  tr.setShadowLayer(3.0.toFloat(), 0.0.toFloat(), 1.0.toFloat(), Color.BLACK)
+  tr.setTextSize(TypedValue.COMPLEX_UNIT_DIP.toInt(), gTrFontSizeSp.toFloat())
+  tr.setMaxLines(1)
+  // 翻译行必须自己居中：垂直 LinearLayout 的默认 LayoutParams 宽度是 MATCH_PARENT
+  // （LinearLayout.generateDefaultLayoutParams：VERTICAL → MATCH_PARENT×WRAP_CONTENT），
+  // 子 View 宽度已顶满可用宽度时 layoutVertical 的居中偏移恒为 0，父容器的
+  // setGravity(CENTER_HORIZONTAL) 对它就失效；而 TextView 默认文本左对齐，
+  // 于是翻译行贴左内边距、和居中的主行（QtLyricMarqueeView 自绘算 offsetX 居中）错位。
+  tr.setGravity(Gravity.CENTER_HORIZONTAL)
+  tr.setVisibility(View.GONE)
+  box.addView(tr)
+
+  const pad = (gFontSizeSp * 1.2).toInt()
+  box.setPadding(pad, (pad * 0.3).toInt(), pad, (pad * 0.3).toInt())
+  root.addView(box)
+
+  gLyricText = text
+  gLyricTr = tr
+  return root
+}
+
+function createLayoutParams(): WindowManager.LayoutParams {
+  // 平台 Int 常量经 UTS 暴露为 number，赋回 Int 字段必须显式 .toInt()；
+  // gravity 用 CENTER_HORIZONTAL（垂直仍按顶部）：x 是相对屏幕中心的偏移，
+  // 窗口 WRAP_CONTENT 宽度随每行歌词长短伸缩时整体保持居中，不会左右飘
+  const lp = new WindowManager.LayoutParams()
+  // 固定宽度 = 屏宽 × 百分比（默认 80%），长行不再把窗口撑到全屏宽再截断
+  lp.width = windowWidthPx().toInt()
+  if (lp.width <= 0) lp.width = WindowManager.LayoutParams.WRAP_CONTENT.toInt()
+  lp.height = WindowManager.LayoutParams.WRAP_CONTENT.toInt()
+  lp.type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY.toInt()
+  lp.format = PixelFormat.TRANSLUCENT.toInt()
+  lp.flags = windowFlags(gLocked).toInt()
+  lp.gravity = Gravity.CENTER_HORIZONTAL.toInt()
+  if (gHasSavedPos) {
+    lp.x = gWinX.toInt()
+    lp.y = gWinY.toInt()
+  } else {
+    lp.x = 0
+    lp.y = 240
+  }
+  return lp
+}
+
+// ==================== 自绘歌词主行（跑马灯） ====================
+
+/**
+ * 自绘主行 View：放得下水平居中静止；溢出则单程滚动到最右端露出结尾后停住
+ * （先停 1s → 匀速到最右 → 保持，网易云式，不再往返）。换行先取消旧动画再重测，
+ * 避免残留滚动位置。
+ *
+ * 绘制走 TextPaint.drawText 直接画，不用原生 TextView 的 maxLines 截断——
+ * 长行不再靠左截断，放到定宽窗内居中；溢出时单程滚动而不是一刀切。
+ */
+class QtLyricMarqueeView extends View {
+  private text: string = ''
+  private paint: TextPaint
+  private animRunning: boolean = false
+  private tick: Runnable | null = null
+  private animStartMs: number = 0
+  private offsetX: number = 0.0
+  private travelPx: number = 0.0
+  private glideMs: number = 0
+  private holdMs: number = 1000
+  private totalMs: number = 0
+  private marginPx: number = 8.0
+
+  constructor(context: Context) {
+    super(context)
+    this.paint = new TextPaint()
+    this.paint.setAntiAlias(true)
+    this.paint.setSubpixelText(true)
+    this.paint.setColor(-1)
+    this.marginPx = dpToPx(8).toDouble()
+  }
+
+  /** 推送当前行文本：先停旧动画，再按新文本重判 居中/滚动 */
+  setLine(line: string): void {
+    this.text = line
+    this.stopAnim()
+    this.reflow()
+  }
+
+  /** 字号 / 颜色 / 字体变化后刷新绘制参数并重新判定 */
+  applyStyle(mainSp: number, color: number, tf: number): void {
+    this.paint.setColor(color.toInt())
+    const ctx = UTSAndroid.getAppContext()
+    if (ctx != null && ctx.getResources() != null) {
+      this.paint.setTextSize(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP.toInt(), mainSp.toFloat(), ctx.getResources().getDisplayMetrics()))
+    }
+    this.paint.setTypeface(typefaceForIndex(tf))
+    this.requestLayout()
+    this.stopAnim()
+    this.reflow()
+  }
+
+  /** 重测：文本 / 字号 / 宽度变化后重新判定 居中/滚动 */
+  reflow(): void {
+    if (this.text.length == 0) return
+    const width = getWidth().toDouble()
+    if (width <= 16) return
+    const textW = this.paint.measureText(this.text).toDouble()
+    const availW = width
+    if (textW + 2 <= availW) {
+      // 放得下：取消滚动，水平居中静止
+      this.stopAnim()
+      this.travelPx = 0.0
+      this.offsetX = (availW - textW) / 2.0
+      this.invalidate()
+      return
+    }
+    // 溢出：单程滚动到最右端停住（网易云式），不再往返
+    this.travelPx = textW - availW + this.marginPx
+    if (this.travelPx <= 0) return
+    const speedPxPerMs = dpToPx(40).toDouble() / 1000.0
+    this.glideMs = Math.ceil(this.travelPx / speedPxPerMs).toInt()
+    if (this.glideMs <= 0) this.glideMs = 1
+    this.holdMs = 1000
+    this.totalMs = this.holdMs + this.glideMs
+    this.offsetX = 0.0
+    this.invalidate()
+    this.startAnim()
+  }
+
+  private startAnim(): void {
+    this.stopAnim()
+    this.animRunning = true
+    this.animStartMs = System.currentTimeMillis()
+    this.tick = new QtLyricTick(this)
+    lyricHandler().postDelayed(this.tick!!, 16)
+  }
+
+  private stopAnim(): void {
+    this.animRunning = false
+    if (this.tick != null) {
+      lyricHandler().removeCallbacks(this.tick!!)
+      this.tick = null
+    }
+  }
+
+  /** 每帧（约 16ms）：单程滚动，滚到最右端后保持位移并停止 */
+  onTick(): void {
+    if (!this.animRunning) return
+    const elapsed = System.currentTimeMillis() - this.animStartMs
+    if (elapsed >= this.totalMs) {
+      // 到达最右端：保持末端位移，不再滚动
+      this.offsetX = -this.travelPx
+      this.stopAnim()
+      this.invalidate()
+      return
+    }
+    if (elapsed < this.holdMs) {
+      this.offsetX = 0.0
+    } else {
+      this.offsetX = -this.travelPx * ((elapsed - this.holdMs) / this.glideMs)
+    }
+    this.invalidate()
+    if (this.tick != null) lyricHandler().postDelayed(this.tick!!, 16)
+  }
+
+  override onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int): void {
+    const w = View.MeasureSpec.getSize(widthMeasureSpec)
+    const h = (this.paint.getTextSize() * 1.5).toInt()
+    this.setMeasuredDimension(w, h)
+  }
+
+  override onDraw(canvas: Canvas): void {
+    super.onDraw(canvas)
+    if (this.text.length == 0) return
+    const width = getWidth().toDouble()
+    if (width <= 0) return
+    const fm = this.paint.getFontMetrics()
+    const baseline = (getHeight().toDouble() - fm.ascent - fm.descent) / 2.0
+    canvas.drawText(this.text, this.offsetX.toFloat(), baseline.toFloat(), this.paint)
+  }
+}
+
+class QtLyricTick implements Runnable {
+  private view: QtLyricMarqueeView
+  constructor(view: QtLyricMarqueeView) {
+    super()
+    this.view = view
+  }
+  override run(): void {
+    this.view.onTick()
+  }
+}
+
+// ==================== 开关与更新（主线程 post） ====================
+
+// ==================== 通知栏开关（media3 会话命令联动） ====================
+// 通知栏的「桌面歌词」按钮（index.uts 自定义 SessionCommand）点击后走到这里：
+// 原生直接显隐悬浮窗，fire 钩子让 index.uts 刷新按钮图标，并经 JS 回调让服务层
+// 启停「跟随播放」。所有状态以悬浮窗本体（gLyricWindow）为准。
+
+/** 悬浮窗显隐变化钩子：index.uts 注册（刷新通知栏按钮 + 通知 JS 服务启停跟随） */
+let lyricWindowChangedHook: AudioPlayerStateCallback | null = null
+export function setLyricWindowChangedHook(hook: AudioPlayerStateCallback | null): void {
+  lyricWindowChangedHook = hook
+}
+
+function fireLyricWindowChanged(): void {
+  lyricWindowChangedHook?.invoke(gLyricWindow != null)
+}
+
+class QtLyricToggle implements Runnable {
+  constructor() {
+    super()
+  }
+  override run(): void {
+    if (gLyricWindow != null) {
+      hideNow()
+      return
+    }
+    showNow()
+  }
+}
+
+/** 通知栏切换桌面歌词（悬浮窗不存在则显示，已显示则移除）。异步到主线程执行 */
+export function toggleLyricWindowForNotification(): void {
+  lyricHandler().post(new QtLyricToggle())
+}
+
+/** 主线程执行：显示悬浮窗（未授权返回 false）。成功后 fire 显隐钩子 */
+function showNow(): boolean {
+  const ctx = UTSAndroid.getAppContext()
+  if (ctx == null) return false
+  if (!nativeHasOverlayPermission()) {
+    // 通知栏「词」按钮最终也走到这里：不给任何反馈的话，用户只会看到「点了没反应」，
+    // 误以为按钮坏了（真机踩过这个坑）。用 Toast 明确说清缺哪个权限。
+    Toast.makeText(ctx, '桌面歌词需要「显示在其他应用上层」权限，请在 App 内开启', Toast.LENGTH_LONG).show()
+    console.log('[QT Audio] 桌面歌词开启失败：未授予悬浮窗权限')
+    return false
+  }
+  // 重复显示先移除旧窗，避免叠加
+  hideNow()
+  loadSavedState()
+  const wm = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+  if (wm == null) return false
+  gWindowManager = wm
+  const view = buildLyricView(ctx)
+  try {
+    wm.addView(view, createLayoutParams())
+    gLyricWindow = view
+    fireLyricWindowChanged()
+    return true
+  } catch (e) {
+    gLyricWindow = null
+    // 同样不能静默失败（窗口已存在、ROM 拦截 addView 等）
+    console.log('[QT Audio] 桌面歌词悬浮窗添加失败: ' + (e != null ? e.toString() : 'unknown'))
+    Toast.makeText(ctx, '桌面歌词悬浮窗创建失败', Toast.LENGTH_SHORT).show()
+    return false
+  }
+}
+
+class QtLyricShow implements Runnable {
+  constructor() {
+    super()
+  }
+  override run(): void {
+    showNow()
+  }
+}
+
+class QtLyricHide implements Runnable {
+  constructor() {
+    super()
+  }
+  override run(): void {
+    hideNow()
+  }
+}
+
+class QtLyricText implements Runnable {
+  private line: string
+  private translation: string
+  constructor(line: string, translation: string) {
+    super()
+    this.line = line
+    this.translation = translation
+  }
+  override run(): void {
+    const text = gLyricText
+    const tr = gLyricTr
+    if (text == null) return
+    text.setLine(this.line)
+    if (tr != null) {
+      if (this.translation.length > 0) {
+        tr.setText(this.translation)
+        tr.setVisibility(View.VISIBLE)
+      } else {
+        tr.setVisibility(View.GONE)
+      }
+    }
+  }
+}
+
+class QtLyricLock implements Runnable {
+  private locked: boolean
+  constructor(locked: boolean) {
+    super()
+    this.locked = locked
+  }
+  override run(): void {
+    const view = gLyricWindow
+    const wm = gWindowManager
+    if (view == null || wm == null) return
+    try {
+      // flags 字段 UTS 不可直接写，重建 LayoutParams 整体替换
+      wm.updateViewLayout(view, createLayoutParams())
+    } catch (e) {
+      // 窗口已失效
+    }
+  }
+}
+
+class QtLyricFont implements Runnable {
+  private main: number
+  private tr: number
+  constructor(main: number, tr: number) {
+    super()
+    this.main = main
+    this.tr = tr
+  }
+  override run(): void {
+    const text = gLyricText
+    const trView = gLyricTr
+    // 主行走自绘跑马灯：update paint 字体后重判 居中/滚动（DIP 单位，见 buildLyricView 说明）
+    if (text != null) text.applyStyle(this.main, gTextColor.toInt(), gTypefaceIndex)
+    if (trView != null) trView.setTextSize(TypedValue.COMPLEX_UNIT_DIP.toInt(), this.tr.toFloat())
+  }
+}
+
+class QtLyricColorTypeface implements Runnable {
+  constructor() {
+    super()
+  }
+  override run(): void {
+    const text = gLyricText
+    const trView = gLyricTr
+    if (text != null) {
+      text.applyStyle(gFontSizeSp, gTextColor.toInt(), gTypefaceIndex)
+    }
+    if (trView != null) {
+      trView.setTextColor(gTextColor.toInt())
+      trView.setTypeface(typefaceForIndex(gTypefaceIndex))
+    }
+  }
+}
+
+class QtLyricSetWidth implements Runnable {
+  constructor() {
+    super()
+  }
+  override run(): void {
+    const view = gLyricWindow
+    const wm = gWindowManager
+    if (view != null && wm != null) {
+      try {
+        wm.updateViewLayout(view, createLayoutParams())
+      } catch (e) {
+        // 窗口已失效
+      }
+    }
+    // 宽度变化后重测主行 居中/滚动
+    const text = gLyricText
+    if (text != null) text.reflow()
+  }
+}
+
+function hideNow(): void {
+  const view = gLyricWindow
+  const wm = gWindowManager
+  if (view != null) {
+    if (wm != null) {
+      try {
+        wm.removeView(view)
+      } catch (e) {
+        // 窗口已失效
+      }
+    }
+  }
+  gLyricWindow = null
+  gLyricText = null
+  gLyricTr = null
+  gWindowManager = null
+  // 原本有窗才通知：重复 hide / 尚未显示就 hide 不打扰（重复显示路径会先走到这里，
+  // 随后 showNow 成功再 fire 一次 true，钩子按最终状态收敛）
+  if (view != null) fireLyricWindowChanged()
+}
+
+/** 显示桌面歌词悬浮窗（需已授权）。异步执行，重复调用安全（先移除旧窗） */
+export function nativeShowLyricWindow(): boolean {
+  if (!nativeHasOverlayPermission()) return false
+  lyricHandler().post(new QtLyricShow())
+  return true
+}
+
+/** 隐藏并移除悬浮窗（异步到主线程） */
+export function nativeHideLyricWindow(): void {
+  lyricHandler().post(new QtLyricHide())
+}
+
+/** 推送当前歌词行文本（translation 为空则隐藏翻译行）。未显示时静默忽略 */
+export function nativeUpdateLyricWindow(line: string, translation: string): void {
+  lyricHandler().post(new QtLyricText(line, translation))
+}
+
+/** 锁定/解锁（锁定 = 点击穿透仅展示）。窗口已显示时即时生效，并持久化 */
+export function nativeSetLyricLocked(locked: boolean): void {
+  gLocked = locked
+  saveLocked()
+  lyricHandler().post(new QtLyricLock(locked))
+}
+
+/** 设置字号（主行/翻译行；数值与设置页预览的 CSS px 一致，按 dp 渲染不受系统字体缩放影响）。即时生效并持久化 */
+export function nativeSetLyricFontSp(main: number, tr: number): void {
+  gFontSizeSp = main
+  gTrFontSizeSp = tr
+  saveFonts()
+  lyricHandler().post(new QtLyricFont(main, tr))
+}
+
+/** 设置歌词文字颜色（有符号 Int32 形态的 ARGB，如 -1 = 白色）。即时生效并持久化 */
+export function nativeSetLyricTextColor(color: number): void {
+  gTextColor = color
+  saveColorTf()
+  lyricHandler().post(new QtLyricColorTypeface())
+}
+
+/** 设置字体族（0 黑体 / 1 宋体 / 2 楷体 / 3 等宽）。即时生效并持久化 */
+export function nativeSetLyricTypeface(index: number): void {
+  gTypefaceIndex = index
+  saveColorTf()
+  lyricHandler().post(new QtLyricColorTypeface())
+}
+
+/** 设置歌词窗宽度（屏宽百分比 50–95，默认 80）。窗口已显示则即时重排 / 重测滚动，并持久化 */
+export function nativeSetLyricWidth(pct: number): void {
+  let v = pct
+  if (!(v >= 50)) v = 80
+  if (v > 95) v = 95
+  gWidthPct = v
+  saveWidth()
+  lyricHandler().post(new QtLyricSetWidth())
+}
+
+// ==================== 供 index.uts 内部转发使用 ====================
+// 历史包袱说明：早期版本前端只能经「被 new 的 QtAudioPlayer 类」调用歌词窗接口
+// （未被 JS import 的独立 export 会被摇树裁掉）。现在 index.uts 以模块级函数
+// （audioLyricShow 等）对外，本文件的函数只作为其内部实现存在。
+
+/** 当前歌词窗是否处于显示流程（供 index.uts 判断是否需要转发更新） */
+export function isLyricWindowShowing(): boolean {
+  return gLyricWindow != null
+}
+

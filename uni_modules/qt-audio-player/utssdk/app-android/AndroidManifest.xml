@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools"
+	package="io.dcloud.uni_modules.qtAudioPlayer">
+
+	<!-- 网络权限：播放网络音频与加载封面 -->
+	<uses-permission android:name="android.permission.INTERNET" />
+	<!-- 前台服务：保活播放 -->
+	<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+	<!-- Android 14+ 媒体播放前台服务类型 -->
+	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+	<!-- Android 13+ 通知栏展示权限（需在运行时申请，不申请仅通知不可见，播放不受影响） -->
+	<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+	<!-- 桌面歌词：在其他应用上层绘制悬浮窗（特殊应用访问权限，运行时跳系统设置页引导开启） -->
+	<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+	<application>
+		<!-- 媒体会话服务（MediaSessionService）：
+		     必须声明 androidx.media3.session.MediaSessionService 这个 action，
+		     否则 SessionToken/MediaController 无法解析到本服务（media3 用 queryIntentServices 判定）。
+		     exported=true 是 media3 官方要求（系统媒体控件/耳机键/车机需要连接会话）。 -->
+		<service
+			android:name="uts.sdk.modules.qtAudioPlayer.QtAudioService"
+			android:exported="true"
+			android:foregroundServiceType="mediaPlayback">
+			<intent-filter>
+				<action android:name="androidx.media3.session.MediaSessionService" />
+				<action android:name="android.intent.action.MEDIA_BUTTON" />
+			</intent-filter>
+		</service>
+		<!-- 桌面小部件：APPWIDGET_UPDATE 由系统在小部件绑定/更新时下发；
+		     qt.widget.* 为小部件按钮的自定义广播（PendingIntent 同应用发出，exported=false 即可） -->
+		<receiver
+			android:name="uts.sdk.modules.qtAudioPlayer.QtWidgetProvider"
+			android:exported="false">
+			<intent-filter>
+				<action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+				<action android:name="qt.widget.TOGGLE" />
+				<action android:name="qt.widget.NEXT" />
+				<action android:name="qt.widget.PREV" />
+			</intent-filter>
+			<meta-data
+				android:name="android.appwidget.provider"
+				android:resource="@xml/qt_widget_info" />
+		</receiver>
+		<!-- 4x2 大卡：封面 + 歌名歌手 + 三键，与紧凑版共用广播动作 -->
+		<receiver
+			android:name="uts.sdk.modules.qtAudioPlayer.QtWidgetLargeProvider"
+			android:exported="false">
+			<intent-filter>
+				<action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+				<action android:name="qt.widget.TOGGLE" />
+				<action android:name="qt.widget.NEXT" />
+				<action android:name="qt.widget.PREV" />
+			</intent-filter>
+			<meta-data
+				android:name="android.appwidget.provider"
+				android:resource="@xml/qt_widget_large_info" />
+		</receiver>
+		<!-- 1x1 播放按钮：整块就是播放/暂停键 -->
+		<receiver
+			android:name="uts.sdk.modules.qtAudioPlayer.QtWidgetToggleProvider"
+			android:exported="false">
+			<intent-filter>
+				<action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+				<action android:name="qt.widget.TOGGLE" />
+				<action android:name="qt.widget.NEXT" />
+				<action android:name="qt.widget.PREV" />
+			</intent-filter>
+			<meta-data
+				android:name="android.appwidget.provider"
+				android:resource="@xml/qt_widget_toggle_info" />
+		</receiver>
+		<!-- media3 媒体按钮接收器：把通知栏/耳机键路由到激活的 MediaSession -->
+		<receiver
+			android:name="androidx.media3.session.MediaButtonReceiver"
+			android:exported="true">
+			<intent-filter>
+				<action android:name="android.intent.action.MEDIA_BUTTON" />
+			</intent-filter>
+		</receiver>
+	</application>
+</manifest>

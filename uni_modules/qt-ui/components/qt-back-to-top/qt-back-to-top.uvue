@@ -1,0 +1,76 @@
+<!--
+  「回到顶部」悬浮按钮（右下角）
+  用法：<QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+  - visible：是否显示，由外层滚动容器根据滚动距离传入（滚动一定距离后再显示）
+  - tap：用户点击，由外层执行真正的滚动回顶部
+  仅一枚头朝上的小火箭图标（无底色圆形）；位置用 JS 计算 px 再以 fixed+left/top 定位，
+  与迷你悬浮球一致，避免 calc()/env() 在该 Vapor 版本不生效导致跑到左上角。
+-->
+<template>
+  <view
+    v-if="visible"
+    class="qt-back-to-top"
+    :class="layout.isWide ? 'qt-back-to-top-wide' : ''"
+    :style="posStyle"
+    @click="$emit('tap')"
+  >
+    <QtIcon name="rocket" :size="64" color="#3f4756" />
+  </view>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, watch, onMounted } from "vue";
+import { qtRpx, useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+
+defineProps<{
+  visible: boolean;
+}>();
+
+const layout = useQtLayout();
+
+defineEmits<{
+  (e: "tap"): void;
+}>();
+
+/** 图标尺寸与右边距/底边距（rpx） */
+const SIZE = 80;
+const MARGIN_RIGHT = 24;
+const MARGIN_BOTTOM = 150;
+
+const left = ref(0);
+const top = ref(0);
+const posStyle = computed((): string => "left:" + left.value + "px;top:" + top.value + "px;");
+
+function reposition(): void {
+  const win = uni.getWindowInfo();
+  left.value = win.windowWidth - qtRpx(MARGIN_RIGHT) - qtRpx(SIZE);
+  top.value = win.windowHeight - qtRpx(MARGIN_BOTTOM) - qtRpx(SIZE);
+}
+
+onMounted(() => {
+  reposition();
+});
+
+// 旋转/分屏后窗口尺寸变化，fixed 的 px 定位必须重算，
+// 否则竖转横后 top 超出新 windowHeight，按钮消失在屏幕外
+watch(
+  () => [layout.windowWidth, layout.windowHeight],
+  () => {
+    reposition();
+  }
+);
+</script>
+
+<style>
+/* fixed + 内联 left/top：与迷你悬浮球相同的定位方式，稳定不跑位 */
+.qt-back-to-top {
+  position: fixed;
+  z-index: 950;
+  width: 80rpx;
+  height: 80rpx;
+  justify-content: center;
+  align-items: center;
+}
+.qt-back-to-top-wide { width: 40px; height: 40px; }
+</style>

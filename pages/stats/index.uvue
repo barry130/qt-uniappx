@@ -1,0 +1,251 @@
+<template>
+  <qt-page-frame :max-width="760">
+  <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']">
+    <scroll-view class="scroll" direction="vertical" :scroll-top="scrollTop" @scroll="onListScroll">
+      <view class="hero" :class="[layout.isWide ? 'hero-wide' : '']" :style="'background-color:' + themeStore.skin.accent + ';'">
+        <QtIcon class="hero-icon" :class="layout.isWide ? 'hero-icon-wide' : ''" name="chart" :size="layout.isWide ? 44 : 72" :color="themeStore.skin.onAccent" />
+        <text class="hero-title" :class="layout.isWide ? 'hero-title-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">你的音乐年度报告</text>
+        <text class="hero-sub" :class="layout.isWide ? 'hero-sub-wide' : ''">从 {{ playDays }} 天的播放记录中</text>
+      </view>
+
+      <view class="section" :class="layout.isWide ? 'section-wide' : ''">
+        <text class="section-title" :class="layout.isWide ? 'section-title-wide' : ''">总览</text>
+        <view class="grid">
+          <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
+            <text class="card-num" :class="layout.isWide ? 'card-num-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">{{ totalPlayed }}</text>
+            <text class="card-label" :class="layout.isWide ? 'card-label-wide' : ''">累计播放</text>
+          </view>
+          <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
+            <text class="card-num" :class="layout.isWide ? 'card-num-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">{{ likedCount }}</text>
+            <text class="card-label" :class="layout.isWide ? 'card-label-wide' : ''">收藏歌曲</text>
+          </view>
+          <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
+            <text class="card-num" :class="layout.isWide ? 'card-num-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">{{ historyCount }}</text>
+            <text class="card-label" :class="layout.isWide ? 'card-label-wide' : ''">听过歌曲</text>
+          </view>
+          <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
+            <text class="card-num" :class="layout.isWide ? 'card-num-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">{{ playDays }}</text>
+            <text class="card-label" :class="layout.isWide ? 'card-label-wide' : ''">活跃天数</text>
+          </view>
+        </view>
+      </view>
+
+      <view v-if="topSongs.length > 0" class="section" :class="layout.isWide ? 'section-wide' : ''">
+        <text class="section-title" :class="layout.isWide ? 'section-title-wide' : ''">最常播放</text>
+        <view
+          v-for="(item, index) in topSongs"
+          :key="item.song.id + item.song.platform"
+          class="rank-row" :class="[[layout.isWide ? 'rank-row-wide' : ''], [themeStore.dark ? 'rank-row-dark' : '', layout.isWide ? 'rank-row-wide' : '']]"
+          
+          @click="playSong(item.song)"
+        >
+          <text
+            class="rank-index" :class="[layout.isWide ? 'rank-index-wide' : '', index < 3 ? 'rank-top' : '']"
+            :style="index < 3 ? 'color:' + themeStore.skin.accent + ';' : ''"
+            >{{ index + 1 }}</text
+          >
+          <image class="rank-cover" :class="layout.isWide ? 'rank-cover-wide' : ''" :src="item.song.picUrl" mode="aspectFill" />
+          <view class="rank-info" :class="layout.isWide ? 'rank-info-wide' : ''">
+            <text class="rank-name" :class="[themeStore.dark ? 'rank-name-dark' : '', layout.isWide ? 'rank-name-wide' : '']" :max-lines="1">{{ item.song.name }}</text>
+            <text class="rank-meta" :class="[themeStore.dark ? 'rank-meta-dark' : '', layout.isWide ? 'rank-meta-wide' : '']">{{ item.song.singer }}</text>
+          </view>
+          <text class="rank-count" :class="layout.isWide ? 'rank-count-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">{{ item.count }} 次</text>
+        </view>
+      </view>
+
+      <view v-if="topArtists.length > 0" class="section" :class="layout.isWide ? 'section-wide' : ''">
+        <text class="section-title" :class="layout.isWide ? 'section-title-wide' : ''">最爱歌手</text>
+        <view
+          v-for="(item, index) in topArtists"
+          :key="item.name"
+          class="rank-row" :class="[[layout.isWide ? 'rank-row-wide' : ''], [themeStore.dark ? 'rank-row-dark' : '', layout.isWide ? 'rank-row-wide' : '']]"
+          
+        >
+          <text
+            class="rank-index" :class="[layout.isWide ? 'rank-index-wide' : '', index < 3 ? 'rank-top' : '']"
+            :style="index < 3 ? 'color:' + themeStore.skin.accent + ';' : ''"
+            >{{ index + 1 }}</text
+          >
+          <view class="artist-avatar" :class="layout.isWide ? 'artist-avatar-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'"><QtIcon name="mic" :size="layout.isWide ? 24 : 34" :color="themeStore.skin.onAccent" /></view>
+          <view class="rank-info" :class="layout.isWide ? 'rank-info-wide' : ''">
+            <text class="rank-name" :class="[themeStore.dark ? 'rank-name-dark' : '', layout.isWide ? 'rank-name-wide' : '']" :max-lines="1">{{ item.name }}</text>
+            <text class="rank-meta" :class="[themeStore.dark ? 'rank-meta-dark' : '', layout.isWide ? 'rank-meta-wide' : '']">{{ item.count }} 次播放</text>
+          </view>
+        </view>
+      </view>
+
+      <view class="pad" :class="layout.isWide ? 'pad-wide' : ''"></view>
+    </scroll-view>
+    <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+  </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { computed, ref } from "vue";
+import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import { usePlayerStore } from "@/stores/player";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { musicApi } from "@/services/music-api";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import type { Song } from "@/types/music";
+
+const player = usePlayerStore();
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+
+// 回到顶部
+const scrollTop = ref(0);
+const showBackToTop = ref(false);
+function onListScroll(e: any) {
+  const st = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
+  showBackToTop.value = st > 600;
+}
+function backToTop() {
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  showBackToTop.value = false;
+}
+
+// 不再有内置的「我喜欢的歌曲」，收藏总数 = 收藏总表里带本地歌单 pid 的歌曲数
+const likedCount = computed(() => {
+  let n = 0;
+  for (let i = 0; i < player.localPlaylists.length; i++) {
+    const pid = player.localPlaylists[i].pid;
+    n += player.songsOfPid(pid != null ? pid : "").length;
+  }
+  return n;
+});
+const historyCount = computed(() => player.history.length);
+const totalPlayed = computed(() => {
+  let total = 0;
+  const keys = Array.from(player.playCounts.keys());
+  for (let i = 0; i < keys.length; i++) {
+    const count = player.playCounts.get(keys[i] as string) ?? 0;
+    total += count;
+  }
+  return total;
+});
+const playDays = computed(() => {
+  const days = new Set<string>();
+  for (let i = 0; i < player.history.length; i++) {
+    const song = player.history[i];
+    if (song == null) continue;
+    if (song.url != null && song.url.length > 0) {
+      days.add("dummy");
+    }
+  }
+  return Math.max(1, Math.floor(player.history.length / 5));
+});
+
+type TopSongEntry = { song: Song; count: number };
+
+// 模板按 { song, count } 渲染（item.song.id / item.count），
+// player.topPlayed() 返回的是纯 Song[] 不带次数，这里自行从播放记录聚合
+const topSongs = computed<TopSongEntry[]>(() => {
+  const pairs: TopSongEntry[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < player.history.length; i++) {
+    const song = player.history[i];
+    if (song == null || song.id == null || song.id.length == 0) continue;
+    const key = song.platform + ":" + song.id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const count = player.playCount(song);
+    if (count > 0) pairs.push({ song, count } as TopSongEntry);
+  }
+  pairs.sort((a, b) => b.count - a.count);
+  return pairs.slice(0, 10);
+});
+
+const topArtists = computed(() => {
+  const map: Record<string, number> = {};
+  for (let i = 0; i < player.history.length; i++) {
+    const song = player.history[i];
+    if (song == null) continue;
+    const name = song.singer;
+    const current = map[name];
+    map[name] = (current != null ? current : 0) + 1;
+  }
+  const pairs: { name: string; count: number }[] = [];
+  const keys = Object.keys(map);
+  for (let i = 0; i < keys.length; i++) {
+    pairs.push({ name: keys[i], count: map[keys[i]] });
+  }
+  let swapped = true;
+  while (swapped) {
+    swapped = false;
+    for (let i = 0; i < pairs.length - 1; i++) {
+      if (pairs[i + 1].count > pairs[i].count) {
+        const tmp = pairs[i];
+        pairs[i] = pairs[i + 1];
+        pairs[i + 1] = tmp;
+        swapped = true;
+      }
+    }
+  }
+  return pairs.slice(0, 5);
+});
+
+function playSong(song: Song): void {
+  musicApi.playUrl(song).then((url) => {
+    song.url = url;
+    player.playSingle(song);
+  }).catch(() => {
+    uni.showToast({ title: "该歌曲暂时无法播放", icon: "none" });
+  });
+}
+</script>
+
+<style>
+.page { flex:1; }
+.scroll { flex:1; }
+.hero { padding:80rpx 36rpx 50rpx; align-items:center; border-radius:0 0 32rpx 32rpx; }
+.hero-icon { margin-bottom:14rpx; }
+.hero-title { font-size:36rpx; font-weight:700; }
+.hero-sub { margin-top:10rpx; color:rgba(255,255,255,0.7); font-size:24rpx; }
+.section { margin:28rpx 24rpx 0; }
+.section-title { color:#191d26; font-size:30rpx; font-weight:600; margin-bottom:18rpx; }
+.grid { flex-direction:row; flex-wrap:wrap; justify-content:space-between; }
+.card { width:48%; height:140rpx; margin-bottom:16rpx; padding:24rpx; background-color:rgba(255,255,255,0.5); border:1px solid rgba(255,255,255,0.35); border-radius:20rpx; justify-content:center; }
+.card-num { font-size:42rpx; font-weight:700; }
+.card-label { margin-top:8rpx; color:#6b7385; font-size:24rpx; }
+.rank-row { height:120rpx; padding:0 24rpx; flex-direction:row; align-items:center; background-color:rgba(255,255,255,0.5); border:1px solid rgba(255,255,255,0.35); border-radius:16rpx; margin-bottom:10rpx; }
+.rank-index { width:50rpx; color:#6b7385; font-size:26rpx; font-weight:600; text-align:center; }
+.rank-top { }
+.rank-cover { width:72rpx; height:72rpx; border-radius:14rpx; margin-left:16rpx; background-color:#e6e8ec; }
+.artist-avatar { width:72rpx; height:72rpx; border-radius:36rpx; margin-left:16rpx; justify-content:center; align-items:center; }
+.rank-info { flex:1; margin-left:18rpx; overflow:hidden; }
+.rank-name { color:#191d26; font-size:27rpx; font-weight:500; text-overflow:ellipsis; }
+.rank-meta { margin-top:6rpx; color:#6b7385; font-size:22rpx; text-overflow:ellipsis; }
+.rank-count { font-size:22rpx; font-weight:500; margin-left:12rpx; }
+.pad { height:60rpx; }
+/* dark */
+
+.card-dark { background-color:rgba(255,255,255,0.04); border-color:rgba(255,255,255,0.06); }
+.rank-row-dark { background-color:rgba(255,255,255,0.04); border-color:rgba(255,255,255,0.06); }
+.section-title-dark { color:#eef0f5; }
+.rank-name-dark { color:#eef0f5; }
+.rank-meta-dark { color:#8a93a6; }
+
+/* Vapor 宽屏：使用 px 覆盖移动端 rpx，避免 1600x900 下按窗口比例放大 */
+
+.hero-wide { padding:40px 24px 28px; border-radius:0 0 16px 16px; }
+.hero-icon-wide { margin-bottom:10px; }
+.hero-title-wide { font-size:22px; }
+.hero-sub-wide { margin-top:8px; font-size:14px; }
+.section-wide { margin:16px 24px 0; }
+.section-title-wide { font-size:17px; margin-bottom:12px; }
+.card-wide { height:92px; margin-bottom:12px; padding:16px; border-radius:14px; }
+.card-num-wide { font-size:26px; }
+.card-label-wide { margin-top:6px; font-size:13px; }
+.rank-row-wide { height:64px; padding-left:20px; padding-right:20px; border-radius:12px; margin-bottom:8px; }
+.rank-index-wide { width:32px; font-size:15px; }
+.rank-cover-wide { width:48px; height:48px; border-radius:10px; margin-left:12px; }
+.artist-avatar-wide { width:48px; height:48px; border-radius:24px; margin-left:12px; }
+.rank-info-wide { margin-left:14px; }
+.rank-name-wide { font-size:16px; }
+.rank-meta-wide { margin-top:4px; font-size:13px; }
+.rank-count-wide { font-size:13px; margin-left:10px; }
+.pad-wide { height:40px; }
+</style>
