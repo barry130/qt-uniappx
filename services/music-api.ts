@@ -1033,19 +1033,6 @@ export class MusicApi {
       return "";
     }
   }
-
-  async videoUrl(
-    id: string,
-    source?: Source,
-    quality: string = "auto"
-  ): Promise<string> {
-    const args = new UTSJSONObject();
-    args.set("source", sourceName(source));
-    args.set("videoId", id);
-    args.set("quality", quality);
-    const response = await this.engineInvoke("videoUrl", args);
-    return this.strOf(response.get("url"));
-  }
 }
 
 export const musicApi = new MusicApi();

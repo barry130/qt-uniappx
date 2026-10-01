@@ -17,7 +17,7 @@
     <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
       <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="showSourcePackage">
         <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="music" :size="36" color="#5f9ea0" />
-        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">音源包</text>
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">音源包管理</text>
         <view v-if="sourceUpdateStore.updatePending" class="cell-dot" />
         <view class="cell-right">
           <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ sourcePackageText() }}</text>
@@ -168,9 +168,10 @@ import { usePlayerStore } from "@/stores/player";
 import { useDownloadsStore } from "@/stores/downloads";
 import { useSourceStore } from "@/stores/source";
 import { platformLabel } from "@/services/platform";
-import { engineStatus, engineVersion, loadedVersionCode, lastEngineError } from "@/services/source-engine";
-import { installedPackage } from "@/services/source-bundle-fs";
-import { checkAndDownload, applyNow, installFromUrl, uninstallSourcePackage, pendingApply, pickSmokeSongs, lastRemoteInfo, syncSourceUpdateBadge } from "@/services/source-update";
+import { engineStatus, engineVersion, loadedPlayPackId, playPackReady, bundleInfo, lastEngineError } from "@/services/source-engine";
+import type { PlayPackMeta } from "@/services/source-bundle-fs";
+import { packs, activePack, officialPack, packById } from "@/services/source-bundle-fs";
+import { checkSourceUpdate, installFromUrl, uninstallPack, activatePack, pickSmokeSongs, lastRemoteInfo, syncSourceUpdateBadge } from "@/services/source-update";
 import { useSourceUpdateStore } from "@/stores/source-update";
 import { clearCachedMe } from "@/services/user-cache";
 
@@ -249,125 +250,166 @@ function pickSource(s: string): void {
   uni.showToast({ title: "默认音源：" + platformLabel(s), icon: "none" });
 }
 
-// ==================== 音源包 ====================
+// ==================== 音源包管理（播放包：官方/自定义多包并存，其一生效） ====================
 
-/** 音源包操作（弹窗里的动作序号） */
-const SP_CHECK = 0;
-const SP_APPLY = 1;
-const SP_INSTALL_URL = 2;
-const SP_UNINSTALL = 3;
+/**
+ * 播放包操作的动作路由：动作表是动态拼的（每个包一组「启用/卸载」项），
+ * sheet 回调只给序号，这里记下序号对应的动作与包 id。
+ */
+type SpAction = { kind: string; id: string };
+let spActions: SpAction[] = [];
 
 function sourcePackageText(): string {
   const tick = sourceRefresh.value;
-  const pkg = installedPackage();
-  if (pkg == null) {
-    // 仓库不内置音源包：未安装时在线取链不可用（本地音乐不受影响）
-    if (engineStatus() == "failed") return "未安装（引擎异常）";
-    return "未安装";
+  const active = activePack();
+  if (active == null) {
+    // 播放包不内置（版权原因）：未安装时在线取链不可用（搜索等数据功能走内置数据包，不受影响）
+    if (engineStatus() == "failed") return "未安装播放包（引擎异常）";
+    return "未安装播放包";
   }
-  const tag = pkg.source == "custom" ? "（自定义）" : "";
-  if (pendingApply()) return "v" + pkg.versionName + tag + "（待生效）";
-  const st = engineStatus();
-  if (st == "ready" || st == "loading") return "v" + pkg.versionName + tag;
-  if (st == "failed") return "v" + pkg.versionName + tag + "（异常）";
-  return "v" + pkg.versionName + tag + "（未装载）";
+  const tag = active.source != "official" ? "（自定义）" : "";
+  if (playPackReady() && loadedPlayPackId() == active.id) return "生效中 v" + active.versionName + tag;
+  return "v" + active.versionName + tag + "（待生效）";
 }
 
-/** 音源包详情（对齐 qt-pc 设置页：当前 / 远端最新 / 状态 / 更新说明） */
-function sourcePackageDetail(): string {
-  const pkg = installedPackage();
+/** 音源包详情（对齐 qt-pc 设置页：生效 / 已安装 / 远端最新 / 内置数据包 / 更新说明） */
+async function sourcePackageDetail(): Promise<string> {
+  const list = packs();
+  const active = activePack();
+  const official = officialPack();
   const remote = lastRemoteInfo();
-  const custom = pkg != null && pkg.source == "custom";
   const lines: string[] = [];
-  if (pkg == null) {
-    lines.push("当前：未安装（在线播放不可用，本地音乐不受影响）");
-  } else if (custom) {
-    lines.push("当前：自定义包（目录号 " + pkg.versionCode + "）");
+  if (active == null) {
+    lines.push("生效：无（在线播放不可用；本地音乐与在线搜索不受影响）");
   } else {
-    lines.push("当前：v" + pkg.versionName);
+    const tag = active.source != "official" ? "（自定义）" : "";
+    const live = playPackReady() && loadedPlayPackId() == active.id;
+    lines.push("生效：" + (active.source != "official" ? "自定义包" : "官方包") + " v" + active.versionName + tag + (live ? "" : "（待生效）"));
   }
-  if (custom) {
-    lines.push("远端：自定义包不参与自动更新，升级请重新粘贴链接");
+  const customCount = list.length - (official != null ? 1 : 0);
+  if (list.length == 0) {
+    lines.push("已安装：无");
   } else {
-    lines.push(remote == null ? "远端：未检查" : "远端：v" + remote.versionName);
+    const parts: string[] = [];
+    if (official != null) parts.push("官方 v" + official.versionName);
+    if (customCount > 0) parts.push("自定义 ×" + customCount);
+    lines.push("已安装：" + parts.join("，") + "（可多包并存，启用其一）");
   }
-  const active = installedPackage();
-  if (engineStatus() == "failed") {
-    lines.push("状态：音源包异常，" + lastEngineError());
-  } else if (pendingApply()) {
-    lines.push("状态：新包已安装，「立即应用」或重启后生效");
-  } else if (active != null && loadedVersionCode() == active.versionCode && engineStatus() == "ready") {
-    lines.push("状态：引擎运行中" + (engineVersion().length > 0 ? "（" + engineVersion() + "）" : ""));
-  } else {
-    lines.push("状态：尚未装载");
+  lines.push(remote == null ? "远端最新：未检查" : "远端最新：v" + remote.versionName);
+  // 内置数据包（meta，搜索/歌单/歌词走它）：bundleInfo 是引擎侧自述；
+  // 引擎冷启动时读它会顺带把引擎拉起来（1-2s），调用方已给 loading
+  const metaReady = (await bundleInfo()).length > 0;
+  lines.push(metaReady ? "数据包：内置（已装载）" : "数据包：内置");
+  if (engineStatus() == "failed" && lastEngineError().length > 0) {
+    lines.push("引擎：" + lastEngineError());
   }
-  if (!custom && remote != null && remote.notes.length > 0) {
+  if (remote != null && remote.notes.length > 0) {
     lines.push("更新说明：" + remote.notes);
   }
   return lines.join("\n");
 }
 
 function showSourcePackage(): void {
-  const pkg = installedPackage();
-  const actions: SheetAction[] = [
-    { name: "检查更新" },
-    { name: "从链接安装自定义包" },
-    { name: "立即应用（含自检）", disabled: pkg == null || !pendingApply() },
-    { name: "卸载音源包", color: "#d95f5f", disabled: pkg == null },
-  ];
-  uni.showModal({
-    title: "音源包",
-    content:
-      sourcePackageDetail() +
-      "\n\n本应用不内置音源包，在线播放需先安装：「检查更新」从官方清单下载，「从链接安装」粘贴自备的 source-bundle.js 直链（仅 https）。检查更新只下载不打断；「立即应用」会重建引擎并做取链自检，自检失败自动回退。",
-    confirmText: "操作",
-    cancelText: "取消",
-    success: (res) => {
-      if (!res.confirm) return;
-      openSheet("音源包操作", actions, (index) => {
-        if (index == SP_CHECK) runSourceCheck();
-        else if (index == SP_APPLY) runSourceApply();
-        else if (index == SP_INSTALL_URL) runSourceInstallUrl();
-        else if (index == SP_UNINSTALL) runSourceUninstall();
-      });
-    },
+  // 详情里带引擎侧状态，先读一次（可能要把引擎拉起来），给个 loading
+  uni.showLoading({ title: "读取状态", mask: true });
+  sourcePackageDetail().then((detail) => {
+    uni.hideLoading();
+    const list = packs();
+    const active = activePack();
+    const actions: SheetAction[] = [];
+    spActions = [];
+    const push = (kind: string, id: string, name: string, color?: string): void => {
+      spActions.push({ kind: kind, id: id } as SpAction);
+      if (color != null) {
+        actions.push({ name: name, color: color } as SheetAction);
+      } else {
+        actions.push({ name: name } as SheetAction);
+      }
+    };
+    push("check", "", "检查更新（安装/升级官方播放包）");
+    push("url", "", "从链接安装自定义包");
+    for (let i = 0; i < list.length; i++) {
+      const p = list[i];
+      if (active != null && active.id == p.id) continue;
+      push("activate", p.id, "启用：" + packLabelOf(p));
+    }
+    for (let i = 0; i < list.length; i++) {
+      push("uninstall", list[i].id, "卸载：" + packLabelOf(list[i]), theme.skin.danger);
+    }
+    uni.showModal({
+      title: "音源包管理",
+      content:
+        detail +
+        "\n\n播放音源包不内置（版权原因）：在线播放需自行安装，可多包并存、启用其一。官方包走「检查更新」安装；自定义包粘贴 play-bundle.js 的 https 直链，装好后在列表中「启用」。切换/启用会即时热装载并做取链自检。",
+      confirmText: "操作",
+      cancelText: "取消",
+      success: (res) => {
+        if (!res.confirm) return;
+        openSheet("音源包操作", actions, (index) => {
+          const act = spActions[index];
+          if (act == null) return;
+          if (act.kind == "check") runSourceCheck();
+          else if (act.kind == "url") runSourceInstallUrl();
+          else if (act.kind == "activate") runSourceActivate(act.id);
+          else if (act.kind == "uninstall") runSourceUninstall(act.id);
+        });
+      },
+    });
+  }).catch(() => {
+    uni.hideLoading();
+    uni.showToast({ title: "读取状态失败", icon: "none" });
   });
 }
 
+function packLabelOf(p: PlayPackMeta): string {
+  const kind = p.source != "official" ? "自定义包" : "官方包";
+  return kind + " v" + p.versionName;
+}
+
+function refreshSourceUi(): void {
+  sourceRefresh.value++;
+  sourceUpdateStore.refresh();
+  syncSourceUpdateBadge();
+}
+
+/** 检查更新：官方包未装时这一步就是首装（manifest 是官方播放包唯一获取渠道） */
 function runSourceCheck(): void {
-  uni.showLoading({ title: "检查中", mask: true });
-  checkAndDownload(true).then((r) => {
+  const firstInstall = officialPack() == null;
+  uni.showLoading({ title: firstInstall ? "安装官方播放包" : "检查更新", mask: true });
+  checkSourceUpdate(true).then((r) => {
     uni.hideLoading();
-    sourceRefresh.value++;
-    syncSourceUpdateBadge();
-    uni.showModal({ title: "检查更新", content: r.message, showCancel: false });
+    refreshSourceUi();
+    uni.showModal({ title: firstInstall ? "安装官方播放包" : "检查更新", content: r.message, showCancel: false });
   }).catch(() => {
     uni.hideLoading();
     uni.showToast({ title: "检查失败", icon: "none" });
   });
 }
 
-function runSourceApply(): void {
-  uni.showLoading({ title: "应用中", mask: true });
+/** 启用一个已落盘的播放包（热装载 + 冒烟自检；自定义包装完不会自动激活，靠这里） */
+function runSourceActivate(id: string): void {
+  uni.showLoading({ title: "启用中", mask: true });
   pickSmokeSongs().then((songs) => {
-    return applyNow(songs);
+    return activatePack(id, songs);
   }).then((r) => {
     uni.hideLoading();
-    sourceRefresh.value++;
-    syncSourceUpdateBadge();
-    uni.showModal({ title: "立即应用", content: r.message, showCancel: false });
+    refreshSourceUi();
+    uni.showModal({ title: "启用播放包", content: r.message, showCancel: false });
   }).catch(() => {
     uni.hideLoading();
-    uni.showToast({ title: "应用失败", icon: "none" });
+    uni.showToast({ title: "启用失败", icon: "none" });
   });
 }
 
-/** 从直链安装自定义音源包（不自动更新，升级=重新粘贴链接） */
+/**
+ * 从直链安装自定义播放包（不自动更新、不自动激活，升级=重新粘贴链接）。
+ * 装完提示「立即启用」：不抢用户的选择权，但把路径缩短到一次点击。
+ */
 function runSourceInstallUrl(): void {
   uni.showModal({
     title: "从链接安装",
     editable: true,
-    placeholderText: "粘贴 source-bundle.js 的 https 直链",
+    placeholderText: "粘贴 play-bundle.js 的 https 直链",
     confirmText: "安装",
     cancelText: "取消",
     success: (res) => {
@@ -380,20 +422,25 @@ function runSourceInstallUrl(): void {
       uni.showLoading({ title: "安装中", mask: true });
       installFromUrl(url).then((r) => {
         uni.hideLoading();
-        sourceRefresh.value++;
-        syncSourceUpdateBadge();
+        refreshSourceUi();
         if (!r.ok) {
           uni.showModal({ title: "安装失败", content: r.message, showCancel: false });
           return;
         }
-        // 安装与生效分开：生效会重建引擎并做自检，是否立刻做交给用户点一下
+        // 找到刚装的包（按安装结果里的 versionCode 对回包 id），给一键启用
+        const list = packs();
+        let newId = "";
+        for (let i = 0; i < list.length; i++) {
+          if (list[i].versionCode == r.versionCode) newId = list[i].id;
+        }
+        const finalId = newId;
         uni.showModal({
           title: "安装完成",
           content: r.message,
-          confirmText: "立即应用",
+          confirmText: "立即启用",
           cancelText: "稍后",
           success: (res2) => {
-            if (res2.confirm) runSourceApply();
+            if (res2.confirm && finalId.length > 0) runSourceActivate(finalId);
           },
         });
       }).catch(() => {
@@ -404,19 +451,32 @@ function runSourceInstallUrl(): void {
   });
 }
 
-function runSourceUninstall(): void {
+/** 卸载一个播放包：生效中的包卸载后在线取链不可用（可再启用列表里的其他包） */
+function runSourceUninstall(id: string): void {
+  const p = packById(id);
+  if (p == null) {
+    uni.showToast({ title: "该播放包已不存在", icon: "none" });
+    return;
+  }
+  const active = activePack();
+  const wasActive = active != null && active.id == id;
   uni.showModal({
-    title: "卸载音源包",
-    content: "移除本机已安装的音源包？卸载后在线播放不可用（本地音乐不受影响），需要时再「检查更新」或「从链接安装」。",
+    title: "卸载播放包",
+    content:
+      "卸载「" + packLabelOf(p) + "」？" +
+      (wasActive ? "这是当前生效的包，卸载后在线播放将不可用（本地音乐不受影响）。" : "") +
+      "需要时可再「检查更新」或「从链接安装」。",
     confirmText: "卸载",
     cancelText: "取消",
     success: (res) => {
       if (!res.confirm) return;
-      uninstallSourcePackage().then(() => {
-        sourceRefresh.value++;
-        syncSourceUpdateBadge();
-        uni.showToast({ title: "已卸载音源包", icon: "none" });
+      uni.showLoading({ title: "卸载中", mask: true });
+      uninstallPack(id).then((r) => {
+        uni.hideLoading();
+        refreshSourceUi();
+        uni.showToast({ title: r.ok ? "已卸载" : r.message, icon: "none" });
       }).catch(() => {
+        uni.hideLoading();
         uni.showToast({ title: "卸载失败，请重试", icon: "none" });
       });
     },

@@ -9,7 +9,7 @@ import { desktopLyric } from '@/services/desktop-lyric'
 import { resolveUrl } from '@/services/http'
 import { initQtStat, qtTrack, qtTrackError, qtStatFlush } from '@/uni_modules/qt-stat'
 import { checkAppUpdate, checkOfficialVersion, setPendingUpdate } from '@/services/upgrade'
-import { prewarmSourceEngine } from '@/services/source-engine'
+import { prewarmSourceEngine, PLAY_PACK_MISSING_EVENT } from '@/services/source-engine'
 import { checkSourceUpdateSilently } from '@/services/source-update'
 import { exitApp, ensureNotificationPermission, openNotificationSettings, applyLegacyInsets } from '@/services/app-native'
 import { refreshQtLayout, pauseQtLayoutWatcher, resumeQtLayoutWatcher } from '@/uni_modules/qt-ui/composables/use-qt-layout'
@@ -63,7 +63,31 @@ onLaunch(() => {
   // 首屏守卫：部分机型（如三星 S24 Ultra 全屏）首页视图树可能一直不挂载，
   // 8s 后仍未挂载则上报 boot-guard 并重建首页，见 services/boot-guard.ts
   installBootGuard()
+  // 在线播放需要「播放音源包」（不内置，版权风险由用户自行安装）：
+  // 引擎在「要取链但没有生效播放包」时广播该事件（引擎侧 10s 节流），
+  // 这里弹一次引导，去设置页安装——不放下载链接，安装动作都在设置页完成
+  uni.$on(PLAY_PACK_MISSING_EVENT, showPlayPackMissingGuide)
 })
+
+/** 播放包缺失引导的弹窗节流：1 分钟内最多一次（用户点了「去安装」则到设置页处理） */
+let lastPlayPackGuideAt = 0
+
+function showPlayPackMissingGuide(): void {
+  const now = Date.now()
+  if (now - lastPlayPackGuideAt < 60000) return
+  lastPlayPackGuideAt = now
+  uni.showModal({
+    title: '未安装播放音源包',
+    content: '在线播放需要在 设置 → 音源包管理 安装并启用播放音源包。本地音乐播放不受影响。',
+    confirmText: '去安装',
+    cancelText: '暂不',
+    confirmColor: themeStore.skin.accent,
+    success: (res) => {
+      if (!res.confirm) return
+      uni.navigateTo({ url: '/pages/settings/index' })
+    },
+  })
+}
 
 // 进入前台时发送 show 事件（统计回前台）；已登录时增量拉取收藏变更（多端同步，LIKE_SYNC_DESIGN.md）
 onShow(() => {

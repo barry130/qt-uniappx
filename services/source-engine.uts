@@ -1,38 +1,47 @@
 /**
- * 音源引擎门面（app 侧）
+ * 音源引擎门面（app 侧，双包架构）
  *
- * 职责：把 qt-js-engine 插件（回调式、原生线程）包成 Promise 风格，并管住三件事：
- *   1. 引擎生命周期：起一次、装一次包、出错降级；
- *   2. 音源包装载：从本地读 chain.json / source-bundle.js 灌进引擎
- *      （chain.json 可缺——custom 直链包自包含，用 bundle 内置的默认线路）；
- *   3. 取链：getPlayUrlByEngine() 是唯一的取链入口（未安装音源包时取链不可用，
- *      失败返回 "" 由调用方报「暂时无法播放」——原型 TS 链已删除，见方案 §2.6）。
+ * 引擎上下文分两层装配：
+ *   ① 元数据包（meta-bundle.js，内置低风险）：装进 qt-js-engine 的**唯一 bundle 槽**
+ *      （插件经 https://qt.local/qt-bundle.js 动态 import ESM；meta 顶层检测到
+ *      globalThis.__qtHost 时自注册 __qtEntries）。搜索/歌单/专辑/歌词/封面等
+ *      数据入口与 verifyPlayable 都由它提供——**不装任何播放包也能用**。
+ *   ② 播放音源包（play-bundle.js，高版权风险，绝不内置）：用户在设置页安装
+ *      （官方 manifest 或自定义直链），文本经 meta 的 installPlayPack 入口
+ *      eval 注入同一引擎上下文（globalThis.__qtPlayPackFactory 约定），
+ *      getPlayUrl/loadChain 由 meta 转发给它。
  *
- * ── bundle 入口契约（hostApiVersion = 1，与 qt-pc 侧同一份 source-bundle.js）──
- * bundle 末尾必须写 `globalThis.__qtEntries = { bundleInfo, loadChain, getPlayUrl, verifyPlayable }`：
- *   bundleInfo()            → JSON 文本 {name, version, platforms:[1101], hostApiVersion}
- *   loadChain(chainJson)    → JSON 文本 {ok:true, lines:N}；chain.json 非法时抛错
- *   getPlayUrl(args)        → JSON 文本 {url, source, quality, line}；取不到时抛错
- *   verifyPlayable(args)    → JSON 文本 {ok, status, length}；用于冒烟自检
- * args 为单个对象：{platform, id, name, singer, album, quality, duration}
+ * 生效中的播放包由 source-bundle-fs 的 activeId 指定（多包并存、其一生效）；
+ * 这里维护「引擎里已注入的是哪个包」（gPlayPackLoadedId），切换/更新后热注入。
  *
- * line 是本次取链**命中**的线路 {id, name, kind}（chain.json 里那条源），供管理端
- * 「当前播放地址」显示「这条地址是音源包里哪条源取到的」；包内 10 分钟缓存命中时
- * 为 null。早期构建把它序列化成了字符串，parsePlayUrlLine 两种形状都认。
+ * ── meta 入口契约（hostApiVersion = 1，与 qt-pc 同一份 meta-bundle.js）──
+ *   bundleInfo()          → {name:"meta-bundle", version:"meta.1", metaRevision,
+ *                            playPack:{name,version}|null, platforms, hostApiVersion}
+ *   installPlayPack(args) → {ok, playPack:{name,version}}；包代码非法时抛错
+ *   uninstallPlayPack()   → {ok}
+ *   loadChain(chainJson)  → {ok:true, lines:N}；chain 非法时抛错
+ *   getPlayUrl(args)      → {url, source, quality, line}；未装播放包时抛
+ *                            PLAY_PACK_MISSING_MESSAGE（“未安装播放音源包…”）
+ *   verifyPlayable(args)  → {ok, status, length}（实现在 meta，冒烟预检不依赖播放包）
+ *   其余数据入口（search/searchPlaylists/lyric/cover/...）与旧单体包同名同形。
+ * args 都是「单个对象的 JSON 数组文本」（引擎边界只走字符串，位置参数）。
  *
- * 契约版本不匹配时**拒绝装载**（引擎返回的 hostApiVersion 与这里不一致），
- * 因为入口名/参数形状变了以后静默失败比直接降级更难排查。
+ * line 是取链命中线路 {id,name,kind}（kind 另有 "cross"=跨源兜底），供管理端
+ * 「当前播放地址」显示；包内缓存命中时为 null（见 parsePlayUrlLine 的兼容注释）。
+ *
+ * 契约版本不匹配时**拒绝装载**：入口名/参数形状变了以后静默失败比直接降级更难排查。
  */
 
 import type { Song } from "@/types/music";
-import type { SourcePackage } from "@/services/source-bundle-fs";
+import type { PlayPackMeta } from "@/services/source-bundle-fs";
+import { metaBundleCode } from "@/services/source-meta-code";
 import { start, stop, loadBundle, invoke, isRunning, isHealthy } from "@/uni_modules/qt-js-engine";
 import {
-  installedPackage,
-  readArtifact,
+  activePack,
+  readPackArtifact,
   ensureLocalStateRestored,
   ARTIFACT_CHAIN,
-  ARTIFACT_BUNDLE,
+  ARTIFACT_PLAY,
 } from "@/services/source-bundle-fs";
 
 /** 与插件 interface.uts 对应的结构类型（服务层不引插件类型，避免跨模块类型耦合） */
@@ -59,6 +68,19 @@ const PLAY_TIMEOUT_MS = 12000;
 const VERIFY_TIMEOUT_MS = 8000;
 /** 装载 chain 的超时（纯本地计算，给短一点） */
 const LOAD_CHAIN_TIMEOUT_MS = 4000;
+/** installPlayPack 注入超时：eval 1.7MB IIFE 一般 <1s，留足余量 */
+const INSTALL_PACK_TIMEOUT_MS = 15000;
+/** bundleInfo 探测超时 */
+const BUNDLE_INFO_TIMEOUT_MS = 4000;
+
+/**
+ * 「未安装播放音源包」提示事件：getPlayUrl 失败且原因是没装播放包时广播
+ * （10s 节流）。App.uvue 接住弹一次引导弹窗（去设置安装），与 qt-pc 的
+ * PlayPackPrompt 同口径——提示需要安装，不内置下载链接，跳转设置页。
+ */
+export const PLAY_PACK_MISSING_EVENT = "qt-play-pack-missing";
+const PLAY_PACK_MISSING_MESSAGE_PART = "未安装播放音源包";
+let gLastMissingEmitAt = 0;
 
 /**
  * 引擎被隔离（poison：单次 evaluate 同步执行超过插件侧 STALL_MS）后的自动重建策略。
@@ -82,13 +104,20 @@ let gEngineVersion = "";
 let gEngineName = "";
 let gLastError = "";
 let gLoadFailure: SourceLoadFailure = "";
-/** 已成功装载进引擎的包版本号（0 = 未装载） */
-let gLoadedCode = 0;
-/** 装载失败过的包版本号，避免每次播放都重试同一个坏包 */
-let gLoadFailedCode = 0;
-/** 起引擎/装包的并发去重 */
+/** 内置 meta 是否已装进引擎（引擎重建/隔离后归零） */
+let gMetaReady = false;
+/** 已成功注入引擎的播放包 id（"" = 没注入任何播放包） */
+let gPlayPackLoadedId = "";
+/** 已成功注入引擎的播放包版本号（0 = 无；设置页/红点比对用） */
+let gPlayPackLoadedCode = 0;
+/** 注入失败过的播放包 id，避免每次播放都重试同一个坏包 */
+let gPlayPackFailedId = "";
+/** 起引擎的并发去重 */
 let gBootPromise: Promise<boolean> | null = null;
-let gLoadPromise: Promise<boolean> | null = null;
+/** 装 meta 的并发去重 */
+let gMetaPromise: Promise<boolean> | null = null;
+/** 注入播放包的并发去重 */
+let gPlayPackPromise: Promise<boolean> | null = null;
 /** 自动重建的滑动窗口计数（见 MAX_REVIVES_PER_WINDOW） */
 let gReviveWindowStart = 0;
 let gRevivesInWindow = 0;
@@ -107,8 +136,14 @@ export function engineName(): string {
   return gEngineName;
 }
 
-export function loadedVersionCode(): number {
-  return gLoadedCode;
+/** 引擎里已注入的播放包 id（"" = 未注入；与 activeId 比对即「待生效」） */
+export function loadedPlayPackId(): string {
+  return gPlayPackLoadedId;
+}
+
+/** 引擎里已注入的播放包版本号（0 = 未注入） */
+export function loadedPlayPackCode(): number {
+  return gPlayPackLoadedCode;
 }
 
 export function lastEngineError(): string {
@@ -120,9 +155,17 @@ export function loadFailureKind(): SourceLoadFailure {
   return gLoadFailure;
 }
 
-/** 引擎当前是否可用于取链 */
+/**
+ * 引擎当前是否可用于**数据入口**（搜索/歌单/歌词…）：只需要内置 meta。
+ * 播放取链是否可用要另看 playPackReady()。
+ */
 export function engineUsable(): boolean {
-  return gStatus == "ready" && gLoadedCode > 0 && isRunning() && isHealthy();
+  return gStatus == "ready" && gMetaReady && isRunning() && isHealthy();
+}
+
+/** 引擎当前是否可用于**取链**：meta + 播放包都已注入且引擎健康 */
+export function playPackReady(): boolean {
+  return engineUsable() && gPlayPackLoadedId.length > 0;
 }
 
 function msgOf(e: any): string {
@@ -191,8 +234,8 @@ function callInvoke(name: string, argsJson: string, timeoutMs: number): Promise<
  * 插件侧对「单次 evaluate 同步执行超过 STALL_MS」的脚本做 poison 隔离，被隔离后
  * gStatus 仍是 "ready"、isHealthy() 变 false，所有 invoke 立刻失败且永不恢复。
  * 这里把它降级为「这一次请求失败 + 下一次自动恢复」：
- *   stop()（放弃卡住的线程）→ start()，并清零 gLoadedCode，
- *   让随后的 ensurePackageLoaded 走完整的「重新装载 bundle + chain」。
+ *   stop()（放弃卡住的线程）→ start()，并归零 meta/播放包装载标记，
+ *   让随后的 ensureDataEngine / ensurePlayPackLoaded 走完整重装。
  */
 export function ensureEngine(): Promise<boolean> {
   if (gStatus == "ready" && !isHealthy()) {
@@ -204,7 +247,7 @@ export function ensureEngine(): Promise<boolean> {
     if (gRevivesInWindow >= MAX_REVIVES_PER_WINDOW || now - gLastReviveAt < MIN_REVIVE_INTERVAL_MS) {
       // 反复被隔离说明包/线路有系统性问题：不再重建，明确失败等用户手动重启。
       // 保持 gStatus = "ready"（而不是 failed），这样窗口过期后还能自动恢复。
-      gLastError = `引擎多次被隔离（脚本执行超时），已暂停自动重建；请在设置里点「立即应用」重建引擎`;
+      gLastError = `引擎多次被隔离（脚本执行超时），已暂停自动重建；请在设置里切换/重装播放包重建引擎`;
       console.log("[SourceEngine] " + gLastError);
       return Promise.resolve(false);
     }
@@ -214,7 +257,7 @@ export function ensureEngine(): Promise<boolean> {
       `[SourceEngine] 引擎已被隔离（脚本执行超时），自动重建（本窗口第 ${gRevivesInWindow}/${MAX_REVIVES_PER_WINDOW} 次）`,
     );
     gStatus = "idle";
-    gLoadedCode = 0;
+    resetLoadedState();
     gLastError = "";
     const revived = reviveEngine();
     gBootPromise = revived;
@@ -226,6 +269,14 @@ export function ensureEngine(): Promise<boolean> {
   const p = bootEngine();
   gBootPromise = p;
   return p;
+}
+
+/** 引擎重建后归零「已装载」标记（meta 与播放包都要重装） */
+function resetLoadedState(): void {
+  gMetaReady = false;
+  gPlayPackLoadedId = "";
+  gPlayPackLoadedCode = 0;
+  gPlayPackFailedId = "";
 }
 
 /** 被隔离后的重建：停掉旧引擎（放弃卡住的线程）再起一个新的 */
@@ -265,8 +316,7 @@ export async function shutdownEngine(): Promise<void> {
   await callStop();
   gStatus = "idle";
   gEngineVersion = "";
-  gLoadedCode = 0;
-  gLoadFailedCode = 0;
+  resetLoadedState();
   gLoadFailure = "";
   // 手动重启 = 用户已介入，清掉自动重建的限流窗口，让它重新可用
   gReviveWindowStart = 0;
@@ -274,101 +324,197 @@ export async function shutdownEngine(): Promise<void> {
   gLastReviveAt = 0;
 }
 
-// ==================== 音源包装载 ====================
+// ==================== ① 装 meta（数据面） ====================
 
 /**
- * 把生效中的音源包装进引擎（幂等）。
- * 返回 false 表示「本次取不了链」：没有音源包 / 引擎起不来 / 包装载失败。
- * 由于引擎是唯一取链实现，这里失败 = 所有播放走不通，预热失败会打日志便于排查。
+ * 确保「引擎已起 + 内置 meta 已装」（幂等，并发单飞）。
+ * 这是数据入口（invokeSource）的唯一前置——**没有播放包也成功**，
+ * 搜索/歌单/歌词等数据功能与播放解耦正是双包架构的要点。
  */
-export async function ensurePackageLoaded(): Promise<boolean> {
-  // 首页等页面调用可能在预热完成前到达，先确保 state.json 已恢复，
-  // 否则会读到空状态而误报「尚未装载」
+export async function ensureDataEngine(): Promise<boolean> {
   await ensureLocalStateRestored();
-  const state = installedPackage();
-  if (state == null) return Promise.resolve(false);
-  // 引擎被隔离（poison）时 gLoadedCode 仍是该版本号，但引擎里所有 invoke 都会立刻失败。
-  // 这里必须把「健康」也作为「已就绪」的条件，否则会直接返回 true 骗过调用方，
-  // 而 ensureEngine() 里的自动重建永远走不到（必须让它看到 !isHealthy() 才能重建）。
-  if (gLoadedCode == state.versionCode && isHealthy()) return Promise.resolve(true);
-  if (gLoadFailedCode == state.versionCode) return Promise.resolve(false);
-  const pending = gLoadPromise;
+  if (!(await ensureEngine())) {
+    gLoadFailure = "engine";
+    return false;
+  }
+  if (gMetaReady && isHealthy()) return true;
+  const pending = gMetaPromise;
   if (pending != null) return pending;
-  const p = loadPackage(state);
-  gLoadPromise = p;
+  const p = loadMetaIntoEngine();
+  gMetaPromise = p;
   return p;
 }
 
-async function loadPackage(pkg: SourcePackage): Promise<boolean> {
-  const versionCode = pkg.versionCode;
+/** 把内置 meta-bundle.js 灌进 bundle 槽并验契约（bundleInfo 自述） */
+async function loadMetaIntoEngine(): Promise<boolean> {
   try {
-    if (!(await ensureEngine())) {
-      gLoadFailure = "engine";
+    gStatus = "loading";
+    // 插件内部会先 compile 做语法校验（不执行），再经动态 import 装载 ESM；
+    // meta 顶层检测到 globalThis.__qtHost（prelude 已注入）时自注册 __qtEntries
+    await callLoadBundle(metaBundleCode());
+    // 契约自检：bundleInfo 必须自述是 meta-bundle 且 hostApiVersion 一致
+    // （旧「单体 ESM 官方包」自述 name=source-bundle，会在这里被拒——
+    //  它们与双包客户端不兼容，需从设置页重新安装播放包）
+    const infoText = await callInvoke("bundleInfo", "[]", BUNDLE_INFO_TIMEOUT_MS);
+    const info = JSON.parse(infoText) as UTSJSONObject;
+    const name = info.get("name") as string | null;
+    const hostApi = info.get("hostApiVersion") as number | null;
+    if (name != "meta-bundle" || hostApi == null || hostApi != HOST_API_VERSION) {
+      gLoadFailure = "contract";
+      fail(`内置元数据包契约不符：name=${name} hostApiVersion=${hostApi}`);
+      return false;
+    }
+    gMetaReady = true;
+    gStatus = "ready";
+    gLastError = "";
+    const revision = info.get("metaRevision");
+    console.log(
+      `[SourceEngine] 内置 meta 已装载（${name}，metaRevision=${revision}，hostApiVersion ${HOST_API_VERSION}）`,
+    );
+    return true;
+  } catch (e) {
+    // meta 是内置产物（构建期已验），装载失败只能是环境问题，不算 bad 包
+    gLoadFailure = "engine";
+    fail(`内置元数据包装载失败：${msgOf(e)}`);
+    return false;
+  } finally {
+    gMetaPromise = null;
+  }
+}
+
+// ==================== ② 注入播放包（播放面） ====================
+
+/**
+ * 确保「生效中的播放包已注入引擎」（幂等，并发单飞）。
+ * 返回 false 表示「本次取不了链」：没有生效包 / 引擎起不来 / meta 没装上 /
+ * 播放包注入失败。没有生效包时广播 PLAY_PACK_MISSING_EVENT（节流），
+ * 由 App.uvue 弹引导安装的提示。
+ */
+export async function ensurePlayPackLoaded(): Promise<boolean> {
+  await ensureLocalStateRestored();
+  const pack = activePack();
+  if (pack == null) {
+    emitPlayPackMissing();
+    return false;
+  }
+  if (!(await ensureDataEngine())) return false;
+  if (gPlayPackLoadedId == pack.id && isHealthy()) return true;
+  if (gPlayPackFailedId == pack.id && isHealthy()) return false;
+  const pending = gPlayPackPromise;
+  if (pending != null) return pending;
+  const p = applyPlayPackInEngine(pack);
+  gPlayPackPromise = p;
+  return p;
+}
+
+/**
+ * 把一个播放包注入引擎：installPlayPack（eval play-bundle.js，约定
+ * globalThis.__qtPlayPackFactory）→ 有 chain.json 时 loadChain。
+ * 失败分类：missing=文件没了；invalid=包代码/chain 非法（可拉黑）；
+ * engine=meta 层都没就绪（环境问题）。
+ */
+async function applyPlayPackInEngine(pack: PlayPackMeta): Promise<boolean> {
+  try {
+    const code = await readPackArtifact(pack.id, ARTIFACT_PLAY);
+    if (code.length == 0) {
+      gPlayPackFailedId = pack.id;
+      gLoadFailure = "missing";
+      fail(`播放包文件缺失：${pack.id}`);
       return false;
     }
     gStatus = "loading";
-    const code = await readArtifact(versionCode, ARTIFACT_BUNDLE);
-    if (code.length == 0) {
-      gLoadFailedCode = versionCode;
-      gLoadFailure = "missing";
-      fail(`音源包文件缺失：${versionCode}`);
-      return false;
-    }
-    // 插件内部会先 compile 做语法校验（不执行），再 execute
-    try {
-      await callLoadBundle(code);
-    } catch (e) {
-      // 语法/执行期报错 = 包本身有问题，可以拉黑
-      gLoadFailedCode = versionCode;
+    // meta 的 installPlayPack：new Function(code) 执行，取 __qtPlayPackFactory
+    // 构造播放层并替换当前生效层；包代码抛错 = 包本身有问题
+    const installArgs = new UTSJSONObject();
+    installArgs.set("code", code);
+    const resText = await callInvoke(
+      "installPlayPack",
+      JSON.stringify([installArgs]),
+      INSTALL_PACK_TIMEOUT_MS,
+    );
+    const res = JSON.parse(resText) as UTSJSONObject;
+    const okFlag = res.get("ok") as boolean | null;
+    if (okFlag != true) {
+      gPlayPackFailedId = pack.id;
       gLoadFailure = "invalid";
-      fail(`bundle 装载失败：${msgOf(e)}`);
+      const err = res.get("error") as string | null;
+      fail(`播放包注入失败：${pack.id}（${err != null ? err : "installPlayPack 未成功"}）`);
       return false;
     }
-    // chain.json 交给 bundle：线路顺序/音质/预算都由它自己解析。
-    // 它是可选覆盖层（内容与 bundle 内置默认链同源）：custom 直链包必无，
-    // official 包的 manifest 也可不列——缺了不算失败，跳过 loadChain，
-    // bundle 用自己内置的 defaultChainConfig 线路。
-    const chain = await readArtifact(versionCode, ARTIFACT_CHAIN);
-    let lines = 0;
-    if (chain.length == 0) {
-      console.log(`[SourceEngine] chain.json 缺失（${versionCode}），改用 bundle 内置默认线路`);
-    } else {
+    // chain.json 是可选线路覆盖层（内容与播放包内置默认链同源）：custom 直链
+    // 包必无，official 的 manifest 也可不列——缺了就跳过 loadChain。
+    const chain = await readPackArtifact(pack.id, ARTIFACT_CHAIN);
+    if (chain.length > 0) {
       try {
-        const loadRes = await callInvoke("loadChain", JSON.stringify([chain]), LOAD_CHAIN_TIMEOUT_MS);
-        const o = JSON.parse(loadRes) as UTSJSONObject | null;
-        if (o != null) {
-          const n = o.get("lines") as number | null;
-          if (n != null) lines = n;
-        }
+        const chainResText = await callInvoke("loadChain", JSON.stringify([chain]), LOAD_CHAIN_TIMEOUT_MS);
+        const chainRes = JSON.parse(chainResText) as UTSJSONObject;
+        const chainOk = chainRes.get("ok") as boolean | null;
+        if (chainOk != true) throw new Error("loadChain 应答 ok!=true");
       } catch (e) {
         // chain 不合法等于没有线路，按包有问题处理（否则每次播放都白跑一趟）
-        gLoadFailedCode = versionCode;
+        gPlayPackFailedId = pack.id;
         gLoadFailure = "invalid";
         fail(`chain.json 装载失败：${msgOf(e)}`);
         return false;
       }
     }
-    gLoadedCode = versionCode;
+    gPlayPackLoadedId = pack.id;
+    gPlayPackLoadedCode = pack.versionCode;
+    gPlayPackFailedId = "";
+    gStatus = "ready";
     gLastError = "";
     gLoadFailure = "";
-    gStatus = "ready";
-    console.log(`[SourceEngine] 音源包已装载：${pkg.versionName}（code ${versionCode}，线路 ${lines} 条）`);
+    console.log(
+      `[SourceEngine] 播放包已注入：${pack.id}（${pack.versionName}，code ${pack.versionCode}）`,
+    );
     return true;
   } catch (e) {
-    gLoadFailedCode = versionCode;
-    gLoadFailure = "engine";
-    fail(`音源包装载失败：${msgOf(e)}`);
+    // invoke 抛错：装载阶段（eval/loadChain 都是同步计算）失败按包问题处理
+    gPlayPackFailedId = pack.id;
+    gLoadFailure = "invalid";
+    fail(`播放包装载失败：${pack.id}（${msgOf(e)}）`);
     return false;
   } finally {
-    gLoadPromise = null;
+    gPlayPackPromise = null;
   }
 }
 
-/** 引擎侧是否已注册全部入口（诊断用，不装载包） */
-export async function bundleInfo(): Promise<string> {
-  if (!(await ensureEngine())) return "";
+/** 「未安装播放音源包」广播（10s 节流；App.uvue 接住弹引导） */
+function emitPlayPackMissing(): void {
+  const now = Date.now();
+  if (now - gLastMissingEmitAt < 10000) return;
+  gLastMissingEmitAt = now;
+  gLastError = "未安装播放音源包：在线播放需要在 设置 → 音源包管理 安装并启用播放音源包";
+  console.log("[SourceEngine] " + gLastError);
+  uni.$emit(PLAY_PACK_MISSING_EVENT);
+}
+
+/**
+ * 从引擎里卸掉当前播放包（切包/卸载前的清理；meta 层保留，数据功能不受影响）。
+ * 失败不阻塞调用方——引擎重建后播放包本来就要重注入。
+ */
+export async function unloadPlayPack(): Promise<void> {
+  if (gPlayPackLoadedId.length == 0) return;
+  const loaded = gPlayPackLoadedId;
+  gPlayPackLoadedId = "";
+  gPlayPackLoadedCode = 0;
   try {
-    return await callInvoke("bundleInfo", "[]", LOAD_CHAIN_TIMEOUT_MS);
+    if (await ensureDataEngine()) {
+      await callInvoke("uninstallPlayPack", "[]", LOAD_CHAIN_TIMEOUT_MS);
+    }
+  } catch (e) {
+    console.log(`[SourceEngine] uninstallPlayPack 失败（${msgOf(e)}），将在下次注入时覆盖`);
+  }
+  console.log(`[SourceEngine] 播放包已卸载：${loaded}`);
+}
+
+// ==================== bundleInfo（诊断） ====================
+
+/** 引擎侧 bundleInfo 应答（含 meta 版本与当前 playPack 自述）；不可用时返回 "" */
+export async function bundleInfo(): Promise<string> {
+  if (!(await ensureDataEngine())) return "";
+  try {
+    return await callInvoke("bundleInfo", "[]", BUNDLE_INFO_TIMEOUT_MS);
   } catch (e) {
     return "";
   }
@@ -396,13 +542,6 @@ export function consumePlayUrlLine(): PlayUrlLine | null {
   return t;
 }
 
-/**
- * 解析应答里的 line 字段。形状不对（null/缺 id/非对象）一律按无命中处理。
- *
- * 兼容两种形状：新包是嵌套对象 `{id,name,kind}`，早期构建把它序列化成了
- * **字符串**（JSON 文本）。这里先按对象取，取不到再按字符串 parse 一次——
- * 这样升级顺序（先换包 / 先换 App）都不会让管理端显示不出线路。
- */
 /**
  * 跨源兜底命中的目标歌（bundle 侧搜索匹配到的目标平台条目）。
  * 引擎歌曲条目不带 platform（单源契约按入参补），这里从线路 id 前缀取：
@@ -439,6 +578,13 @@ function parseTargetSong(raw: any, lineId: string): Song | null {
   }
 }
 
+/**
+ * 解析应答里的 line 字段。形状不对（null/缺 id/非对象）一律按无命中处理。
+ *
+ * 兼容两种形状：新包是嵌套对象 `{id,name,kind}`，早期构建把它序列化成了
+ * **字符串**（JSON 文本）。这里先按对象取，取不到再按字符串 parse 一次——
+ * 这样升级顺序（先换包 / 先换 App）都不会让管理端显示不出线路。
+ */
 function parsePlayUrlLine(raw: any): PlayUrlLine | null {
   if (raw == null) return null;
   // ① 对象形状（当前包）
@@ -481,10 +627,11 @@ function parsePlayUrlLine(raw: any): PlayUrlLine | null {
 /**
  * 用引擎取播放地址。失败一律返回 ""（不抛错）——
  * 调用方拿到空串直接报「暂时无法播放」，不再有第二套取链实现兜底。
+ * 没装播放包 / meta 报「未安装播放音源包」时广播 PLAY_PACK_MISSING_EVENT。
  * 成功时把命中的线路存进 lastPlayUrlLine（见 consumePlayUrlLine）。
  */
 export async function getPlayUrlByEngine(song: Song, quality: string): Promise<string> {
-  if (!(await ensurePackageLoaded())) return "";
+  if (!(await ensurePlayPackLoaded())) return "";
   const args = new UTSJSONObject();
   args.set("platform", song.platform);
   args.set("id", song.id);
@@ -497,9 +644,15 @@ export async function getPlayUrlByEngine(song: Song, quality: string): Promise<s
   try {
     value = await callInvoke("getPlayUrl", JSON.stringify([args]), PLAY_TIMEOUT_MS);
   } catch (e) {
+    // 未装播放包（meta 转发层抛 PLAY_PACK_MISSING_MESSAGE）→ 引导安装
+    const message = msgOf(e);
+    if (message.indexOf(PLAY_PACK_MISSING_MESSAGE_PART) >= 0) {
+      emitPlayPackMissing();
+      return "";
+    }
     // 单曲取不到不算引擎故障，不写 failed。
-    // 错误文本里带歌/音质定位 + bundle 侧的逐线路追踪（qt-entries 会把 trace 拼进 error）
-    console.log(`[SourceEngine] 引擎取链失败：${msgOf(e)}（${song.platform} @${quality}「${song.name} ${song.singer}」id=${song.id}）`);
+    // 错误文本里带歌/音质定位 + bundle 侧的逐线路追踪（meta 会把 trace 拼进 error）
+    console.log(`[SourceEngine] 引擎取链失败：${message}（${song.platform} @${quality}「${song.name} ${song.singer}」id=${song.id}）`);
     return "";
   }
   try {
@@ -521,24 +674,24 @@ export async function getPlayUrlByEngine(song: Song, quality: string): Promise<s
 const DATA_TIMEOUT_MS = 30000;
 
 /**
- * 调 bundle 的音源数据入口（search / playlistDetail / lyric / cover 等），
- * 返回入口应答的 JSON 文本（形状见 qt-pc/src/source-scripts/qt-entries.ts）。
+ * 调 meta 的音源数据入口（search / playlistDetail / lyric / cover 等），
+ * 返回入口应答的 JSON 文本（形状见 qt-sources/src/meta-entries.ts）。
  *
- * 与 getPlayUrlByEngine 的分工：这里只做「装载 + invoke + 原样回传」，
- * 不解析具体字段——解析与模型映射归调用方（services/music-api.ts），
- * 入口增删时不必动本文件。失败抛错（调用方按原语义 catch/提示），
- * 因为数据接口取不到就是页面加载失败，需要让用户看到。
+ * 只需内置 meta（数据面与播放包解耦）：未装播放包时搜索/歌单/歌词照常工作。
+ * 失败抛错（调用方按原语义 catch/提示），因为数据接口取不到就是页面加载失败，
+ * 需要让用户看到。
  */
 export async function invokeSource(name: string, argsJson: string, timeoutMs: number = DATA_TIMEOUT_MS): Promise<string> {
-  if (!(await ensurePackageLoaded())) {
-    throw new Error("音源包未就绪：" + (gLastError.length > 0 ? gLastError : "尚未装载"));
+  if (!(await ensureDataEngine())) {
+    throw new Error("音源引擎未就绪：" + (gLastError.length > 0 ? gLastError : "尚未装载"));
   }
   return await callInvoke(name, argsJson, timeoutMs);
 }
 
-/** 试听校验：让 bundle 自己发一次 Range 请求确认地址真的可播（冒烟自检的第 ③ 道闸门） */
+/** 试听校验：让 meta 发一次 Range 请求确认地址真的可播（冒烟自检的第 ③ 道闸门；
+ *  实现在 meta 层，不依赖播放包） */
 export async function verifyPlayableByEngine(url: string): Promise<boolean> {
-  if (!(await ensurePackageLoaded())) return false;
+  if (!(await ensureDataEngine())) return false;
   const args = new UTSJSONObject();
   args.set("url", url);
   try {
@@ -554,16 +707,18 @@ export async function verifyPlayableByEngine(url: string): Promise<boolean> {
 // ==================== 启动预热 ====================
 
 /**
- * 冷启动预热：恢复生效状态 → 起引擎 → 装包。
- * 全部失败都只记录日志，不抛错（本地音乐不受影响；未安装音源包时由设置页/首页引导安装）。
+ * 冷启动预热：恢复生效状态 → 起引擎 → 装内置 meta → 注入生效中的播放包（如有）。
+ * 全部失败都只记录日志，不抛错：数据功能不装包也该能用，本地音乐更不受影响；
+ * 未装播放包时由设置页/首页横幅引导安装。
+ * 启动预热**不做冒烟**（冒烟要发真实网络请求，交给用户显式的安装/切换动作）。
  */
 export async function prewarm(): Promise<void> {
   try {
-    // 先恢复本地状态：未安装音源包时直接返回（在线取链不可用，由页面引导安装）
     await ensureLocalStateRestored();
-    if (installedPackage() == null) return;
-    if (!(await ensureEngine())) return;
-    await ensurePackageLoaded();
+    if (!(await ensureDataEngine())) return;
+    const pack = activePack();
+    if (pack == null) return;
+    await ensurePlayPackLoaded();
   } catch (e) {
     console.log("[SourceEngine] 预热失败：" + msgOf(e));
   }
