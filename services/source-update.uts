@@ -595,6 +595,24 @@ export async function activatePack(id: string, smokeSongs: Song[]): Promise<Sour
 }
 
 /**
+ * 切回内置数据包基线（音源包管理页「内置基线」行）：清空生效数据包位并让引擎
+ * 重装基线。数据包位空 = 基线（activeMetaId 为空串），与 activatePack 的 meta
+ * 分支共用装载管线，但不带版本契约校验（基线随应用分发，信任内嵌资产）。
+ */
+export async function activateBaselineMeta(): Promise<SourceApplyResult> {
+  await ensureLocalStateRestored();
+  if (!(await setActiveMeta(""))) {
+    return applyResult(false, 0, "切换失败：本地状态写入失败");
+  }
+  const ok = await reloadEngineMeta();
+  if (!ok) {
+    return applyResult(false, 0, `内置基线装载未通过：${lastEngineError()}`);
+  }
+  syncSourceUpdateBadge();
+  return applyResult(true, 0, "已切回内置基线数据包");
+}
+
+/**
  * 卸载一个包：play → 引擎卸载 + 删目录 + 出列表；meta → 回退生效位（activeMetaId
  * 清空即回内置基线）+ 删目录。卸载生效中的 meta 后引擎重装回基线。
  */
