@@ -33,15 +33,20 @@
  */
 
 import type { Song } from "@/types/music";
-import type { PlayPackMeta } from "@/services/source-bundle-fs";
+import type { SourcePackMeta } from "@/services/source-bundle-fs";
+import type { PackHeaderInfo } from "@/services/source-pack-header";
 import { metaBundleCode } from "@/services/source-meta-code";
+import { parsePackHeader } from "@/services/source-pack-header";
 import { start, stop, loadBundle, invoke, isRunning, isHealthy } from "@/uni_modules/qt-js-engine";
 import {
   activePack,
+  activeMetaPack,
   readPackArtifact,
   ensureLocalStateRestored,
   ARTIFACT_CHAIN,
   ARTIFACT_PLAY,
+  ARTIFACT_META,
+  PACK_KIND_META,
 } from "@/services/source-bundle-fs";
 
 /** 与插件 interface.uts 对应的结构类型（服务层不引插件类型，避免跨模块类型耦合） */
@@ -106,6 +111,10 @@ let gLastError = "";
 let gLoadFailure: SourceLoadFailure = "";
 /** 内置 meta 是否已装进引擎（引擎重建/隔离后归零） */
 let gMetaReady = false;
+/** 引擎里实际装载的 meta 来源：包 id（如 meta-official）或 ""（内置基线） */
+let gMetaLoadedId = "";
+/** 引擎里实际装载的 meta 版本号（基线无包头时为 0） */
+let gMetaLoadedCode = 0;
 /** 已成功注入引擎的播放包 id（"" = 没注入任何播放包） */
 let gPlayPackLoadedId = "";
 /** 已成功注入引擎的播放包版本号（0 = 无；设置页/红点比对用） */
@@ -144,6 +153,24 @@ export function loadedPlayPackId(): string {
 /** 引擎里已注入的播放包版本号（0 = 未注入） */
 export function loadedPlayPackCode(): number {
   return gPlayPackLoadedCode;
+}
+
+/** 引擎里实际装载的 meta 来源 id（"" = 内置基线；与 activeMetaId 比对即「待生效」） */
+export function loadedMetaId(): string {
+  return gMetaLoadedId;
+}
+
+/** 引擎里实际装载的 meta 版本号（0 = 未知/旧基线） */
+export function loadedMetaCode(): number {
+  return gMetaLoadedCode;
+}
+
+/**
+ * 内置基线 meta 的包头（旧基线无包头 → versionCode 视为 0）。
+ * 更新探测用它和「已装 meta 包 / 远端新版」比版本。
+ */
+export function baselineMetaInfo(): PackHeaderInfo | null {
+  return parsePackHeader(metaBundleCode());
 }
 
 export function lastEngineError(): string {
@@ -274,6 +301,8 @@ export function ensureEngine(): Promise<boolean> {
 /** 引擎重建后归零「已装载」标记（meta 与播放包都要重装） */
 function resetLoadedState(): void {
   gMetaReady = false;
+  gMetaLoadedId = "";
+  gMetaLoadedCode = 0;
   gPlayPackLoadedId = "";
   gPlayPackLoadedCode = 0;
   gPlayPackFailedId = "";
@@ -345,13 +374,41 @@ export async function ensureDataEngine(): Promise<boolean> {
   return p;
 }
 
-/** 把内置 meta-bundle.js 灌进 bundle 槽并验契约（bundleInfo 自述） */
+/**
+ * 解析要装进 bundle 槽的 meta 文本：生效中的 meta 包（source-bundle-fs 的
+ * activeMetaId）优先，读不到/包头不对则回退内置基线。
+ * 统一包模型：meta 包与播放包一样是用户安装的 js 文件，只是装进引擎的槽位不同。
+ */
+async function resolveMetaText(): Promise<{ id: string; code: number; text: string } | null> {
+  const pack = activeMetaPack();
+  if (pack != null) {
+    const text = await readPackArtifact(pack.id, ARTIFACT_META);
+    const header = parsePackHeader(text);
+    if (text.length > 0 && header != null && header.kind == PACK_KIND_META) {
+      return { id: pack.id, code: header.versionCode, text: text };
+    }
+    console.log(
+      `[SourceEngine] meta 包 ${pack.id} 不可用（文件缺失或包头非法），回退内置基线`,
+    );
+  }
+  const baseline = metaBundleCode();
+  const header = parsePackHeader(baseline);
+  return { id: "", code: header != null ? header.versionCode : 0, text: baseline };
+}
+
+/** 把生效 meta（已装包优先，否则内置基线）灌进 bundle 槽并验契约（bundleInfo 自述） */
 async function loadMetaIntoEngine(): Promise<boolean> {
   try {
     gStatus = "loading";
+    const meta = await resolveMetaText();
+    if (meta == null) {
+      gLoadFailure = "engine";
+      fail("元数据包文本不可用");
+      return false;
+    }
     // 插件内部会先 compile 做语法校验（不执行），再经动态 import 装载 ESM；
     // meta 顶层检测到 globalThis.__qtHost（prelude 已注入）时自注册 __qtEntries
-    await callLoadBundle(metaBundleCode());
+    await callLoadBundle(meta.text);
     // 契约自检：bundleInfo 必须自述是 meta-bundle 且 hostApiVersion 一致
     // （旧「单体 ESM 官方包」自述 name=source-bundle，会在这里被拒——
     //  它们与双包客户端不兼容，需从设置页重新安装播放包）
@@ -361,21 +418,24 @@ async function loadMetaIntoEngine(): Promise<boolean> {
     const hostApi = info.get("hostApiVersion") as number | null;
     if (name != "meta-bundle" || hostApi == null || hostApi != HOST_API_VERSION) {
       gLoadFailure = "contract";
-      fail(`内置元数据包契约不符：name=${name} hostApiVersion=${hostApi}`);
+      fail(`元数据包契约不符：name=${name} hostApiVersion=${hostApi}`);
       return false;
     }
     gMetaReady = true;
+    gMetaLoadedId = meta.id;
+    gMetaLoadedCode = meta.code;
     gStatus = "ready";
     gLastError = "";
     const revision = info.get("metaRevision");
     console.log(
-      `[SourceEngine] 内置 meta 已装载（${name}，metaRevision=${revision}，hostApiVersion ${HOST_API_VERSION}）`,
+      `[SourceEngine] meta 已装载：${meta.id.length > 0 ? meta.id : "内置基线"} v${meta.code}` +
+        `（${name}，metaRevision=${revision}，hostApiVersion ${HOST_API_VERSION}）`,
     );
     return true;
   } catch (e) {
-    // meta 是内置产物（构建期已验），装载失败只能是环境问题，不算 bad 包
+    // 基线是构建期验证过的产物，装载失败只能是环境问题，不算 bad 包
     gLoadFailure = "engine";
-    fail(`内置元数据包装载失败：${msgOf(e)}`);
+    fail(`元数据包装载失败：${msgOf(e)}`);
     return false;
   } finally {
     gMetaPromise = null;
@@ -413,7 +473,7 @@ export async function ensurePlayPackLoaded(): Promise<boolean> {
  * 失败分类：missing=文件没了；invalid=包代码/chain 非法（可拉黑）；
  * engine=meta 层都没就绪（环境问题）。
  */
-async function applyPlayPackInEngine(pack: PlayPackMeta): Promise<boolean> {
+async function applyPlayPackInEngine(pack: SourcePackMeta): Promise<boolean> {
   try {
     const code = await readPackArtifact(pack.id, ARTIFACT_PLAY);
     if (code.length == 0) {
@@ -506,6 +566,21 @@ export async function unloadPlayPack(): Promise<void> {
     console.log(`[SourceEngine] uninstallPlayPack 失败（${msgOf(e)}），将在下次注入时覆盖`);
   }
   console.log(`[SourceEngine] 播放包已卸载：${loaded}`);
+}
+
+/**
+ * 让「生效 meta 变更」立即生效：整引擎重启（meta 在唯一 bundle 槽里，换它只能
+ * 重装槽位）→ 重装 meta → 把生效播放包重新热注入。
+ * meta 包安装/更新/卸载回基线后由 source-update 调用。音频播放器不受影响
+ * （引擎只负责取链，正在放的歌继续放），之后的数据/取链请求自动走新 meta。
+ */
+export async function reloadEngineMeta(): Promise<boolean> {
+  await shutdownEngine();
+  if (!(await ensureDataEngine())) return false;
+  if (activePack() != null) {
+    return await ensurePlayPackLoaded();
+  }
+  return true;
 }
 
 // ==================== bundleInfo（诊断） ====================

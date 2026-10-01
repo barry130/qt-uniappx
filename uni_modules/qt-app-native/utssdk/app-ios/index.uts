@@ -4,7 +4,7 @@
  * 本项目以 Android 为主，此处保证接口可编译；实际调用方对返回值做降级处理。
  */
 
-import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity } from "../interface.uts";
+import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, PickFileResult, PickJsFile } from "../interface.uts";
 
 export const openExternalUrl: OpenExternalUrl = (url: string): boolean => {
   if (url == null || url.length == 0) return false;
@@ -65,4 +65,10 @@ export const recreateActivity: RecreateActivity = function (): boolean {
 // 沙盒内文件删除需 NSFileManager，这里保持占位、按返回值由调用方降级。
 export const deleteLocalMedia: DeleteLocalMedia = function (items: LocalAudioItem[]): DeleteLocalMediaResult {
 	return { deleted: 0, pending: 0, failed: items.length };
+};
+
+// iOS 的文件选择需 UIDocumentPickerViewController + 委托链，本项目以 Android
+// 为主，恒回调失败，由调用方隐藏「本地文件安装」入口/降级提示。
+export const pickJsFile: PickJsFile = function (onResult: (result: PickFileResult) => void): void {
+	onResult({ ok: false, name: "", content: "", message: "当前平台不支持本地文件安装" } as PickFileResult);
 };

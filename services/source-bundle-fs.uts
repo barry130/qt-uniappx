@@ -1,39 +1,41 @@
 /**
- * 播放音源包本地存储（目录布局 + 读写 + 本地状态，schema 2 多包并存）
+ * 音源包本地存储（目录布局 + 读写 + 本地状态，schema 3 统一包模型）
  *
- * 双包架构（2026-10，与 qt-pc 的 source_install.rs v2 同源）：
- *   - 元数据包（meta-bundle.js）**内置**在代码里（services/source-meta-code.uts），
- *     不落盘、不走这里的任何路径；
- *   - 播放音源包（play-bundle.js，高版权风险）**绝不内置**：用户安装，可多版本
- *     共存，其中 exactly one 生效（activeId）。这里只管播放包的落盘与状态。
+ * 统一包模型（2026-10，与 qt-pc 同源）：
+ *   - 所有音源包（meta 数据包 / play 播放包）一律由用户经「https 链接 / 本地 js
+ *     文件」安装，包文件首行 /*__QT_PACK__{...}*\/ 自述身份（kind/id/名称/版本/
+ *     updateUrl），宿主不执行包体即可解析（见 source-pack-header.uts）；
+ *   - 每个包按自述 id 独立版本管理：同 id 的新版本原地替换，不同 id 多包共存；
+ *   - meta：内置基线（services/source-meta-code.uts）之上可装更新包覆盖生效，
+ *     卸载即回退基线；play：不内置，多包并存、恰好一个生效（activeId）；
+ *   - 更新发现：各包 updateUrl 自管探测 + astral manifest 渠道（source-update.uts），
+ *     一律「仅提示、手动确认」后下载生效。
  *
  * 目录（Android 私有目录 filesDir 下，路径由 qt-js-engine 插件的 dataDir() 给出）：
  *   source-bundle/
- *     state.json                          本地状态（见 SourceLocalState，schema 2）
- *     install/<packId>/play-bundle.js     播放包主体（必需）
- *     install/<packId>/chain.json         可选线路覆盖层（manifest 列了才有）
+ *     state.json                          本地状态（见 SourceLocalState，schema 3）
+ *     install/<packId>/meta-bundle.js     meta 包主体（kind=meta）
+ *     install/<packId>/play-bundle.js     play 包主体（kind=play）
+ *     install/<packId>/chain.json         可选线路覆盖层（play 包专属）
  *
- * state.json 结构（schema 2）：
- *   { "schema": 2,
- *     "packs": [ {id,name,versionCode,versionName,source,dir,installedAt} ],
- *     "activeId": "official" | "custom-20261001-173005" | "",
- *     "bad": [2026091801],
- *     "lastCheckAt": 1758200000000,
- *     "previousOfficial": {…} | null }
+ * state.json 结构（schema 3）：
+ *   { "schema": 3,
+ *     "packs": [ {id,kind,name,versionCode,versionName,updateUrl,dir,
+ *                 installedAt,updatedAt,skipCodes,lastProbeAt} ],
+ *     "activeId": "play-official" | "custom-20261001-173005" | "",
+ *     "activeMetaId": "meta-official" | "",
+ *     "lastCheckAt": 1758200000000 }
  *
- * 包 id 规则：
- *   - official：id 恒为 "official"，目录同名，更新时**原地替换**（旧版本不保留
- *     目录；回退目标版本本地没有时按「未安装」处理，重新检查即可装回）；
- *   - custom：id 为 "custom-<yyyyMMdd-HHmmss>"，每次从链接安装都落新目录，
- *     多份共存互不影响，卸载即删目录。
+ * schema 2 → 3 迁移（统一包模型）：
+ *   - packs 全部补 kind="play"；id "official" 改 "play-official"（目录随改名）；
+ *   - source 字段删除（官方/自定义之分只是包自述 id 的差别）；
+ *   - 全局 bad[]（官方坏版本）并入 play-official 的 skipCodes；
+ *   - previousOfficial 删除（服务端回退治理已随 manifest 自动安装一并移除）。
+ * schema 1 → 3：旧包是单体全量 ESM，直接清掉 pkg/ 与 install/（与 v2 迁移同口径）。
  *
- * schema 1（单包 installed/previous）→ 2 迁移：旧包是「单体 ESM 全量包」
- * （元数据+取链同一文件），与双包契约不兼容，迁移时整体清掉 pkg/ 目录，
- * 只保留 bad / lastCheckAt 两个字段（发布前的破坏性变更，与 qt-pc 同口径）。
- *
- * 注意 packs 表示「已落盘」，不等于「引擎已生效」：生效由 activeId 指定，
- * 引擎装载是否成功见 source-engine（装载失败不在这里改状态——用户手装的
- * custom 包失败也保留在列表里，由用户自己决定卸载或换包）。
+ * 注意 packs 表示「已落盘」，不等于「引擎已生效」：play 生效由 activeId 指定、
+ * meta 生效由 activeMetaId 指定（"" = 内置基线），装载是否成功见 source-engine
+ * （失败不改这里的落盘状态——用户手装的包失败也留在列表里，由用户自行处理）。
  *
  * 为什么不放 uni storage：bundle 约 2MB，storage 是给小数据的；
  * 文件读写统一走 qt-js-engine 插件（java.io），不依赖 uni.getFileSystemManager 的跨端可用性。
@@ -51,56 +53,70 @@ import {
 } from "@/uni_modules/qt-js-engine";
 // #endif
 
-const UNSUPPORTED = "当前平台不支持播放音源包存储";
+const UNSUPPORTED = "当前平台不支持音源包存储";
 const ROOT_NAME = "source-bundle";
 const STATE_FILE = "state.json";
 const INSTALL_DIR = "install";
 
-/** 官方播放包 id（目录名同名；更新原地替换这个目录） */
-export const OFFICIAL_PACK_ID = "official";
-/** 播放包来源：官方 manifest 下发 */
-export const PACK_SOURCE_OFFICIAL = "official";
-/** 播放包来源：用户从链接安装 */
-export const PACK_SOURCE_CUSTOM = "custom";
+/** 包种类：meta 数据包（可覆盖内置基线） */
+export const PACK_KIND_META = "meta";
+/** 包种类：play 播放包（取链，不内置） */
+export const PACK_KIND_PLAY = "play";
 
-/** 产物文件名（与 manifest 的 artifacts[].path 一致；chain.json 是可选覆盖层） */
+/** 官方播放包自述 id（qt-sources sources.config.json 的 packs.play.id） */
+export const OFFICIAL_PLAY_ID = "play-official";
+/** 官方数据包自述 id（内置基线与更新包同 id） */
+export const OFFICIAL_META_ID = "meta-official";
+
+/** 产物文件名：meta 包主体 */
+export const ARTIFACT_META = "meta-bundle.js";
+/** 产物文件名：play 包主体 */
 export const ARTIFACT_PLAY = "play-bundle.js";
+/** 产物文件名：可选线路覆盖层（play 专属） */
 export const ARTIFACT_CHAIN = "chain.json";
 
-/** 已落盘的一个播放音源包 */
-export type PlayPackMeta = {
-  /** 包 id：OFFICIAL_PACK_ID 或 "custom-<yyyyMMdd-HHmmss>"（同时是目录名） */
+/** 某种类包的主体产物名 */
+export function artifactOfKind(kind: string): string {
+  return kind == PACK_KIND_META ? ARTIFACT_META : ARTIFACT_PLAY;
+}
+
+/** 已落盘的一个音源包（meta/play 通用；身份字段来自包文件头自述） */
+export type SourcePackMeta = {
+  /** 包 id（包头自述，同时是目录名；同 id 更新原地替换） */
   id: string;
-  /** 播放包自述名（bundleInfo 报告，如 "play-bundle"；展示用） */
+  /** PACK_KIND_META / PACK_KIND_PLAY */
+  kind: string;
+  /** 包头自述名（展示用，如「官方播放包」） */
   name: string;
-  /**
-   * 版本号：official 是后端发号（如 2026100101）；custom 用安装时刻的
-   * unix 秒（正数），只用于展示与列表排序，不参与官方版本比较。
-   */
+  /** 包头自述版本号（单调递增；更新判定与展示用） */
   versionCode: number;
-  /** 版本名（official 如 2026.10.01.1；custom 同 id） */
+  /** 包头自述版本名（如 2026.10.02.1） */
   versionName: string;
-  /** official = manifest 下发（可更新）；custom = 用户直链（不自动更新） */
-  source: string;
+  /** 包头自述更新源（https 直链；空 = 该包不自管更新） */
+  updateUrl: string;
   /** 包目录绝对路径 */
   dir: string;
-  /** 安装时间（毫秒） */
+  /** 首次安装时间（毫秒） */
   installedAt: number;
+  /** 最近一次版本变更时间（毫秒；列表排序用） */
+  updatedAt: number;
+  /** 该包装载/冒烟失败过的版本号：不再对这些版本提示更新 */
+  skipCodes: number[];
+  /** 上次探测 updateUrl 的时间（毫秒；按包独立节流） */
+  lastProbeAt: number;
 };
 
-/** 本地状态（state.json，schema 2） */
+/** 本地状态（state.json，schema 3） */
 export type SourceLocalState = {
   schema: number;
-  /** 已落盘的全部播放包（official 至多一个 + 任意多个 custom） */
-  packs: PlayPackMeta[];
-  /** 生效中的包 id（"" = 没有任何生效包，在线取链不可用） */
+  /** 已落盘的全部音源包（meta + play 混排，靠 kind 区分） */
+  packs: SourcePackMeta[];
+  /** 生效中的 play 包 id（"" = 未安装，在线取链不可用） */
   activeId: string;
-  /** 装载/冒烟失败过的官方版本号，不再自动重下 */
-  bad: number[];
-  /** 上次检查更新时间（毫秒，节流用） */
+  /** 生效中的 meta 包 id（"" = 使用内置基线） */
+  activeMetaId: string;
+  /** 上次 manifest 渠道检查时间（毫秒，节流用） */
   lastCheckAt: number;
-  /** 官方包被覆盖前的版本（回退目标候选；目录不保留，仅记录元信息） */
-  previousOfficial: PlayPackMeta | null;
 };
 
 // ==================== 平台文件 API ====================
@@ -217,14 +233,14 @@ function fsListNames(dir: string): Promise<string[]> {
 
 // ==================== 路径 ====================
 
-/** 播放包根目录（空串 = 当前平台不可用） */
+/** 音源包根目录（空串 = 当前平台不可用） */
 export function packageRoot(): string {
   const base = fsDataDir();
   if (base.length == 0) return "";
   return base + "/" + ROOT_NAME;
 }
 
-/** install/ 目录（全部播放包的父目录） */
+/** install/ 目录（全部包的父目录） */
 export function installDir(): string {
   return packageRoot() + "/" + INSTALL_DIR;
 }
@@ -243,28 +259,6 @@ export function statePath(): string {
   return packageRoot() + "/" + STATE_FILE;
 }
 
-/** 新 custom 包 id：custom-<yyyyMMdd-HHmmss>（本地时间，同秒重复安装加序号） */
-export function customPackId(): string {
-  const d = new Date();
-  const pad = (n: number): string => (n < 10 ? "0" + n : "" + n);
-  const stamp =
-    d.getFullYear() +
-    pad(d.getMonth() + 1) +
-    pad(d.getDate()) +
-    "-" +
-    pad(d.getHours()) +
-    pad(d.getMinutes()) +
-    pad(d.getSeconds());
-  let id = "custom-" + stamp;
-  // 同秒内二次安装：后缀 -2/-3…，避免覆盖上一份
-  let suffix = 2;
-  while (packById(id) != null) {
-    id = "custom-" + stamp + "-" + suffix;
-    suffix += 1;
-  }
-  return id;
-}
-
 // ==================== 内存副本 + 读写 ====================
 
 let gState: SourceLocalState = emptyState();
@@ -279,23 +273,31 @@ export function localState(): SourceLocalState {
 
 export function emptyState(): SourceLocalState {
   return {
-    schema: 2,
-    packs: [] as PlayPackMeta[],
+    schema: 3,
+    packs: [] as SourcePackMeta[],
     activeId: "",
-    bad: [] as number[],
+    activeMetaId: "",
     lastCheckAt: 0,
-    previousOfficial: null,
   } as SourceLocalState;
 }
 
-/** 全部已落盘的播放包（拷贝一份，防调用方改内存状态） */
-export function packs(): PlayPackMeta[] {
-  const out: PlayPackMeta[] = [];
+/** 全部已落盘的音源包（拷贝一份，防调用方改内存状态） */
+export function packs(): SourcePackMeta[] {
+  const out: SourcePackMeta[] = [];
   for (let i = 0; i < gState.packs.length; i++) out.push(clonePack(gState.packs[i]));
   return out;
 }
 
-export function packById(id: string): PlayPackMeta | null {
+/** 某种类的全部包（meta / play） */
+export function packsOfKind(kind: string): SourcePackMeta[] {
+  const out: SourcePackMeta[] = [];
+  for (let i = 0; i < gState.packs.length; i++) {
+    if (gState.packs[i].kind == kind) out.push(clonePack(gState.packs[i]));
+  }
+  return out;
+}
+
+export function packById(id: string): SourcePackMeta | null {
   for (let i = 0; i < gState.packs.length; i++) {
     if (gState.packs[i].id == id) return clonePack(gState.packs[i]);
   }
@@ -303,22 +305,23 @@ export function packById(id: string): PlayPackMeta | null {
 }
 
 /** 生效中的播放包（null = 未安装，在线取链不可用） */
-export function activePack(): PlayPackMeta | null {
+export function activePack(): SourcePackMeta | null {
   if (gState.activeId.length == 0) return null;
   return packById(gState.activeId);
 }
 
-/** 官方播放包（至多一个；null = 未安装官方包） */
-export function officialPack(): PlayPackMeta | null {
-  return packById(OFFICIAL_PACK_ID);
+/** 生效中的 meta 包（null = 使用内置基线） */
+export function activeMetaPack(): SourcePackMeta | null {
+  if (gState.activeMetaId.length == 0) return null;
+  return packById(gState.activeMetaId);
 }
 
 /**
  * 从磁盘恢复本地状态到内存（幂等，进程内单飞）。
  * 恢复时做两件清洗：
- *   1. schema 1 旧状态 → 迁移（清 pkg/，保 bad/lastCheckAt）；
- *   2. 落盘校验：play-bundle.js 不在的包直接剔除（防「状态在、文件被清」），
- *      生效包被剔除时 activeId 清空（回到未安装）。
+ *   1. 旧 schema 状态 → 迁移到 schema 3；
+ *   2. 落盘校验：主体产物不在的包直接剔除（防「状态在、文件被清」），
+ *      生效包被剔除时对应 activeId/activeMetaId 清空。
  */
 export async function restoreLocalState(): Promise<SourceLocalState> {
   gState = emptyState();
@@ -326,14 +329,13 @@ export async function restoreLocalState(): Promise<SourceLocalState> {
     const raw = await fsRead(statePath());
     if (raw.length > 0) {
       const o = JSON.parse(raw) as UTSJSONObject;
-      if (o.get("packs") == null) {
-        // schema 1（单包 installed/previous）：旧包是单体全量 ESM，双包引擎
-        // 装不了（bundle 槽现在恒放 meta），整体清掉只保 bad/lastCheckAt
-        await migrateFromV1(o);
-      } else {
+      const schema = numOf(o, "schema");
+      if (schema >= 3) {
         const state = stateFromJson(o);
         await validateOnDisk(state);
         gState = state;
+      } else {
+        await migrateLegacy(o, schema);
       }
     }
   } catch (_) {
@@ -342,38 +344,75 @@ export async function restoreLocalState(): Promise<SourceLocalState> {
   return gState;
 }
 
-/** v1 → v2 迁移：删 pkg/ 整棵 + install/ 残留，state 重写为 schema 2 */
-async function migrateFromV1(old: UTSJSONObject): Promise<void> {
+/** v1/v2 → v3 迁移（详见文件头注释；迁移后立即落盘） */
+async function migrateLegacy(old: UTSJSONObject, schema: number): Promise<void> {
   const state = emptyState();
-  const bad = old.get("bad") as number[] | null;
-  if (bad != null) {
-    for (let i = 0; i < bad.length; i++) {
-      const n = bad[i] as number;
-      if (n != null && n != 0) state.bad.push(n);
+  // v2 的全局坏版本名单（官方播放包历史拉黑版本）→ play-official 的 skipCodes
+  const bad: number[] = [];
+  const badRaw = old.get("bad") as number[] | null;
+  if (badRaw != null) {
+    for (let i = 0; i < badRaw.length; i++) {
+      const n = badRaw[i] as number;
+      if (n != null && n != 0) bad.push(n);
     }
   }
   state.lastCheckAt = numOf(old, "lastCheckAt");
-  await fsRemove(packageRoot() + "/pkg");
-  await fsRemove(installDir());
+  if (schema == 2) {
+    const packList = old.get("packs") as UTSJSONObject[] | null;
+    if (packList != null) {
+      for (let i = 0; i < packList.length; i++) {
+        const legacy = packList[i] as UTSJSONObject;
+        const id = strOf(legacy, "id");
+        if (id.length == 0) continue;
+        // 统一包模型：official → play-official（目录随改名），custom-* 保持原 id
+        const isOfficial = id == "official";
+        const nextId = isOfficial ? OFFICIAL_PLAY_ID : id;
+        if (isOfficial) {
+          await moveDirIfPresent(packDirOf("official"), packDirOf(nextId));
+        }
+        const dir = strOf(legacy, "dir");
+        const meta = packFromJsonParts(nextId, PACK_KIND_PLAY, legacy);
+        meta.dir = packDirOf(nextId);
+        if (isOfficial && bad.length > 0) meta.skipCodes = bad;
+        state.packs.push(meta);
+        if (strOf(old, "activeId") == id) state.activeId = nextId;
+      }
+    }
+  } else {
+    // schema 1：旧包是单体全量 ESM，新引擎装不了，整体清掉
+    await fsRemove(packageRoot() + "/pkg");
+    await fsRemove(installDir());
+  }
   gState = state;
   await saveLocalState(state);
-  console.log("[SourceBundleFs] schema 1 → 2 迁移完成（旧单体包已清除，需重新安装播放包）");
+  await pruneOrphans();
+  console.log(`[SourceBundleFs] schema ${schema} → 3 迁移完成`);
 }
 
-/** 剔除 play-bundle.js 不在盘上的包；生效包被剔除则清空 activeId */
+/** 目录改名迁移用：from 存在且 to 不存在时把 from 改成 to（读出重写，跨设备安全） */
+async function moveDirIfPresent(from: string, to: string): Promise<void> {
+  if (await fsExists(to)) return;
+  if (!(await fsExists(from))) return;
+  await fsMkdirs(to);
+  for (const name of [ARTIFACT_PLAY, ARTIFACT_CHAIN]) {
+    const text = await readTextFileAt(from + "/" + name);
+    if (text.length > 0) await writeTextFileAt(to + "/" + name, text);
+  }
+  await fsRemove(from);
+}
+
+/** 剔除主体产物不在盘上的包；生效包被剔除则清空对应 active id */
 async function validateOnDisk(state: SourceLocalState): Promise<void> {
-  const kept: PlayPackMeta[] = [];
+  const kept: SourcePackMeta[] = [];
   for (let i = 0; i < state.packs.length; i++) {
     const p = state.packs[i];
-    const ok = await fsExists(artifactPath(p.id, ARTIFACT_PLAY));
+    const ok = await fsExists(artifactPath(p.id, artifactOfKind(p.kind)));
     if (ok) {
       kept.push(p);
     } else {
-      console.log(`[SourceBundleFs] 包 ${p.id} 的 ${ARTIFACT_PLAY} 不在盘上，已剔除`);
+      console.log(`[SourceBundleFs] 包 ${p.id} 的主体产物不在盘上，已剔除`);
       if (state.activeId == p.id) state.activeId = "";
-      if (state.previousOfficial != null && state.previousOfficial.id == p.id) {
-        state.previousOfficial = null;
-      }
+      if (state.activeMetaId == p.id) state.activeMetaId = "";
     }
   }
   state.packs = kept;
@@ -407,7 +446,7 @@ export async function saveLocalState(state: SourceLocalState): Promise<boolean> 
   }
 }
 
-/** 只更新 lastCheckAt 并落盘（节流用） */
+/** 只更新 lastCheckAt 并落盘（manifest 渠道节流用） */
 export async function touchLastCheck(at: number): Promise<void> {
   const next = cloneState(gState);
   next.lastCheckAt = at;
@@ -415,38 +454,44 @@ export async function touchLastCheck(at: number): Promise<void> {
 }
 
 export function cloneState(s: SourceLocalState): SourceLocalState {
-  const packList: PlayPackMeta[] = [];
+  const packList: SourcePackMeta[] = [];
   for (let i = 0; i < s.packs.length; i++) packList.push(clonePack(s.packs[i]));
-  const bad: number[] = [];
-  for (let i = 0; i < s.bad.length; i++) bad.push(s.bad[i]);
   return {
     schema: s.schema,
     packs: packList,
     activeId: s.activeId,
-    bad: bad,
+    activeMetaId: s.activeMetaId,
     lastCheckAt: s.lastCheckAt,
-    previousOfficial: s.previousOfficial != null ? clonePack(s.previousOfficial) : null,
   } as SourceLocalState;
 }
 
-export function clonePack(p: PlayPackMeta): PlayPackMeta {
+export function clonePack(p: SourcePackMeta): SourcePackMeta {
+  const skip: number[] = [];
+  for (let i = 0; i < p.skipCodes.length; i++) skip.push(p.skipCodes[i]);
   return {
     id: p.id,
+    kind: p.kind,
     name: p.name,
     versionCode: p.versionCode,
     versionName: p.versionName,
-    source: p.source,
+    updateUrl: p.updateUrl,
     dir: p.dir,
     installedAt: p.installedAt,
-  } as PlayPackMeta;
+    updatedAt: p.updatedAt,
+    skipCodes: skip,
+    lastProbeAt: p.lastProbeAt,
+  } as SourcePackMeta;
 }
 
 // ==================== 包级操作（增/删/切换） ====================
 
-/** 新增或替换一个包记录（同 id 覆盖，如 official 原地更新） */
-export async function putPack(meta: PlayPackMeta): Promise<boolean> {
+/**
+ * 新增或替换一个包记录（同 id 覆盖 = 原地更新）。
+ * 列表顺序：meta 包在前、play 包在后，各组内 updatedAt 新→旧（设置页展示序）。
+ */
+export async function putPack(meta: SourcePackMeta): Promise<boolean> {
   const next = cloneState(gState);
-  const list: PlayPackMeta[] = [];
+  const list: SourcePackMeta[] = [];
   let replaced = false;
   for (let i = 0; i < next.packs.length; i++) {
     if (next.packs[i].id == meta.id) {
@@ -457,51 +502,57 @@ export async function putPack(meta: PlayPackMeta): Promise<boolean> {
     }
   }
   if (!replaced) list.push(clonePack(meta));
-  // official 排最前，custom 按安装时间新→旧（设置页列表顺序）
-  const officials = list.filter((p) => p.source == PACK_SOURCE_OFFICIAL);
-  const customs = list
-    .filter((p) => p.source != PACK_SOURCE_OFFICIAL)
-    .sort((a, b) => (a.installedAt > b.installedAt ? -1 : 1));
-  next.packs = officials.concat(customs);
+  const metas = list
+    .filter((p) => p.kind == PACK_KIND_META)
+    .sort((a, b) => (a.updatedAt > b.updatedAt ? -1 : 1));
+  const plays = list
+    .filter((p) => p.kind != PACK_KIND_META)
+    .sort((a, b) => (a.updatedAt > b.updatedAt ? -1 : 1));
+  next.packs = metas.concat(plays);
   return saveLocalState(next);
 }
 
-/** 记录「官方包被覆盖前的版本」（回退目标候选） */
-export async function setPreviousOfficial(meta: PlayPackMeta | null): Promise<boolean> {
-  const next = cloneState(gState);
-  next.previousOfficial = meta != null ? clonePack(meta) : null;
-  return saveLocalState(next);
-}
-
-/** 切换生效包（包必须已落盘；传 "" 表示全部不生效） */
+/** 切换生效 play 包（包必须已落盘且 kind=play；传 "" 表示全部不生效） */
 export async function setActive(id: string): Promise<boolean> {
-  if (id.length > 0 && packById(id) == null) return false;
+  if (id.length > 0) {
+    const p = packById(id);
+    if (p == null || p.kind != PACK_KIND_PLAY) return false;
+  }
   const next = cloneState(gState);
   next.activeId = id;
   return saveLocalState(next);
 }
 
+/** 切换生效 meta 包（传 "" = 回退内置基线） */
+export async function setActiveMeta(id: string): Promise<boolean> {
+  if (id.length > 0) {
+    const p = packById(id);
+    if (p == null || p.kind != PACK_KIND_META) return false;
+  }
+  const next = cloneState(gState);
+  next.activeMetaId = id;
+  return saveLocalState(next);
+}
+
 /**
- * 卸载一个包：删目录 + 出列表；卸的是生效包则 activeId 清空（回到未安装，
- * 由用户在列表里另选或重装）。返回是否成功。
+ * 卸载一个包：删目录 + 出列表；卸的是生效包则对应 activeId/activeMetaId 清空
+ * （play 回到未安装、meta 回到内置基线，由用户在列表里另选或重装）。
  */
 export async function removePack(id: string): Promise<boolean> {
   const next = cloneState(gState);
-  const list: PlayPackMeta[] = [];
+  const list: SourcePackMeta[] = [];
   for (let i = 0; i < next.packs.length; i++) {
     if (next.packs[i].id != id) list.push(next.packs[i]);
   }
   next.packs = list;
   if (next.activeId == id) next.activeId = "";
-  if (next.previousOfficial != null && next.previousOfficial.id == id) {
-    next.previousOfficial = null;
-  }
+  if (next.activeMetaId == id) next.activeMetaId = "";
   await fsRemove(packDirOf(id));
   return saveLocalState(next);
 }
 
 /**
- * 清掉全部播放包（回到「未安装」）：state.json 重置、install/ 整棵删除。
+ * 清掉全部音源包（回到「未安装/内置基线」）：state.json 重置、install/ 整棵删除。
  * 排查/迁移用；正常卸载走 removePack（逐包）。
  */
 export async function clearAllPacks(): Promise<void> {
@@ -539,12 +590,12 @@ export async function readPackArtifact(id: string, path: string): Promise<string
   }
 }
 
-/** 删一个产物（文件本就不存在也算成功）；发布清单不再列出某产物时用它清掉旧覆盖层 */
+/** 删一个产物（文件本就不存在也算成功）；更新包不再带 chain.json 时用它清掉旧覆盖层 */
 export function removePackArtifact(id: string, path: string): Promise<boolean> {
   return fsRemove(artifactPath(id, path));
 }
 
-/** 按绝对路径读文本（下载中转的临时文件用）；读不到返回 "" */
+/** 按绝对路径读文本（下载中转/系统选择器选中的文件用）；读不到返回 "" */
 export async function readTextFileAt(path: string): Promise<string> {
   try {
     return await fsRead(path);
@@ -568,58 +619,97 @@ export function existsFileAt(path: string): Promise<boolean> {
   return fsExists(path);
 }
 
-// ==================== 坏包名单 ====================
+// ==================== 坏版本名单（按包独立） ====================
 
 /**
- * 把一个官方版本号标记为坏包（装载/冒烟失败后调用），自动更新不再重下它。
- * custom 包不进名单：它没有版本号语义，失败也保留在列表里由用户处理。
+ * 给某个包记一个「装载/冒烟失败」的版本号：探测更新时跳过对该版本的提示，
+ * 防止反复下载一个装不上的版本。
  */
-export async function markBad(versionCode: number): Promise<void> {
+export async function markPackBad(packId: string, versionCode: number): Promise<void> {
   if (versionCode <= 0) return;
   const next = cloneState(gState);
-  let exists = false;
-  for (let i = 0; i < next.bad.length; i++) {
-    if (next.bad[i] == versionCode) exists = true;
+  for (let i = 0; i < next.packs.length; i++) {
+    if (next.packs[i].id == packId) {
+      let exists = false;
+      for (let j = 0; j < next.packs[i].skipCodes.length; j++) {
+        if (next.packs[i].skipCodes[j] == versionCode) exists = true;
+      }
+      if (!exists) next.packs[i].skipCodes.push(versionCode);
+    }
   }
-  if (!exists) next.bad.push(versionCode);
   await saveLocalState(next);
 }
 
-export function isBad(versionCode: number): boolean {
-  for (let i = 0; i < gState.bad.length; i++) {
-    if (gState.bad[i] == versionCode) return true;
+export function isPackBadVersion(packId: string, versionCode: number): boolean {
+  for (let i = 0; i < gState.packs.length; i++) {
+    if (gState.packs[i].id != packId) continue;
+    for (let j = 0; j < gState.packs[i].skipCodes.length; j++) {
+      if (gState.packs[i].skipCodes[j] == versionCode) return true;
+    }
   }
   return false;
 }
 
+/** 记录某包上次探测 updateUrl 的时间（按包独立节流） */
+export async function touchPackProbe(packId: string, at: number): Promise<void> {
+  const next = cloneState(gState);
+  for (let i = 0; i < next.packs.length; i++) {
+    if (next.packs[i].id == packId) next.packs[i].lastProbeAt = at;
+  }
+  await saveLocalState(next);
+}
+
 // ==================== JSON ↔ 类型 ====================
 
-function packToJson(p: PlayPackMeta): UTSJSONObject {
+function packToJson(p: SourcePackMeta): UTSJSONObject {
   const o = new UTSJSONObject();
   o.set("id", p.id);
+  o.set("kind", p.kind);
   o.set("name", p.name);
   o.set("versionCode", p.versionCode);
   o.set("versionName", p.versionName);
-  o.set("source", p.source);
+  o.set("updateUrl", p.updateUrl);
   o.set("dir", p.dir);
   o.set("installedAt", p.installedAt);
+  o.set("updatedAt", p.updatedAt);
+  o.set("skipCodes", p.skipCodes);
+  o.set("lastProbeAt", p.lastProbeAt);
   return o;
 }
 
-function packFromJson(v: UTSJSONObject | null): PlayPackMeta | null {
+function packFromJson(v: UTSJSONObject | null): SourcePackMeta | null {
   if (v == null) return null;
   const id = strOf(v, "id");
   if (id.length == 0) return null;
+  const kind = strOf(v, "kind");
+  const meta = packFromJsonParts(id, kind.length > 0 ? kind : PACK_KIND_PLAY, v);
+  meta.updatedAt = numOf(v, "updatedAt");
+  meta.lastProbeAt = numOf(v, "lastProbeAt");
+  const skip = v.get("skipCodes") as number[] | null;
+  if (skip != null) {
+    for (let i = 0; i < skip.length; i++) {
+      const n = skip[i] as number;
+      if (n != null && n != 0) meta.skipCodes.push(n);
+    }
+  }
+  return meta;
+}
+
+/** 从包头同名字段组装包记录（id/kind 由调用方给定，v 提供自述身份字段） */
+function packFromJsonParts(id: string, kind: string, v: UTSJSONObject): SourcePackMeta {
   return {
     id: id,
+    kind: kind,
     name: strOf(v, "name"),
     versionCode: numOf(v, "versionCode"),
     versionName: strOf(v, "versionName"),
-    // 旧数据缺 source 一律按 official 兜底（custom 记录从 v2 起就有）
-    source: strOf(v, "source").length > 0 ? strOf(v, "source") : PACK_SOURCE_OFFICIAL,
-    dir: strOf(v, "dir"),
+    updateUrl: strOf(v, "updateUrl"),
+    dir: packDirOf(id),
     installedAt: numOf(v, "installedAt"),
-  } as PlayPackMeta;
+    updatedAt: numOf(v, "installedAt"),
+    skipCodes: [] as number[],
+    lastProbeAt: 0,
+  } as SourcePackMeta;
 }
 
 function stateToJson(s: SourceLocalState): UTSJSONObject {
@@ -629,9 +719,8 @@ function stateToJson(s: SourceLocalState): UTSJSONObject {
   for (let i = 0; i < s.packs.length; i++) packList.push(packToJson(s.packs[i]));
   o.set("packs", packList);
   o.set("activeId", s.activeId);
-  o.set("bad", s.bad);
+  o.set("activeMetaId", s.activeMetaId);
   o.set("lastCheckAt", s.lastCheckAt);
-  o.set("previousOfficial", s.previousOfficial != null ? packToJson(s.previousOfficial) : null);
   return o;
 }
 
@@ -645,17 +734,8 @@ function stateFromJson(o: UTSJSONObject): SourceLocalState {
     }
   }
   state.activeId = strOf(o, "activeId");
+  state.activeMetaId = strOf(o, "activeMetaId");
   state.lastCheckAt = numOf(o, "lastCheckAt");
-  const bad = o.get("bad") as number[] | null;
-  if (bad != null) {
-    const list: number[] = [];
-    for (let i = 0; i < bad.length; i++) {
-      const n = bad[i] as number;
-      if (n != null && n != 0) list.push(n);
-    }
-    state.bad = list;
-  }
-  state.previousOfficial = packFromJson(o.get("previousOfficial") as UTSJSONObject | null);
   return state;
 }
 

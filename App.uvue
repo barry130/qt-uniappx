@@ -10,7 +10,15 @@ import { resolveUrl } from '@/services/http'
 import { initQtStat, qtTrack, qtTrackError, qtStatFlush } from '@/uni_modules/qt-stat'
 import { checkAppUpdate, checkOfficialVersion, setPendingUpdate } from '@/services/upgrade'
 import { prewarmSourceEngine, PLAY_PACK_MISSING_EVENT } from '@/services/source-engine'
-import { checkSourceUpdateSilently } from '@/services/source-update'
+import {
+  discoverUpdatesAtStartup,
+  SOURCE_UPDATE_FOUND_EVENT,
+  offersFromJson,
+  applyUpdate,
+  pickSmokeSongs,
+  offerLabel,
+} from '@/services/source-update'
+import type { PackUpdateOffer } from '@/services/source-update'
 import { exitApp, ensureNotificationPermission, openNotificationSettings, applyLegacyInsets } from '@/services/app-native'
 import { refreshQtLayout, pauseQtLayoutWatcher, resumeQtLayoutWatcher } from '@/uni_modules/qt-ui/composables/use-qt-layout'
 import { installBootGuard } from '@/services/boot-guard'
@@ -56,9 +64,10 @@ onLaunch(() => {
   runStartup()
   // 音源引擎预热：恢复本地状态 → 起 WebView(V8) 引擎 → 装已安装的音源包（未安装则直接返回，全程失败静默）
   prewarmSourceEngine()
-  // 启动静默检查音源更新（默认开，4 小时一次；只下载不打断，装包交给「立即应用」/下次启动）
+  // 启动时发现音源包更新（各包自管 updateUrl + astral manifest，4 小时节流）：
+  // 只发现不安装——发现到新版后弹「仅提示」的确认框，用户点了「更新」才下载生效
   setTimeout(() => {
-    checkSourceUpdateSilently()
+    discoverUpdatesAtStartup()
   }, 3000)
   // 首屏守卫：部分机型（如三星 S24 Ultra 全屏）首页视图树可能一直不挂载，
   // 8s 后仍未挂载则上报 boot-guard 并重建首页，见 services/boot-guard.ts
@@ -67,7 +76,45 @@ onLaunch(() => {
   // 引擎在「要取链但没有生效播放包」时广播该事件（引擎侧 10s 节流），
   // 这里弹一次引导，去设置页安装——不放下载链接，安装动作都在设置页完成
   uni.$on(PLAY_PACK_MISSING_EVENT, showPlayPackMissingGuide)
+  // 启动更新发现拿到「可用更新」清单：逐条弹「仅提示」确认框（绝不自动安装），
+  // 用户点「更新」才下载 → 校验 → 替换 → 生效；点「暂不」保留红点进设置页处理
+  uni.$on(SOURCE_UPDATE_FOUND_EVENT, (payload: string) => {
+    promptPackUpdates(offersFromJson(payload))
+  })
 })
+
+/**
+ * 逐条提示可用更新（仅提示、手动确认；meta 先于 play——数据面先就绪）。
+ * 确认后走 applyUpdate（下载 → 头校验 → 替换 → 生效/回滚），结果 toast。
+ */
+async function promptPackUpdates(offers: PackUpdateOffer[]): Promise<void> {
+  const sorted = offers
+    .filter((o) => o.kind == 'meta' || o.kind == 'play')
+    .sort((a, b) => (a.kind == 'meta' ? -1 : 1))
+  for (let i = 0; i < sorted.length; i++) {
+    const offer = sorted[i]
+    const confirmed = await new Promise<boolean>((resolve) => {
+      uni.showModal({
+        title: '音源包更新',
+        content:
+          offerLabel(offer) +
+          (offer.notes.length > 0 ? '\n' + offer.notes : '') +
+          '\n是否现在下载并更新？',
+        confirmText: '更新',
+        cancelText: '暂不',
+        confirmColor: themeStore.skin.accent,
+        success: (res) => resolve(res.confirm),
+        fail: (_) => resolve(false),
+      })
+    })
+    if (!confirmed) continue
+    uni.showLoading({ title: '正在更新…', mask: true })
+    const songs = await pickSmokeSongs()
+    const result = await applyUpdate(offer, songs)
+    uni.hideLoading()
+    uni.showToast({ title: result.message, icon: 'none', duration: 3000 })
+  }
+}
 
 /** 播放包缺失引导的弹窗节流：1 分钟内最多一次（用户点了「去安装」则到设置页处理） */
 let lastPlayPackGuideAt = 0

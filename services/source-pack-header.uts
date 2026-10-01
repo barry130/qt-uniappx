@@ -1,0 +1,95 @@
+/**
+ * 音源包包头（__QT_PACK__）解析 —— 统一包模型的身份契约
+ *
+ * 包文件（meta-bundle.js / play-bundle.js）首行是自述注释头：
+ *   /*__QT_PACK__{"kind":"play","id":"play-official","name":"官方播放包",
+ *                 "versionCode":2026100201,"versionName":"2026.10.02.1",
+ *                 "updateUrl":"https://…"}*\/
+ *
+ * 宿主在**不执行包体**的前提下读它，用于：
+ * - 安装时识别种类（meta → 引擎 bundle 槽 / play → installPlayPack）与身份 id；
+ * - 同 id 更新替换、按包独立版本比较（versionCode 单调递增）；
+ * - updateUrl 自管更新探测（拉新版文件的头比较即可判定有没有新版）。
+ *
+ * 生成方：qt-sources 构建脚本（scripts/build-sources.mjs 的 packHeaderOf）；
+ * 第三方包作者按同一格式手写首行即可（kind=play 且包体需挂
+ * globalThis.__qtPlayPackFactory）。字段：
+ * - kind：必填，"meta" | "play"；
+ * - id：必填，^[a-z0-9-]{2,32}$（同时是客户端 install/ 下的目录名）；
+ * - name/versionCode/versionName：必填（展示与版本比较）；
+ * - updateUrl：可选（https 直链；缺省/为空 = 该包不自管更新）；
+ * - notes：可选（更新说明，提示时展示）。
+ */
+
+/** 包头解析结果（字段缺失时按「无效头」整体返回 null） */
+export type PackHeaderInfo = {
+  kind: string;
+  id: string;
+  name: string;
+  versionCode: number;
+  versionName: string;
+  updateUrl: string;
+  notes: string;
+};
+
+const HEADER_MARK = "/*__QT_PACK__";
+/** 与 qt-sources 构建脚本同源的 id 规则 */
+const ID_PATTERN = "^[a-z0-9-]{2,32}$";
+
+/**
+ * 解析文本首行的 __QT_PACK__ 头。
+ * 返回 null = 没有头或头不完整/不合法（旧版包、随便改名的文件都会落在这里，
+ * 调用方按「不是可安装的音源包」口径提示）。
+ */
+export function parsePackHeader(text: string): PackHeaderInfo | null {
+  if (text == null || text.length == 0) return null;
+  if (!text.startsWith(HEADER_MARK)) return null;
+  const end = text.indexOf("*/", HEADER_MARK.length);
+  if (end < 0) return null;
+  let o: UTSJSONObject | null = null;
+  try {
+    o = JSON.parse(text.substring(HEADER_MARK.length, end)) as UTSJSONObject | null;
+  } catch (_) {
+    return null;
+  }
+  if (o == null) return null;
+  const kind = strOf(o, "kind");
+  const id = strOf(o, "id");
+  const versionCode = numOf(o, "versionCode");
+  if (kind.length == 0 || id.length == 0 || versionCode <= 0) return null;
+  if (!isValidPackId(id)) return null;
+  return {
+    kind: kind,
+    id: id,
+    name: strOf(o, "name"),
+    versionCode: versionCode,
+    versionName: strOf(o, "versionName"),
+    updateUrl: strOf(o, "updateUrl"),
+    notes: strOf(o, "notes"),
+  } as PackHeaderInfo;
+}
+
+export function isValidPackId(id: string): boolean {
+  if (id.length < 2 || id.length > 32) return false;
+  const re = new RegExp(ID_PATTERN);
+  return re.test(id);
+}
+
+/** 包头的单行序列化（诊断/日志用） */
+export function packHeaderLabel(h: PackHeaderInfo): string {
+  return `${h.kind}/${h.id} v${h.versionCode}（${h.versionName}）`;
+}
+
+function strOf(o: UTSJSONObject, key: string): string {
+  const v = o.get(key);
+  if (v == null) return "";
+  return `${v}`;
+}
+
+function numOf(o: UTSJSONObject, key: string): number {
+  const v = o.get(key);
+  if (v == null) return 0;
+  const n = v as number;
+  if (n == null) return 0;
+  return n;
+}

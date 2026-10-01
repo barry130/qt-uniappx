@@ -9,7 +9,8 @@
  * （编译进原生层），此处通过平台分发导入调用；H5 保留 window 实现，其余降级为复制+提示。
  */
 
-import { openExternalUrl, exitAppNative, installApkNative, openNotificationSettings as openNotificationSettingsNative, applyLegacyInsets as applyLegacyInsetsNative } from "@/uni_modules/qt-app-native";
+import { openExternalUrl, exitAppNative, installApkNative, openNotificationSettings as openNotificationSettingsNative, applyLegacyInsets as applyLegacyInsetsNative, pickJsFile as pickJsFileNative } from "@/uni_modules/qt-app-native";
+import type { PickFileResult } from "@/uni_modules/qt-app-native";
 import { ensureNotificationPermission as ensureNotificationPermissionNative } from "@/uni_modules/qt-audio-player";
 
 export type DownloadProgress = (received: number, total: number, percent: number) => void;
@@ -165,5 +166,28 @@ export function applyLegacyInsets(): boolean {
   // #endif
   // #ifndef APP-ANDROID
   return false;
+  // #endif
+}
+
+/**
+ * 打开系统文件选择器选一个 js/文本文件，读回全文（音源包「本地文件安装」用）。
+ * Android 走 ACTION_OPEN_DOCUMENT + contentResolver（content URI 只有一次读
+ * 权限，所以原生侧直接把内容读出来回传）；其他平台恒回调不支持。
+ */
+export function pickJsFile(): Promise<PickFileResult> {
+  // #ifdef APP-ANDROID
+  return new Promise((resolve) => {
+    try {
+      pickJsFileNative((result) => {
+        resolve(result);
+      });
+    } catch (e) {
+      console.log("[AppNative] pickJsFile error", e);
+      resolve({ ok: false, name: "", content: "", message: "无法打开文件选择器" } as PickFileResult);
+    }
+  });
+  // #endif
+  // #ifndef APP-ANDROID
+  return Promise.resolve({ ok: false, name: "", content: "", message: "当前平台不支持本地文件安装" } as PickFileResult);
   // #endif
 }

@@ -1,28 +1,25 @@
 /**
- * 播放音源包热更新与安装（双包架构，v2 多包版）
+ * 音源包安装与更新（统一包模型，v3）
  *
- * 只管**播放包**（play-bundle.js）：官方 manifest 检查/下载/原地替换 +
- * 用户直链安装 custom 包。元数据包（meta-bundle.js）内置在代码里
- * （services/source-meta-code.uts），不经本文件。
+ * 所有音源包（meta 数据包 / play 播放包）机制完全一致：
+ *   - 安装：用户给「https 直链」或「本地 js 文件」（qt-app-native 的系统文件
+ *     选择器），包首行 /*__QT_PACK__{...}*\/ 自述身份（kind/id/名称/版本/updateUrl），
+ *     宿主解析头 → 校验 → 落 install/<id>/ → 登记。同 id = 同一个包，新版本
+ *     原地替换（.prev 暂存旧文件，失败可回滚）；不同 id 多包共存。
+ *   - 更新发现：① 各包自述 updateUrl 探测（拉远端文件头比版本，按包独立节流）；
+ *     ② astral manifest 渠道（保留：这是发布方自己的发布接口，未来也用于
+ *     下发 meta 包）。两路合并成一份「可用更新」清单。
+ *   - 更新生效：**仅提示、手动确认**（启动时/App 内弹一次），确认后下载 →
+ *     校验 → 替换 → 生效。绝不明装。
+ *     play 生效 = 引擎热注入 + 冒烟自检，失败回滚 .prev 并拉黑该版本；
+ *     meta 生效 = 整引擎重装 bundle 槽（reloadEngineMeta），bundleInfo 验
+ *     契约，失败回滚 .prev 回退旧版本/基线。
  *
- * 判定顺序（与 qt-pc source_update.rs 的 decide_update 同口径）：
- *   1. 拉 manifest（服务端已按平台/准入预筛，返回至多一条 release）
- *   2. 无 release → 「远端没有可用播放包」
- *   3. 不面向本平台 / 未发布（已撤回）→ 各自提示，不动本地
- *   4. hostApiVersion > 本机契约 → 「需要更高版本的 App」
- *   5. 服务端 rollbackTo / bad 命中本地版本 → 移除官方包（回退到「未安装」）
- *   6. 本地 bad[] 含该 code → 跳过（此前装载失败）
- *   7. 官方包未安装 → 全新安装（含冒烟）；远端 > 本地 → 更新；
- *      == → 已是最新；< → 拒绝降级
+ * 生效位：play 包 activeId（多包并存恰好一个生效，装新包不抢已有生效位）；
+ * meta 包 activeMetaId（"" = 内置基线，卸载即回退）。
  *
- * 生效策略：官方包安装/更新后，仅当当前**没有生效包或生效的就是官方包**时才
- * 自动激活并冒烟；生效中的是自定义包时不抢激活（用户在列表里自己切换）。
- * custom 直链包**从不自动激活**——多包并存、装完由用户挑一个生效正是本设计的
- * 核心用法。
- *
- * 「落盘」不等于「生效」：生效 = 引擎热注入（installPlayPack，无需重建引擎）
- * + 冒烟自检（取链 + Range 预检）。官方包装载/冒烟失败 → 拉黑该版本 + 移除 +
- * 上报；custom 包失败 → 保留在列表（用户手装的，去留由用户决定），只提示。
+ * 「落盘」不等于「生效」：装载失败不改落盘状态由用户处理（除非是更新动作——
+ * 更新失败自动回滚，安装动作失败则保留由用户决定）。
  */
 
 import type { Song } from "@/types/music";
@@ -31,32 +28,41 @@ import { mergeClientHeaders } from "@/services/client-info";
 import { getAccessToken } from "@/services/auth";
 import { getCurrentVersionCode, getCurrentVersionName } from "@/services/app-version";
 import { musicApi } from "@/services/music-api";
-import type { PlayPackMeta } from "@/services/source-bundle-fs";
+import type { SourcePackMeta } from "@/services/source-bundle-fs";
+import type { PackHeaderInfo } from "@/services/source-pack-header";
+import { parsePackHeader } from "@/services/source-pack-header";
 import {
   localState,
-  officialPack,
-  activePack,
+  packs,
   packById,
+  activePack,
+  activeMetaPack,
   setActive,
+  setActiveMeta,
   putPack,
-  setPreviousOfficial,
   removePack,
-  isBad,
-  markBad,
+  markPackBad,
+  isPackBadVersion,
+  touchPackProbe,
   touchLastCheck,
   ensureLocalStateRestored,
   ensurePackDir,
   writePackArtifact,
+  writeTextFileAt,
+  readPackArtifact,
   removePackArtifact,
   readTextFileAt,
   removeFileAt,
-  customPackId,
+  artifactPath,
+  artifactOfKind,
   pruneOrphans,
   packDirOf,
-  OFFICIAL_PACK_ID,
-  PACK_SOURCE_CUSTOM,
+  OFFICIAL_PLAY_ID,
+  PACK_KIND_META,
+  PACK_KIND_PLAY,
   ARTIFACT_CHAIN,
   ARTIFACT_PLAY,
+  ARTIFACT_META,
 } from "@/services/source-bundle-fs";
 import {
   ensurePlayPackLoaded,
@@ -67,6 +73,10 @@ import {
   playPackReady,
   loadFailureKind,
   lastEngineError,
+  reloadEngineMeta,
+  loadedMetaCode,
+  baselineMetaInfo,
+  engineUsable,
 } from "@/services/source-engine";
 
 /** 平台常量（与 astral 的 qt_app_update.type 同源） */
@@ -76,40 +86,58 @@ export const PLATFORM_WINDOWS = 1103;
 const HOST_API_VERSION = 1;
 const MANIFEST_TIMEOUT_MS = 10000;
 const DOWNLOAD_TIMEOUT_MS = 60000;
-/** 启动静默检查的最小间隔（4 小时；只对已装官方包的设备生效） */
-const SILENT_INTERVAL_MS = 4 * 60 * 60 * 1000;
+/** 头部探测超时（只拉 4KB，不用下载整包的超时） */
+const PROBE_TIMEOUT_MS = 10000;
+/** 自管 updateUrl 探测的最小间隔（按包独立节流，4 小时） */
+const PROBE_INTERVAL_MS = 4 * 60 * 60 * 1000;
+/** manifest 渠道检查的最小间隔（4 小时） */
+const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
 /** 播放包主体必须含的工厂标记（meta 的 installPlayPack 契约） */
 const PLAY_PACK_FACTORY_MARKER = "__qtPlayPackFactory";
+/** 头部探测的 Range 上限（包头行远小于此；200 全量应答也能直接用） */
+const PROBE_RANGE_BYTES = 4096;
 
-/** 最近一次检查拿到的远端信息（设置页展示「远端最新 / 更新说明」，与 qt-pc 一致只放内存） */
-export type SourceRemoteInfo = {
-  versionCode: number;
-  versionName: string;
+// ==================== 可用更新（提示 + 手动确认） ====================
+
+/**
+ * 一条可用更新。targetId 是**包 id**；meta 基线升级时 targetId 为
+ * OFFICIAL_META_ID 且 fromBaseline=true（当前用的还是内置基线）。
+ */
+export type PackUpdateOffer = {
+  kind: string;
+  targetId: string;
+  /** 当前版本（基线无包头 = 0） */
+  currentCode: number;
+  newCode: number;
+  newName: string;
+  /** 更新说明（自管头 notes 或 manifest notes） */
   notes: string;
+  /** self = 包自述 updateUrl；manifest = astral 发布渠道 */
   channel: string;
-  checkedAt: number;
+  /** 下载地址（确认后从这里拉全量文件） */
+  url: string;
+  /** meta 专用：当前生效的是内置基线（更新后首次安装 meta 包） */
+  fromBaseline: boolean;
 };
 
-let gRemote: SourceRemoteInfo | null = null;
+/** 最近一次发现的可用更新（内存态；设置页/启动提示共用，装完即清） */
+let gOffers: PackUpdateOffer[] = [];
 
-/** 最近一次检查的远端结果（null = 本次启动还没检查过） */
-export function lastRemoteInfo(): SourceRemoteInfo | null {
-  return gRemote;
+/** 当前可用更新列表（拷贝） */
+export function pendingUpdates(): PackUpdateOffer[] {
+  const out: PackUpdateOffer[] = [];
+  for (let i = 0; i < gOffers.length; i++) out.push(gOffers[i]);
+  return out;
 }
 
 /** 页面红点监听的事件名（stores/source-update 的响应式镜像接住它，tab 栏与行红点随之刷新） */
 export const SOURCE_UPDATE_BADGE_EVENT = "qt-source-update-badge";
+/** 有可用更新事件（App.uvue 接住弹确认提示；payload = offers JSON） */
+export const SOURCE_UPDATE_FOUND_EVENT = "qt-source-update-found";
 
-/**
- * 是否该亮「有新音源包」红点：已装官方包且远端有更高版本。
- * 更新装好（官方包 versionCode 追平远端）后红点自然消失。
- */
+/** 是否该亮「有可用更新」红点：发现过至少一条未应用的更新 */
 export function hasSourceUpdateBadge(): boolean {
-  const remote = gRemote;
-  if (remote == null) return false;
-  const official = officialPack();
-  if (official == null) return false;
-  return remote.versionCode > official.versionCode;
+  return gOffers.length > 0;
 }
 
 /** 广播红点事件：stores/source-update 统一接住刷新，底部 tab 栏与各页面行红点随之更新 */
@@ -118,270 +146,386 @@ export function syncSourceUpdateBadge(): void {
 }
 
 /**
- * 启动静默检查：只对**已安装官方包**的设备生效（首装是用户显式动作，交给设置页），
- * 不弹任何 UI；失败静默——音源包检查不该打扰播放。查到新版就走完整更新
- * （下载 → 原地替换 → 自动激活（如允许）→ 冒烟），官方包冒烟失败自动回退移除。
+ * 启动时的更新发现（不打扰策略）：
+ * - 只做发现 + 广播 SOURCE_UPDATE_FOUND_EVENT，由 App.uvue 弹「仅提示」的确认框；
+ * - manifest 渠道按 lastCheckAt 节流；自管 updateUrl 按各包 lastProbeAt 节流
+ *   （force=true 双双跳过节流，设置页按钮用）；
+ * - 全部失败静默：更新检查不该打断播放。
  */
-export async function checkSourceUpdateSilently(): Promise<void> {
+export async function discoverUpdatesAtStartup(): Promise<PackUpdateOffer[]> {
   try {
     await ensureLocalStateRestored();
-    if (officialPack() == null) {
-      // 没装官方包：不打扰，等用户进设置页显式「检查更新」安装
-      return;
-    }
     const state = localState();
     const now = Date.now();
-    if (now - state.lastCheckAt < SILENT_INTERVAL_MS) return;
-    await checkSourceUpdate(false);
-  } catch (_) {}
-  syncSourceUpdateBadge();
+    const force = now - state.lastCheckAt >= CHECK_INTERVAL_MS;
+    const offers = await discoverUpdates(force);
+    if (offers.length > 0) {
+      uni.$emit(SOURCE_UPDATE_FOUND_EVENT, offersToJson(offers));
+    }
+    syncSourceUpdateBadge();
+    return offers;
+  } catch (_) {
+    return [] as PackUpdateOffer[];
+  }
 }
 
-// ==================== 检查（判定 + 触发安装/更新） ====================
+/**
+ * 显式发现更新（设置页按钮与启动共用）：合并两路来源——
+ *   ① 已装各包的自述 updateUrl（含 meta 包与 play 包；基线 meta 的 updateUrl
+ *      来自内置代码里的包头）；
+ *   ② astral manifest（play-bundle.js 产物；未来可加 meta-bundle.js）。
+ * 同一包两路都报新版时取 versionCode 更高的一路。
+ */
+export async function discoverUpdates(force: boolean): Promise<PackUpdateOffer[]> {
+  await ensureLocalStateRestored();
+  const now = Date.now();
+  const found: PackUpdateOffer[] = [];
+  // ① 自管 updateUrl（已装包 + meta 基线）
+  const installed = packs();
+  for (let i = 0; i < installed.length; i++) {
+    const pack = installed[i];
+    if (pack.updateUrl.length == 0) continue;
+    if (!force && now - pack.lastProbeAt < PROBE_INTERVAL_MS) continue;
+    const remote = await probePackHeader(pack.updateUrl);
+    await touchPackProbe(pack.id, now);
+    if (remote == null || remote.id != pack.id || remote.kind != pack.kind) continue;
+    if (remote.versionCode <= pack.versionCode) continue;
+    if (isPackBadVersion(pack.id, remote.versionCode)) continue;
+    found.push(
+      offerOf(pack.kind, pack.id, pack.versionCode, remote.versionCode, remote.versionName,
+        remote.notes, "self", pack.updateUrl, false),
+    );
+  }
+  // meta 基线的 updateUrl（内置包头的自述；基线版本号无头视为 0）
+  const baseline = baselineMetaInfo();
+  if (baseline != null && baseline.updateUrl.length > 0) {
+    const activeMeta = activeMetaPack();
+    // 已装生效 meta 包的设备按它自己的 updateUrl 走（上面 ① 已处理），不重复探基线
+    if (activeMeta == null) {
+      const remote = await probePackHeader(baseline.updateUrl);
+      if (
+        remote != null &&
+        remote.id == baseline.id &&
+        remote.kind == PACK_KIND_META &&
+        remote.versionCode > baseline.versionCode &&
+        !isPackBadVersion(baseline.id, remote.versionCode)
+      ) {
+        found.push(
+          offerOf(PACK_KIND_META, baseline.id, baseline.versionCode, remote.versionCode,
+            remote.versionName, remote.notes, "self", baseline.updateUrl, true),
+        );
+      }
+    }
+  }
+  // ② manifest 渠道
+  const manifest = await fetchManifest();
+  await touchLastCheck(now);
+  if (manifest != null && manifest.release != null) {
+    const release = manifest.release;
+    if (release.published && !release.bad && release.rollbackTo <= 0 && containsNum(release.platforms, PLATFORM_ANDROID) && release.hostApiVersion <= HOST_API_VERSION) {
+      // play 产物：release 版本号即产物版本
+      for (let i = 0; i < release.artifacts.length; i++) {
+        const a = release.artifacts[i];
+        if (a.path != ARTIFACT_PLAY || a.url.length == 0) continue;
+        const local = packById(OFFICIAL_PLAY_ID);
+        const currentCode = local != null ? local.versionCode : 0;
+        if (a.version <= currentCode || isPackBadVersion(OFFICIAL_PLAY_ID, a.version)) continue;
+        if (hasOfferFor(found, OFFICIAL_PLAY_ID, a.version)) continue;
+        found.push(
+          offerOf(PACK_KIND_PLAY, OFFICIAL_PLAY_ID, currentCode, a.version,
+            release.sourceVersionName, release.notes, "manifest", a.url, false),
+        );
+      }
+      // meta 产物（未来发布）：版本号在产物头里，需要探测
+      for (let i = 0; i < release.artifacts.length; i++) {
+        const a = release.artifacts[i];
+        if (a.path != ARTIFACT_META || a.url.length == 0) continue;
+        const remote = await probePackHeader(a.url);
+        if (remote == null || remote.kind != PACK_KIND_META) continue;
+        const localMeta = packById(remote.id);
+        const currentCode =
+          localMeta != null
+            ? localMeta.versionCode
+            : baseline != null && baseline.id == remote.id
+              ? baseline.versionCode
+              : 0;
+        if (remote.versionCode <= currentCode || isPackBadVersion(remote.id, remote.versionCode)) continue;
+        if (hasOfferFor(found, remote.id, remote.versionCode)) continue;
+        found.push(
+          offerOf(PACK_KIND_META, remote.id, currentCode, remote.versionCode,
+            remote.versionName, release.notes, "manifest", a.url, localMeta == null),
+        );
+      }
+    }
+  }
+  // 同一包取 versionCode 最高的一条（self 与 manifest 撞车时）
+  const deduped = dedupeOffers(found);
+  gOffers = deduped;
+  return deduped;
+}
 
-/** manifest 里的产物条目 */
-export type SourceArtifact = {
-  path: string;
-  /** 单文件版本号（取代 sha256 的角色） */
-  version: number;
-  url: string;
-};
-
-/** manifest 里的 release 节点 */
-export type SourceRelease = {
-  sourceVersionCode: number;
-  sourceVersionName: string;
-  platforms: number[];
-  hostApiVersion: number;
-  channel: string;
-  notes: string;
-  publishedAt: string;
-  rollbackTo: number;
-  bad: boolean;
-  /** 是否已发布（缺失视为已发布，服务端本应预筛撤回版本） */
-  published: boolean;
-  artifacts: SourceArtifact[];
-};
-
-export type SourceManifest = {
-  schema: number;
-  generatedAt: string;
-  release: SourceRelease | null;
-};
-
-/** 检查结果（给设置页展示用） */
-export type SourceCheckResult = {
-  /**
-   * none=没动作 / up_to_date=已是最新 / updated=已安装或更新并生效 /
-   * downloaded=已落盘未激活（生效中的是自定义包）/ rolled_back=已按远端要求移除 /
-   * blocked=被拦下（契约/坏包）/ failed=安装或冒烟失败
-   */
-  action: string;
-  versionCode: number;
-  versionName: string;
-  message: string;
-};
+// ==================== 应用更新（手动确认后） ====================
 
 /**
- * 显式检查更新（设置页按钮与静默检查共用）：判定 + 必要时安装/更新。
- * force=true 预留给设置页（本函数不做节流，节流在 checkSourceUpdateSilently）。
+ * 应用一条可用更新（用户在提示框/设置页点了「更新」）：
+ * 下载全量 → 头校验（id/kind/version 必须匹配 offer）→ 走统一替换管线 →
+ * 立即生效（play 热注入 + 冒烟；meta 重装引擎槽）。失败自动回滚 .prev。
  */
-export async function checkSourceUpdate(force: boolean): Promise<SourceCheckResult> {
-  const result = await decideSourceUpdate();
-  // gRemote 在判定中可能刷新（影响红点），统一在出口广播一次
-  syncSourceUpdateBadge();
+export async function applyUpdate(offer: PackUpdateOffer, smokeSongs: Song[]): Promise<SourceApplyResult> {
+  const text = await downloadText(offer.url);
+  if (text.length == 0) {
+    return applyResult(false, offer.newCode, "下载失败：更新包拉取为空，请稍后重试");
+  }
+  const header = parsePackHeader(text);
+  if (
+    header == null ||
+    header.id != offer.targetId ||
+    header.kind != offer.kind ||
+    header.versionCode != offer.newCode
+  ) {
+    return applyResult(false, offer.newCode, "更新包无效：文件头与发现的版本不符");
+  }
+  const result = await installPackText(
+    text,
+    header,
+    smokeSongs,
+    true,
+  );
+  if (result.ok) {
+    dropOffer(offer.targetId);
+    syncSourceUpdateBadge();
+  } else if (result.message.indexOf("已回滚") >= 0 || result.message.indexOf("已回退") >= 0) {
+    // 更新失败且已回滚：这个版本拉黑，别再反复提示
+    await markPackBad(offer.targetId, offer.newCode);
+    dropOffer(offer.targetId);
+    syncSourceUpdateBadge();
+  }
+  // manifest 渠道的官方播放包：把结果回传发布端（灰度观测用；自管渠道没有
+  // 服务端记录，不报）。失败静默——上报不该影响本地更新体验。
+  if (offer.channel == "manifest" && offer.targetId == OFFICIAL_PLAY_ID) {
+    reportResult(offer.newCode, result.ok, result.message).catch((_e) => {});
+  }
   return result;
 }
 
-async function decideSourceUpdate(): Promise<SourceCheckResult> {
-  await ensureLocalStateRestored();
-  const now = Date.now();
-  const manifest = await fetchManifest();
-  await touchLastCheck(now);
-  if (manifest == null) {
-    return checkResult("none", 0, "", "检查更新失败：网络异常或服务暂不可用，请稍后重试");
-  }
-  const release = manifest.release;
-  if (release == null) {
-    gRemote = null;
-    syncSourceUpdateBadge();
-    return checkResult("none", 0, "", "远端没有可用播放包");
-  }
-  gRemote = {
-    versionCode: release.sourceVersionCode,
-    versionName: release.sourceVersionName,
-    notes: release.notes,
-    channel: release.channel,
-    checkedAt: now,
-  };
-  // ① 平台
-  if (!containsNum(release.platforms, PLATFORM_ANDROID)) {
-    return checkResult("none", release.sourceVersionCode, release.sourceVersionName, "该播放包不面向本平台");
-  }
-  // ② 发布状态
-  if (!release.published) {
-    return checkResult("none", release.sourceVersionCode, release.sourceVersionName, "该版本已撤回或未发布");
-  }
-  // ③ 宿主契约
-  if (release.hostApiVersion > HOST_API_VERSION) {
-    return checkResult(
-      "blocked",
-      release.sourceVersionCode,
-      release.sourceVersionName,
-      "该播放包需要更高版本的应用，请先升级 App",
-    );
-  }
-  const official = officialPack();
-  // ④ 服务端要求回退 / 标坏：命中本地已装版本才动作
-  if (release.rollbackTo > 0 || release.bad) {
-    if (official != null && official.versionCode == release.sourceVersionCode) {
-      const reason = release.bad ? "该版本已被服务端标记为问题版本，官方播放包已移除" : `远端已撤回该版本，官方播放包已移除（回退目标 v${release.rollbackTo}）`;
-      await removeOfficialFromDevice();
-      return checkResult("rolled_back", release.sourceVersionCode, release.sourceVersionName, reason);
-    }
-    if (release.rollbackTo > 0 && official != null && official.versionCode == release.rollbackTo) {
-      return checkResult("up_to_date", official.versionCode, official.versionName, "官方播放包已在回退目标版本");
-    }
-    return checkResult(
-      "none",
-      release.sourceVersionCode,
-      release.sourceVersionName,
-      "远端要求回退到 v" + release.rollbackTo + "，本地未安装受影响版本",
-    );
-  }
-  // ⑤ 本地坏包名单
-  if (isBad(release.sourceVersionCode)) {
-    return checkResult(
-      "blocked",
-      release.sourceVersionCode,
-      release.sourceVersionName,
-      "该版本此前装载失败，已跳过（卸载官方包并重新检查可重试）",
-    );
-  }
-  // ⑥ 版本比较
-  if (official == null) {
-    // 首次安装：manifest 是官方播放包唯一的获取渠道（仓库不内置、也不放下载直链）
-    return await installOfficialRelease(release, now);
-  }
-  if (release.sourceVersionCode < official.versionCode) {
-    return checkResult("none", official.versionCode, official.versionName, "拒绝降级：远端版本不高于本地");
-  }
-  if (release.sourceVersionCode == official.versionCode) {
-    return checkResult("up_to_date", official.versionCode, official.versionName, "官方播放包已是最新版本");
-  }
-  return await installOfficialRelease(release, now);
-}
-
-// ==================== 官方包安装/更新 ====================
+// ==================== 统一安装（链接 / 本地文件 / 文本） ====================
 
 /**
- * 把一个官方 release 落盘并按需激活（installOfficialRelease）：
- *   1. 全部产物先下到内存再落盘（中途失败不清掉旧官方包——原地替换不能留半新半旧）
- *   2. play-bundle.js 必须含 __qtPlayPackFactory（外层冒烟，防 manifest 指错文件）
- *   3. manifest 没列 chain.json 时清掉旧官方包可能留下的 chain（版本必须配套）
- *   4. 激活条件：当前无生效包或生效的就是官方包；生效中的是自定义包时不抢
- *   5. 激活走 applyActivePack（热注入 + 冒烟），失败自动拉黑移除（见其注释）
+ * 从 https 直链安装一个包（官方发布直链、第三方作者的分发链接都走这里）。
+ * 只接受 https：包会被引擎当脚本执行，明文 http 一律拒绝。
+ * 下载走 uni.downloadFile，不加统一客户端头（第三方直链带自定义头会坏签名/表单校验）。
  */
-async function installOfficialRelease(release: SourceRelease, now: number): Promise<SourceCheckResult> {
-  const code = release.sourceVersionCode;
-  if (code <= 0) {
-    return checkResult("none", 0, "", "远端版本号无效");
+export async function installFromUrl(url: string, smokeSongs: Song[]): Promise<SourceApplyResult> {
+  const link = url.trim();
+  if (link.length == 0) {
+    return applyResult(false, 0, "链接不能为空");
   }
-  // 收集清单：play 必需，chain 可选
-  let playUrl = "";
-  let chainUrl = "";
-  for (let i = 0; i < release.artifacts.length; i++) {
-    const a = release.artifacts[i];
-    if (a.path == ARTIFACT_PLAY && a.url.length > 0) {
-      playUrl = a.url;
-    } else if (a.path == ARTIFACT_CHAIN && a.url.length > 0) {
-      chainUrl = a.url;
-    }
+  if (!link.startsWith("https://")) {
+    return applyResult(false, 0, "只支持 https 直链（音源包会被当脚本执行，不接受明文 http）");
   }
-  if (playUrl.length == 0) {
-    return checkResult("none", code, release.sourceVersionName, "远端清单缺少 " + ARTIFACT_PLAY + "，无法安装");
+  const temp = await downloadToTemp(link);
+  if (temp.length == 0) {
+    return applyResult(false, 0, "下载失败，请检查链接是否可直连");
   }
-  // ① 全部先下到内存（失败早退，不动磁盘上的旧官方包）
-  const playText = await downloadText(playUrl);
-  if (playText.length == 0) {
-    return checkResult("failed", code, release.sourceVersionName, "下载失败：播放包主体拉取为空，请稍后重试");
+  const text = await readTextFileAt(temp);
+  await removeFileAt(temp);
+  if (text.length == 0) {
+    return applyResult(false, 0, "下载的音源包为空");
   }
-  if (playText.indexOf(PLAY_PACK_FACTORY_MARKER) < 0) {
-    return checkResult("failed", code, release.sourceVersionName, "远端播放包无效：缺少 " + PLAY_PACK_FACTORY_MARKER + " 导出");
+  return await installFromText(text, smokeSongs);
+}
+
+/**
+ * 从本地 js 文件安装：Android 系统选择器（qt-app-native pickJsFile）拿到的
+ * content URI 只有一次读权限，原生侧已把全文读回，直接走 installFromText。
+ * （服务层不再按路径安装：SAF 选出的文件没有可复用的真实路径。）
+ */
+export async function installFromLocalFile(content: string, smokeSongs: Song[]): Promise<SourceApplyResult> {
+  if (content.trim().length == 0) {
+    return applyResult(false, 0, "未选择文件");
   }
-  let chainText = "";
-  if (chainUrl.length > 0) {
-    chainText = await downloadText(chainUrl);
-    if (chainText.length == 0) {
-      return checkResult("failed", code, release.sourceVersionName, "下载失败：线路覆盖层拉取为空，请稍后重试");
-    }
-  }
-  // ② 落盘（原地替换 official 目录）
-  if (!(await ensurePackDir(OFFICIAL_PACK_ID))) {
-    return checkResult("failed", code, release.sourceVersionName, "写入失败：无法创建官方播放包目录");
-  }
-  if (!(await writePackArtifact(OFFICIAL_PACK_ID, ARTIFACT_PLAY, playText))) {
-    return checkResult("failed", code, release.sourceVersionName, "写入失败：播放包落盘失败");
-  }
-  if (chainText.length > 0) {
-    if (!(await writePackArtifact(OFFICIAL_PACK_ID, ARTIFACT_CHAIN, chainText))) {
-      return checkResult("failed", code, release.sourceVersionName, "写入失败：线路覆盖层落盘失败");
-    }
-  } else {
-    // 本版 manifest 不发 chain：清掉旧官方包的 chain，避免新播放层配旧线路
-    await removePackArtifact(OFFICIAL_PACK_ID, ARTIFACT_CHAIN);
-  }
-  // ③ 登记包记录（official 原地覆盖；记下被覆盖的旧版本供诊断）
-  const old = officialPack();
-  const meta: PlayPackMeta = {
-    id: OFFICIAL_PACK_ID,
-    name: "官方播放包",
-    versionCode: code,
-    versionName: release.sourceVersionName,
-    source: "official",
-    dir: packDirOf(OFFICIAL_PACK_ID),
-    installedAt: now,
-  };
-  await putPack(meta);
-  if (old != null && old.versionCode != code) {
-    await setPreviousOfficial(old);
-  }
-  await pruneOrphans();
-  // ④ 激活（不抢自定义包的生效位）
-  const state = localState();
-  const activateAllowed = state.activeId.length == 0 || state.activeId == OFFICIAL_PACK_ID;
-  if (!activateAllowed) {
-    syncSourceUpdateBadge();
-    return checkResult(
-      "downloaded",
-      code,
-      release.sourceVersionName,
-      `官方播放包已更新到 ${release.sourceVersionName}（当前生效的是自定义包，可在列表切换）`,
+  return await installFromText(content, smokeSongs);
+}
+
+/** 从文本安装（统一管线的入口：解析头 → 校验 → 落盘 → 登记 → 按需生效） */
+export async function installFromText(text: string, smokeSongs: Song[]): Promise<SourceApplyResult> {
+  const header = parsePackHeader(text);
+  if (header == null) {
+    return applyResult(
+      false,
+      0,
+      "不是有效的音源包：文件首行缺少 /*__QT_PACK__*/ 身份头（需要 2026-10 后构建的包）",
     );
   }
-  await setActive(OFFICIAL_PACK_ID);
-  const smokeSongs = await pickSmokeSongs();
-  const applied = await applyActivePack(smokeSongs);
-  syncSourceUpdateBadge();
-  if (!applied.ok) {
-    return checkResult("failed", code, release.sourceVersionName, applied.message);
-  }
-  const verb = old == null ? "已安装并生效" : "已更新并生效";
-  return checkResult("updated", code, release.sourceVersionName, `官方播放包 v${release.sourceVersionName} ${verb}`);
+  return await installPackText(text, header, smokeSongs, false);
 }
 
-/** 移除官方包（远端回退/标坏、或装载冒烟失败后的清理）：先从引擎卸掉再删盘 */
-async function removeOfficialFromDevice(): Promise<void> {
-  if (loadedPlayPackId() == OFFICIAL_PACK_ID) {
-    await unloadPlayPack();
+/**
+ * 统一安装/替换管线（安装与更新共用；isUpdate=true 时失败自动回滚 .prev）。
+ *
+ * 步骤：
+ *   1. 内容校验：play 必须含 __qtPlayPackFactory；meta 靠装载后的 bundleInfo 契约
+ *      自检兜底（meta 无工厂标记）。
+ *   2. 旧文件暂存 .prev（同 id 替换；全新安装无旧文件）。
+ *   3. 落盘 install/<id>/<artifact> + putPack 登记（play 直链/本地安装不带
+ *      chain.json，顺手清掉可能残留的旧 chain，保证版本配套）。
+ *   4. 生效判定：
+ *      play —— 生效位为空（首次）或已生效的就是这个包（更新）→ 热注入 + 冒烟；
+ *              生效中的是别的包 → 只落盘不抢生效位；
+ *      meta —— 生效位为空（还在用基线）或已生效的就是这个包 → 重装引擎槽；
+ *              生效中的是别的 meta 包 → 只落盘。
+ *   5. 失败回滚（仅 isUpdate）：恢复 .prev、恢复包记录与生效位、重放旧包；
+ *      拉黑与否由调用方（applyUpdate 拉黑，手动重装不拉黑）。
+ */
+async function installPackText(
+  text: string,
+  header: PackHeaderInfo,
+  smokeSongs: Song[],
+  isUpdate: boolean,
+): Promise<SourceApplyResult> {
+  await ensureLocalStateRestored();
+  const kind = header.kind;
+  const id = header.id;
+  if (kind != PACK_KIND_META && kind != PACK_KIND_PLAY) {
+    return applyResult(false, header.versionCode, `未知包种类：${kind}（只认 meta / play）`);
   }
-  await removePack(OFFICIAL_PACK_ID);
+  if (kind == PACK_KIND_PLAY && text.indexOf(PLAY_PACK_FACTORY_MARKER) < 0) {
+    return applyResult(
+      false,
+      header.versionCode,
+      "该文件不是有效的播放包（缺少 " + PLAY_PACK_FACTORY_MARKER + " 导出）",
+    );
+  }
+  const artifact = artifactOfKind(kind);
+  const old = packById(id);
+  if (old != null && old.kind != kind) {
+    return applyResult(false, header.versionCode, `包 id 冲突：${id} 已被${old.kind == PACK_KIND_META ? "数据" : "播放"}包占用`);
+  }
+  const now = Date.now();
+  // ② 旧文件暂存（更新失败回滚用；新装没有旧文件）
+  const prevPath = packDirOf(id) + "/" + artifact + ".prev";
+  const mainPath = artifactPath(id, artifact);
+  const hadOld = (await readPackArtifact(id, artifact)).length > 0;
+  if (hadOld) {
+    await ensurePackDir(id);
+    await writeTextFileAt(prevPath, await readPackArtifact(id, artifact));
+  }
+  // ③ 落盘 + 登记
+  if (!(await ensurePackDir(id))) {
+    return applyResult(false, header.versionCode, "写入失败：无法创建包目录");
+  }
+  if (!(await writePackArtifact(id, artifact, text))) {
+    return applyResult(false, header.versionCode, "写入失败：音源包落盘失败");
+  }
+  if (kind == PACK_KIND_PLAY) {
+    // 链接/本地安装的 play 包自包含（内嵌默认链），残留的旧 chain 会造成
+    // 「新播放层配旧线路」，一律清掉
+    await removePackArtifact(id, ARTIFACT_CHAIN);
+  }
+  const meta: SourcePackMeta = {
+    id: id,
+    kind: kind,
+    name: header.name.length > 0 ? header.name : id,
+    versionCode: header.versionCode,
+    versionName: header.versionName,
+    updateUrl: header.updateUrl,
+    dir: packDirOf(id),
+    installedAt: old != null ? old.installedAt : now,
+    updatedAt: now,
+    skipCodes: old != null ? old.skipCodes : ([] as number[]),
+    lastProbeAt: old != null ? old.lastProbeAt : 0,
+  };
+  await putPack(meta);
   await pruneOrphans();
-  musicApi.clearPlayUrlCache();
+  // ④ 生效判定
+  const state = localState();
+  if (kind == PACK_KIND_PLAY) {
+    const canActivate = state.activeId.length == 0 || state.activeId == id;
+    if (!canActivate) {
+      syncSourceUpdateBadge();
+      return applyResult(
+        true,
+        header.versionCode,
+        `${meta.name} v${header.versionName} 已落盘（当前生效的是其他播放包，可在列表切换）`,
+      );
+    }
+    await setActive(id);
+    const smoke = await applyActivePack(smokeSongs);
+    if (!smoke.ok && isUpdate) {
+      await rollbackPack(old, id, prevPath, mainPath);
+      return applyResult(false, header.versionCode, `${smoke.message}；已回滚到 ${old != null ? old.versionName : "未安装"}`);
+    }
+    if (!smoke.ok) {
+      // 手动重装失败：保留文件由用户决定（可能是环境问题），仅提示
+      return smoke;
+    }
+    syncSourceUpdateBadge();
+    return applyResult(
+      true,
+      header.versionCode,
+      `${meta.name} v${header.versionName} 已${old != null ? "更新" : "安装"}并生效`,
+    );
+  }
+  // meta：生效位为空（基线）或就是这个包 → 重装引擎槽
+  const metaCanActivate = state.activeMetaId.length == 0 || state.activeMetaId == id;
+  if (!metaCanActivate) {
+    return applyResult(
+      true,
+      header.versionCode,
+      `${meta.name} v${header.versionName} 已落盘（当前生效的是其他数据包，可在列表切换）`,
+    );
+  }
+  await setActiveMeta(id);
+  const reloaded = await reloadEngineMeta();
+  const verified = reloaded && engineUsable() && loadedMetaCode() == header.versionCode;
+  if (!verified) {
+    const detail = lastEngineError();
+    if (isUpdate || old == null) {
+      // 新装/更新的 meta 包验证不过：回滚（新装 = 回基线，更新 = 回旧文件）
+      await rollbackPack(old, id, prevPath, mainPath);
+      await reloadEngineMeta();
+      const target = old != null ? old.versionName : "内置基线";
+      return applyResult(false, header.versionCode, `数据包装载未通过（${detail}）；已回退到 ${target}`);
+    }
+    return applyResult(false, header.versionCode, `数据包装载未通过：${detail}（可在列表卸载后回退基线）`);
+  }
   syncSourceUpdateBadge();
+  return applyResult(
+    true,
+    header.versionCode,
+    `${meta.name} v${header.versionName} 已${old != null ? "更新" : "安装"}并生效`,
+  );
 }
 
-// ==================== 生效（热注入 + 冒烟自检） ====================
+/** 回滚一个包到 .prev（无旧文件 = 恢复到安装前：未安装 / 内置基线） */
+async function rollbackPack(
+  old: SourcePackMeta | null,
+  id: string,
+  prevPath: string,
+  mainPath: string,
+): Promise<void> {
+  try {
+    if (old != null) {
+      const prev = await readTextFileAt(prevPath);
+      if (prev.length > 0) {
+        await writeTextFileAt(mainPath, prev);
+        await putPack(old);
+        await removeFileAt(prevPath);
+        return;
+      }
+    }
+    // 没有旧文件可回滚：恢复到安装前状态（未安装 / 基线）
+    if (old != null && loadedPlayPackId() == old.id) {
+      await unloadPlayPack();
+    }
+    await removePack(id);
+    await removeFileAt(prevPath);
+  } catch (e) {
+    console.log("[SourceUpdate] 回滚失败：" + `${e}`);
+  }
+}
+
+// ==================== 生效（play 热注入 + 冒烟） ====================
 
 export type SourceApplyResult = {
   ok: boolean;
@@ -392,22 +536,16 @@ export type SourceApplyResult = {
 /**
  * 让 activeId 指向的播放包真正生效：引擎**热注入**（installPlayPack 覆盖当前
  * 播放层，无需重建引擎、不影响 meta 数据面）+ 冒烟自检。
- *
- * 失败处理（见 source-engine 的 SourceLoadFailure）：
- *   - invalid（包本身坏）→ 官方包：拉黑 + 移除 + 上报（自动回退到「未安装」，
- *     多包下用户还装了别的包可在列表启用）；custom 包：保留在列表，仅提示；
- *   - missing/engine/contract（环境问题）→ 只提示，不拉黑不删包。
- * 冒烟同口径：官方失败移除拉黑上报，custom 失败保留。
- *
- * @param smokeSongs 冒烟候选曲目（调用方 pickSmokeSongs 给，通常 1~5 首）
+ * 装载失败分类见 source-engine（invalid = 包本身坏；missing/engine/contract =
+ * 环境问题）。这里只提示（落盘去留由用户/更新管线决定），冒烟通过后清前端
+ * 播放地址缓存（旧链路地址会继续用满 10 分钟 TTL）。
  */
 export async function applyActivePack(smokeSongs: Song[]): Promise<SourceApplyResult> {
   await ensureLocalStateRestored();
   const pack = activePack();
   if (pack == null) {
-    return applyResult(false, 0, "未选择播放音源包：请在列表中启用一个，或安装官方包");
+    return applyResult(false, 0, "未选择播放音源包：请在列表中启用一个，或先安装");
   }
-  const isOfficial = pack.source != PACK_SOURCE_CUSTOM;
   if (playPackReady() && loadedPlayPackId() == pack.id) {
     return applyResult(true, pack.versionCode, "该版本已在生效中");
   }
@@ -416,41 +554,39 @@ export async function applyActivePack(smokeSongs: Song[]): Promise<SourceApplyRe
     const kind = loadFailureKind();
     const detail = lastEngineError();
     if (kind == "invalid") {
-      if (isOfficial) {
-        await markBad(pack.versionCode);
-        await removeOfficialFromDevice();
-        await reportResult(pack.versionCode, false, "装载失败：" + detail);
-        return applyResult(false, pack.versionCode, "官方播放包不可用，已移除并拉黑该版本：" + detail);
-      }
-      return applyResult(false, pack.versionCode, `自定义播放包未能生效（已保留在列表）：${detail}`);
+      return applyResult(false, pack.versionCode, `该播放包不可用（已保留在列表，可卸载或重装）：${detail}`);
     }
     return applyResult(false, pack.versionCode, `播放包未能生效：${detail}`);
   }
   const smoke = await smokeTest(smokeSongs);
   if (!smoke.ok) {
-    if (isOfficial) {
-      await markBad(pack.versionCode);
-      await removeOfficialFromDevice();
-      await reportResult(pack.versionCode, false, "冒烟自检失败：" + smoke.message);
-      return applyResult(false, pack.versionCode, "冒烟自检未通过，官方播放包已移除：" + smoke.message);
-    }
-    return applyResult(false, pack.versionCode, `冒烟自检未通过（自定义包已保留在列表，可直接试播）：${smoke.message}`);
+    return applyResult(false, pack.versionCode, `冒烟自检未通过（包已保留在列表，可直接试播）：${smoke.message}`);
   }
   // 新包真正生效：清掉前端播放地址缓存，否则旧链路的地址会继续用满 10 分钟 TTL
   musicApi.clearPlayUrlCache();
-  if (isOfficial) {
-    await reportResult(pack.versionCode, true, "冒烟通过：" + smoke.message);
-  }
   syncSourceUpdateBadge();
   return applyResult(true, pack.versionCode, `播放音源包已生效：${pack.name} ${pack.versionName}`);
 }
 
-/** 切换生效包（设置页列表项「启用」）：setActive 后立即热注入 + 冒烟 */
+/** 切换生效播放包（设置页列表项「启用」）：setActive 后立即热注入 + 冒烟 */
 export async function activatePack(id: string, smokeSongs: Song[]): Promise<SourceApplyResult> {
   await ensureLocalStateRestored();
   const pack = packById(id);
   if (pack == null) {
     return applyResult(false, 0, "该播放包已不存在（可能刚被卸载），请刷新列表");
+  }
+  if (pack.kind == PACK_KIND_META) {
+    if (!(await setActiveMeta(id))) {
+      return applyResult(false, pack.versionCode, "切换失败：本地状态写入失败");
+    }
+    const ok = await reloadEngineMeta();
+    if (!ok || loadedMetaCode() != pack.versionCode) {
+      await setActiveMeta("");
+      await reloadEngineMeta();
+      return applyResult(false, pack.versionCode, `数据包装载未通过：${lastEngineError()}（已回退内置基线）`);
+    }
+    syncSourceUpdateBadge();
+    return applyResult(true, pack.versionCode, `数据包已生效：${pack.name} ${pack.versionName}`);
   }
   if (!(await setActive(id))) {
     return applyResult(false, pack.versionCode, "切换生效包失败：本地状态写入失败");
@@ -458,12 +594,25 @@ export async function activatePack(id: string, smokeSongs: Song[]): Promise<Sour
   return await applyActivePack(smokeSongs);
 }
 
-/** 卸载一个播放包（设置页列表项「卸载」）：引擎卸载 → 删目录 → 出列表 */
+/**
+ * 卸载一个包：play → 引擎卸载 + 删目录 + 出列表；meta → 回退生效位（activeMetaId
+ * 清空即回内置基线）+ 删目录。卸载生效中的 meta 后引擎重装回基线。
+ */
 export async function uninstallPack(id: string): Promise<SourceApplyResult> {
   await ensureLocalStateRestored();
   const pack = packById(id);
   if (pack == null) {
-    return applyResult(false, 0, "该播放包已不存在");
+    return applyResult(false, 0, "该包已不存在");
+  }
+  if (pack.kind == PACK_KIND_META) {
+    if (!(await removePack(id))) {
+      return applyResult(false, pack.versionCode, "卸载失败：本地状态写入失败");
+    }
+    await reloadEngineMeta();
+    musicApi.clearPlayUrlCache();
+    dropOffer(id);
+    syncSourceUpdateBadge();
+    return applyResult(true, pack.versionCode, `已卸载 ${pack.name}（数据包已回退内置基线）`);
   }
   if (loadedPlayPackId() == id) {
     await unloadPlayPack();
@@ -473,6 +622,7 @@ export async function uninstallPack(id: string): Promise<SourceApplyResult> {
   }
   await pruneOrphans();
   musicApi.clearPlayUrlCache();
+  dropOffer(id);
   syncSourceUpdateBadge();
   return applyResult(true, pack.versionCode, `已卸载 ${pack.name} ${pack.versionName}`);
 }
@@ -511,7 +661,7 @@ export async function smokeTest(songs: Song[]): Promise<SourceSmokeResult> {
 }
 
 /**
- * 冒烟自检的候选曲目：按固定关键词在酷我搜前 5 首（搜索走内置 meta，不需要播放包）。
+ * 冒烟自检的候选曲目：按固定关键词在酷我搜前 5 首（搜索走 meta，不需要播放包）。
  * 不写死歌曲 ID——歌会下架、接口会变，用搜索结果更抗老化；
  * smokeTest 会逐个尝试，任一成功即通过，所以列表里有没有免费歌都能兜住。
  */
@@ -527,68 +677,37 @@ export async function pickSmokeSongs(): Promise<Song[]> {
 /** 冒烟搜索关键词（选最常见的歌名，保证各源都有结果） */
 const SMOKE_KEYWORD = "晴天";
 
-// ==================== 从链接安装自定义包 ====================
+// ==================== manifest 渠道（astral 发布接口） ====================
 
-/**
- * 从直链安装自定义播放包（source=custom，不自动更新、不自动激活）。
- *
- * 与 qt-pc 的 source_install_from_url 同口径：
- *   - 只接受 https 直链（包会被引擎当脚本执行，明文 http 一律拒绝）
- *   - 下载 → 外层校验（必须含 __qtPlayPackFactory，meta installPlayPack 契约）→ 落盘
- *   - 每次安装都落新目录（custom-<时间戳>），多份共存，卸载即删
- *   - 只写 play-bundle.js：直链包自包含（内含默认线路），不带 chain.json
- *   - 装完不抢激活：用户在播放包列表里自己选择启用哪个
- *
- * 下载走 uni.downloadFile，不加统一客户端头（第三方直链带自定义头会坏签名/表单校验）。
- */
-export async function installFromUrl(url: string): Promise<SourceApplyResult> {
-  const link = url.trim();
-  if (link.length == 0) {
-    return applyResult(false, 0, "链接不能为空");
-  }
-  if (!link.startsWith("https://")) {
-    return applyResult(false, 0, "只支持 https 直链（播放包会被当脚本执行，不接受明文 http）");
-  }
-  const temp = await downloadToTemp(link);
-  if (temp.length == 0) {
-    return applyResult(false, 0, "下载失败，请检查链接是否可直连");
-  }
-  const text = await readTextFileAt(temp);
-  await removeFileAt(temp);
-  if (text.length == 0) {
-    return applyResult(false, 0, "播放包下载为空");
-  }
-  // 外层校验：看起来是播放包（meta installPlayPack 约定的工厂导出），否则直接拒绝。
-  // 旧「单体 ESM 官方包」（createSourceLayer 导出）在这里被拦下——与双包客户端不兼容。
-  if (text.indexOf(PLAY_PACK_FACTORY_MARKER) < 0) {
-    return applyResult(false, 0, "该链接不是有效的播放音源包（缺少 " + PLAY_PACK_FACTORY_MARKER + "）");
-  }
-  await ensureLocalStateRestored();
-  const id = customPackId();
-  if (!(await ensurePackDir(id))) {
-    return applyResult(false, 0, "写入失败：无法创建播放包目录");
-  }
-  if (!(await writePackArtifact(id, ARTIFACT_PLAY, text))) {
-    return applyResult(false, 0, "写入失败：播放包落盘失败");
-  }
-  const now = Date.now();
-  const meta: PlayPackMeta = {
-    id: id,
-    name: "自定义播放包",
-    // custom 包没有官方发号：unix 秒只用于展示与排序，不参与官方版本比较
-    versionCode: Math.floor(now / 1000),
-    versionName: id.substring("custom-".length),
-    source: PACK_SOURCE_CUSTOM,
-    dir: packDirOf(id),
-    installedAt: now,
-  };
-  await putPack(meta);
-  await pruneOrphans();
-  syncSourceUpdateBadge();
-  return applyResult(true, meta.versionCode, "自定义播放包已安装；在下方列表中选择「启用」使其生效");
-}
+/** manifest 里的产物条目 */
+export type SourceArtifact = {
+  path: string;
+  /** 单文件版本号（play = release 发号；meta 实际版本以产物头为准） */
+  version: number;
+  url: string;
+};
 
-// ==================== 请求 ====================
+/** manifest 里的 release 节点 */
+export type SourceRelease = {
+  sourceVersionCode: number;
+  sourceVersionName: string;
+  platforms: number[];
+  hostApiVersion: number;
+  channel: string;
+  notes: string;
+  publishedAt: string;
+  rollbackTo: number;
+  bad: boolean;
+  /** 是否已发布（缺失视为已发布，服务端本应预筛撤回版本） */
+  published: boolean;
+  artifacts: SourceArtifact[];
+};
+
+export type SourceManifest = {
+  schema: number;
+  generatedAt: string;
+  release: SourceRelease | null;
+};
 
 function requestJson(
   url: string,
@@ -664,7 +783,7 @@ export async function fetchManifest(): Promise<SourceManifest | null> {
   return manifestFromJson(data);
 }
 
-/** 上报冒烟/加载结果（失败时后端可据此把该版本标坏）；custom 包没有服务端记录，调用方别传它 */
+/** 上报更新结果（manifest 渠道的官方播放包专用；自管渠道没有服务端记录） */
 export async function reportResult(
   sourceVersionCode: number,
   ok: boolean,
@@ -680,7 +799,7 @@ export async function reportResult(
   await requestJson(resolveUrl("app/source/report"), "POST", data);
 }
 
-// ==================== 下载 ====================
+// ==================== 下载与头探测 ====================
 
 /** uni.downloadFile → 临时文件绝对路径；失败返回 "" */
 function downloadToTemp(url: string): Promise<string> {
@@ -703,7 +822,7 @@ function downloadToTemp(url: string): Promise<string> {
   });
 }
 
-/** 下载一个产物到内存文本（installOfficialRelease 的「先下后写」用）；失败返回 "" */
+/** 下载一个产物到内存文本（安装/更新的「先下后写」用）；失败返回 "" */
 async function downloadText(url: string): Promise<string> {
   const temp = await downloadToTemp(url);
   if (temp.length == 0) return "";
@@ -711,6 +830,45 @@ async function downloadText(url: string): Promise<string> {
   // 临时文件在 cache 目录系统会回收，这里顺手清掉
   await removeFileAt(temp);
   return text;
+}
+
+/**
+ * 探测一个包直链的文件头（不用下载整个文件）：
+ * GET + Range: bytes=0-4095 —— 支持 Range 的服务器回 206（省流量），
+ * 不支持的回 200 全量（数据已在手，同样只用头部解析）。
+ * 只解析首行 __QT_PACK__ 头；URL 是第三方直链，绝不合并客户端系统头。
+ */
+export function probePackHeader(url: string): Promise<PackHeaderInfo | null> {
+  return new Promise<PackHeaderInfo | null>((resolve) => {
+    if (!url.startsWith("https://")) {
+      resolve(null);
+      return;
+    }
+    const headers = new UTSJSONObject();
+    headers.set("Range", "bytes=0-" + (PROBE_RANGE_BYTES - 1));
+    uni.request({
+      url: url,
+      method: "GET",
+      header: headers,
+      timeout: PROBE_TIMEOUT_MS,
+      success: (response) => {
+        const status = response.statusCode;
+        if (status != 206 && status != 200) {
+          resolve(null);
+          return;
+        }
+        const data = response.data;
+        if (data == null) {
+          resolve(null);
+          return;
+        }
+        resolve(parsePackHeader(`${data}`));
+      },
+      fail: (_) => {
+        resolve(null);
+      },
+    });
+  });
 }
 
 // ==================== JSON ↔ 类型 ====================
@@ -761,8 +919,118 @@ function releaseFromJson(o: UTSJSONObject): SourceRelease {
   } as SourceRelease;
 }
 
-function checkResult(action: string, code: number, name: string, message: string): SourceCheckResult {
-  return { action: action, versionCode: code, versionName: name, message: message } as SourceCheckResult;
+function offerOf(
+  kind: string,
+  targetId: string,
+  currentCode: number,
+  newCode: number,
+  newName: string,
+  notes: string,
+  channel: string,
+  url: string,
+  fromBaseline: boolean,
+): PackUpdateOffer {
+  return {
+    kind: kind,
+    targetId: targetId,
+    currentCode: currentCode,
+    newCode: newCode,
+    newName: newName,
+    notes: notes,
+    channel: channel,
+    url: url,
+    fromBaseline: fromBaseline,
+  } as PackUpdateOffer;
+}
+
+/** offers → JSON（事件 payload 用；UTSJSONObject 手工组装） */
+function offersToJson(list: PackUpdateOffer[]): string {
+  const arr: UTSJSONObject[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const o = new UTSJSONObject();
+    o.set("kind", list[i].kind);
+    o.set("targetId", list[i].targetId);
+    o.set("currentCode", list[i].currentCode);
+    o.set("newCode", list[i].newCode);
+    o.set("newName", list[i].newName);
+    o.set("notes", list[i].notes);
+    o.set("channel", list[i].channel);
+    o.set("url", list[i].url);
+    o.set("fromBaseline", list[i].fromBaseline);
+    arr.push(o);
+  }
+  const root = new UTSJSONObject();
+  root.set("offers", arr);
+  return JSON.stringify(root);
+}
+
+/** 事件 payload → offers（App.uvue 接住 SOURCE_UPDATE_FOUND_EVENT 用） */
+export function offersFromJson(payload: string): PackUpdateOffer[] {
+  const out: PackUpdateOffer[] = [];
+  try {
+    const root = JSON.parse(payload) as UTSJSONObject;
+    const arr = root.get("offers") as UTSJSONObject[] | null;
+    if (arr == null) return out;
+    for (let i = 0; i < arr.length; i++) {
+      const o = arr[i];
+      out.push(
+        offerOf(
+          strOf(o, "kind"),
+          strOf(o, "targetId"),
+          numOf(o, "currentCode"),
+          numOf(o, "newCode"),
+          strOf(o, "newName"),
+          strOf(o, "notes"),
+          strOf(o, "channel"),
+          strOf(o, "url"),
+          boolOfDefault(o, "fromBaseline", false),
+        ),
+      );
+    }
+  } catch (_) {}
+  return out;
+}
+
+/** 更新提示的一行文案（弹窗/列表共用） */
+export function offerLabel(o: PackUpdateOffer): string {
+  const kindLabel = o.kind == PACK_KIND_META ? "数据包" : "播放包";
+  const from = o.fromBaseline ? "内置基线" : `v${o.currentCode}`;
+  return `${kindLabel}有新版本：v${from} → v${o.newCode}（${o.newName}）`;
+}
+
+/** 应用成功（或拉黑）后从内存清单里去掉对应 offer */
+function dropOffer(targetId: string): void {
+  const kept: PackUpdateOffer[] = [];
+  for (let i = 0; i < gOffers.length; i++) {
+    if (gOffers[i].targetId != targetId) kept.push(gOffers[i]);
+  }
+  gOffers = kept;
+}
+
+/** found 里是否已有某包某版本的 offer（manifest 与 self 渠道去重） */
+function hasOfferFor(found: PackUpdateOffer[], targetId: string, newCode: number): boolean {
+  for (let i = 0; i < found.length; i++) {
+    if (found[i].targetId == targetId && found[i].newCode == newCode) return true;
+  }
+  return false;
+}
+
+/** 同一包的多个 offer 取 versionCode 最高的 */
+function dedupeOffers(found: PackUpdateOffer[]): PackUpdateOffer[] {
+  const out: PackUpdateOffer[] = [];
+  for (let i = 0; i < found.length; i++) {
+    let j = 0;
+    let replaced = false;
+    for (; j < out.length; j++) {
+      if (out[j].targetId == found[i].targetId) {
+        if (found[i].newCode > out[j].newCode) out[j] = found[i];
+        replaced = true;
+        break;
+      }
+    }
+    if (!replaced) out.push(found[i]);
+  }
+  return out;
 }
 
 function applyResult(ok: boolean, code: number, message: string): SourceApplyResult {

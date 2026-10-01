@@ -21,7 +21,10 @@ import OutputStream from "java.io.OutputStream";
 
 import Cursor from "android.database.Cursor";
 import WindowCompat from "androidx.core.view.WindowCompat";
-import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity } from "../interface.uts";
+import BufferedReader from "java.io.BufferedReader";
+import InputStreamReader from "java.io.InputStreamReader";
+import OpenableColumns from "android.provider.OpenableColumns";
+import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, PickFileResult, PickJsFile } from "../interface.uts";
 
 /**
  * 强制窗口回归传统布局模式（decorFitsSystemWindows = true）。
@@ -609,4 +612,103 @@ export const deleteLocalMedia: DeleteLocalMedia = (items: LocalAudioItem[]): Del
 		}
 	}
 	return result;
+};
+
+// ==================== 系统文件选择器（选一个 js/文本文件读回全文） ====================
+
+/** pickJsFile 用的 Activity result 请求码（避开运行时已占用的区间，过滤时严格比对） */
+// 必须显式标 Int：UTS 字面量默认推断 number（编译为 Kotlin Number），
+// startActivityForResult / onAppActivityResult 的 requestCode 都是 Int，
+// 不标会在 705 行报「实际类型为 Number，预期类型为 Int」（error17）
+const PICK_JS_FILE_REQUEST: Int = 40011;
+/** 一次只允许一个选择会话：后点的顶掉先点的（回调置空防串扰） */
+let pickJsFileCallback: ((result: PickFileResult) => void) | null = null;
+/** onAppActivityResult 只注册一次 */
+let pickJsFileListenerReady = false;
+
+/**
+ * 打开系统文件选择器（ACTION_OPEN_DOCUMENT），选中后经 contentResolver 读回
+ * UTF-8 全文。不限 MIME：文件管理器对 .js 的归类五花八门（octet-stream /
+ * text/plain / x-javascript…），宁宽勿漏，选到的内容由上层 installFromText
+ * 校验包头，非音源包会被拒绝。ACTION_OPEN_DOCUMENT 返回的 content URI 只有
+ * 一次性读权限，所以必须在这里把内容读出来回传（不能把 URI 存着以后用）。
+ */
+export const pickJsFile: PickJsFile = function (onResult: (result: PickFileResult) => void): void {
+	const activity = UTSAndroid.getUniActivity();
+	if (activity == null) {
+		onResult({ ok: false, name: "", content: "", message: "窗口未就绪，请稍后重试" } as PickFileResult);
+		return;
+	}
+	if (!pickJsFileListenerReady) {
+		pickJsFileListenerReady = true;
+		UTSAndroid.onAppActivityResult((requestCode: Int, resultCode: Int, data?: Intent) => {
+			if (requestCode != PICK_JS_FILE_REQUEST) return;
+			const cb = pickJsFileCallback;
+			pickJsFileCallback = null;
+			if (cb == null) return;
+			// Activity.RESULT_OK = -1；取消/关闭都按「用户取消」处理
+			if (resultCode != -1 || data == null) {
+				cb({ ok: false, name: "", content: "", message: "已取消选择" } as PickFileResult);
+				return;
+			}
+			const uri = data.getData();
+			if (uri == null) {
+				cb({ ok: false, name: "", content: "", message: "未选择文件" } as PickFileResult);
+				return;
+			}
+			try {
+				const resolver = activity.getContentResolver();
+				// 显示名（仅用于提示；失败不影响读取）
+				let name = "";
+				try {
+					const cursor = resolver.query(uri, null, null, null, null);
+					if (cursor != null && cursor.moveToFirst()) {
+						const idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+						if (idx >= 0) name = cursor.getString(idx);
+					}
+					cursor!.close();
+				} catch (e) {
+					// 查不到名字就算了
+				}
+				const reader = new BufferedReader(new InputStreamReader(resolver.openInputStream(uri), "UTF-8"));
+				let text = "";
+				let overflow = false;
+				while (true) {
+					const line = reader.readLine();
+					if (line == null) break;
+					text += line;
+					text += "\n";
+					// 防御：音源包撑死几 MB，超 16MB 当作选错文件直接放弃
+					if (text.length > 16 * 1024 * 1024) {
+						overflow = true;
+						break;
+					}
+				}
+				reader.close();
+				if (overflow) {
+					cb({ ok: false, name: name, content: "", message: "文件过大（超过 16MB），不是音源包" } as PickFileResult);
+					return;
+				}
+				if (text.length == 0) {
+					cb({ ok: false, name: name, content: "", message: "文件内容为空" } as PickFileResult);
+					return;
+				}
+				cb({ ok: true, name: name, content: text, message: "" } as PickFileResult);
+			} catch (e) {
+				console.log("[AppNative] pickJsFile read error " + (e != null ? e.toString() : "unknown"));
+				cb({ ok: false, name: "", content: "", message: "读取文件失败" } as PickFileResult);
+			}
+		});
+	}
+	try {
+		const intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+		intent.addCategory(Intent.CATEGORY_OPENABLE);
+		intent.setType("*/*");
+		pickJsFileCallback = onResult;
+		activity.startActivityForResult(intent, PICK_JS_FILE_REQUEST);
+	} catch (e) {
+		pickJsFileCallback = null;
+		console.log("[AppNative] pickJsFile launch error " + (e != null ? e.toString() : "unknown"));
+		onResult({ ok: false, name: "", content: "", message: "无法打开文件选择器" } as PickFileResult);
+	}
 };

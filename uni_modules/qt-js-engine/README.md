@@ -162,22 +162,26 @@ stop((r) => {})                // 正常关停；对已 poison 的引擎放弃�
 
 ```
 App.uvue onLaunch
-  └─ prewarmSourceEngine()                    恢复 state.json → 未安装则返回 → start() → loadBundle(生效包)
+  └─ prewarmSourceEngine()                    恢复 state.json → start() → loadBundle(meta 槽: 生效数据包|内置基线) → 装生效播放包
 music-api.resolvePlayUrl()
   └─ getPlayUrlByEngine(song, quality)        引擎可用则走音源包；未安装/取不到返回 ""，由调用方报「暂时无法播放」
-services/source-update.checkAndDownload()     4h 节流的清单检查 → 差量下载 → 落盘 → 冒烟 → 切换（仅 official 包）
-services/source-update.installFromUrl()       用户粘贴 https 直链 → 校验 → 落盘（custom 包，不自动更新）
-pages/settings/index.uvue 「音源包」           手动检查 / 从链接安装 / 应用（含冒烟）/ 卸载
+services/source-update.discoverUpdatesAtStartup()  启动更新发现（各包自述 updateUrl + astral manifest，4h 节流）
+  └─ SOURCE_UPDATE_FOUND_EVENT                仅提示：App.uvue 弹确认框，用户点「更新」才 applyUpdate()（绝不静默安装）
+services/source-update.installFromUrl()/installFromLocalFile()/installFromText()
+                                              统一安装管线：解析 /*__QT_PACK__*/ 头 → 校验 → install/<id>/ 落盘 → 登记 → 按需生效
+pages/settings/index.uvue 「音源包管理」        检查更新 / 从链接·本地文件安装 / 逐包启用·卸载（数据包卸载回内置基线）
 ```
 
 包体与状态全部经本插件的文件 API 存放在 `filesDir/source-bundle/`
-（`state.json` + `pkg/<versionCode>/chain.json|source-bundle.js`），schema 见方案 §2.3。
+（`state.json` + `install/<packId>/meta-bundle.js|play-bundle.js|chain.json`），
+schema 3 见 `services/source-bundle-fs.uts` 头注释。
 
-**仓库不内置任何音源包**：`static/` 下没有 `source-bundle/`，包只有两个来源——
-official（服务端清单下发，自动更新）与 custom（用户直链安装，不自动更新）。
-`installed` 为 null 即「未安装」，在线取链不可用（本地音乐不受影响），
-由首页横幅与设置页引导安装。回退链为 `最新 → previous → 未安装`。
-custom 包自包含（bundle 内有默认线路），不带 `chain.json`；official 包带。
+**仓库不内置播放包**：`static/` 下只有数据包基线（`source-meta-code.uts`），
+播放包全部由用户安装——官方与自定义机制完全一致（https 直链或本地 .js 文件，
+包头自述 id/版本/updateUrl，同 id 新版本原地替换，多包共存、activeId 指定生效包）。
+数据包（meta）内置基线开箱可用，也可安装更高版本（activeMetaId 生效，卸载回基线）。
+所有包的身份都是「自述 id + 安装渠道」：官方只是发布方推荐的 id
+（`play-official` / `meta-official`），不做内容级验签。
 
 > 注意：改了 UTS 插件后真机调试要重新编译该插件；`HBuilderX` 会按文件指纹跳过未变化的插件，
 > 必要时加 `--cleanCache true`。本插件已无原生库，不再需要为 `.so` 打自定义基座。
