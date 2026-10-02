@@ -408,10 +408,12 @@ class V8Client extends WebViewClient {
 
 	/**
 	 * 403 空响应：网络收缴用（shouldInterceptRequest 里非 bundle 请求一律返回它，
-	 * WebView 不产真实网络流量）。UTS 的 Uint8Array 在 app-android 映射为 ByteArray。
+	 * WebView 不产真实网络流量）。注意：传入平台 API 时要用 ByteArray 直造
+	 * （HBuilderX 5.26 起 new Uint8Array 编译为 UTS 包装类型，不再是 Kotlin
+	 * ByteArray，会报「参数类型不匹配」，见编译器已知问题 error17）。
 	 */
 	blockedResponse(): WebResourceResponse {
-		const res = new WebResourceResponse('text/plain', 'utf-8', new ByteArrayInputStream(new Uint8Array(0)))
+		const res = new WebResourceResponse('text/plain', 'utf-8', new ByteArrayInputStream(new ByteArray(0)))
 		res.setStatusCodeAndReasonPhrase(403, 'Blocked by qt-js-engine')
 		return res
 	}

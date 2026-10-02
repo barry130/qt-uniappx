@@ -300,6 +300,11 @@ function goNoticeCenter(): void {
   uni.navigateTo({ url: "/pages/notice/list/index" });
 }
 watch(() => noticeStore.notices, () => applyNoticeBar());
+// 数据包引导弹窗显隐：声明必须先于下方 popupBlocking —— useQtTabBarSync 会
+// 立即求值该 computed，声明放页面后部会触发 TDZ 报错
+// 「Cannot access 'metaGuideVisible' before initialization」（真机已复现）。
+const metaGuideVisible = ref(false);
+let metaGuideDismissedInSession = false;
 // 弹层（公告/升级/数据包引导）期间临时隐藏 tabbar；平时宽屏隐藏（rail 取代）、竖屏显示
 const popupBlocking = computed<boolean>(() => noticeStore.splashNotice != null || upgradeVisible.value || metaGuideVisible.value);
 useQtTabBarSync(popupBlocking);
@@ -378,9 +383,8 @@ function onPacksChanged(): void {
  * 数据包安装引导（未装数据包时弹一次的全屏引导）：metaMissing 由
  * sourceUpdateStore 镜像（须等本地状态恢复后刷新），本会话内关掉过就不再弹
  * （onMetaGuideDismiss 置位）。安装动作在设置页完成，这里只指路。
+ * （metaGuideVisible / metaGuideDismissedInSession 的声明在本页 setup 顶部）
  */
-const metaGuideVisible = ref(false);
-let metaGuideDismissedInSession = false;
 function onMetaGuideDismiss(): void {
   metaGuideDismissedInSession = true;
   metaGuideVisible.value = false;
