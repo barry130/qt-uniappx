@@ -26,8 +26,8 @@
           </view>
         </qt-card>
 
-        <qt-card class="pack-card" title="数据包" description="多包共存、各启用其一；停用或卸载后在线搜索/歌单/歌词及在线播放不可用，本地音乐不受影响。">
-          <view v-if="metaRows.length == 1" class="pack-empty">
+        <qt-card class="pack-card" title="数据包" description="多包共存、各启用其一；卸载后在线搜索/歌单/歌词及在线播放不可用，本地音乐不受影响。">
+          <view v-if="metaRows.length == 0" class="pack-empty">
             <text class="pack-empty-text" :style="'color:' + theme.skin.textMuted + ';'">未安装任何数据包，可从下方「安装音源包」入口安装；未装时仅本地音乐可用。</text>
           </view>
           <view v-for="row in metaRows" :key="'m-' + row.id" class="pack-row" :class="row.last ? 'pack-row-last' : ''" :style="rowBorderStyle">
@@ -36,7 +36,7 @@
               <text class="pack-row-name" :style="'color:' + (row.active ? theme.skin.accent : theme.skin.text) + ';'">{{ row.name }}</text>
               <text class="pack-row-sub" :style="'color:' + theme.skin.textMuted + ';'">{{ row.sub }}</text>
             </view>
-            <qt-button v-if="!row.active" class="pack-row-btn" :label="row.id.length == 0 ? '停用' : '启用'" variant="secondary" size="sm" @click="onActivateClick(row.id)" />
+            <qt-button v-if="!row.active" class="pack-row-btn" label="启用" variant="secondary" size="sm" @click="runSourceActivate(row.id)" />
             <qt-button v-if="row.id.length > 0" class="pack-row-btn" label="卸载" variant="ghost" size="sm" @click="runSourceUninstall(row.id)" />
           </view>
         </qt-card>
@@ -51,7 +51,7 @@
               <text class="pack-row-name" :style="'color:' + (row.active ? theme.skin.accent : theme.skin.text) + ';'">{{ row.name }}</text>
               <text class="pack-row-sub" :style="'color:' + theme.skin.textMuted + ';'">{{ row.sub }}</text>
             </view>
-            <qt-button v-if="!row.active" class="pack-row-btn" label="启用" variant="secondary" size="sm" @click="onActivateClick(row.id)" />
+            <qt-button v-if="!row.active" class="pack-row-btn" label="启用" variant="secondary" size="sm" @click="runSourceActivate(row.id)" />
             <qt-button class="pack-row-btn" label="卸载" variant="ghost" size="sm" @click="runSourceUninstall(row.id)" />
           </view>
         </qt-card>
@@ -74,13 +74,37 @@
 
         <qt-card class="pack-card pack-card-last" title="安装音源包" description="数据包 / 播放包机制一致：单文件 .js，首行自述身份（kind/id/版本），同 id 新版本原地替换。">
           <view class="install-row">
-            <qt-button class="install-btn" label="从链接安装" variant="secondary" size="sm" @click="runSourceInstallUrl" />
+            <qt-button class="install-btn" label="从链接安装" variant="secondary" size="sm" @click="openUrlSheet" />
             <qt-button class="install-btn" label="从本地文件安装" variant="outline" size="sm" @click="runSourceInstallFile" />
           </view>
-          <text class="install-hint" :style="'color:' + theme.skin.textMuted + ';'">链接需为 https 直链；本地安装支持微信/QQ/网盘下载的 .js 文件。装完不抢已有生效位，首个包自动生效。</text>
+          <text class="install-hint" :style="'color:' + theme.skin.textMuted + ';'">链接需为 http(s) 直链；本地安装支持微信/QQ/网盘下载的 .js 文件。装完不抢已有生效位，首个包自动生效。</text>
         </qt-card>
       </view>
     </scroll-view>
+
+    <!-- 从链接安装：页内输入弹层（uni.showModal 的 editable 输入框在 App 端不渲染） -->
+    <view v-if="urlSheetVisible" class="url-mask" @click="closeUrlSheet">
+      <view class="url-card" :class="layout.isWide ? 'url-card-wide' : ''" :style="layout.isWide ? urlCardStyleWide : urlCardStyle" @click.stop>
+        <text class="url-title" :class="layout.isWide ? 'url-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">从链接安装</text>
+        <text class="url-desc" :class="layout.isWide ? 'url-desc-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">粘贴音源包 .js 文件的 http(s) 直链</text>
+        <input
+          class="url-input"
+          :class="layout.isWide ? 'url-input-wide' : ''"
+          :style="layout.isWide ? urlInputStyleWide : urlInputStyle"
+          :value="urlSheetValue"
+          @input="onUrlSheetInput"
+          placeholder="https://example.com/pack.js"
+          :placeholder-class="layout.isWide ? 'url-ph-wide' : 'url-ph'"
+          :maxlength="2048"
+          :focus="urlSheetVisible"
+        />
+        <text v-if="urlSheetError.length > 0" class="url-error" :class="layout.isWide ? 'url-error-wide' : ''" :style="'color:' + theme.skin.danger + ';'">{{ urlSheetError }}</text>
+        <view class="url-btn-row" :class="layout.isWide ? 'url-btn-row-wide' : ''">
+          <qt-button class="url-btn" label="取消" variant="ghost" size="sm" @click="closeUrlSheet" />
+          <qt-button class="url-btn" label="下载并校验" variant="secondary" size="sm" @click="submitUrlSheet" />
+        </view>
+      </view>
+    </view>
   </qt-page-frame>
 </template>
 <script setup lang="ts">
@@ -96,14 +120,14 @@ import { engineStatus, engineVersion, lastEngineError, loadedPlayPackId, playPac
 import { packsOfKind, activePack, activeMetaPack, packById, isOfficialPackId, PACK_KIND_META, PACK_KIND_PLAY } from "@/services/source-bundle-fs";
 import { verifyOfficialSignature } from "@/services/pack-signature";
 import type { SourcePackMeta } from "@/services/source-bundle-fs";
-import { discoverUpdates, applyUpdate, installFromText, downloadPackText, uninstallPack, activatePack, deactivateMetaPack, pickSmokeSongs, pendingUpdates, syncSourceUpdateBadge, offerLabel } from "@/services/source-update";
+import { discoverUpdates, applyUpdate, installFromText, downloadPackText, uninstallPack, activatePack, pickSmokeSongs, pendingUpdates, syncSourceUpdateBadge, offerLabel } from "@/services/source-update";
 import type { PackUpdateOffer } from "@/services/source-update";
 import { parsePackHeader } from "@/services/source-pack-header";
 import { pickJsFile } from "@/services/app-native";
 import { useSourceUpdateStore } from "@/stores/source-update";
 
 /**
- * 音源包管理独立页（v3 统一包模型）：当前状态 / 数据包（含停用）/ 播放包 /
+ * 音源包管理独立页（v3 统一包模型）：当前状态 / 数据包 / 播放包 /
  * 可用更新 / 安装入口五块。状态都在非响应式的 service 里，用 refreshTick 做一次
  * 重算触发（与设置页摘要行同一套路），任何操作完成后 bump 一下即可整页刷新。
  */
@@ -118,7 +142,7 @@ type OfferRow = { id: string; label: string; last: boolean };
 /** 行底分隔线颜色（主题切换时随 skin 重算） */
 const rowBorderStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
 
-/** 数据包行：已安装数据包 + 末尾的「停用数据包」行（id 空串 = 生效位为空）；last 行不带分隔线 */
+/** 数据包行：已安装数据包（不设「停用」入口，不用就卸载）；last 行不带分隔线 */
 const metaRows = computed((): PackRow[] => {
   const _tick = refreshTick.value;
   const meta = activeMetaPack();
@@ -126,9 +150,8 @@ const metaRows = computed((): PackRow[] => {
   const list = packsOfKind(PACK_KIND_META);
   for (let i = 0; i < list.length; i++) {
     const p = list[i];
-    rows.push({ id: p.id, name: p.name, sub: packSubText(p, meta != null && meta.id == p.id ? "生效中" : ""), active: meta != null && meta.id == p.id, last: false } as PackRow);
+    rows.push({ id: p.id, name: p.name, sub: packSubText(p, meta != null && meta.id == p.id ? "生效中" : ""), active: meta != null && meta.id == p.id, last: i == list.length - 1 } as PackRow);
   }
-  rows.push({ id: "", name: "停用数据包", sub: "不启用任何数据包 · 在线搜索/歌单/歌词及在线播放不可用，本地音乐照常", active: meta == null, last: true } as PackRow);
   return rows;
 });
 
@@ -194,7 +217,7 @@ const offerRows = computed((): OfferRow[] => {
 function metaStatusText(): string {
   const _tick = refreshTick.value;
   const meta = activeMetaPack();
-  return meta == null ? "未安装/停用（在线搜索/歌单/歌词及在线播放不可用）" : meta.name + " v" + meta.versionName + "（生效中）";
+  return meta == null ? "未安装（在线搜索/歌单/歌词及在线播放不可用）" : meta.name + " v" + meta.versionName + "（生效中）";
 }
 
 function playStatusText(): string {
@@ -236,14 +259,96 @@ onShow(() => {
 /** 剪贴板里已提示过的链接（同一链接一次会话只提示一次） */
 let lastPromptedClip = "";
 
-/** 粗判剪贴板内容是否是音源包直链：https 且以 .js 结尾（允许带查询串） */
+/** 端口号字符串 → 数值；非法（空/非数字/越界/0）返回 -1，逐字符累加避免 parseInt 的宽松解析 */
+function portValue(port: string): number {
+  let n = 0;
+  for (let i = 0; i < port.length; i++) {
+    const c = port.charCodeAt(i);
+    if (c < 48 || c > 57) return -1;
+    n = n * 10 + (c - 48);
+    if (n > 65535) return -1;
+  }
+  return n >= 1 ? n : -1;
+}
+
+/** 常规主机名校验：每段非空、仅字母数字连字符、不以连字符开头结尾；至少两段或 localhost */
+function isValidHostName(host: string): boolean {
+  if (host.length == 0) return false;
+  if (host == "localhost") return true;
+  const labels = host.split(".");
+  if (labels.length < 2) return false;
+  for (let i = 0; i < labels.length; i++) {
+    const lab = labels[i];
+    if (lab.length == 0 || lab.startsWith("-") || lab.endsWith("-")) return false;
+    for (let j = 0; j < lab.length; j++) {
+      const c = lab.charCodeAt(j);
+      const ok = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 45;
+      if (!ok) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * 严格校验音源包直链，返回错误文案；空串 = 通过。
+ * 规则：http/https 直链；无空格/换行/制表；长度 ≤2048；主机合法（域名 ≥2 段、
+ * localhost、IPv6 [..]，可带端口 1-65535）；路径以 / 开始、以 .js 结尾
+ * （? 查询串和 # 锚点截断后再判）。剪贴板粗判与输入弹层共用这一套。
+ */
+function validatePackLink(raw: string): string {
+  const t = raw.trim();
+  if (t.length == 0) return "链接不能为空";
+  if (t.length > 2048) return "链接过长（上限 2048 字符）";
+  if (t.indexOf(" ") >= 0 || t.indexOf("\n") >= 0 || t.indexOf("\r") >= 0 || t.indexOf("\t") >= 0) {
+    return "链接里不能包含空格或换行";
+  }
+  const isHttps = t.startsWith("https://");
+  const isHttp = !isHttps && t.startsWith("http://");
+  if (!isHttps && !isHttp) return "只支持 http(s):// 开头的直链";
+  const rest = t.substring(isHttps ? "https://".length : "http://".length);
+  // 主机段：到第一条 / ? # 为止
+  let hostEnd = rest.length;
+  const slash = rest.indexOf("/");
+  const q1 = rest.indexOf("?");
+  const h1 = rest.indexOf("#");
+  if (slash >= 0 && slash < hostEnd) hostEnd = slash;
+  if (q1 >= 0 && q1 < hostEnd) hostEnd = q1;
+  if (h1 >= 0 && h1 < hostEnd) hostEnd = h1;
+  const hostPort = rest.substring(0, hostEnd);
+  if (hostPort.length == 0) return "缺少主机名";
+  // 主机与端口拆分：IPv6 走 [..] / [..]:port；否则最后一个冒号是端口分隔
+  if (hostPort.startsWith("[")) {
+    const close = hostPort.indexOf("]");
+    if (close < 1) return "主机名不合法";
+    const after = hostPort.substring(close + 1);
+    if (after.length > 0) {
+      if (!after.startsWith(":")) return "主机名不合法";
+      if (portValue(after.substring(1)) < 0) return "端口不合法";
+    }
+  } else {
+    let host = hostPort;
+    const colon = hostPort.indexOf(":");
+    if (colon >= 0) {
+      host = hostPort.substring(0, colon);
+      if (portValue(hostPort.substring(colon + 1)) < 0) return "端口不合法";
+    }
+    if (!isValidHostName(host)) return "主机名不合法";
+  }
+  // 路径：截掉 # 和 ? 后必须以 / 开始、.js 结尾
+  let pathPart = rest.substring(hostEnd);
+  const hashIdx = pathPart.indexOf("#");
+  if (hashIdx >= 0) pathPart = pathPart.substring(0, hashIdx);
+  const qIdx = pathPart.indexOf("?");
+  if (qIdx >= 0) pathPart = pathPart.substring(0, qIdx);
+  if (!pathPart.startsWith("/") || !pathPart.endsWith(".js")) {
+    return "路径需以 / 开始且指向 .js 文件";
+  }
+  return "";
+}
+
+/** 粗判剪贴板内容是否是音源包直链：与输入弹层同一套严格规则 */
 function looksLikePackUrl(s: string): boolean {
-  const t = s.trim();
-  if (!t.startsWith("https://") || t.length > 2048) return false;
-  if (t.indexOf(" ") >= 0) return false;
-  const q = t.indexOf("?");
-  const path = q >= 0 ? t.substring(0, q) : t;
-  return path.endsWith(".js");
+  return validatePackLink(s).length == 0;
 }
 
 /** 进页检测剪贴板：像音源包直链就提示一键安装（读取失败静默——部分系统限制后台读） */
@@ -269,17 +374,14 @@ function checkClipboardPackLink(): void {
   });
 }
 
-/** 从 https 直链安装：下载全文 → 安装预览确认 → 统一安装管线 */
+/** 从 http(s) 直链安装：严格校验 → 下载全文 → 安装预览确认 → 统一安装管线 */
 function installFromLink(url: string): void {
+  const vErr = validatePackLink(url);
+  if (vErr.length > 0) {
+    uni.showToast({ title: vErr, icon: "none" });
+    return;
+  }
   const link = url.trim();
-  if (link.length == 0) {
-    uni.showToast({ title: "链接不能为空", icon: "none" });
-    return;
-  }
-  if (!link.startsWith("https://")) {
-    uni.showToast({ title: "只支持 https 直链", icon: "none" });
-    return;
-  }
   uni.showLoading({ title: "下载中", mask: true });
   downloadPackText(link).then((text) => {
     uni.hideLoading();
@@ -352,24 +454,43 @@ async function confirmAndInstall(text: string, source: string, ref: string): Pro
   });
 }
 
-/** 「从链接安装」入口：弹输入框，拿链接走 installFromLink */
-function runSourceInstallUrl(): void {
-  uni.showModal({
-    title: "从链接安装",
-    editable: true,
-    placeholderText: "粘贴音源包 .js 文件的 https 直链",
-    confirmText: "下一步",
-    cancelText: "取消",
-    success: (res) => {
-      if (!res.confirm) return;
-      const url = res.content != null ? res.content.trim() : "";
-      if (url.length == 0) {
-        uni.showToast({ title: "链接不能为空", icon: "none" });
-        return;
-      }
-      installFromLink(url);
-    },
-  });
+/** URL 输入弹层状态（uni.showModal 的 editable 在 App 端不出输入框，改页内弹层） */
+const urlSheetVisible = ref(false);
+const urlSheetValue = ref("");
+const urlSheetError = ref("");
+
+/** 弹层卡片底色与圆角（主题切换随 skin 重算；宽窄屏圆角基准不同） */
+const urlCardStyle = computed<string>(() => "background-color:" + theme.skin.surfaceStrong + ";border-radius:24rpx;");
+const urlCardStyleWide = computed<string>(() => "background-color:" + theme.skin.surfaceStrong + ";border-radius:14px;");
+/** 输入框填充底色 + 文字色 */
+const urlInputStyle = computed<string>(() => "background-color:" + theme.skin.surfaceInset + ";color:" + theme.skin.text + ";border-radius:14rpx;");
+const urlInputStyleWide = computed<string>(() => "background-color:" + theme.skin.surfaceInset + ";color:" + theme.skin.text + ";border-radius:8px;");
+
+/** 「从链接安装」入口：打开页内输入弹层（点遮罩或「取消」关闭） */
+function openUrlSheet(): void {
+  urlSheetValue.value = "";
+  urlSheetError.value = "";
+  urlSheetVisible.value = true;
+}
+
+function closeUrlSheet(): void {
+  urlSheetVisible.value = false;
+}
+
+function onUrlSheetInput(e: InputEvent): void {
+  urlSheetValue.value = e.detail.value;
+  if (urlSheetError.value.length > 0) urlSheetError.value = "";
+}
+
+/** 提交：严格校验不过就在弹层里红字提示，过了关层走 installFromLink */
+function submitUrlSheet(): void {
+  const vErr = validatePackLink(urlSheetValue.value);
+  if (vErr.length > 0) {
+    urlSheetError.value = vErr;
+    return;
+  }
+  urlSheetVisible.value = false;
+  installFromLink(urlSheetValue.value);
 }
 
 /** 从本地 .js 文件安装（系统选择器；content URI 一次性读权限，原生侧读完带回全文） */
@@ -381,15 +502,6 @@ function runSourceInstallFile(): void {
     }
     confirmAndInstall(picked.content, "file", picked.name);
   });
-}
-
-/** 行「启用」统一入口：数据包的「停用数据包」行走 deactivateMetaPack，其余走 activatePack */
-function onActivateClick(id: string): void {
-  if (id.length == 0) {
-    runDeactivateMeta();
-  } else {
-    runSourceActivate(id);
-  }
 }
 
 /** 检查更新：双渠道发现（force 跳过节流），发现到新版逐条列出、可一键全部更新 */
@@ -462,28 +574,6 @@ function runSourceActivate(id: string): void {
   }).catch(() => {
     uni.hideLoading();
     uni.showToast({ title: "启用失败", icon: "none" });
-  });
-}
-
-/** 停用数据包（数据包卡「停用数据包」行）：确认后清生效位，数据面下线 */
-function runDeactivateMeta(): void {
-  uni.showModal({
-    title: "停用数据包",
-    content: "停用后在线搜索/歌单/歌词及在线播放将不可用（本地音乐不受影响；在线播放依赖数据包承载的装载入口），已安装的数据包会保留在列表里。确定停用？",
-    confirmText: "停用",
-    cancelText: "取消",
-    success: (res) => {
-      if (!res.confirm) return;
-      uni.showLoading({ title: "切换中", mask: true });
-      deactivateMetaPack().then((r) => {
-        uni.hideLoading();
-        refreshSourceUi();
-        uni.showModal({ title: "切换数据包", content: r.message, showCancel: false });
-      }).catch(() => {
-        uni.hideLoading();
-        uni.showToast({ title: "切换失败", icon: "none" });
-      });
-    },
   });
 }
 
@@ -631,5 +721,81 @@ function runSourceUninstall(id: string): void {
   margin-top: 14rpx;
   font-size: 22rpx;
   line-height: 1.6;
+}
+
+/* 从链接安装：页内输入弹层（遮罩 + 居中卡片），宽窄两套尺寸 */
+.url-mask {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background-color: rgba(0, 0, 0, 0.45);
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+}
+.url-card {
+  width: 560rpx;
+  padding: 32rpx 28rpx 24rpx;
+}
+.url-card-wide {
+  width: 480px;
+  padding: 22px 24px 18px;
+}
+.url-title {
+  font-size: 30rpx;
+  font-weight: 600;
+}
+.url-title-wide {
+  font-size: 17px;
+}
+.url-desc {
+  margin-top: 8rpx;
+  font-size: 23rpx;
+}
+.url-desc-wide {
+  margin-top: 4px;
+  font-size: 13px;
+}
+.url-input {
+  margin-top: 22rpx;
+  height: 78rpx;
+  padding: 0 20rpx;
+  font-size: 26rpx;
+}
+.url-input-wide {
+  margin-top: 12px;
+  height: 40px;
+  padding: 0 12px;
+  font-size: 14px;
+}
+.url-ph {
+  font-size: 24rpx;
+  color: #9aa1b0;
+}
+.url-ph-wide {
+  font-size: 13px;
+  color: #9aa1b0;
+}
+.url-error {
+  margin-top: 10rpx;
+  font-size: 22rpx;
+  line-height: 1.5;
+}
+.url-error-wide {
+  margin-top: 6px;
+  font-size: 12px;
+}
+.url-btn-row {
+  flex-direction: row;
+  justify-content: flex-end;
+  margin-top: 26rpx;
+}
+.url-btn-row-wide {
+  margin-top: 16px;
+}
+.url-btn {
+  margin-left: 16rpx;
 }
 </style>

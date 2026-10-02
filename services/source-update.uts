@@ -339,17 +339,19 @@ export async function applyUpdate(offer: PackUpdateOffer, smokeSongs: Song[]): P
 // ==================== 统一安装（链接 / 本地文件 / 文本） ====================
 
 /**
- * 从 https 直链安装一个包（官方发布直链、第三方作者的分发链接都走这里）。
- * 只接受 https：包会被引擎当脚本执行，明文 http 一律拒绝。
- * 下载走 uni.downloadFile，不加统一客户端头（第三方直链带自定义头会坏签名/表单校验）。
+ * 从 http(s) 直链安装一个包（官方发布直链、第三方作者的分发链接都走这里）。
+ * http 明文链路的风险由签名校验兜底：官方包（自称官方 id）装前强制 ed25519
+ * 验签，明文链路被篡改的官方包过不了签名直接拒绝；第三方包本就不带签名、
+ * 与本地文件安装同级由用户自担。下载走 uni.downloadFile，不加统一客户端头
+ * （第三方直链带自定义头会坏签名/表单校验）。
  */
 export async function installFromUrl(url: string, smokeSongs: Song[]): Promise<SourceApplyResult> {
   const link = url.trim();
   if (link.length == 0) {
     return applyResult(false, 0, "链接不能为空");
   }
-  if (!link.startsWith("https://")) {
-    return applyResult(false, 0, "只支持 https 直链（音源包会被当脚本执行，不接受明文 http）");
+  if (!link.startsWith("https://") && !link.startsWith("http://")) {
+    return applyResult(false, 0, "只支持 http(s):// 直链");
   }
   const text = await downloadPackText(link);
   if (text.length == 0) {
@@ -359,13 +361,13 @@ export async function installFromUrl(url: string, smokeSongs: Song[]): Promise<S
 }
 
 /**
- * 下载一个音源包全文（https 直链校验 + uni.downloadFile 临时文件 + 读回 + 清理）。
+ * 下载一个音源包全文（http(s) 直链校验 + uni.downloadFile 临时文件 + 读回 + 清理）。
  * 管理页「安装预览」流程复用：先拿到全文解析包头给用户确认，确认后再走
  * installFromText 落盘。返回空串 = 下载失败。
  */
 export async function downloadPackText(url: string): Promise<string> {
   const link = url.trim();
-  if (!link.startsWith("https://")) return "";
+  if (!link.startsWith("https://") && !link.startsWith("http://")) return "";
   const temp = await downloadToTemp(link);
   if (temp.length == 0) return "";
   const text = await readTextFileAt(temp);
@@ -701,23 +703,6 @@ export async function activatePack(id: string, smokeSongs: Song[]): Promise<Sour
     return applyResult(false, pack.versionCode, "切换生效包失败：本地状态写入失败");
   }
   return await applyActivePack(smokeSongs);
-}
-
-/**
- * 停用数据包（音源包管理页「停用数据包」行）：清空生效数据包位并重装引擎——
- * activeMetaId 为空串即停用，数据面下线（在线搜索/歌单/歌词不可用，本地音乐
- * 照常），列表里的已装包保留，之后可随时再启用。与 activatePack 的 meta 分支
- * 共用装载管线，只是方向相反（清槽而非装槽）。
- */
-export async function deactivateMetaPack(): Promise<SourceApplyResult> {
-  await ensureLocalStateRestored();
-  if (!(await setActiveMeta(""))) {
-    return applyResult(false, 0, "切换失败：本地状态写入失败");
-  }
-  await reloadEngineMeta();
-  syncSourceUpdateBadge();
-  bumpPacksChanged();
-  return applyResult(true, 0, "已停用数据包（在线搜索/歌单/歌词及在线播放不可用，本地音乐不受影响）");
 }
 
 /**
