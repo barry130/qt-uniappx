@@ -6,8 +6,8 @@
  *     文件」安装，包文件首行 /*__QT_PACK__{...}*\/ 自述身份（kind/id/名称/版本/
  *     updateUrl），宿主不执行包体即可解析（见 source-pack-header.uts）；
  *   - 每个包按自述 id 独立版本管理：同 id 的新版本原地替换，不同 id 多包共存；
- *   - meta：内置基线（services/source-meta-code.uts）之上可装更新包覆盖生效，
- *     卸载即回退基线；play：不内置，多包并存、恰好一个生效（activeId）；
+ *   - meta：同样不内置（未装时数据面下线），多包共存、生效由 activeMetaId
+ *     指定（"" = 未装/停用）；play：多包并存、恰好一个生效（activeId）；
  *   - 更新发现：各包 updateUrl 自管探测 + astral manifest 渠道（source-update.uts），
  *     一律「仅提示、手动确认」后下载生效。
  *
@@ -34,7 +34,7 @@
  * schema 1 → 3：旧包是单体全量 ESM，直接清掉 pkg/ 与 install/（与 v2 迁移同口径）。
  *
  * 注意 packs 表示「已落盘」，不等于「引擎已生效」：play 生效由 activeId 指定、
- * meta 生效由 activeMetaId 指定（"" = 内置基线），装载是否成功见 source-engine
+ * meta 生效由 activeMetaId 指定（"" = 未装/停用，数据面下线），装载是否成功见 source-engine
  * （失败不改这里的落盘状态——用户手装的包失败也留在列表里，由用户自行处理）。
  *
  * 为什么不放 uni storage：bundle 约 2MB，storage 是给小数据的；
@@ -58,14 +58,14 @@ const ROOT_NAME = "source-bundle";
 const STATE_FILE = "state.json";
 const INSTALL_DIR = "install";
 
-/** 包种类：meta 数据包（可覆盖内置基线） */
+/** 包种类：meta 数据包（搜索/歌单/歌词，不内置） */
 export const PACK_KIND_META = "meta";
 /** 包种类：play 播放包（取链，不内置） */
 export const PACK_KIND_PLAY = "play";
 
 /** 官方播放包自述 id（qt-sources sources.config.json 的 packs.play.id） */
 export const OFFICIAL_PLAY_ID = "play-official";
-/** 官方数据包自述 id（内置基线与更新包同 id） */
+/** 官方数据包自述 id */
 export const OFFICIAL_META_ID = "meta-official";
 
 /** 产物文件名：meta 包主体 */
@@ -128,7 +128,7 @@ export type SourceLocalState = {
   packs: SourcePackMeta[];
   /** 生效中的 play 包 id（"" = 未安装，在线取链不可用） */
   activeId: string;
-  /** 生效中的 meta 包 id（"" = 使用内置基线） */
+  /** 生效中的 meta 包 id（"" = 未装/停用，数据面下线） */
   activeMetaId: string;
   /** 上次 manifest 渠道检查时间（毫秒，节流用） */
   lastCheckAt: number;
@@ -325,7 +325,7 @@ export function activePack(): SourcePackMeta | null {
   return packById(gState.activeId);
 }
 
-/** 生效中的 meta 包（null = 使用内置基线） */
+/** 生效中的 meta 包（null = 未装/停用，数据面下线） */
 export function activeMetaPack(): SourcePackMeta | null {
   if (gState.activeMetaId.length == 0) return null;
   return packById(gState.activeMetaId);
@@ -436,8 +436,8 @@ async function validateOnDisk(state: SourceLocalState): Promise<void> {
 /**
  * 确保本地状态已从磁盘恢复（进程内幂等，只跑一次）。
  *
- * 为什么需要：恢复是异步的，而首页等页面现在直接依赖引擎数据（数据面只需内置
- * meta，但播放面要读 activeId），页面调用完全可能赶在预热完成之前——直接读
+ * 为什么需要：恢复是异步的，而首页等页面现在直接依赖本地状态（activeMetaId/
+ * activeId 都是恢复后才有），页面调用完全可能赶在预热完成之前——直接读
  * activePack() 会拿到空状态，误报「未安装」。所有链路必须先过这里。
  */
 export function ensureLocalStateRestored(): Promise<SourceLocalState> {
@@ -543,7 +543,7 @@ export async function setActive(id: string): Promise<boolean> {
   return saveLocalState(next);
 }
 
-/** 切换生效 meta 包（传 "" = 回退内置基线） */
+/** 切换生效 meta 包（传 "" = 停用数据包，数据面下线） */
 export async function setActiveMeta(id: string): Promise<boolean> {
   if (id.length > 0) {
     const p = packById(id);
@@ -590,7 +590,7 @@ export function isOfficialPackId(id: string): boolean {
 
 /**
  * 卸载一个包：删目录 + 出列表；卸的是生效包则对应 activeId/activeMetaId 清空
- * （play 回到未安装、meta 回到内置基线，由用户在列表里另选或重装）。
+ * （play 回到未安装、meta 回到停用，由用户在列表里另选或重装）。
  */
 export async function removePack(id: string): Promise<boolean> {
   const next = cloneState(gState);
@@ -606,7 +606,7 @@ export async function removePack(id: string): Promise<boolean> {
 }
 
 /**
- * 清掉全部音源包（回到「未安装/内置基线」）：state.json 重置、install/ 整棵删除。
+ * 清掉全部音源包（回到「未安装/停用」）：state.json 重置、install/ 整棵删除。
  * 排查/迁移用；正常卸载走 removePack（逐包）。
  */
 export async function clearAllPacks(): Promise<void> {

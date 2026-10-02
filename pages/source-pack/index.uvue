@@ -26,19 +26,22 @@
           </view>
         </qt-card>
 
-        <qt-card class="pack-card" title="数据包" description="多包共存、各启用其一；卸载或切回内置基线后数据功能不受影响。">
+        <qt-card class="pack-card" title="数据包" description="多包共存、各启用其一；停用或卸载后在线搜索/歌单/歌词及在线播放不可用，本地音乐不受影响。">
+          <view v-if="metaRows.length == 1" class="pack-empty">
+            <text class="pack-empty-text" :style="'color:' + theme.skin.textMuted + ';'">未安装任何数据包，可从下方「安装音源包」入口安装；未装时仅本地音乐可用。</text>
+          </view>
           <view v-for="row in metaRows" :key="'m-' + row.id" class="pack-row" :class="row.last ? 'pack-row-last' : ''" :style="rowBorderStyle">
             <QtIcon v-if="row.active" class="pack-row-check" name="check" :size="layout.isWide ? 18 : 28" :color="theme.skin.accent" />
             <view class="pack-row-main">
               <text class="pack-row-name" :style="'color:' + (row.active ? theme.skin.accent : theme.skin.text) + ';'">{{ row.name }}</text>
               <text class="pack-row-sub" :style="'color:' + theme.skin.textMuted + ';'">{{ row.sub }}</text>
             </view>
-            <qt-button v-if="!row.active" class="pack-row-btn" label="启用" variant="secondary" size="sm" @click="onActivateClick(row.id)" />
+            <qt-button v-if="!row.active" class="pack-row-btn" :label="row.id.length == 0 ? '停用' : '启用'" variant="secondary" size="sm" @click="onActivateClick(row.id)" />
             <qt-button v-if="row.id.length > 0" class="pack-row-btn" label="卸载" variant="ghost" size="sm" @click="runSourceUninstall(row.id)" />
           </view>
         </qt-card>
 
-        <qt-card class="pack-card" title="播放包" description="播放包不内置（版权原因）：未安装时在线播放不可用，本地音乐与搜索不受影响。">
+        <qt-card class="pack-card" title="播放包" description="播放包不内置（版权原因）：未安装时在线播放不可用，本地音乐与数据功能互不影响。">
           <view v-if="playRows.length == 0" class="pack-empty">
             <text class="pack-empty-text" :style="'color:' + theme.skin.textMuted + ';'">未安装任何播放包，可从下方「安装音源包」入口安装。</text>
           </view>
@@ -93,14 +96,14 @@ import { engineStatus, engineVersion, lastEngineError, loadedPlayPackId, playPac
 import { packsOfKind, activePack, activeMetaPack, packById, isOfficialPackId, PACK_KIND_META, PACK_KIND_PLAY } from "@/services/source-bundle-fs";
 import { verifyOfficialSignature } from "@/services/pack-signature";
 import type { SourcePackMeta } from "@/services/source-bundle-fs";
-import { discoverUpdates, applyUpdate, installFromText, downloadPackText, uninstallPack, activatePack, activateBaselineMeta, pickSmokeSongs, pendingUpdates, syncSourceUpdateBadge, offerLabel } from "@/services/source-update";
+import { discoverUpdates, applyUpdate, installFromText, downloadPackText, uninstallPack, activatePack, deactivateMetaPack, pickSmokeSongs, pendingUpdates, syncSourceUpdateBadge, offerLabel } from "@/services/source-update";
 import type { PackUpdateOffer } from "@/services/source-update";
 import { parsePackHeader } from "@/services/source-pack-header";
 import { pickJsFile } from "@/services/app-native";
 import { useSourceUpdateStore } from "@/stores/source-update";
 
 /**
- * 音源包管理独立页（v3 统一包模型）：当前状态 / 数据包（含内置基线）/ 播放包 /
+ * 音源包管理独立页（v3 统一包模型）：当前状态 / 数据包（含停用）/ 播放包 /
  * 可用更新 / 安装入口五块。状态都在非响应式的 service 里，用 refreshTick 做一次
  * 重算触发（与设置页摘要行同一套路），任何操作完成后 bump 一下即可整页刷新。
  */
@@ -115,17 +118,17 @@ type OfferRow = { id: string; label: string; last: boolean };
 /** 行底分隔线颜色（主题切换时随 skin 重算） */
 const rowBorderStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
 
-/** 数据包行：内置基线（id 空串）+ 已安装数据包；last 行不带分隔线 */
+/** 数据包行：已安装数据包 + 末尾的「停用数据包」行（id 空串 = 生效位为空）；last 行不带分隔线 */
 const metaRows = computed((): PackRow[] => {
   const _tick = refreshTick.value;
   const meta = activeMetaPack();
   const rows: PackRow[] = [];
-  rows.push({ id: "", name: "内置基线", sub: "随应用分发 · 开箱可用", active: meta == null, last: false } as PackRow);
   const list = packsOfKind(PACK_KIND_META);
   for (let i = 0; i < list.length; i++) {
     const p = list[i];
-    rows.push({ id: p.id, name: p.name, sub: packSubText(p, meta != null && meta.id == p.id ? "生效中" : ""), active: meta != null && meta.id == p.id, last: i == list.length - 1 } as PackRow);
+    rows.push({ id: p.id, name: p.name, sub: packSubText(p, meta != null && meta.id == p.id ? "生效中" : ""), active: meta != null && meta.id == p.id, last: false } as PackRow);
   }
+  rows.push({ id: "", name: "停用数据包", sub: "不启用任何数据包 · 在线搜索/歌单/歌词及在线播放不可用，本地音乐照常", active: meta == null, last: true } as PackRow);
   return rows;
 });
 
@@ -191,7 +194,7 @@ const offerRows = computed((): OfferRow[] => {
 function metaStatusText(): string {
   const _tick = refreshTick.value;
   const meta = activeMetaPack();
-  return meta == null ? "内置基线（搜索/歌单/歌词开箱可用）" : meta.name + " v" + meta.versionName + "（生效中）";
+  return meta == null ? "未安装/停用（在线搜索/歌单/歌词及在线播放不可用）" : meta.name + " v" + meta.versionName + "（生效中）";
 }
 
 function playStatusText(): string {
@@ -380,10 +383,10 @@ function runSourceInstallFile(): void {
   });
 }
 
-/** 行「启用」统一入口：数据包内置基线行走 activateBaselineMeta，其余走 activatePack */
+/** 行「启用」统一入口：数据包的「停用数据包」行走 deactivateMetaPack，其余走 activatePack */
 function onActivateClick(id: string): void {
   if (id.length == 0) {
-    runUseBaseline();
+    runDeactivateMeta();
   } else {
     runSourceActivate(id);
   }
@@ -462,20 +465,29 @@ function runSourceActivate(id: string): void {
   });
 }
 
-/** 切回内置数据包基线（数据包卡「内置基线」行） */
-function runUseBaseline(): void {
-  uni.showLoading({ title: "切换中", mask: true });
-  activateBaselineMeta().then((r) => {
-    uni.hideLoading();
-    refreshSourceUi();
-    uni.showModal({ title: "切换数据包", content: r.message, showCancel: false });
-  }).catch(() => {
-    uni.hideLoading();
-    uni.showToast({ title: "切换失败", icon: "none" });
+/** 停用数据包（数据包卡「停用数据包」行）：确认后清生效位，数据面下线 */
+function runDeactivateMeta(): void {
+  uni.showModal({
+    title: "停用数据包",
+    content: "停用后在线搜索/歌单/歌词及在线播放将不可用（本地音乐不受影响；在线播放依赖数据包承载的装载入口），已安装的数据包会保留在列表里。确定停用？",
+    confirmText: "停用",
+    cancelText: "取消",
+    success: (res) => {
+      if (!res.confirm) return;
+      uni.showLoading({ title: "切换中", mask: true });
+      deactivateMetaPack().then((r) => {
+        uni.hideLoading();
+        refreshSourceUi();
+        uni.showModal({ title: "切换数据包", content: r.message, showCancel: false });
+      }).catch(() => {
+        uni.hideLoading();
+        uni.showToast({ title: "切换失败", icon: "none" });
+      });
+    },
   });
 }
 
-/** 卸载一个包：生效中的播放包卸载后在线取链不可用；数据包卸载后回退内置基线 */
+/** 卸载一个包：生效中的播放包卸载后在线取链不可用；生效中的数据包卸载后数据面下线 */
 function runSourceUninstall(id: string): void {
   const p = packById(id);
   if (p == null) {
@@ -487,7 +499,7 @@ function runSourceUninstall(id: string): void {
   const wasActive = (active != null && active.id == id) || (meta != null && meta.id == id);
   let consequence = "";
   if (p.kind == PACK_KIND_META) {
-    consequence = wasActive ? "这是当前生效的数据包，卸载后将回退到内置基线（搜索/歌单/歌词不受影响）。" : "";
+    consequence = wasActive ? "这是当前生效的数据包，卸载后在线搜索/歌单/歌词及在线播放将不可用（本地音乐不受影响）。" : "";
   } else {
     consequence = wasActive ? "这是当前生效的播放包，卸载后在线播放将不可用（本地音乐不受影响）。" : "";
   }

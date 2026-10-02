@@ -802,8 +802,8 @@ export class MusicApi {
   ): Promise<string> {
     const cached = this.urlCacheGet(cacheKey);
     if (cached.length > 0) return cached;
-    // 取链只走音源引擎（source-bundle.js）：仓库不内置音源包，包由用户安装
-    // （官方清单检查更新或从链接安装）后启动预热装载；
+    // 取链只走音源引擎：仓库不内置任何音源包（数据包/播放包都由用户在设置页
+    // 从链接或本地文件安装，已装包的更新走 manifest/自管探测）后启动预热装载；
     // 取不到（未安装/线路全灭/装载失败）就报错，不再回退 TS 原型链——两套实现难维护，
     // 且原型链会让「链路热更新失效」这类问题被旧实现掩盖（方案 §2.6）。
     const engineUrl = await getPlayUrlByEngine(song, quality);

@@ -162,24 +162,25 @@ stop((r) => {})                // 正常关停；对已 poison 的引擎放弃�
 
 ```
 App.uvue onLaunch
-  └─ prewarmSourceEngine()                    恢复 state.json → start() → loadBundle(meta 槽: 生效数据包|内置基线) → 装生效播放包
+  └─ prewarmSourceEngine()                    恢复 state.json → start() → loadBundle(meta 槽: 生效数据包，未装则跳过) → 装生效播放包
 music-api.resolvePlayUrl()
   └─ getPlayUrlByEngine(song, quality)        引擎可用则走音源包；未安装/取不到返回 ""，由调用方报「暂时无法播放」
 services/source-update.discoverUpdatesAtStartup()  启动更新发现（各包自述 updateUrl + astral manifest，4h 节流）
   └─ SOURCE_UPDATE_FOUND_EVENT                仅提示：App.uvue 弹确认框，用户点「更新」才 applyUpdate()（绝不静默安装）
 services/source-update.installFromUrl()/installFromLocalFile()/installFromText()
                                               统一安装管线：解析 /*__QT_PACK__*/ 头 → 校验 → install/<id>/ 落盘 → 登记 → 按需生效
-pages/settings/index.uvue 「音源包管理」        检查更新 / 从链接·本地文件安装 / 逐包启用·卸载（数据包卸载回内置基线）
+pages/settings/index.uvue 「音源包管理」        检查更新 / 从链接·本地文件安装 / 逐包启用·停用·卸载（卸载生效数据包 = 数据面停用）
 ```
 
 包体与状态全部经本插件的文件 API 存放在 `filesDir/source-bundle/`
 （`state.json` + `install/<packId>/meta-bundle.js|play-bundle.js|chain.json`），
 schema 3 见 `services/source-bundle-fs.uts` 头注释。
 
-**仓库不内置播放包**：`static/` 下只有数据包基线（`source-meta-code.uts`），
-播放包全部由用户安装——官方与自定义机制完全一致（https 直链或本地 .js 文件，
-包头自述 id/版本/updateUrl，同 id 新版本原地替换，多包共存、activeId 指定生效包）。
-数据包（meta）内置基线开箱可用，也可安装更高版本（activeMetaId 生效，卸载回基线）。
+**仓库不内置任何音源包**：数据包与播放包都由用户在「音源包管理」页从 https
+直链或本地 .js 文件安装（包头自述 id/版本/updateUrl，同 id 新版本原地替换，
+多包共存；播放包 activeId / 数据包 activeMetaId 指定生效包，均只对已装包提示
+更新）。未装数据包时在线搜索/歌单/歌词及在线播放不可用（播放注入依赖数据包
+的装载入口；本地音乐照常），首页引导只指路设置页。
 所有包的身份都是「自述 id + 内容签名」：官方包是保留 id
 （`play-official` / `meta-official`）+ 发布私钥的 ed25519 尾部签名块
 （`__QT_SIGN__`），安装/更新时用 APK 内置 tweetnacl 公钥硬校验

@@ -1,0 +1,154 @@
+<template>
+  <view v-if="visible" class="mg-mask" @click="onMaskTap">
+    <view class="mg-card" :class="layout.isWide ? 'mg-card-wide' : ''" @click.stop>
+      <view class="mg-icon-wrap" :class="layout.isWide ? 'mg-icon-wrap-wide' : ''">
+        <QtIcon name="disc" :size="layout.isWide ? 28 : 52" :color="themeStore.skin.accent" />
+      </view>
+      <text class="mg-title" :class="layout.isWide ? 'mg-title-wide' : ''">安装数据包，启用在线功能</text>
+      <text class="mg-sub" :class="layout.isWide ? 'mg-sub-wide' : ''">在线搜索 · 歌单 · 歌词 · 封面</text>
+      <view class="mg-divider" :class="layout.isWide ? 'mg-divider-wide' : ''"></view>
+      <text class="mg-body" :class="layout.isWide ? 'mg-body-wide' : ''">应用未内置数据包：需在「音源包管理」页安装一次，支持从链接或本地文件安装。未安装时在线功能不可用（搜索/歌单/歌词/在线播放），本地音乐播放不受影响。</text>
+      <view class="mg-actions" :class="layout.isWide ? 'mg-actions-wide' : ''">
+        <qt-button class="mg-btn" :class="layout.isWide ? 'mg-btn-wide' : ''" label="暂不" variant="ghost" size="md" @click="onDismiss" />
+        <qt-button class="mg-btn" :class="layout.isWide ? 'mg-btn-wide' : ''" label="去安装" variant="primary" size="md" @click="onGo" />
+      </view>
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+/**
+ * 数据包安装引导弹窗（业务组件）：未安装数据包时首页全屏弹出。
+ *
+ * 口径与 qt-pc 的 MetaPackGuide 一致：应用不内置数据包，弹窗只说明
+ * 「需在音源包管理页安装一次（链接/本地文件）」并指路——不提任何
+ * 「官方渠道」，不带下载动作；安装动作完全由用户在管理页自行发起。
+ * 未安装的后果也如实告知：在线搜索/歌单/歌词及在线播放不可用（播放注入
+ * 依赖数据包的装载入口），本地音乐不受影响。
+ *
+ * 交互：visible 由页面控制（首页 onShow 检查 store 镜像；一次会话内关闭过
+ * 就不再弹）；「去安装」emit go（页面跳音源包管理页），「暂不」/点遮罩
+ * emit dismiss。
+ */
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+
+const layout = useQtLayout();
+const themeStore = useThemeStore();
+
+const emit = defineEmits<{
+  (e: "go"): void;
+  (e: "dismiss"): void;
+}>();
+
+defineProps({
+  /** 是否显示（首页据 sourceUpdateStore.metaMissing && 未在本会话关闭过） */
+  visible: { type: Boolean, default: false },
+});
+
+function onGo(): void {
+  emit("go");
+}
+
+function onDismiss(): void {
+  emit("dismiss");
+}
+
+function onMaskTap(): void {
+  emit("dismiss");
+}
+</script>
+
+<style>
+.mg-mask {
+  position: fixed;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  justify-content: center;
+  align-items: center;
+  z-index: 999;
+}
+.mg-card {
+  width: 600rpx;
+  border-radius: 32rpx;
+  background-color: #ffffff;
+  padding: 44rpx 40rpx 36rpx;
+  flex-direction: column;
+  align-items: center;
+}
+.mg-card-wide {
+  width: 420px;
+  padding: 30px 32px 26px;
+  border-radius: 16px;
+}
+.mg-icon-wrap {
+  width: 88rpx;
+  height: 88rpx;
+  border-radius: 24rpx;
+  background-color: #eef1f7;
+  justify-content: center;
+  align-items: center;
+}
+.mg-icon-wrap-wide {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+}
+.mg-title {
+  margin-top: 24rpx;
+  color: #191d26;
+  font-size: 34rpx;
+  font-weight: 700;
+}
+.mg-title-wide {
+  margin-top: 14px;
+  font-size: 18px;
+}
+.mg-sub {
+  margin-top: 10rpx;
+  color: #6b7385;
+  font-size: 24rpx;
+}
+.mg-sub-wide {
+  margin-top: 6px;
+  font-size: 13px;
+}
+.mg-divider {
+  margin-top: 28rpx;
+  width: 520rpx;
+  height: 1px;
+  background-color: #eef1f7;
+}
+.mg-divider-wide {
+  margin-top: 16px;
+  width: 356px;
+}
+.mg-body {
+  margin-top: 24rpx;
+  color: #596173;
+  font-size: 26rpx;
+  line-height: 1.6;
+}
+.mg-body-wide {
+  margin-top: 14px;
+  font-size: 14px;
+}
+.mg-actions {
+  margin-top: 36rpx;
+  flex-direction: row;
+  align-items: center;
+}
+.mg-actions-wide {
+  margin-top: 20px;
+}
+.mg-btn {
+  margin-left: 20rpx;
+}
+.mg-btn-wide {
+  margin-left: 12px;
+}
+</style>

@@ -51,7 +51,7 @@ uni_modules/
     ├── docs/
     │   ├── design.md               # 本文档：设计系统
     │   └── ui-review.md            # UI 审查红线 / 整改进度 / 剩余问题（活文档）
-    └── components/                 # 单文件、单目录，共 20 个组件
+    └── components/                 # 单文件、单目录，共 21 个组件
         ├── qt-page-frame/          # 页面外壳（全站唯一，maxWidth 默认 1280）
         ├── qt-page/                # 旧外壳，已废弃（无页面使用）
         ├── qt-ui/                  # 旧根组件，已废弃（无页面使用）
@@ -61,6 +61,7 @@ uni_modules/
         ├── qt-mini-player/         # 悬浮播放球（几乎全站可见）
         ├── qt-song-row/  qt-song-row-lite/
         ├── qt-notice-bar/  qt-notice-splash/  qt-upgrade-popup/
+        ├── qt-meta-pack-guide/     # 数据包安装引导弹窗（业务组件：未装数据包时首页指路设置页）
         ├── qt-playlist-picker/  qt-back-to-top/  qt-rich-text/
 ```
 

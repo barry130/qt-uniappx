@@ -2,14 +2,15 @@
  * 音源引擎门面（app 侧，双包架构）
  *
  * 引擎上下文分两层装配：
- *   ① 元数据包（meta-bundle.js，内置低风险）：装进 qt-js-engine 的**唯一 bundle 槽**
- *      （插件经 https://qt.local/qt-bundle.js 动态 import ESM；meta 顶层检测到
- *      globalThis.__qtHost 时自注册 __qtEntries）。搜索/歌单/专辑/歌词/封面等
- *      数据入口与 verifyPlayable 都由它提供——**不装任何播放包也能用**。
- *   ② 播放音源包（play-bundle.js，高版权风险，绝不内置）：用户在设置页安装
- *      （官方 manifest 或自定义直链），文本经 meta 的 installPlayPack 入口
- *      eval 注入同一引擎上下文（globalThis.__qtPlayPackFactory 约定），
- *      getPlayUrl/loadChain 由 meta 转发给它。
+ *   ① 元数据包（meta-bundle.js，同样不内置）：用户在设置页从链接或本地文件安装，
+ *      装进 qt-js-engine 的**唯一 bundle 槽**（插件经 https://qt.local/qt-bundle.js
+ *      动态 import ESM；meta 顶层检测到 globalThis.__qtHost 时自注册 __qtEntries）。
+ *      搜索/歌单/专辑/歌词/封面等数据入口与 verifyPlayable 都由它提供——
+ *      **未安装时数据面整体下线**（本地音乐不受影响），首页引导只指路设置页。
+ *   ② 播放音源包（play-bundle.js，高版权风险，同样不内置）：用户在设置页安装
+ *      （自定义直链；已装包的更新经 manifest 提示），文本经 meta 的
+ *      installPlayPack 入口 eval 注入同一引擎上下文
+ *      （globalThis.__qtPlayPackFactory 约定），getPlayUrl/loadChain 由 meta 转发给它。
  *
  * 生效中的播放包由 source-bundle-fs 的 activeId 指定（多包并存、其一生效）；
  * 这里维护「引擎里已注入的是哪个包」（gPlayPackLoadedId），切换/更新后热注入。
@@ -34,8 +35,6 @@
 
 import type { Song } from "@/types/music";
 import type { SourcePackMeta } from "@/services/source-bundle-fs";
-import type { PackHeaderInfo } from "@/services/source-pack-header";
-import { metaBundleCode } from "@/services/source-meta-code";
 import { parsePackHeader } from "@/services/source-pack-header";
 import {
   start,
@@ -118,11 +117,11 @@ let gEngineVersion = "";
 let gEngineName = "";
 let gLastError = "";
 let gLoadFailure: SourceLoadFailure = "";
-/** 内置 meta 是否已装进引擎（引擎重建/隔离后归零） */
+/** 内置 meta 是否已装进引擎（引擎重建/隔离后归零；未装数据包时恒为 false） */
 let gMetaReady = false;
-/** 引擎里实际装载的 meta 来源：包 id（如 meta-official）或 ""（内置基线） */
+/** 引擎里实际装载的 meta 来源：包 id（如 meta-official）；数据包不内置，未装时为 "" */
 let gMetaLoadedId = "";
-/** 引擎里实际装载的 meta 版本号（基线无包头时为 0） */
+/** 引擎里实际装载的 meta 版本号（未装时为 0） */
 let gMetaLoadedCode = 0;
 /** 已成功注入引擎的播放包 id（"" = 没注入任何播放包） */
 let gPlayPackLoadedId = "";
@@ -164,22 +163,14 @@ export function loadedPlayPackCode(): number {
   return gPlayPackLoadedCode;
 }
 
-/** 引擎里实际装载的 meta 来源 id（"" = 内置基线；与 activeMetaId 比对即「待生效」） */
+/** 引擎里实际装载的 meta 来源 id（"" = 未装数据包，数据面下线；与 activeMetaId 比对即「待生效」） */
 export function loadedMetaId(): string {
   return gMetaLoadedId;
 }
 
-/** 引擎里实际装载的 meta 版本号（0 = 未知/旧基线） */
+/** 引擎里实际装载的 meta 版本号（0 = 未装） */
 export function loadedMetaCode(): number {
   return gMetaLoadedCode;
-}
-
-/**
- * 内置基线 meta 的包头（旧基线无包头 → versionCode 视为 0）。
- * 更新探测用它和「已装 meta 包 / 远端新版」比版本。
- */
-export function baselineMetaInfo(): PackHeaderInfo | null {
-  return parsePackHeader(metaBundleCode());
 }
 
 export function lastEngineError(): string {
@@ -192,7 +183,7 @@ export function loadFailureKind(): SourceLoadFailure {
 }
 
 /**
- * 引擎当前是否可用于**数据入口**（搜索/歌单/歌词…）：只需要内置 meta。
+ * 引擎当前是否可用于**数据入口**（搜索/歌单/歌词…）：只需已装数据包。
  * 播放取链是否可用要另看 playPackReady()。
  */
 export function engineUsable(): boolean {
@@ -443,9 +434,10 @@ export async function shutdownEngine(): Promise<void> {
 // ==================== ① 装 meta（数据面） ====================
 
 /**
- * 确保「引擎已起 + 内置 meta 已装」（幂等，并发单飞）。
+ * 确保「引擎已起 + 生效 meta 已装」（幂等，并发单飞）。
  * 这是数据入口（invokeSource）的唯一前置——**没有播放包也成功**，
  * 搜索/歌单/歌词等数据功能与播放解耦正是双包架构的要点。
+ * 数据包不内置：未安装时返回 false（failure=missing），数据面下线不是引擎错误。
  */
 export async function ensureDataEngine(): Promise<boolean> {
   await ensureLocalStateRestored();
@@ -463,36 +455,41 @@ export async function ensureDataEngine(): Promise<boolean> {
 
 /**
  * 解析要装进 bundle 槽的 meta 文本：生效中的 meta 包（source-bundle-fs 的
- * activeMetaId）优先，读不到/包头不对则回退内置基线。
- * 统一包模型：meta 包与播放包一样是用户安装的 js 文件，只是装进引擎的槽位不同。
+ * activeMetaId）。统一包模型：meta 包与播放包一样是用户安装的 js 文件，只是
+ * 装进引擎的槽位不同——数据包不内置，未安装时返回 null（数据面下线，非错误）。
  */
 async function resolveMetaText(): Promise<{ id: string; code: number; text: string } | null> {
   const pack = activeMetaPack();
-  if (pack != null) {
-    const text = await readPackArtifact(pack.id, ARTIFACT_META);
-    const header = parsePackHeader(text);
-    if (text.length > 0 && header != null && header.kind == PACK_KIND_META) {
-      return { id: pack.id, code: header.versionCode, text: text };
-    }
-    console.log(
-      `[SourceEngine] meta 包 ${pack.id} 不可用（文件缺失或包头非法），回退内置基线`,
-    );
+  if (pack == null) return null;
+  const text = await readPackArtifact(pack.id, ARTIFACT_META);
+  const header = parsePackHeader(text);
+  if (text.length > 0 && header != null && header.kind == PACK_KIND_META) {
+    return { id: pack.id, code: header.versionCode, text: text };
   }
-  const baseline = metaBundleCode();
-  const header = parsePackHeader(baseline);
-  return { id: "", code: header != null ? header.versionCode : 0, text: baseline };
+  console.log(`[SourceEngine] meta 包 ${pack.id} 不可用（文件缺失或包头非法）`);
+  return null;
 }
 
-/** 把生效 meta（已装包优先，否则内置基线）灌进 bundle 槽并验契约（bundleInfo 自述） */
+/** 把生效 meta（已装包）灌进 bundle 槽并验契约（bundleInfo 自述）；未装走下线路径 */
 async function loadMetaIntoEngine(): Promise<boolean> {
   try {
-    gStatus = "loading";
+    const pack = activeMetaPack();
     const meta = await resolveMetaText();
     if (meta == null) {
-      gLoadFailure = "engine";
-      fail("元数据包文本不可用");
+      if (pack == null) {
+        // 未装数据包：数据面整体下线，不是引擎错误（本地音乐照常），首页/设置页引导
+        gStatus = "idle";
+        gLoadFailure = "missing";
+        gLastError = "未安装数据包：在线搜索/歌单/歌词及在线播放不可用，可在 设置 → 音源包管理 安装";
+        console.log("[SourceEngine] " + gLastError);
+        return false;
+      }
+      // 生效包在列表里但文件没了/包头坏了：按坏包处理（可卸载后重装）
+      gLoadFailure = "invalid";
+      fail(`数据包 ${pack.id} 文件缺失或包头非法（可在列表卸载后重装）`);
       return false;
     }
+    gStatus = "loading";
     // 插件内部会先 compile 做语法校验（不执行），再经动态 import 装载 ESM；
     // meta 顶层检测到 globalThis.__qtHost（prelude 已注入）时自注册 __qtEntries
     await callLoadBundle(meta.text);
@@ -515,13 +512,14 @@ async function loadMetaIntoEngine(): Promise<boolean> {
     gLastError = "";
     const revision = info.get("metaRevision");
     console.log(
-      `[SourceEngine] meta 已装载：${meta.id.length > 0 ? meta.id : "内置基线"} v${meta.code}` +
+      `[SourceEngine] meta 已装载：${meta.id} v${meta.code}` +
         `（${name}，metaRevision=${revision}，hostApiVersion ${HOST_API_VERSION}）`,
     );
     return true;
   } catch (e) {
-    // 基线是构建期验证过的产物，装载失败只能是环境问题，不算 bad 包
-    gLoadFailure = "engine";
+    // 装载阶段抛错多为包文本本身非法（插件 compile 校验不过）；环境级故障
+    // （起不来/隔离）已在 ensureEngine 按 engine 分类，这里按坏包处理
+    gLoadFailure = "invalid";
     fail(`元数据包装载失败：${msgOf(e)}`);
     return false;
   } finally {
@@ -534,7 +532,9 @@ async function loadMetaIntoEngine(): Promise<boolean> {
 /**
  * 确保「生效中的播放包已注入引擎」（幂等，并发单飞）。
  * 返回 false 表示「本次取不了链」：没有生效包 / 引擎起不来 / meta 没装上 /
- * 播放包注入失败。没有生效包时广播 PLAY_PACK_MISSING_EVENT（节流），
+ * 播放包注入失败。注意播放注入走 meta 的 installPlayPack 入口——**数据包
+ * 未装时在线播放同样不可用**（ensureDataEngine 先行失败，gLastError 已给出
+ * 指路文案）。没有生效播放包时广播 PLAY_PACK_MISSING_EVENT（节流），
  * 由 App.uvue 弹引导安装的提示。
  */
 export async function ensurePlayPackLoaded(): Promise<boolean> {
@@ -658,7 +658,7 @@ export async function unloadPlayPack(): Promise<void> {
 /**
  * 让「生效 meta 变更」立即生效：整引擎重启（meta 在唯一 bundle 槽里，换它只能
  * 重装槽位）→ 重装 meta → 把生效播放包重新热注入。
- * meta 包安装/更新/卸载回基线后由 source-update 调用。音频播放器不受影响
+ * meta 包安装/更新/卸载/停用后由 source-update 调用。音频播放器不受影响
  * （引擎只负责取链，正在放的歌继续放），之后的数据/取链请求自动走新 meta。
  */
 export async function reloadEngineMeta(): Promise<boolean> {
@@ -839,7 +839,8 @@ const DATA_TIMEOUT_MS = 30000;
  * 调 meta 的音源数据入口（search / playlistDetail / lyric / cover 等），
  * 返回入口应答的 JSON 文本（形状见 qt-sources/src/meta-entries.ts）。
  *
- * 只需内置 meta（数据面与播放包解耦）：未装播放包时搜索/歌单/歌词照常工作。
+ * 只需已装数据包（数据面与播放包解耦）：未装播放包时搜索/歌单/歌词照常工作；
+ * 未装数据包时这里抛错（missing，调用方按页面加载失败提示，首页引导指路设置页）。
  * 失败抛错（调用方按原语义 catch/提示），因为数据接口取不到就是页面加载失败，
  * 需要让用户看到。
  */
@@ -869,9 +870,10 @@ export async function verifyPlayableByEngine(url: string): Promise<boolean> {
 // ==================== 启动预热 ====================
 
 /**
- * 冷启动预热：恢复生效状态 → 起引擎 → 装内置 meta → 注入生效中的播放包（如有）。
- * 全部失败都只记录日志，不抛错：数据功能不装包也该能用，本地音乐更不受影响；
- * 未装播放包时由设置页/首页横幅引导安装。
+ * 冷启动预热：恢复生效状态 → 起引擎 → 装生效数据包（未装则直接返回，数据面下线
+ * 由首页/设置页引导）→ 注入生效中的播放包（如有）。
+ * 全部失败都只记录日志，不抛错：本地音乐不受影响；未装数据包/播放包时由
+ * 设置页/首页引导指路安装。
  * 启动预热**不做冒烟**（冒烟要发真实网络请求，交给用户显式的安装/切换动作）。
  */
 export async function prewarm(): Promise<void> {

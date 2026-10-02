@@ -23,13 +23,14 @@
           </view>
         </view>
         <qt-notice-bar :notice="barNotice" @closed="barNotice = null" />
-        <!-- 播放音源包不内置（版权风险，用户自行安装）：没有生效中的播放包时在线取链不可用，
-             给一条去设置安装的引导（搜索等数据功能已内置元数据包，不受影响；本地音乐照常播放） -->
+        <!-- 两种音源包都不内置：播放包（版权风险）与数据包（在线搜索/歌单/歌词）都由用户
+             在设置页自行安装。没有生效中的播放包时给一条引导条；没有生效中的数据包时弹
+             QtMetaPackGuide（下方）。两者都只指路设置页，不带下载动作；本地音乐照常播放 -->
         <view v-if="sourceUpdateStore.sourceMissing" class="source-tip" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="goSourcePack">
           <QtIcon name="music" :size="26" :color="themeStore.skin.accent" />
           <view class="source-tip-copy">
             <text class="source-tip-title" :style="'color:' + themeStore.skin.text + ';'" :max-lines="1">未安装播放音源包</text>
-            <text class="source-tip-desc" :style="'color:' + themeStore.skin.textMuted + ';'" :max-lines="2">在线播放需要先安装播放音源包，点此去设置安装；本地音乐与在线搜索不受影响</text>
+            <text class="source-tip-desc" :style="'color:' + themeStore.skin.textMuted + ';'" :max-lines="2">在线播放需要先安装播放音源包，点此去设置安装；本地音乐播放不受影响</text>
           </view>
           <QtIcon name="chevron-right" :size="24" :color="themeStore.skin.iconMuted" />
         </view>
@@ -169,6 +170,7 @@
       <QtTabBar current="pages/home/index" :dots="updateDotPaths" />
       <qt-notice-splash v-if="!upgradeVisible" :notice="noticeStore.splashNotice" @closed="onSplashClosed" />
       <qt-upgrade-popup v-model:visible="upgradeVisible" :info="upgradeInfo" @closed="onUpgradeClosed" />
+      <QtMetaPackGuide :visible="metaGuideVisible" @go="goSourcePack" @dismiss="onMetaGuideDismiss" />
       </view>
     </view>
   </qt-page-frame>
@@ -188,6 +190,7 @@ import QtNoticeBar from "@/uni_modules/qt-ui/components/qt-notice-bar/qt-notice-
 import QtNoticeSplash from "@/uni_modules/qt-ui/components/qt-notice-splash/qt-notice-splash.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import qtUpgradePopup from "@/uni_modules/qt-ui/components/qt-upgrade-popup/qt-upgrade-popup.uvue";
+import QtMetaPackGuide from "@/uni_modules/qt-ui/components/qt-meta-pack-guide/qt-meta-pack-guide.uvue";
 import { musicApi } from "@/services/music-api";
 import { ensureLocalStateRestored } from "@/services/source-bundle-fs";
 import { usePlayerStore } from "@/stores/player";
@@ -295,8 +298,8 @@ function goNoticeCenter(): void {
   uni.navigateTo({ url: "/pages/notice/list/index" });
 }
 watch(() => noticeStore.notices, () => applyNoticeBar());
-// 弹层（公告/升级）期间临时隐藏 tabbar；平时宽屏隐藏（rail 取代）、竖屏显示
-const popupBlocking = computed<boolean>(() => noticeStore.splashNotice != null || upgradeVisible.value);
+// 弹层（公告/升级/数据包引导）期间临时隐藏 tabbar；平时宽屏隐藏（rail 取代）、竖屏显示
+const popupBlocking = computed<boolean>(() => noticeStore.splashNotice != null || upgradeVisible.value || metaGuideVisible.value);
 useQtTabBarSync(popupBlocking);
 
 /** 自定义导航页需自行让出状态栏高度 */
@@ -359,13 +362,25 @@ function ensureLoad(): void {
   load();
 }
 /**
- * 刷新音源包状态（含「未安装」引导横幅）。
+ * 数据包安装引导（未装数据包时弹一次的全屏引导）：metaMissing 由
+ * sourceUpdateStore 镜像（须等本地状态恢复后刷新），本会话内关掉过就不再弹
+ * （onMetaGuideDismiss 置位）。安装动作在设置页完成，这里只指路。
+ */
+const metaGuideVisible = ref(false);
+let metaGuideDismissedInSession = false;
+function onMetaGuideDismiss(): void {
+  metaGuideDismissedInSession = true;
+  metaGuideVisible.value = false;
+}
+/**
+ * 刷新音源包状态（含「未安装」引导横幅与数据包引导弹窗）。
  * 必须先等本地状态恢复：恢复是异步的，页面 onShow 可能赶在预热之前，
  * 直接判定会把「已安装」误报成「未安装」。
  */
 function refreshSourcePackState(): void {
   ensureLocalStateRestored().then(() => {
     sourceUpdateStore.refresh();
+    metaGuideVisible.value = sourceUpdateStore.metaMissing && !metaGuideDismissedInSession;
   }).catch(() => {
     sourceUpdateStore.refresh();
   });

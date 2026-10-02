@@ -7,16 +7,18 @@
  *     宿主解析头 → 校验 → 落 install/<id>/ → 登记。同 id = 同一个包，新版本
  *     原地替换（.prev 暂存旧文件，失败可回滚）；不同 id 多包共存。
  *   - 更新发现：① 各包自述 updateUrl 探测（拉远端文件头比版本，按包独立节流）；
- *     ② astral manifest 渠道（保留：这是发布方自己的发布接口，未来也用于
- *     下发 meta 包）。两路合并成一份「可用更新」清单。
+ *     ② astral manifest 渠道（保留：这是发布方自己的发布接口）。两路合并成一份
+ *     「可用更新」清单。**两种包均只对已装包提示更新**——未装不主动下发首装
+ *     offer，安装动作完全由用户在设置页从链接或本地文件发起，客户端不做
+ *     「官方渠道可安装」的宣传。
  *   - 更新生效：**仅提示、手动确认**（启动时/App 内弹一次），确认后下载 →
  *     校验 → 替换 → 生效。绝不明装。
  *     play 生效 = 引擎热注入 + 冒烟自检，失败回滚 .prev 并拉黑该版本；
  *     meta 生效 = 整引擎重装 bundle 槽（reloadEngineMeta），bundleInfo 验
- *     契约，失败回滚 .prev 回退旧版本/基线。
+ *     契约，失败回滚 .prev 回退旧版本（新装则回到未安装）。
  *
  * 生效位：play 包 activeId（多包并存恰好一个生效，装新包不抢已有生效位）；
- * meta 包 activeMetaId（"" = 内置基线，卸载即回退）。
+ * meta 包 activeMetaId（"" = 未装/停用，数据面下线；生效位空时新装包自动上位）。
  *
  * 「落盘」不等于「生效」：装载失败不改落盘状态由用户处理（除非是更新动作——
  * 更新失败自动回滚，安装动作失败则保留由用户决定）。
@@ -36,7 +38,6 @@ import {
   packs,
   packById,
   activePack,
-  activeMetaPack,
   setActive,
   setActiveMeta,
   putPack,
@@ -80,7 +81,6 @@ import {
   lastEngineError,
   reloadEngineMeta,
   loadedMetaCode,
-  baselineMetaInfo,
   engineUsable,
 } from "@/services/source-engine";
 
@@ -105,13 +105,13 @@ const PROBE_RANGE_BYTES = 4096;
 // ==================== 可用更新（提示 + 手动确认） ====================
 
 /**
- * 一条可用更新。targetId 是**包 id**；meta 基线升级时 targetId 为
- * OFFICIAL_META_ID 且 fromBaseline=true（当前用的还是内置基线）。
+ * 一条可用更新。targetId 是**包 id**；发现通道只对已装包发 offer
+ * （未装包不下发首装 offer，安装由用户在设置页发起）。
  */
 export type PackUpdateOffer = {
   kind: string;
   targetId: string;
-  /** 当前版本（基线无包头 = 0） */
+  /** 当前已装版本（0 = 未安装；正常不会出现在 offer 里，仅防御展示） */
   currentCode: number;
   newCode: number;
   newName: string;
@@ -121,8 +121,6 @@ export type PackUpdateOffer = {
   channel: string;
   /** 下载地址（确认后从这里拉全量文件） */
   url: string;
-  /** meta 专用：当前生效的是内置基线（更新后首次安装 meta 包） */
-  fromBaseline: boolean;
 };
 
 /** 最近一次发现的可用更新（内存态；设置页/启动提示共用，装完即清） */
@@ -176,16 +174,16 @@ export async function discoverUpdatesAtStartup(): Promise<PackUpdateOffer[]> {
 
 /**
  * 显式发现更新（设置页按钮与启动共用）：合并两路来源——
- *   ① 已装各包的自述 updateUrl（含 meta 包与 play 包；基线 meta 的 updateUrl
- *      来自内置代码里的包头）；
- *   ② astral manifest（play-bundle.js 产物；未来可加 meta-bundle.js）。
- * 同一包两路都报新版时取 versionCode 更高的一路。
+ *   ① 已装各包的自述 updateUrl（含 meta 包与 play 包）；
+ *   ② astral manifest（play-bundle.js / meta-bundle.js 产物）。
+ * 两路都**只对已装包提示更新**：未装包不下发首装 offer，安装动作完全由用户在
+ * 设置页从链接或本地文件发起。同一包两路都报新版时取 versionCode 更高的一路。
  */
 export async function discoverUpdates(force: boolean): Promise<PackUpdateOffer[]> {
   await ensureLocalStateRestored();
   const now = Date.now();
   const found: PackUpdateOffer[] = [];
-  // ① 自管 updateUrl（已装包 + meta 基线）
+  // ① 自管 updateUrl（仅已装包）
   const installed = packs();
   for (let i = 0; i < installed.length; i++) {
     const pack = installed[i];
@@ -198,29 +196,8 @@ export async function discoverUpdates(force: boolean): Promise<PackUpdateOffer[]
     if (isPackBadVersion(pack.id, remote.versionCode)) continue;
     found.push(
       offerOf(pack.kind, pack.id, pack.versionCode, remote.versionCode, remote.versionName,
-        remote.notes, "self", pack.updateUrl, false),
+        remote.notes, "self", pack.updateUrl),
     );
-  }
-  // meta 基线的 updateUrl（内置包头的自述；基线版本号无头视为 0）
-  const baseline = baselineMetaInfo();
-  if (baseline != null && baseline.updateUrl.length > 0) {
-    const activeMeta = activeMetaPack();
-    // 已装生效 meta 包的设备按它自己的 updateUrl 走（上面 ① 已处理），不重复探基线
-    if (activeMeta == null) {
-      const remote = await probePackHeader(baseline.updateUrl);
-      if (
-        remote != null &&
-        remote.id == baseline.id &&
-        remote.kind == PACK_KIND_META &&
-        remote.versionCode > baseline.versionCode &&
-        !isPackBadVersion(baseline.id, remote.versionCode)
-      ) {
-        found.push(
-          offerOf(PACK_KIND_META, baseline.id, baseline.versionCode, remote.versionCode,
-            remote.versionName, remote.notes, "self", baseline.updateUrl, true),
-        );
-      }
-    }
   }
   // ② manifest 渠道
   const manifest = await fetchManifest();
@@ -228,42 +205,40 @@ export async function discoverUpdates(force: boolean): Promise<PackUpdateOffer[]
   if (manifest != null && manifest.release != null) {
     const release = manifest.release;
     if (release.published && !release.bad && release.rollbackTo <= 0 && containsNum(release.platforms, PLATFORM_ANDROID) && release.hostApiVersion <= HOST_API_VERSION) {
-      // play 产物：release 版本号即产物版本
+      // play 产物：release 版本号即产物版本。仅对已装包提示更新——未装不下发
+      // 首装 offer（安装由用户在设置页发起，客户端不宣传官方渠道可安装）
       for (let i = 0; i < release.artifacts.length; i++) {
         const a = release.artifacts[i];
         if (a.path != ARTIFACT_PLAY || a.url.length == 0) continue;
         const local = packById(OFFICIAL_PLAY_ID);
-        const currentCode = local != null ? local.versionCode : 0;
+        if (local == null) continue;
+        const currentCode = local.versionCode;
         // 版本压制例外：本地官方包从未通过签名校验（签名落地前的历史冒充包）——
         // manifest 真官方更新不按 versionCode 压制，总能提示出来覆盖掉它。
-        const unverifiedOfficial = local != null && !local.signVerified;
+        const unverifiedOfficial = !local.signVerified;
         if ((a.version <= currentCode && !unverifiedOfficial) || isPackBadVersion(OFFICIAL_PLAY_ID, a.version)) continue;
         if (hasOfferFor(found, OFFICIAL_PLAY_ID, a.version)) continue;
         found.push(
           offerOf(PACK_KIND_PLAY, OFFICIAL_PLAY_ID, currentCode, a.version,
-            release.sourceVersionName, release.notes, "manifest", a.url, false),
+            release.sourceVersionName, release.notes, "manifest", a.url),
         );
       }
-      // meta 产物（未来发布）：版本号在产物头里，需要探测
+      // meta 产物：版本号在产物头里，需要探测；同样仅对已装包提示更新（未装不下发）
       for (let i = 0; i < release.artifacts.length; i++) {
         const a = release.artifacts[i];
         if (a.path != ARTIFACT_META || a.url.length == 0) continue;
         const remote = await probePackHeader(a.url);
         if (remote == null || remote.kind != PACK_KIND_META) continue;
         const localMeta = packById(remote.id);
-        const currentCode =
-          localMeta != null
-            ? localMeta.versionCode
-            : baseline != null && baseline.id == remote.id
-              ? baseline.versionCode
-              : 0;
+        if (localMeta == null) continue;
+        const currentCode = localMeta.versionCode;
         // 版本压制例外：本地 meta 官方包从未通过签名校验（历史冒充包）→ 不压制
-        const unverifiedMeta = localMeta != null && isOfficialPackId(remote.id) && !localMeta.signVerified;
+        const unverifiedMeta = isOfficialPackId(remote.id) && !localMeta.signVerified;
         if ((remote.versionCode <= currentCode && !unverifiedMeta) || isPackBadVersion(remote.id, remote.versionCode)) continue;
         if (hasOfferFor(found, remote.id, remote.versionCode)) continue;
         found.push(
           offerOf(PACK_KIND_META, remote.id, currentCode, remote.versionCode,
-            remote.versionName, release.notes, "manifest", a.url, localMeta == null),
+            remote.versionName, release.notes, "manifest", a.url),
         );
       }
     }
@@ -399,7 +374,7 @@ export async function installFromText(text: string, smokeSongs: Song[], source: 
  *   4. 生效判定：
  *      play —— 生效位为空（首次）或已生效的就是这个包（更新）→ 热注入 + 冒烟；
  *              生效中的是别的包 → 只落盘不抢生效位；
- *      meta —— 生效位为空（还在用基线）或已生效的就是这个包 → 重装引擎槽；
+ *      meta —— 生效位为空（未装/停用，新装自动上位）或已生效的就是这个包 → 重装引擎槽；
  *              生效中的是别的 meta 包 → 只落盘。
  *   5. 失败回滚（仅 isUpdate）：恢复 .prev、恢复包记录与生效位、重放旧包；
  *      拉黑与否由调用方（applyUpdate 拉黑，手动重装不拉黑）。
@@ -529,7 +504,8 @@ async function installPackText(
       `${meta.name} v${header.versionName} 已${old != null ? "更新" : "安装"}并生效`,
     );
   }
-  // meta：生效位为空（基线）或就是这个包 → 重装引擎槽
+  // meta：生效位为空（未装/停用，数据面下线）或就是这个包 → 重装引擎槽。
+  // 生效位为空时新装包自动上位（数据面从下线恢复），不抢其他生效包的位置。
   const metaCanActivate = state.activeMetaId.length == 0 || state.activeMetaId == id;
   if (!metaCanActivate) {
     await clearPackError(id);
@@ -545,15 +521,20 @@ async function installPackText(
   if (!verified) {
     const detail = lastEngineError();
     if (isUpdate || old == null) {
-      // 新装/更新的 meta 包验证不过：回滚（新装 = 回基线，更新 = 回旧文件）
+      // 新装/更新的 meta 包验证不过：回滚（新装 = 回到未安装，更新 = 回旧文件）
       await rollbackPack(old, id, prevPath, mainPath);
       await reloadEngineMeta();
       await notePackError(id, `装载未通过（${detail}）`);
-      const target = old != null ? old.versionName : "内置基线";
-      return applyResult(false, header.versionCode, `数据包装载未通过（${detail}）；已回退到 ${target}`);
+      return applyResult(
+        false,
+        header.versionCode,
+        old != null
+          ? `数据包装载未通过（${detail}）；已回退到 v${old.versionName}`
+          : `数据包装载未通过（${detail}）；已卸载，可重试或换一个包`,
+      );
     }
     await notePackError(id, `装载未通过（${detail}）`);
-    return applyResult(false, header.versionCode, `数据包装载未通过：${detail}（可在列表卸载后回退基线）`);
+    return applyResult(false, header.versionCode, `数据包装载未通过：${detail}（可卸载后重装）`);
   }
   await clearPackError(id);
   syncSourceUpdateBadge();
@@ -564,7 +545,7 @@ async function installPackText(
   );
 }
 
-/** 回滚一个包到 .prev（无旧文件 = 恢复到安装前：未安装 / 内置基线） */
+/** 回滚一个包到 .prev（无旧文件 = 恢复到安装前：未安装） */
 async function rollbackPack(
   old: SourcePackMeta | null,
   id: string,
@@ -581,7 +562,7 @@ async function rollbackPack(
         return;
       }
     }
-    // 没有旧文件可回滚：恢复到安装前状态（未安装 / 基线）
+    // 没有旧文件可回滚：恢复到安装前状态（未安装）
     if (old != null && loadedPlayPackId() == old.id) {
       await unloadPlayPack();
     }
@@ -652,10 +633,11 @@ export async function activatePack(id: string, smokeSongs: Song[]): Promise<Sour
     }
     const ok = await reloadEngineMeta();
     if (!ok || loadedMetaCode() != pack.versionCode) {
+      // 装载不过：清空生效位回到「停用」（数据面下线），列表里保留可重装/另选
       await setActiveMeta("");
       await reloadEngineMeta();
       await notePackError(id, `装载未通过：${lastEngineError()}`);
-      return applyResult(false, pack.versionCode, `数据包装载未通过：${lastEngineError()}（已回退内置基线）`);
+      return applyResult(false, pack.versionCode, `数据包装载未通过：${lastEngineError()}（已停用，可重装或另选）`);
     }
     await clearPackError(id);
     syncSourceUpdateBadge();
@@ -668,26 +650,25 @@ export async function activatePack(id: string, smokeSongs: Song[]): Promise<Sour
 }
 
 /**
- * 切回内置数据包基线（音源包管理页「内置基线」行）：清空生效数据包位并让引擎
- * 重装基线。数据包位空 = 基线（activeMetaId 为空串），与 activatePack 的 meta
- * 分支共用装载管线，但不带版本契约校验（基线随应用分发，信任内嵌资产）。
+ * 停用数据包（音源包管理页「停用数据包」行）：清空生效数据包位并重装引擎——
+ * activeMetaId 为空串即停用，数据面下线（在线搜索/歌单/歌词不可用，本地音乐
+ * 照常），列表里的已装包保留，之后可随时再启用。与 activatePack 的 meta 分支
+ * 共用装载管线，只是方向相反（清槽而非装槽）。
  */
-export async function activateBaselineMeta(): Promise<SourceApplyResult> {
+export async function deactivateMetaPack(): Promise<SourceApplyResult> {
   await ensureLocalStateRestored();
   if (!(await setActiveMeta(""))) {
     return applyResult(false, 0, "切换失败：本地状态写入失败");
   }
-  const ok = await reloadEngineMeta();
-  if (!ok) {
-    return applyResult(false, 0, `内置基线装载未通过：${lastEngineError()}`);
-  }
+  await reloadEngineMeta();
   syncSourceUpdateBadge();
-  return applyResult(true, 0, "已切回内置基线数据包");
+  return applyResult(true, 0, "已停用数据包（在线搜索/歌单/歌词及在线播放不可用，本地音乐不受影响）");
 }
 
 /**
- * 卸载一个包：play → 引擎卸载 + 删目录 + 出列表；meta → 回退生效位（activeMetaId
- * 清空即回内置基线）+ 删目录。卸载生效中的 meta 后引擎重装回基线。
+ * 卸载一个包：play → 引擎卸载 + 删目录 + 出列表；meta → 清生效位（activeMetaId
+ * 置空即停用，数据面下线）+ 删目录。卸载生效中的 meta 后数据功能不可用，直到
+ * 用户另装/启用别的数据包。
  */
 export async function uninstallPack(id: string): Promise<SourceApplyResult> {
   await ensureLocalStateRestored();
@@ -703,7 +684,7 @@ export async function uninstallPack(id: string): Promise<SourceApplyResult> {
     musicApi.clearPlayUrlCache();
     dropOffer(id);
     syncSourceUpdateBadge();
-    return applyResult(true, pack.versionCode, `已卸载 ${pack.name}（数据包已回退内置基线）`);
+    return applyResult(true, pack.versionCode, `已卸载 ${pack.name}（数据包已停用，在线搜索/歌单/歌词及在线播放不可用）`);
   }
   if (loadedPlayPackId() == id) {
     await unloadPlayPack();
@@ -1019,7 +1000,6 @@ function offerOf(
   notes: string,
   channel: string,
   url: string,
-  fromBaseline: boolean,
 ): PackUpdateOffer {
   return {
     kind: kind,
@@ -1030,7 +1010,6 @@ function offerOf(
     notes: notes,
     channel: channel,
     url: url,
-    fromBaseline: fromBaseline,
   } as PackUpdateOffer;
 }
 
@@ -1047,7 +1026,6 @@ function offersToJson(list: PackUpdateOffer[]): string {
     o.set("notes", list[i].notes);
     o.set("channel", list[i].channel);
     o.set("url", list[i].url);
-    o.set("fromBaseline", list[i].fromBaseline);
     arr.push(o);
   }
   const root = new UTSJSONObject();
@@ -1074,7 +1052,6 @@ export function offersFromJson(payload: string): PackUpdateOffer[] {
           strOf(o, "notes"),
           strOf(o, "channel"),
           strOf(o, "url"),
-          boolOfDefault(o, "fromBaseline", false),
         ),
       );
     }
@@ -1085,7 +1062,7 @@ export function offersFromJson(payload: string): PackUpdateOffer[] {
 /** 更新提示的一行文案（弹窗/列表共用） */
 export function offerLabel(o: PackUpdateOffer): string {
   const kindLabel = o.kind == PACK_KIND_META ? "数据包" : "播放包";
-  const from = o.fromBaseline ? "内置基线" : `v${o.currentCode}`;
+  const from = o.currentCode > 0 ? `v${o.currentCode}` : "未安装";
   return `${kindLabel}有新版本：v${from} → v${o.newCode}（${o.newName}）`;
 }
 
