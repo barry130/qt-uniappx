@@ -42,7 +42,6 @@ import {
   loadBundle,
   invoke,
   evaluate,
-  readAssetText,
   isRunning,
   isHealthy,
 } from "@/uni_modules/qt-js-engine";
@@ -56,6 +55,7 @@ import {
   ARTIFACT_META,
   PACK_KIND_META,
 } from "@/services/source-bundle-fs";
+import { PACK_VERIFY_NACL_SRC } from "@/services/pack-verify-nacl";
 
 /** 与插件 interface.uts 对应的结构类型（服务层不引插件类型，避免跨模块类型耦合） */
 type EngineInfo = { engine: string; version: string; hostApiVersion: number; probe: string };
@@ -269,19 +269,6 @@ function callEvaluate(code: string): Promise<string> {
   });
 }
 
-/** 读 APK assets 里的文本（官方包验签的 nacl 实现就放在 static/pack-verify/） */
-function callReadAssetText(path: string): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    readAssetText(path, (ok: boolean, value: string, error: string) => {
-      if (ok) {
-        resolve(value);
-      } else {
-        reject(new Error(error));
-      }
-    });
-  });
-}
-
 /** 剥掉 evaluateJavascript JSON 序列化字符串两端可能带的引号（含 \" 转义还原） */
 export function stripEvalQuotes(value: string): string {
   let v = value.trim();
@@ -292,30 +279,68 @@ export function stripEvalQuotes(value: string): string {
   return v;
 }
 
-/** 官方包验签器（nacl）是否已装进当前引擎 */
-let gVerifierReady = false;
+/** 官方包验签器（nacl）在引擎全局的冻结引用名；空串 = 未装载（resetLoadedState 归零） */
+let gVerifierGlobal = "";
+
+/** RFC 8032 §7.1 Ed25519 TEST 1（空消息）——验签器已知答案自检的标准向量 */
+const VERIFIER_KAT_PUB_HEX = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+const VERIFIER_KAT_SIG_HEX = "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b";
+
+/** 验签器冻结全局名（pack-signature.uts 组装验签表达式用；未装载为空串） */
+export function verifierGlobalName(): string {
+  return gVerifierGlobal;
+}
 
 /**
- * 确保引擎里已装载官方包验签器（tweetnacl，static/pack-verify/nacl.min.js，
- * 纯 JS 同步实现，装载后挂全局 self.nacl）。引擎重建后归零重装（resetLoadedState）。
- * 幂等：已就绪直接返回；重复装载也只重复定义全局，无副作用。
+ * 确保引擎里已装载官方包验签器（tweetnacl，PACK_VERIFY_NACL_SRC 内嵌常量，
+ * 纯 JS 同步实现；不走 APK assets——基座 assets 冻结在基座构建时刻，dev 热推
+ * 不更新，见 pack-verify-nacl.uts 文件头）。引擎重建后归零重装（resetLoadedState）。
+ *
+ * 防伪装载（复审 P0-A；nacl.min.js UMD 尾部是 module.exports 优先）：同引擎里
+ * 已生效的恶意包可以预埋 globalThis.module={exports:{}}、伪 self.nacl（或其
+ * 访问器）劫持装载结果，也可以在装载完成后重定义裸 nacl。本实现不信任引擎
+ * 里任何既有全局：
+ * 1. nacl 源码在 IIFE 参数作用域内执行——self/module/exports/window 被全新
+ *    对象/undefined 遮蔽，UMD 只能把真 nacl 落到本次新建的私有对象上；
+ * 2. 装载后立刻跑 RFC 8032 标准测试向量：正例必须验真、篡改末字节的负例
+ *    必须验假，恒真式假实现直接判失败（fail-closed）；
+ * 3. 自检通过后把 nacl 对象冻结为随机名全局的不可写、不可配置属性，后续
+ *    验签表达式只经由该冻结属性访问（见 pack-signature.uts），装载后的
+ *    重定义/删除在语言层面不可能。
+ * 残余面：恶意包完全接管 JS realm（替换 Function 构造器等）时同域防御一律
+ * 不成立——需要独立 realm 验签才能封死，超出本轮修复范围。
  */
 export async function ensurePackVerifier(): Promise<boolean> {
-  if (gVerifierReady) return true;
+  if (gVerifierGlobal.length > 0) return true;
   if (!(await ensureEngine())) return false;
   try {
-    const asset = await callReadAssetText("static/pack-verify/nacl.min.js");
-    if (asset.length < 1000) {
-      console.log("[SourceEngine] 验签器资产缺失或过短：" + String(asset.length));
+    if (PACK_VERIFY_NACL_SRC.length < 1000) {
+      console.log("[SourceEngine] 验签器内嵌常量异常：" + String(PACK_VERIFY_NACL_SRC.length));
       return false;
     }
-    // 末尾判断装载结果：nacl-fast.min 会挂 self.nacl（WebView 里 self === window）
-    const probe = await callEvaluate(asset + ";String(typeof self.nacl==='object'&&typeof nacl.sign==='object'&&typeof nacl.sign.detached==='object'?'ok':'missing')");
+    const asset = PACK_VERIFY_NACL_SRC;
+    const name = "__qtVfy_" + Math.floor(Math.random() * 2147483647).toString();
+    // 单次同步求值：参数遮蔽装载 → 结构探测 → KAT 正负例 → 冻结到随机名全局
+    const expr =
+      "(function(self,module,exports,window){" +
+      asset +
+      ";var n=self.nacl;" +
+      "if(!n||!n.sign||!n.sign.detached||typeof n.sign.detached.verify!=='function')return String('missing');" +
+      "function hb(s){var a=new Uint8Array(s.length/2);for(var i=0;i<s.length;i+=2){a[i>>1]=parseInt(s.substr(i,2),16)}return a}" +
+      "var pub=hb('" + VERIFIER_KAT_PUB_HEX + "');" +
+      "var sig=hb('" + VERIFIER_KAT_SIG_HEX + "');" +
+      "if(!n.sign.detached.verify(new Uint8Array(0),sig,pub))return String('kat-pos');" +
+      "var bad=hb('" + VERIFIER_KAT_SIG_HEX + "');bad[63]^=1;" +
+      "if(n.sign.detached.verify(new Uint8Array(0),bad,pub))return String('kat-neg');" +
+      "try{Object.defineProperty(globalThis,'" + name + "',{value:n,writable:false,configurable:false})}catch(e){return String('freeze')}" +
+      "return String('ok');" +
+      "})({},undefined,undefined,{})";
+    const probe = await callEvaluate(expr);
     const ok = stripEvalQuotes(probe) == "ok";
     if (ok) {
-      gVerifierReady = true;
+      gVerifierGlobal = name;
     } else {
-      console.log("[SourceEngine] 验签器装载探测失败：" + probe);
+      console.log("[SourceEngine] 验签器装载/自检失败：" + probe);
     }
     return ok;
   } catch (e) {
@@ -383,7 +408,7 @@ function resetLoadedState(): void {
   gPlayPackLoadedId = "";
   gPlayPackLoadedCode = 0;
   gPlayPackFailedId = "";
-  gVerifierReady = false;
+  gVerifierGlobal = "";
 }
 
 /** 被隔离后的重建：停掉旧引擎（放弃卡住的线程）再起一个新的 */

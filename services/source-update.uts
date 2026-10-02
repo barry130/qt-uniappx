@@ -244,7 +244,10 @@ export async function discoverUpdates(force: boolean): Promise<PackUpdateOffer[]
   await touchLastCheck(now);
   if (manifest != null && manifest.release != null) {
     const release = manifest.release;
-    if (release.published && !release.bad && release.rollbackTo <= 0 && containsNum(release.platforms, PLATFORM_ANDROID) && release.hostApiVersion <= HOST_API_VERSION) {
+    // platforms 留空 = 不限平台（与 qt-pc source_install 的准入口径一致）；
+    // 显式列出时必须包含 Android（1101）
+    const platformOk = release.platforms.length == 0 || containsNum(release.platforms, PLATFORM_ANDROID);
+    if (release.published && !release.bad && release.rollbackTo <= 0 && platformOk && release.hostApiVersion <= HOST_API_VERSION) {
       // play 产物：release 版本号即产物版本。仅对已装包提示更新——未装不下发
       // 首装 offer（安装由用户在设置页发起，客户端不宣传官方渠道可安装）
       for (let i = 0; i < release.artifacts.length; i++) {

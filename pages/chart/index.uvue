@@ -134,6 +134,9 @@ const filteredCharts = computed<Chart[]>(() => {
 
 /** 上次加载时的包态指纹：音源包安装/更新/卸载/启停后变化，整页重拉 */
 let loadedPackFp = "";
+// loadAll 并发序号：onShow 与包变更广播可能同时触发拉取，旧一轮的慢响应
+// 若后到会把新数据覆盖掉、还会提前收走 loading——非最新序号的回调全部丢弃
+let loadAllSeq = 0;
 
 function onSourceChange(index: number): void {
   sourceIndex.value = index;
@@ -151,20 +154,26 @@ function syncSourceIndex(): void {
 
 /** 拉全量榜单（onMounted/onShow/包变更广播共用），完成后记录包态指纹 */
 async function loadAll(): Promise<void> {
+  const mySeq = ++loadAllSeq;
   loadedPackFp = packsFingerprint();
   loading.value = true;
   allCharts.value = [];
   try {
-    allCharts.value = await musicApi.allCharts();
+    const charts = await musicApi.allCharts();
+    if (mySeq == loadAllSeq) allCharts.value = charts;
   } catch (error) {
     console.error("[QT Music Chart Page]", error);
-    uni.showToast({ title: "加载失败", icon: "none" });
+    if (mySeq == loadAllSeq) {
+      uni.showToast({ title: "加载失败", icon: "none" });
+    }
   } finally {
-    loading.value = false;
     // 网格随 loading 消失才渲染，等布局落定后实测一次宽度
-    gridTimers.push(setTimeout(() => {
-      measureGrid(0);
-    }, 300) as number);
+    if (mySeq == loadAllSeq) {
+      loading.value = false;
+      gridTimers.push(setTimeout(() => {
+        measureGrid(0);
+      }, 300) as number);
+    }
   }
 }
 

@@ -11,19 +11,27 @@
  * 验不过（含无签名块）一律拒绝；第三方包不受影响。
  *
  * 验签在 JS 引擎里执行（tweetnacl 纯 JS 同步实现，ed25519 + SHA-512）——UTS 侧没有
- * 曲线运算原生 API。验签发生在**装载/执行新包内容之前**，且验签表达式自包含（唯一
- * 依赖的全局 nacl 由 ensurePackVerifier 装载）——当前已生效的播放包无法靠篡改引擎
- * 全局伪造验签结果。
+ * 曲线运算原生 API。验签发生在**装载/执行新包内容之前**。对「同引擎里已生效的
+ * 恶意包」的三个劫持面全部封死（复审 P0-A）：nacl 只经 ensurePackVerifier 冻结
+ * 的随机名全局属性取用（不可写、不可配置，装载后无法重定义/删除）；公钥以 hex
+ * 字面量内联（不经可被调包的 atob）；消息字节由手写 UTF-8 编码器从已对表的
+ * 送验字符串现算（不经可被调包的 TextEncoder，杜绝「字符串与字节解耦」的
+ * 旧包重放）。残余面：恶意包完全接管 JS realm 时同域防御一律不成立。
  *
  * 送验内容按块通过 evaluateJavascript 分批推进引擎（2026-10-08）：1.7MB 官方包整段
  * 内联进单次求值会超过 Android Binder ~1MB 事务上限（见 qt-js-engine webview.uts
  * 文档）。缓冲名带随机数、汇总时做 isArray/长度/双哈希三重校验——正在生效的旧包
  * 既无法预埋同名陷阱，也无法把送验内容调包成另一份真正签过的旧官方包。
  */
-import { ensurePackVerifier, evalOnEngine } from "@/services/source-engine";
+import { ensurePackVerifier, evalOnEngine, verifierGlobalName } from "@/services/source-engine";
 
-/** 官方发布公钥（ed25519 raw 32B，base64）。与 qt-sources sources.config.json packs.signing.publicKey、qt-pc 常量保持一致 */
-const OFFICIAL_SIGN_PUBKEY_B64 = "mOti+JoaX2Tn6VaP91E+TaYrth4oGaUqASv9Ot4NDcE=";
+/**
+ * 官方发布公钥（ed25519 raw 32B，hex 字面量）。与 qt-sources sources.config.json
+ * packs.signing.publicKey（base64：mOti+JoaX2Tn6VaP91E+TaYrth4oGaUqASv9Ot4NDcE=）、
+ * qt-pc 常量同一把钥匙。直接以 hex 内联进验签表达式、不经 atob 解码——atob 是
+ * 同域可调包的全局（换掉真公钥即可让冒充包通过），hex 字面量没有这个劫持面。
+ */
+const OFFICIAL_SIGN_PUBKEY_HEX = "98eb62f89a1a5f64e7e9568ff7513e4da62bb61e2819a52a012bfd3ade0d0dc1";
 /** 签名块起始标记（与 qt-sources sign-pack.mjs 同值） */
 const SIGN_BLOCK_MARK = "/*__QT_SIGN__";
 
@@ -116,20 +124,26 @@ const SIGN_CHUNK_CHARS = 96000;
  * 长度 + 两条非线性链 + nacl 验签同时满足才可能伪造，实际不可构造。
  */
 function signContentHash(text: string): string {
+  // 复审 P0-B 修复（第二版）：services 层在 uni-app x 安卓上编译为 app-service
+  // JS（logcat 的 JSConsole 源码行号即证），既没有 .toInt()，裸乘法也是 Double
+  // 语义（超 2^53 丢精度、无 32 位回绕），官方包会 100% 命中「qt:err:hash」。
+  // 显式 Int 标注在该层不生效。正解是与引擎侧完全同款的表达式：Math.imul
+  // 强制 Int32 乘法 + ^ 与 >> 的 32 位补码语义——两个 JS 域（app-service V8、
+  // 引擎 WebView V8）与 Node 对照件逐位一致，Kotlin 原生插件层不经过本函数。
   let a = 0;
   let b = 0;
   for (let i = 0; i < text.length; i++) {
     const c = text.charCodeAt(i);
-    a = (a ^ c) * -2048144789;
+    a = Math.imul(a ^ c, -2048144789);
     a = a ^ (a >> 13);
-    a = a * -1028477387;
+    a = Math.imul(a, -1028477387);
     a = a ^ (a >> 16);
-    b = (b ^ c) * 668265263;
+    b = Math.imul(b ^ c, 668265263);
     b = b ^ (b >> 15);
-    b = b * 374761393;
+    b = Math.imul(b, 374761393);
     b = b ^ (b >> 13);
   }
-  return a.toString() + "_" + b.toString();
+  return `${a}_${b}`;
 }
 
 /**
@@ -141,11 +155,19 @@ export async function verifyOfficialSignature(text: string): Promise<PackSignChe
   if (!(await ensurePackVerifier())) {
     return { ok: false, message: "验签环境不可用（引擎或验签器装载失败）" };
   }
+  // 只经冻结全局属性取用 nacl（见 ensurePackVerifier：KAT 自检通过后
+  // defineProperty 不可写不可配置，装载后无法被同域代码重定义/删除）
+  const verifierRef = verifierGlobalName();
+  if (verifierRef.length == 0) {
+    return { ok: false, message: "验签环境不可用（验签器引用缺失）" };
+  }
   const parts = splitSignatureBlock(text);
   if (parts.sig.length == 0) {
     return { ok: false, message: "文件缺少官方签名（尾部 __QT_SIGN__ 块）" };
   }
-  // atob→Uint8Array 的内联小函数（nacl 不带 base64；WebView 标配 atob）
+  // atob→Uint8Array 的内联小函数（nacl 不带 base64；WebView 标配 atob）。
+  // 只用于解码文件自带的签名——atob 即便被调包，产出的假签名配真公钥
+  // 只会验假（fail-closed），不可能放行冒充包。
   const b64ToBytes =
     "(function(x){var a=new Uint8Array(x.length);for(var i=0;i<x.length;i++)a[i]=x.charCodeAt(i);return a})";
   // 分块送验（2026-10-08 修复）：单次求值内联全文会超 Binder 上限，首个签名官方包
@@ -201,18 +223,29 @@ export async function verifyOfficialSignature(text: string): Promise<PackSignChe
       "if((a+\"_\"+b)!==\"" +
       signContentHash(content) +
       "\")return String(\"qt:err:hash\");" +
-      "var m=new TextEncoder().encode(t);" +
+      // 手写 UTF-8 编码：不依赖 TextEncoder（同域可调包成「返回另一份旧官方
+      // 包字节」实现重放）；代理项按 Node Buffer.from(text,'utf8') 同规则
+      // 替换为 U+FFFD，保证与 qt-sources 签名侧字节完全一致。
+      "var m=(function(s){var n=s.length,o=[],i;" +
+      "function w(c){if(c<128)o.push(c);else if(c<2048)o.push(192|c>>6,128|c&63);else if(c<65536)o.push(224|c>>12,128|c>>6&63,128|c&63);else o.push(240|c>>18,128|c>>12&63,128|c>>6&63,128|c&63)}" +
+      "for(i=0;i<n;i++){var c=s.charCodeAt(i);" +
+      "if(c>=55296&&c<=56319&&i+1<n){var d=s.charCodeAt(i+1);if(d>=56320&&d<=57343){w((c-55296)*1024+(d-56320)+65536);i++;continue}}" +
+      "if(c>=55296&&c<=57343)c=65533;w(c)}" +
+      "return new Uint8Array(o)})(t);" +
       "var sm=" +
       b64ToBytes +
       "(atob(\"" +
       parts.sig +
       "\"));" +
-      "var pm=" +
-      b64ToBytes +
-      "(atob(\"" +
-      OFFICIAL_SIGN_PUBKEY_B64 +
-      "\"));" +
-      "return String(\"qt:\"+(nacl.sign.detached.verify(m,sm,pm)?\"ok\":\"bad\"));" +
+      "if(sm.length!==64)return String(\"qt:err:siglen\");" +
+      "function hb(s){var a=new Uint8Array(s.length/2);for(var i=0;i<s.length;i+=2){a[i>>1]=parseInt(s.substr(i,2),16)}return a}" +
+      "var pm=hb(\"" +
+      OFFICIAL_SIGN_PUBKEY_HEX +
+      "\");" +
+      "if(pm.length!==32)return String(\"qt:err:publen\");" +
+      "return String(\"qt:\"+(globalThis." +
+      verifierRef +
+      ".sign.detached.verify(m,sm,pm)?\"ok\":\"bad\"));" +
       "}catch(e){try{globalThis." +
       bufName +
       "=null}catch(_){}return String(\"qt:err:\"+e);}})()";

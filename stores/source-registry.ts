@@ -8,8 +8,9 @@ import { useSourceStore } from "@/stores/source";
  *
  * 数据包经 `__qtEntries.sourceRegistry()` 声明音源（id/名称/短名/色值，
  * 顺序即 UI 展示顺序）与音质档位；后续新增/下线音源、调整音质只需发新
- * 数据包。未装数据包 / 旧版包（无该入口）时列表为空且 ready=false：
- * 各页面的音源/音质选项为空并引导去 设置→音源包管理，本地音乐不受影响。
+ * 数据包。未装数据包 / 旧版包（无该入口）时 ready=false 且各页面引导去
+ * 设置→音源包管理；已取到的清单在后续空响应（引擎重载空窗等瞬态）时保留，
+ * 本地音乐不受影响。
  *
  * 刷新时机：
  * - 各页面 onShow/onMounted 调 ensure()（幂等，成功过就不再请求）；
@@ -43,9 +44,9 @@ class SourceRegistryStore {
     try {
       const registry = await musicApi.sourceRegistry();
       if (registry == null) {
-        // 未装数据包 / 旧版包无注册表入口 / 引擎未就绪：清空并保持未就绪
-        this.sources = [];
-        this.qualities = [];
+        // 未装数据包 / 旧版包无注册表入口 / 引擎未就绪（换包重载的空窗也走这里）：
+        // 只置未就绪等下次 ensure 重试，不清空已取到的清单——瞬时空响应把
+        // 音源/音质选项清成空白（且无自动重试）比短暂显示旧清单伤害大得多。
         this.ready = false;
         return;
       }
