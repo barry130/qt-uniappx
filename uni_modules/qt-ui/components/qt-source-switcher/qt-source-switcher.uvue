@@ -20,10 +20,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useSourceStore } from "@/stores/source";
+import { useSourceRegistryStore } from "@/stores/source-registry";
 import { platformLabel } from "@/services/platform";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
@@ -31,13 +32,15 @@ import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 
 const emit = defineEmits(["change"]);
 const store = useSourceStore();
+const registry = useSourceRegistryStore();
 const layout = useQtLayout();
 const theme = useThemeStore();
-const sources: string[] = ["wyy", "qq", "kw", "kg"];
+// 音源清单来自数据包注册表（未装包时为空 → 打开时提示去设置页安装）
+const sources = computed<string[]>(() => registry.sourceIds());
 const sheetVisible = ref(false);
 
 const sheetActions = computed<SheetAction[]>(() =>
-  sources.map((s) => ({
+  sources.value.map((s) => ({
     name: platformLabel(s),
     color: s == store.current ? theme.skin.accent : undefined,
   }))
@@ -47,14 +50,22 @@ function label(): string {
   return platformLabel(store.current);
 }
 function open(): void {
+  if (sources.value.length == 0) {
+    uni.showToast({ title: "请先在 设置→音源包管理 安装数据包", icon: "none" });
+    return;
+  }
   sheetVisible.value = true;
 }
 function onSheetSelect(_action: SheetAction, index: number): void {
-  const s = sources[index];
+  const s = sources.value[index];
   if (s == store.current) return;
   store.setSource(s);
   emit("change", s);
 }
+
+onMounted(() => {
+  registry.ensure();
+});
 </script>
 
 <style>

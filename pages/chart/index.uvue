@@ -47,6 +47,7 @@ import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-t
 import { musicApi } from "@/services/music-api";
 import { packsFingerprint, SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
 import { useSourceStore } from "@/stores/source";
+import { useSourceRegistryStore } from "@/stores/source-registry";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { platformLabel } from "@/services/platform";
@@ -56,15 +57,18 @@ const themeStore = useThemeStore();
 const sourceStore = useSourceStore();
 const layout = useQtLayout();
 
-const sources: Source[] = ["wyy", "qq", "kw", "kg"];
-const sourceLabels = sources.map((s) => platformLabel(s));
+// 音源清单来自数据包注册表：注册表异步加载完成后由 watch 同步选中项
+const sourceRegistry = useSourceRegistryStore();
+const sources = computed<Source[]>(() => sourceRegistry.sourceIds() as Source[]);
+const sourceLabels = computed<string[]>(() => sources.value.map((s) => platformLabel(s)));
 const sourceIndex = ref(0);
 const loading = ref(false);
 const allCharts = ref<Chart[]>([]);
 
 // 非响应式：仅切源时读一次用于恢复位置。滚动中只写普通变量、不更新 ref，
 // 否则 :scroll-top 会被每帧回写，触发整棵列表子树重渲染（下滑卡顿根因）。
-const scrollPositions: number[] = [0, 0, 0, 0];
+// 长度跟随注册表（源数不再写死），越界读取返回 0。
+let scrollPositions: number[] = [];
 const scrollTop = ref(0);
 const showBackToTop = ref(false);
 function onListScroll(e: any): void {
@@ -123,7 +127,8 @@ const chartCardWidth = computed<number>(() => {
 const gridStyle = computed<string>(() => layout.isWide && scrollWidth.value > 0 ? "width:" + scrollWidth.value + "px;" : "");
 
 const filteredCharts = computed<Chart[]>(() => {
-  const currentSource = sources[sourceIndex.value];
+  const currentSource = sources.value[sourceIndex.value];
+  if (currentSource == null) return [];
   return allCharts.value.filter((chart) => chart.platform === currentSource);
 });
 
@@ -133,6 +138,15 @@ let loadedPackFp = "";
 function onSourceChange(index: number): void {
   sourceIndex.value = index;
   scrollTop.value = scrollPositions[index] ?? 0;
+}
+
+/** 注册表源清单变化（异步加载/换包）后同步选中项与滚动位置数组长度 */
+function syncSourceIndex(): void {
+  const ids = sources.value;
+  if (ids.length == 0) return;
+  if (scrollPositions.length < ids.length) scrollPositions = ids.map(() => 0);
+  const idx = ids.indexOf(sourceStore.current);
+  sourceIndex.value = idx >= 0 ? idx : 0;
 }
 
 /** 拉全量榜单（onMounted/onShow/包变更广播共用），完成后记录包态指纹 */
@@ -178,11 +192,14 @@ function onPacksChanged(): void {
 
 onMounted(() => {
   sourceStore.restore();
-  const current = sourceStore.current;
-  const idx = sources.indexOf(current);
-  if (idx >= 0) sourceIndex.value = idx;
+  sourceRegistry.ensure();
+  syncSourceIndex();
   loadAll();
   uni.$on(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
+});
+// 注册表异步加载完成（或换包后清单变化）时重选当前音源对应 tab
+watch(() => sources.value.length, () => {
+  syncSourceIndex();
 });
 // 页面停留时旋转屏幕：窗口尺寸变化后重测网格宽度，列数/卡宽随之刷新
 watch(
@@ -196,11 +213,10 @@ watch(
 );
 onShow(() => {
   sourceStore.restore();
+  sourceRegistry.ensure();
   // 空列表 or 音源包态变化（安装/更新/卸载/启停）时重拉，其余停留在原地
   if (allCharts.value.length == 0 || loadedPackFp != packsFingerprint()) {
-    const current = sourceStore.current;
-    const idx = sources.indexOf(current);
-    if (idx >= 0) sourceIndex.value = idx;
+    syncSourceIndex();
     loadAll();
   }
 });

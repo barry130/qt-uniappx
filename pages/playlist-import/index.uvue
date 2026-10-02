@@ -131,12 +131,13 @@ import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-fr
 import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
 import QtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import { onLoad, onBackPress } from "@dcloudio/uni-app";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { musicApi } from "@/services/music-api";
 import { usePlayerStore } from "@/stores/player";
+import { useSourceRegistryStore } from "@/stores/source-registry";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
 import type { Playlist } from "@/types/music";
 import type { Source } from "@/services/music-api";
@@ -144,6 +145,7 @@ import type { Source } from "@/services/music-api";
 const themeStore = useThemeStore();
 const layout = useQtLayout();
 const player = usePlayerStore();
+const registry = useSourceRegistryStore();
 
 /** 0 收藏歌单（收藏远程引用）/ 1 导入歌曲（拷贝进自建歌单） */
 const modeTag = ref(0);
@@ -156,13 +158,14 @@ const importDone = ref(false);
 const importProgress = ref("");
 /** 本次导入的总歌数（锁定层文案用） */
 const importTotal = ref(0);
-/** 平台选择：0 自动识别，1-4 固定平台 */
+/** 平台选择：0 自动识别，其余为数据包注册表声明的音源（顺序同切换器） */
 const platIndex = ref(0);
 const platOpen = ref(false);
-const platLabels: string[] = ["自动识别（链接）", "网易云", "QQ音乐", "酷狗", "酷我"];
+// 音源清单来自数据包注册表：未装包时只剩「自动识别」（链接解析仍可用）
+const platLabels = computed<string[]>(() => ["自动识别（链接）"].concat(registry.sources.map((s) => s.name)));
 /** 解析平台与手选不一致时的说明（带链接时域名优先） */
 const platNote = ref("");
-const platValues: string[] = ["", "wyy", "qq", "kg", "kw"];
+const platValues = computed<string[]>(() => [""].concat(registry.sourceIds()));
 
 // 拉取/导入进行中禁系统返回（导航栏返回与手势都走这里）
 onBackPress((_options: OnBackPressOptions): boolean => {
@@ -226,26 +229,30 @@ const hintText = computed((): string => {
     modeTag.value == 0
       ? "粘贴歌单分享链接或 ID，把远程歌单收藏进收藏夹，歌单内容跟随远程更新。"
       : "粘贴歌单分享链接或 ID，拉取全部歌曲拷贝进我的自建歌单，导入后与远程歌单互不影响。";
-  return head + "仅支持" + platLabels.slice(1).join("、") + "四个平台。";
+  const names = platLabels.value.slice(1);
+  return head + (names.length > 0 ? "仅支持" + names.join("、") + "。" : "安装数据包后可选平台。");
 });
 /** 平台行下方常驻注明：当前选择下该填链接还是歌单 ID */
 const platFormatHint = computed((): string => {
   if (platIndex.value == 0) {
     return "输入歌单分享链接，按链接域名自动识别平台；也可以直接填纯数字歌单 ID。";
   }
-  return "输入" + platLabels[platIndex.value] + "的纯数字歌单 ID；粘贴链接时仍按链接域名识别，以链接为准。";
+  return "输入" + platLabels.value[platIndex.value] + "的纯数字歌单 ID；粘贴链接时仍按链接域名识别，以链接为准。";
 });
 
 function platLabel(p: string): string {
-  if (p == "wyy") return "网易云";
-  if (p == "qq") return "QQ音乐";
-  if (p == "kw") return "酷我";
-  if (p == "kg") return "酷狗";
-  return p;
+  return registry.label(p);
 }
 
 onLoad(() => {
   qtTrackPage("pages/playlist-import/index");
+  // 平台清单来自数据包注册表：装载后刷新可选平台（未装包只剩自动识别）
+  registry.ensure();
+});
+
+// 换包/注册表加载后清单变短时，把手选平台收回「自动识别」，避免选中越界
+watch(() => platValues.value.length, () => {
+  if (platIndex.value >= platValues.value.length) platIndex.value = 0;
 });
 
 /** 切 tag：清掉上一步的结果，输入与平台选择保留（同一条链接两种去向） */
@@ -273,7 +280,7 @@ function parseInput(): { platform: Source; id: string } | null {
     uni.showToast({ title: "请先粘贴歌单链接", icon: "none" });
     return null;
   }
-  const sel = platValues[platIndex.value];
+  const sel = platValues.value[platIndex.value] ?? "";
   const parsed =
     sel.length > 0
       ? musicApi.parsePlaylistInput(text, sel as Source)
@@ -290,7 +297,7 @@ async function onParse(): Promise<void> {
   if (parsing.value || importing.value) return;
   const parsed = parseInput();
   if (parsed == null) return;
-  const sel = platValues[platIndex.value];
+  const sel = platValues.value[platIndex.value] ?? "";
   platNote.value =
     sel.length > 0 && parsed.platform != sel
       ? "已按链接识别为" + platLabel(parsed.platform) + "，未按手选的" + platLabel(sel) + "解析"

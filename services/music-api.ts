@@ -49,7 +49,18 @@ export function isPlayUrlStale(song: Song): boolean {
   return Date.now() - at > PLAY_URL_TTL;
 }
 
-export type Source = "wyy" | "qq" | "kw" | "kg";
+/**
+ * 音源 id。清单不再内置：由数据包经 `__qtEntries.sourceRegistry()` 动态声明
+ * （见 stores/source-registry.ts），新增/下线音源只发新数据包。这里保持 string
+ * 别名是为了让存量代码继续以 Source 语义传递 id。
+ */
+export type Source = string;
+/** 数据包注册表里的一个音源（展示名沿用匿名口径，由包声明） */
+export type RegistrySource = { id: string; name: string; short: string; color: string };
+/** 数据包注册表里的一个音质档位 */
+export type RegistryQuality = { id: string; name: string };
+/** 数据包注册表（音源清单 + 音质档位；宿主 UI 选项的唯一来源） */
+export type SourceRegistry = { sources: RegistrySource[]; qualities: RegistryQuality[] };
 export type Banner = {
   id: string;
   picUrl: string;
@@ -220,6 +231,39 @@ export class MusicApi {
   private async engineInvoke(name: string, args: UTSJSONObject): Promise<UTSJSONObject> {
     const raw = await invokeSource(name, JSON.stringify([args]));
     return parseJsonToUtso(raw);
+  }
+
+  /**
+   * 数据包注册表（音源清单 + 音质档位）。调用方：stores/source-registry.ts。
+   * 未装数据包 / 旧版包（无 sourceRegistry 入口）/ 引擎未就绪 → null，
+   * 调用方据此把音源列表置空并引导去设置页安装，本地音乐不受影响。
+   */
+  async sourceRegistry(): Promise<SourceRegistry | null> {
+    try {
+      const response = await this.engineInvoke("sourceRegistry", new UTSJSONObject());
+      const rawSources = response.get("sources") as UTSJSONObject[] | null;
+      const rawQualities = response.get("qualities") as UTSJSONObject[] | null;
+      if (rawSources == null || rawQualities == null) return null;
+      const sources: RegistrySource[] = [];
+      for (let i = 0; i < rawSources.length; i++) {
+        const item = rawSources[i];
+        sources.push({
+          id: this.strOf(item.get("id")),
+          name: this.strOf(item.get("name")),
+          short: this.strOf(item.get("short")),
+          color: this.strOf(item.get("color")),
+        });
+      }
+      const qualities: RegistryQuality[] = [];
+      for (let i = 0; i < rawQualities.length; i++) {
+        const item = rawQualities[i];
+        qualities.push({ id: this.strOf(item.get("id")), name: this.strOf(item.get("name")) });
+      }
+      if (sources.length == 0) return null;
+      return { sources, qualities };
+    } catch (_) {
+      return null;
+    }
   }
 
   private strOf(v: any): string {

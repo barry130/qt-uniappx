@@ -188,6 +188,7 @@ import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtPlaylistPicker from "@/uni_modules/qt-ui/components/qt-playlist-picker/qt-playlist-picker.uvue";
 import { usePlayerStore } from "@/stores/player";
 import { useDownloadsStore } from "@/stores/downloads";
+import { useSourceRegistryStore } from "@/stores/source-registry";
 import { useShareCardStore } from "@/stores/share-card";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { audioPlayer } from "@/services/audio-player";
@@ -199,6 +200,7 @@ import type { Song, LyricLine } from "@/types/music";
 
 const player = usePlayerStore();
 const downloads = useDownloadsStore();
+const sourceRegistry = useSourceRegistryStore();
 const shareCard = useShareCardStore();
 const theme = useThemeStore();
 const showLyric = ref(false);
@@ -1151,8 +1153,8 @@ function showPlayUrl(): void {
     },
   });
 }
-const SOURCE_LABELS: Record<string, string> = { wyy: "音源一", qq: "音源二", kw: "音源三", kg: "音源四" };
-const SOURCES: string[] = ["wyy", "qq", "kw", "kg"];
+// 跨源兜底候选清单来自数据包注册表（音质切换失败时按序尝试其他源）
+const SOURCES = computed<string[]>(() => sourceRegistry.sourceIds());
 
 function modeIconName(): string {
   if (player.mode == "random") return "shuffle";
@@ -1163,15 +1165,19 @@ function modeIconName(): string {
 async function switchQuality(): Promise<void> {
   const current = player.current;
   if (current == null) return;
-  const qualities = ["128", "320", "flac"];
-  const labels = ["标准 128k", "高品 320k", "无损 FLAC"];
+  // 音质档位来自数据包注册表（未装包为空 → 提示去设置页安装）
+  const qualities = sourceRegistry.qualities;
+  if (qualities.length == 0) {
+    uni.showToast({ title: "请先在 设置→音源包管理 安装数据包", icon: "none" });
+    return;
+  }
   // 打开面板时标注当前音质（后缀 + 高亮），用户能直接看出现在播的是哪一档
-  const qActions: SheetAction[] = qualities.map((q, i) => ({
-    name: labels[i] + (q == player.quality ? "（当前）" : ""),
-    color: q == player.quality ? theme.skin.accent : "",
+  const qActions: SheetAction[] = qualities.map((q) => ({
+    name: q.name + (q.id == player.quality ? "（当前）" : ""),
+    color: q.id == player.quality ? theme.skin.accent : "",
   }));
   openActionSheet("选择音质", qActions, async (_action, index) => {
-    const quality = qualities[index];
+    const quality = qualities[index].id;
     try {
       // 直接为当前歌曲获取新音质，不修改全局 player.quality
       const newUrl = await musicApi.playUrl(current, quality);
@@ -1181,7 +1187,7 @@ async function switchQuality(): Promise<void> {
       }
       current.url = newUrl;
       uni.showToast({
-        title: "音质已切换为 " + labels[index],
+        title: "音质已切换为 " + qualities[index].name,
         icon: "none",
       });
       // 重新播放当前歌曲（保持当前播放进度）
@@ -1189,7 +1195,7 @@ async function switchQuality(): Promise<void> {
       return;
     } catch (_) {
       // 如果当前平台不支持该音质，尝试从其他平台搜索替换
-      const others = SOURCES.filter((s) => s != current.platform);
+      const others = SOURCES.value.filter((s) => s != current.platform);
       for (let i = 0; i < others.length; i++) {
         const target = others[i];
         try {
@@ -1210,7 +1216,7 @@ async function switchQuality(): Promise<void> {
             const newUrl = await musicApi.playUrl(current, quality);
             if (newUrl.length > 0) {
               current.url = newUrl;
-              uni.showToast({ title: "已切换至" + SOURCE_LABELS[target] + " " + quality, icon: "none" });
+              uni.showToast({ title: "已切换至" + platformShortName() + " " + quality, icon: "none" });
               player.play(current, player.queue, true);
               return;
             }

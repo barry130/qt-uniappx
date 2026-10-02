@@ -167,6 +167,7 @@ import { desktopLyric } from "@/services/desktop-lyric";
 import { usePlayerStore } from "@/stores/player";
 import { useDownloadsStore } from "@/stores/downloads";
 import { useSourceStore } from "@/stores/source";
+import { useSourceRegistryStore } from "@/stores/source-registry";
 import { platformLabel } from "@/services/platform";
 import { engineStatus, loadedPlayPackId, playPackReady } from "@/services/source-engine";
 import { activePack, activeMetaPack } from "@/services/source-bundle-fs";
@@ -176,6 +177,7 @@ import { clearCachedMe } from "@/services/user-cache";
 const player = usePlayerStore();
 const downloads = useDownloadsStore();
 const sourceStore = useSourceStore();
+const registry = useSourceRegistryStore();
 const layout = useQtLayout();
 const theme = useThemeStore();
 const groupStyle = computed<string>(() => "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";");
@@ -183,7 +185,7 @@ const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.div
 const rates: number[] = [0.75, 1.0, 1.25, 1.5, 2.0];
 const currentRate = ref(audioPlayer.rate);
 const sleepMinutes = ref(0);
-const sources: string[] = ["wyy", "qq", "kw", "kg"];
+const sources = computed<string[]>(() => registry.sourceIds());
 // 音源包：状态都在非响应式的 service 里，用 sourceRefresh 做一次重算触发
 const sourceRefresh = ref(0);
 // 「有新音源包」红点：检查下载后亮，立即应用 / 下次启动自动装载后灭
@@ -215,6 +217,7 @@ onShow(() => {
   currentRate.value = audioPlayer.rate;
   concurrentMode.value = audioPlayer.getConcurrentMode();
   sourceStore.restore();
+  registry.ensure();
   sourceUpdateStore.refresh();
   sourceRefresh.value++;
   // 从系统授权页返回时刷新开关状态（去授权前开关先记为开，返回后真实生效状态以权限为准）
@@ -236,11 +239,16 @@ function sourceText(): string {
   return platformLabel(sourceStore.current);
 }
 function showSource(): void {
-  openSheet("默认音源", sources.map((s) => ({
+  const list = sources.value;
+  if (list.length == 0) {
+    uni.showToast({ title: "请先在 设置→音源包管理 安装数据包", icon: "none" });
+    return;
+  }
+  openSheet("默认音源", list.map((s) => ({
     name: platformLabel(s),
     color: s == sourceStore.current ? theme.skin.accent : undefined,
   })), (index) => {
-    pickSource(sources[index]);
+    pickSource(list[index]);
   });
 }
 function pickSource(s: string): void {
@@ -342,16 +350,12 @@ function showConcurrent(): void {
   });
 }
 
-const qualityOptions: { value: string; name: string }[] = [
-  { value: "128", name: "标准 128k" },
-  { value: "320", name: "高品 320k" },
-  { value: "flac", name: "无损 FLAC" },
-];
+// 音质档位来自数据包注册表（未装包为空 → 打开时提示安装）
+const qualityOptions = computed<{ value: string; name: string }[]>(() =>
+  registry.qualities.map((q) => ({ value: q.id, name: q.name }))
+);
 function qualityLabel(q: string): string {
-  for (let i = 0; i < qualityOptions.length; i++) {
-    if (qualityOptions[i].value == q) return qualityOptions[i].name;
-  }
-  return "高品 320k";
+  return registry.qualityLabel(q);
 }
 function playQualityText(): string {
   return qualityLabel(player.quality);
@@ -360,21 +364,31 @@ function downloadQualityText(): string {
   return qualityLabel(downloads.downloadQuality);
 }
 function showPlayQuality(): void {
-  openSheet("播放默认音质", qualityOptions.map((opt) => ({
+  const opts = qualityOptions.value;
+  if (opts.length == 0) {
+    uni.showToast({ title: "请先在 设置→音源包管理 安装数据包", icon: "none" });
+    return;
+  }
+  openSheet("播放默认音质", opts.map((opt) => ({
     name: opt.name,
     color: opt.value == player.quality ? theme.skin.accent : undefined,
   })), (index) => {
-    player.setQuality(qualityOptions[index].value);
-    uni.showToast({ title: "播放音质：" + qualityOptions[index].name, icon: "none" });
+    player.setQuality(opts[index].value);
+    uni.showToast({ title: "播放音质：" + opts[index].name, icon: "none" });
   });
 }
 function showDownloadQuality(): void {
-  openSheet("下载默认音质", qualityOptions.map((opt) => ({
+  const opts = qualityOptions.value;
+  if (opts.length == 0) {
+    uni.showToast({ title: "请先在 设置→音源包管理 安装数据包", icon: "none" });
+    return;
+  }
+  openSheet("下载默认音质", opts.map((opt) => ({
     name: opt.name,
     color: opt.value == downloads.downloadQuality ? theme.skin.accent : undefined,
   })), (index) => {
-    downloads.setDownloadQuality(qualityOptions[index].value);
-    uni.showToast({ title: "下载音质：" + qualityOptions[index].name, icon: "none" });
+    downloads.setDownloadQuality(opts[index].value);
+    uni.showToast({ title: "下载音质：" + opts[index].name, icon: "none" });
   });
 }
 

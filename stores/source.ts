@@ -3,8 +3,8 @@ import { reactive } from "vue";
 const SOURCE_KEY = "qt-source";
 
 class SourceStore {
+  /** 启动默认（注册表加载后若不在数据包清单内，会被纠正为第一个音源） */
   current = "wyy";
-  private sources: string[] = ["wyy", "qq", "kw", "kg"];
 
   restore(): void {
     try {
@@ -14,8 +14,12 @@ class SourceStore {
     } catch (_) {}
   }
 
+  /**
+   * 写入当前音源。清单在数据包注册表里（stores/source-registry.ts），
+   * UI 只会传注册表里的 id；换包后存量值的有效性由注册表的
+   * validateCurrentSource 纠正，这里不做本端校验。
+   */
   setSource(source: string): void {
-    if (this.sources.indexOf(source) < 0) return;
     this.current = source;
     try {
       uni.setStorageSync(SOURCE_KEY, source);
