@@ -45,6 +45,7 @@ import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import { musicApi } from "@/services/music-api";
+import { packsFingerprint, SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
 import { useSourceStore } from "@/stores/source";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
@@ -126,12 +127,17 @@ const filteredCharts = computed<Chart[]>(() => {
   return allCharts.value.filter((chart) => chart.platform === currentSource);
 });
 
+/** 上次加载时的包态指纹：音源包安装/更新/卸载/启停后变化，整页重拉 */
+let loadedPackFp = "";
+
 function onSourceChange(index: number): void {
   sourceIndex.value = index;
   scrollTop.value = scrollPositions[index] ?? 0;
 }
 
+/** 拉全量榜单（onMounted/onShow/包变更广播共用），完成后记录包态指纹 */
 async function loadAll(): Promise<void> {
+  loadedPackFp = packsFingerprint();
   loading.value = true;
   allCharts.value = [];
   try {
@@ -165,12 +171,18 @@ function openChart(chart: Chart): void {
   });
 }
 
+/** 音源包变更广播：App 层更新弹窗确认时收不到 onShow，事件实时重拉 */
+function onPacksChanged(): void {
+  loadAll();
+}
+
 onMounted(() => {
   sourceStore.restore();
   const current = sourceStore.current;
   const idx = sources.indexOf(current);
   if (idx >= 0) sourceIndex.value = idx;
   loadAll();
+  uni.$on(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
 });
 // 页面停留时旋转屏幕：窗口尺寸变化后重测网格宽度，列数/卡宽随之刷新
 watch(
@@ -184,7 +196,8 @@ watch(
 );
 onShow(() => {
   sourceStore.restore();
-  if (allCharts.value.length == 0) {
+  // 空列表 or 音源包态变化（安装/更新/卸载/启停）时重拉，其余停留在原地
+  if (allCharts.value.length == 0 || loadedPackFp != packsFingerprint()) {
     const current = sourceStore.current;
     const idx = sources.indexOf(current);
     if (idx >= 0) sourceIndex.value = idx;
@@ -197,6 +210,7 @@ onUnmounted(() => {
     if (t != null) clearTimeout(t);
   }
   gridTimers = [];
+  uni.$off(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
 });
 </script>
 

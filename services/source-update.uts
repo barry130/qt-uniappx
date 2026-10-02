@@ -38,6 +38,7 @@ import {
   packs,
   packById,
   activePack,
+  activeMetaPack,
   setActive,
   setActiveMeta,
   putPack,
@@ -76,6 +77,7 @@ import {
   getPlayUrlByEngine,
   verifyPlayableByEngine,
   loadedPlayPackId,
+  loadedPlayPackCode,
   playPackReady,
   loadFailureKind,
   lastEngineError,
@@ -101,6 +103,44 @@ const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const PLAY_PACK_FACTORY_MARKER = "__qtPlayPackFactory";
 /** 头部探测的 Range 上限（包头行远小于此；200 全量应答也能直接用） */
 const PROBE_RANGE_BYTES = 4096;
+
+// ==================== 包变更广播（页面重拉数据用） ====================
+
+/**
+ * 包集合/引擎内容变更广播：安装（含更新）/卸载/启停/切换**成功后**发出，
+ * 持有音源数据的页面（home/search/playlists/daily/artist/chart）监听后重拉，
+ * 避免「装完新包，页面还举着旧包甚至旧『未装』状态的数据」。
+ * 与 packsFingerprint() 互补：事件覆盖「当前正显示的页面」（如 App 层更新
+ * 弹窗确认时页面没有 onShow），指纹覆盖事件够不着的角落（onShow 兜底比对）。
+ */
+export const SOURCE_PACKS_CHANGED_EVENT = "qt-source-packs-changed";
+
+/** 包变更纪元（每次 bump +1，诊断日志用；页面判定走 packsFingerprint） */
+let gPacksEpoch = 0;
+
+/**
+ * 包态指纹：音源页无需关心细节，只要求「任何安装/更新/卸载/启停/切换」
+ * 都会改变它。派生自本地状态而非事件计数——不依赖每个出口记得 bump，
+ * 不存在漏报；页面 onShow 时与上次比对，不同即重拉。
+ */
+export function packsFingerprint(): string {
+  const st = localState();
+  const meta = activeMetaPack();
+  const play = activePack();
+  return `${st.activeMetaId}@${meta != null ? meta.versionCode : -1}|${st.activeId}@${play != null ? play.versionCode : -1}|${st.packs.length}`;
+}
+
+/**
+ * 包变更落地后调用：纪元 +1、清播放地址缓存（旧包取的地址不再可靠）、
+ * 广播事件。统一在这里清缓存——meta 变更虽然不动已取的播放 URL，但
+ * 统一清代价为零（下播重新取链），换来「任何包变更后缓存必干净」。
+ */
+function bumpPacksChanged(): void {
+  gPacksEpoch++;
+  musicApi.clearPlayUrlCache();
+  uni.$emit(SOURCE_PACKS_CHANGED_EVENT);
+  console.log(`[SourceUpdate] 包态已变更（epoch ${gPacksEpoch}），广播页面重拉`);
+}
 
 // ==================== 可用更新（提示 + 手动确认） ====================
 
@@ -479,6 +519,7 @@ async function installPackText(
       // 新版本已替换落盘（旧失败记录针对的是旧文件，清掉）；生效位是别的包，等用户切换
       await clearPackError(id);
       syncSourceUpdateBadge();
+      bumpPacksChanged();
       return applyResult(
         true,
         header.versionCode,
@@ -490,14 +531,18 @@ async function installPackText(
     if (!smoke.ok && isUpdate) {
       await rollbackPack(old, id, prevPath, mainPath);
       await notePackError(id, smoke.message);
+      bumpPacksChanged();
       return applyResult(false, header.versionCode, `${smoke.message}；已回滚到 ${old != null ? old.versionName : "未安装"}`);
     }
     if (!smoke.ok) {
-      // 手动重装失败：保留文件由用户决定（可能是环境问题），仅提示
+      // 手动重装失败：保留文件由用户决定（可能是环境问题），仅提示。
+      // 播放层可能已被换成新代码（注入成功冒烟不过），照样广播重拉
+      bumpPacksChanged();
       return smoke;
     }
     await clearPackError(id);
     syncSourceUpdateBadge();
+    bumpPacksChanged();
     return applyResult(
       true,
       header.versionCode,
@@ -509,6 +554,7 @@ async function installPackText(
   const metaCanActivate = state.activeMetaId.length == 0 || state.activeMetaId == id;
   if (!metaCanActivate) {
     await clearPackError(id);
+    bumpPacksChanged();
     return applyResult(
       true,
       header.versionCode,
@@ -525,6 +571,7 @@ async function installPackText(
       await rollbackPack(old, id, prevPath, mainPath);
       await reloadEngineMeta();
       await notePackError(id, `装载未通过（${detail}）`);
+      bumpPacksChanged();
       return applyResult(
         false,
         header.versionCode,
@@ -534,10 +581,12 @@ async function installPackText(
       );
     }
     await notePackError(id, `装载未通过（${detail}）`);
+    bumpPacksChanged();
     return applyResult(false, header.versionCode, `数据包装载未通过：${detail}（可卸载后重装）`);
   }
   await clearPackError(id);
   syncSourceUpdateBadge();
+  bumpPacksChanged();
   return applyResult(
     true,
     header.versionCode,
@@ -594,7 +643,8 @@ export async function applyActivePack(smokeSongs: Song[]): Promise<SourceApplyRe
   if (pack == null) {
     return applyResult(false, 0, "未选择播放音源包：请在列表中启用一个，或先安装");
   }
-  if (playPackReady() && loadedPlayPackId() == pack.id) {
+  // 幂等早退必须同看 id 与 versionCode：同 id 更新（原地替换）id 不变、代码已换
+  if (playPackReady() && loadedPlayPackId() == pack.id && loadedPlayPackCode() == pack.versionCode) {
     return applyResult(true, pack.versionCode, "该版本已在生效中");
   }
   const loaded = await ensurePlayPackLoaded();
@@ -611,12 +661,14 @@ export async function applyActivePack(smokeSongs: Song[]): Promise<SourceApplyRe
   const smoke = await smokeTest(smokeSongs);
   if (!smoke.ok) {
     await notePackError(pack.id, `冒烟自检未通过：${smoke.message}`);
+    bumpPacksChanged();
     return applyResult(false, pack.versionCode, `冒烟自检未通过（包已保留在列表，可直接试播）：${smoke.message}`);
   }
   // 新包真正生效：清掉前端播放地址缓存，否则旧链路的地址会继续用满 10 分钟 TTL
   musicApi.clearPlayUrlCache();
   await clearPackError(pack.id);
   syncSourceUpdateBadge();
+  bumpPacksChanged();
   return applyResult(true, pack.versionCode, `播放音源包已生效：${pack.name} ${pack.versionName}`);
 }
 
@@ -637,10 +689,12 @@ export async function activatePack(id: string, smokeSongs: Song[]): Promise<Sour
       await setActiveMeta("");
       await reloadEngineMeta();
       await notePackError(id, `装载未通过：${lastEngineError()}`);
+      bumpPacksChanged();
       return applyResult(false, pack.versionCode, `数据包装载未通过：${lastEngineError()}（已停用，可重装或另选）`);
     }
     await clearPackError(id);
     syncSourceUpdateBadge();
+    bumpPacksChanged();
     return applyResult(true, pack.versionCode, `数据包已生效：${pack.name} ${pack.versionName}`);
   }
   if (!(await setActive(id))) {
@@ -662,6 +716,7 @@ export async function deactivateMetaPack(): Promise<SourceApplyResult> {
   }
   await reloadEngineMeta();
   syncSourceUpdateBadge();
+  bumpPacksChanged();
   return applyResult(true, 0, "已停用数据包（在线搜索/歌单/歌词及在线播放不可用，本地音乐不受影响）");
 }
 
@@ -684,6 +739,7 @@ export async function uninstallPack(id: string): Promise<SourceApplyResult> {
     musicApi.clearPlayUrlCache();
     dropOffer(id);
     syncSourceUpdateBadge();
+    bumpPacksChanged();
     return applyResult(true, pack.versionCode, `已卸载 ${pack.name}（数据包已停用，在线搜索/歌单/歌词及在线播放不可用）`);
   }
   if (loadedPlayPackId() == id) {
@@ -696,6 +752,7 @@ export async function uninstallPack(id: string): Promise<SourceApplyResult> {
   musicApi.clearPlayUrlCache();
   dropOffer(id);
   syncSourceUpdateBadge();
+  bumpPacksChanged();
   return applyResult(true, pack.versionCode, `已卸载 ${pack.name} ${pack.versionName}`);
 }
 

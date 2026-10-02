@@ -192,6 +192,7 @@ import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-t
 import qtUpgradePopup from "@/uni_modules/qt-ui/components/qt-upgrade-popup/qt-upgrade-popup.uvue";
 import QtMetaPackGuide from "@/uni_modules/qt-ui/components/qt-meta-pack-guide/qt-meta-pack-guide.uvue";
 import { musicApi } from "@/services/music-api";
+import { packsFingerprint, SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
 import { ensureLocalStateRestored } from "@/services/source-bundle-fs";
 import { usePlayerStore } from "@/stores/player";
 import { useSourceStore } from "@/stores/source";
@@ -288,6 +289,7 @@ onUnmounted(() => {
     clearTimeout(upgradeTimer);
     upgradeTimer = null;
   }
+  uni.$off(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
 });
 function onUpgradeClosed(): void {
   upgradeVisible.value = false;
@@ -317,6 +319,8 @@ const playlists = ref<Playlist[]>([]);
 const songs = ref<Song[]>([]);
 const charts = ref<Chart[]>([]);
 let loadedSource = "";
+/** 上次加载时的包态指纹：安装/更新/卸载/启停音源包后指纹变化，触发整页重拉 */
+let loadedPackFp = "";
 // 加载序号：快速切音源时旧音源的慢响应晚到，不得覆盖新音源的首页数据（写回前比对）
 let homeLoadSeq = 0;
 
@@ -354,12 +358,21 @@ async function load(): Promise<void> {
   await latestTask;
 }
 function ensureLoad(): void {
-  if (loadedSource == sourceStore.current) return;
+  const fp = packsFingerprint();
+  if (loadedSource == sourceStore.current && loadedPackFp == fp) return;
   loadedSource = sourceStore.current;
+  loadedPackFp = fp;
   playlists.value = [];
   songs.value = [];
   charts.value = [];
   load();
+}
+/**
+ * 音源包变更（安装/更新/卸载/启停）广播：App 层更新弹窗确认时页面收不到
+ * onShow，靠事件实时重拉；藏在页面栈底时也照样拉，回到时即已就绪。
+ */
+function onPacksChanged(): void {
+  ensureLoad();
 }
 /**
  * 数据包安装引导（未装数据包时弹一次的全屏引导）：metaMissing 由
@@ -394,6 +407,7 @@ onMounted(() => {
   ensureLoad();
   refreshSourcePackState();
   applyNoticeBar();
+  uni.$on(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
 });
 onShow(() => {
   qtTrackPage("pages/home/index");

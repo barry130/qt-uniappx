@@ -100,6 +100,7 @@ import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-fr
 import { ref, computed, onMounted, onUnmounted } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import { musicApi } from "@/services/music-api";
+import { packsFingerprint, SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
 import { useSourceStore } from "@/stores/source";
 import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
@@ -222,6 +223,8 @@ function backToTop() {
   showBackToTop.value = false;
 }
 let loadedSource = "";
+/** 上次加载时的包态指纹：音源包安装/更新/卸载/启停后变化，分类+列表整页重拉 */
+let loadedPackFp = "";
 
 /** 1rpx 对应的 px 值 */
 const unit = computed((): number => screenWidth.value / 750);
@@ -432,8 +435,10 @@ async function loadMore(): Promise<void> {
 }
 
 async function ensureLoad(): Promise<void> {
-  if (loadedSource == sourceStore.current) return;
+  const fp = packsFingerprint();
+  if (loadedSource == sourceStore.current && loadedPackFp == fp) return;
   loadedSource = sourceStore.current;
+  loadedPackFp = fp;
   const source = sourceStore.current;
   selectedCategory.value = "";
   playlists.value = [];
@@ -463,12 +468,18 @@ function openPlaylist(list: Playlist): void {
   });
 }
 
+/** 音源包变更广播：App 层更新弹窗确认时收不到 onShow，事件实时重拉 */
+function onPacksChanged(): void {
+  ensureLoad();
+}
+
 onMounted(() => {
   sourceStore.restore();
   try {
     screenWidth.value = uni.getWindowInfo().windowWidth;
   } catch (_) {}
   ensureLoad();
+  uni.$on(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
   // 首帧 list-view 还没完成布局，晚一点量（measureViewport 内部还有重试）
   viewportTimers.push(setTimeout(() => {
     measureViewport();
@@ -485,6 +496,7 @@ onUnmounted(() => {
     if (t != null) clearTimeout(t);
   }
   viewportTimers = [];
+  uni.$off(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
 });
 </script>
 

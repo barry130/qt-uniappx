@@ -311,7 +311,7 @@
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { ref, reactive, computed, onMounted } from "vue";
+import { ref, reactive, computed, onMounted, onUnmounted } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import QtSongRowLite from "@/uni_modules/qt-ui/components/qt-song-row-lite/qt-song-row-lite.uvue";
 import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
@@ -323,6 +323,7 @@ import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-act
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import { useSongSheet } from "@/composables/use-song-sheet";
 import { musicApi } from "@/services/music-api";
+import { packsFingerprint, SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
 import { usePlayerStore } from "@/stores/player";
 import { useSourceStore } from "@/stores/source";
 import { platformShort } from "@/services/platform";
@@ -384,6 +385,8 @@ function backToTop() {
 const { sheetVisible, sheetActions, openSheet, onSheetSelect, sheetTitle } =
   useSongSheet();
 let loadedSource = "";
+/** 上次加载时的包态指纹：音源包安装/更新/卸载/启停后变化，热词/结果重拉 */
+let loadedPackFp = "";
 // 搜索代号：每次新搜索/切音源 +1。切音源会连发多次搜索，慢返回的旧响应会覆盖新结果，
 // 表现为"切了音源页面却没反应"。所有异步写回前都校验代号是否仍是最新。
 let searchSeq = 0;
@@ -460,21 +463,31 @@ async function loadHot(): Promise<void> {
 
 function ensureSource(): void {
   const current = sourceStore.current;
-  if (loadedSource == current) return;
+  const fp = packsFingerprint();
+  if (loadedSource == current && loadedPackFp == fp) return;
   loadedSource = current;
+  loadedPackFp = fp;
   if (searched.value && keyword.value.trim().length > 0) doSearch();
   else loadHot();
+}
+/** 音源包变更广播：App 层更新弹窗确认时收不到 onShow，事件实时重拉 */
+function onPacksChanged(): void {
+  ensureSource();
 }
 
 onMounted(() => {
   sourceStore.restore();
   loadHistory();
   ensureSource();
+  uni.$on(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
 });
 onShow(() => {
   qtTrackPage("pages/search/index");
   sourceStore.restore();
   ensureSource();
+});
+onUnmounted(() => {
+  uni.$off(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
 });
 
 const emptyShowSong = computed(() => songs.value.length == 0);

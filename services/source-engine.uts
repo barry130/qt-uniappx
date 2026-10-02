@@ -532,9 +532,11 @@ async function loadMetaIntoEngine(): Promise<boolean> {
 /**
  * 确保「生效中的播放包已注入引擎」（幂等，并发单飞）。
  * 返回 false 表示「本次取不了链」：没有生效包 / 引擎起不来 / meta 没装上 /
- * 播放包注入失败。注意播放注入走 meta 的 installPlayPack 入口——**数据包
- * 未装时在线播放同样不可用**（ensureDataEngine 先行失败，gLastError 已给出
- * 指路文案）。没有生效播放包时广播 PLAY_PACK_MISSING_EVENT（节流），
+ * 播放包注入失败。记忆化必须**同时比对 id 与 versionCode**——同 id 的更新
+ * （manifest/自管渠道都是原地替换）id 不变但代码已换，只看 id 会把旧版本
+ * 留在引擎里冒充「已生效」。注意播放注入走 meta 的 installPlayPack 入口——
+ * **数据包未装时在线播放同样不可用**（ensureDataEngine 先行失败，gLastError
+ * 已给出指路文案）。没有生效播放包时广播 PLAY_PACK_MISSING_EVENT（节流），
  * 由 App.uvue 弹引导安装的提示。
  */
 export async function ensurePlayPackLoaded(): Promise<boolean> {
@@ -545,7 +547,7 @@ export async function ensurePlayPackLoaded(): Promise<boolean> {
     return false;
   }
   if (!(await ensureDataEngine())) return false;
-  if (gPlayPackLoadedId == pack.id && isHealthy()) return true;
+  if (gPlayPackLoadedId == pack.id && gPlayPackLoadedCode == pack.versionCode && isHealthy()) return true;
   if (gPlayPackFailedId == pack.id && isHealthy()) return false;
   const pending = gPlayPackPromise;
   if (pending != null) return pending;

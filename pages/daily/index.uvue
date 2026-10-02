@@ -62,7 +62,7 @@
 </template>
 <script setup lang="ts">
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
 import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
@@ -71,6 +71,7 @@ import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-act
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import { useSongSheet } from "@/composables/use-song-sheet";
 import { musicApi } from "@/services/music-api";
+import { packsFingerprint, SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
 import { usePlayerStore } from "@/stores/player";
 import { useSourceStore } from "@/stores/source";
 import { useThemeStore, qtOnAccentRgba } from "@/uni_modules/qt-ui/stores/theme";
@@ -98,6 +99,8 @@ const { sheetVisible, sheetActions, openSheet, onSheetSelect, sheetTitle } = use
 const songs = ref<Song[]>([]);
 const loading = ref(false);
 let loadedSource = "";
+/** 上次加载时的包态指纹：音源包安装/更新/卸载/启停后变化，整页重拉 */
+let loadedPackFp = "";
 
 // 强调色上的次级文字：onAccent 按透明度弱化一档（深色 onAccent / 白色 onAccent 都成立）
 const heroSubColor = computed((): string => qtOnAccentRgba(themeStore.skin, 0.78));
@@ -147,10 +150,17 @@ async function load(): Promise<void> {
 }
 
 function ensureLoad(): void {
-  if (loadedSource == sourceStore.current) return;
+  const fp = packsFingerprint();
+  if (loadedSource == sourceStore.current && loadedPackFp == fp) return;
   loadedSource = sourceStore.current;
+  loadedPackFp = fp;
   songs.value = [];
   load();
+}
+
+/** 音源包变更广播：App 层更新弹窗确认时收不到 onShow，事件实时重拉 */
+function onPacksChanged(): void {
+  ensureLoad();
 }
 
 async function play(song: Song): Promise<void> {
@@ -183,10 +193,14 @@ function playShuffle(): void {
 onMounted(() => {
   sourceStore.restore();
   ensureLoad();
+  uni.$on(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
 });
 onShow(() => {
   sourceStore.restore();
   ensureLoad();
+});
+onUnmounted(() => {
+  uni.$off(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
 });
 </script>
 
