@@ -180,8 +180,11 @@ schema 3 见 `services/source-bundle-fs.uts` 头注释。
 播放包全部由用户安装——官方与自定义机制完全一致（https 直链或本地 .js 文件，
 包头自述 id/版本/updateUrl，同 id 新版本原地替换，多包共存、activeId 指定生效包）。
 数据包（meta）内置基线开箱可用，也可安装更高版本（activeMetaId 生效，卸载回基线）。
-所有包的身份都是「自述 id + 安装渠道」：官方只是发布方推荐的 id
-（`play-official` / `meta-official`），不做内容级验签。
+所有包的身份都是「自述 id + 内容签名」：官方包是保留 id
+（`play-official` / `meta-official`）+ 发布私钥的 ed25519 尾部签名块
+（`__QT_SIGN__`），安装/更新时用 APK 内置 tweetnacl 公钥硬校验
+（`services/pack-signature.uts`），验不过直接拒绝；第三方包不签名、
+流程不变。
 
 > 注意：改了 UTS 插件后真机调试要重新编译该插件；`HBuilderX` 会按文件指纹跳过未变化的插件，
 > 必要时加 `--cleanCache true`。本插件已无原生库，不再需要为 `.so` 打自定义基座。
