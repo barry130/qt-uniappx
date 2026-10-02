@@ -104,6 +104,14 @@ export type SourcePackMeta = {
   skipCodes: number[];
   /** 上次探测 updateUrl 的时间（毫秒；按包独立节流） */
   lastProbeAt: number;
+  /** 安装来源：""（旧记录/未知） | "url" | "file" | "manifest"（展示与溯源用） */
+  installSource: string;
+  /** 来源备注：url=安装链接；file=文件名；manifest 留空 */
+  installRef: string;
+  /** 最近一次装载/冒烟失败原因（空 = 无记录；成功生效后清空） */
+  lastError: string;
+  /** lastError 时间（毫秒；0 = 无失败记录） */
+  lastErrorAt: number;
 };
 
 /** 本地状态（state.json，schema 3） */
@@ -480,6 +488,10 @@ export function clonePack(p: SourcePackMeta): SourcePackMeta {
     updatedAt: p.updatedAt,
     skipCodes: skip,
     lastProbeAt: p.lastProbeAt,
+    installSource: p.installSource,
+    installRef: p.installRef,
+    lastError: p.lastError,
+    lastErrorAt: p.lastErrorAt,
   } as SourcePackMeta;
 }
 
@@ -532,6 +544,40 @@ export async function setActiveMeta(id: string): Promise<boolean> {
   const next = cloneState(gState);
   next.activeMetaId = id;
   return saveLocalState(next);
+}
+
+/** 记录一个包最近一次装载/冒烟失败原因（管理页展示与诊断用；失败静默不抛） */
+export async function notePackError(id: string, message: string): Promise<void> {
+  if (id.length == 0 || message.length == 0) return;
+  if (packById(id) == null) return;
+  const next = cloneState(gState);
+  for (let i = 0; i < next.packs.length; i++) {
+    if (next.packs[i].id == id) {
+      next.packs[i].lastError = message;
+      next.packs[i].lastErrorAt = Date.now();
+    }
+  }
+  await saveLocalState(next);
+}
+
+/** 清掉一个包的失败记录（成功生效后调用） */
+export async function clearPackError(id: string): Promise<void> {
+  if (id.length == 0) return;
+  if (packById(id) == null) return;
+  const next = cloneState(gState);
+  for (let i = 0; i < next.packs.length; i++) {
+    if (next.packs[i].id == id) {
+      if (next.packs[i].lastError.length == 0 && next.packs[i].lastErrorAt == 0) return;
+      next.packs[i].lastError = "";
+      next.packs[i].lastErrorAt = 0;
+    }
+  }
+  await saveLocalState(next);
+}
+
+/** 官方包 id（astral manifest 发布的推荐 id）：直链/本地装到这些 id 时 UI 要提示防仿冒 */
+export function isOfficialPackId(id: string): boolean {
+  return id == OFFICIAL_PLAY_ID || id == OFFICIAL_META_ID;
 }
 
 /**
@@ -674,6 +720,10 @@ function packToJson(p: SourcePackMeta): UTSJSONObject {
   o.set("updatedAt", p.updatedAt);
   o.set("skipCodes", p.skipCodes);
   o.set("lastProbeAt", p.lastProbeAt);
+  o.set("installSource", p.installSource);
+  o.set("installRef", p.installRef);
+  o.set("lastError", p.lastError);
+  o.set("lastErrorAt", p.lastErrorAt);
   return o;
 }
 
@@ -685,6 +735,11 @@ function packFromJson(v: UTSJSONObject | null): SourcePackMeta | null {
   const meta = packFromJsonParts(id, kind.length > 0 ? kind : PACK_KIND_PLAY, v);
   meta.updatedAt = numOf(v, "updatedAt");
   meta.lastProbeAt = numOf(v, "lastProbeAt");
+  // 新增字段（schema 3 内追加，旧记录缺字段 → 默认值，向后兼容）
+  meta.installSource = strOf(v, "installSource");
+  meta.installRef = strOf(v, "installRef");
+  meta.lastError = strOf(v, "lastError");
+  meta.lastErrorAt = numOf(v, "lastErrorAt");
   const skip = v.get("skipCodes") as number[] | null;
   if (skip != null) {
     for (let i = 0; i < skip.length; i++) {
@@ -709,6 +764,10 @@ function packFromJsonParts(id: string, kind: string, v: UTSJSONObject): SourcePa
     updatedAt: numOf(v, "installedAt"),
     skipCodes: [] as number[],
     lastProbeAt: 0,
+    installSource: "",
+    installRef: "",
+    lastError: "",
+    lastErrorAt: 0,
   } as SourcePackMeta;
 }
 

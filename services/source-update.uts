@@ -45,6 +45,8 @@ import {
   isPackBadVersion,
   touchPackProbe,
   touchLastCheck,
+  notePackError,
+  clearPackError,
   ensureLocalStateRestored,
   ensurePackDir,
   writePackArtifact,
@@ -283,6 +285,7 @@ export async function applyUpdate(offer: PackUpdateOffer, smokeSongs: Song[]): P
     header.kind != offer.kind ||
     header.versionCode != offer.newCode
   ) {
+    await notePackError(offer.targetId, "更新包无效：文件头与发现的版本不符");
     return applyResult(false, offer.newCode, "更新包无效：文件头与发现的版本不符");
   }
   const result = await installPackText(
@@ -290,6 +293,8 @@ export async function applyUpdate(offer: PackUpdateOffer, smokeSongs: Song[]): P
     header,
     smokeSongs,
     true,
+    offer.channel == "manifest" ? "manifest" : "keep",
+    "",
   );
   if (result.ok) {
     dropOffer(offer.targetId);
@@ -323,32 +328,46 @@ export async function installFromUrl(url: string, smokeSongs: Song[]): Promise<S
   if (!link.startsWith("https://")) {
     return applyResult(false, 0, "只支持 https 直链（音源包会被当脚本执行，不接受明文 http）");
   }
-  const temp = await downloadToTemp(link);
-  if (temp.length == 0) {
+  const text = await downloadPackText(link);
+  if (text.length == 0) {
     return applyResult(false, 0, "下载失败，请检查链接是否可直连");
   }
+  return await installFromText(text, smokeSongs, "url", link);
+}
+
+/**
+ * 下载一个音源包全文（https 直链校验 + uni.downloadFile 临时文件 + 读回 + 清理）。
+ * 管理页「安装预览」流程复用：先拿到全文解析包头给用户确认，确认后再走
+ * installFromText 落盘。返回空串 = 下载失败。
+ */
+export async function downloadPackText(url: string): Promise<string> {
+  const link = url.trim();
+  if (!link.startsWith("https://")) return "";
+  const temp = await downloadToTemp(link);
+  if (temp.length == 0) return "";
   const text = await readTextFileAt(temp);
   await removeFileAt(temp);
-  if (text.length == 0) {
-    return applyResult(false, 0, "下载的音源包为空");
-  }
-  return await installFromText(text, smokeSongs);
+  return text;
 }
 
 /**
  * 从本地 js 文件安装：Android 系统选择器（qt-app-native pickJsFile）拿到的
  * content URI 只有一次读权限，原生侧已把全文读回，直接走 installFromText。
- * （服务层不再按路径安装：SAF 选出的文件没有可复用的真实路径。）
+ * fileName 仅作来源备注记录（展示用）。
  */
-export async function installFromLocalFile(content: string, smokeSongs: Song[]): Promise<SourceApplyResult> {
+export async function installFromLocalFile(content: string, smokeSongs: Song[], fileName: string): Promise<SourceApplyResult> {
   if (content.trim().length == 0) {
     return applyResult(false, 0, "未选择文件");
   }
-  return await installFromText(content, smokeSongs);
+  return await installFromText(content, smokeSongs, "file", fileName);
 }
 
-/** 从文本安装（统一管线的入口：解析头 → 校验 → 落盘 → 登记 → 按需生效） */
-export async function installFromText(text: string, smokeSongs: Song[]): Promise<SourceApplyResult> {
+/**
+ * 从文本安装（统一管线的入口：解析头 → 校验 → 落盘 → 登记 → 按需生效）。
+ * source/ref 记录安装来源（"url"=链接 / "file"=本地文件 / "manifest"=官方渠道），
+ * 管理页「安装预览」流程确认后直接调这里落盘。
+ */
+export async function installFromText(text: string, smokeSongs: Song[], source: string, ref: string): Promise<SourceApplyResult> {
   const header = parsePackHeader(text);
   if (header == null) {
     return applyResult(
@@ -357,7 +376,7 @@ export async function installFromText(text: string, smokeSongs: Song[]): Promise
       "不是有效的音源包：文件首行缺少 /*__QT_PACK__*/ 身份头（需要 2026-10 后构建的包）",
     );
   }
-  return await installPackText(text, header, smokeSongs, false);
+  return await installPackText(text, header, smokeSongs, false, source, ref);
 }
 
 /**
@@ -382,6 +401,8 @@ async function installPackText(
   header: PackHeaderInfo,
   smokeSongs: Song[],
   isUpdate: boolean,
+  source: string,
+  ref: string,
 ): Promise<SourceApplyResult> {
   await ensureLocalStateRestored();
   const kind = header.kind;
@@ -434,6 +455,12 @@ async function installPackText(
     updatedAt: now,
     skipCodes: old != null ? old.skipCodes : ([] as number[]),
     lastProbeAt: old != null ? old.lastProbeAt : 0,
+    // 来源溯源：source=="keep"（自管更新）保留原安装来源；manifest 渠道改写为官方；
+    // 全新安装/直链/本地用传入值。新装清空失败记录（后续失败会重新记）。
+    installSource: source == "keep" ? (old != null ? old.installSource : "") : source,
+    installRef: source == "keep" ? (old != null ? old.installRef : "") : ref,
+    lastError: old != null ? old.lastError : "",
+    lastErrorAt: old != null ? old.lastErrorAt : 0,
   };
   await putPack(meta);
   await pruneOrphans();
@@ -442,6 +469,8 @@ async function installPackText(
   if (kind == PACK_KIND_PLAY) {
     const canActivate = state.activeId.length == 0 || state.activeId == id;
     if (!canActivate) {
+      // 新版本已替换落盘（旧失败记录针对的是旧文件，清掉）；生效位是别的包，等用户切换
+      await clearPackError(id);
       syncSourceUpdateBadge();
       return applyResult(
         true,
@@ -453,12 +482,14 @@ async function installPackText(
     const smoke = await applyActivePack(smokeSongs);
     if (!smoke.ok && isUpdate) {
       await rollbackPack(old, id, prevPath, mainPath);
+      await notePackError(id, smoke.message);
       return applyResult(false, header.versionCode, `${smoke.message}；已回滚到 ${old != null ? old.versionName : "未安装"}`);
     }
     if (!smoke.ok) {
       // 手动重装失败：保留文件由用户决定（可能是环境问题），仅提示
       return smoke;
     }
+    await clearPackError(id);
     syncSourceUpdateBadge();
     return applyResult(
       true,
@@ -469,6 +500,7 @@ async function installPackText(
   // meta：生效位为空（基线）或就是这个包 → 重装引擎槽
   const metaCanActivate = state.activeMetaId.length == 0 || state.activeMetaId == id;
   if (!metaCanActivate) {
+    await clearPackError(id);
     return applyResult(
       true,
       header.versionCode,
@@ -484,11 +516,14 @@ async function installPackText(
       // 新装/更新的 meta 包验证不过：回滚（新装 = 回基线，更新 = 回旧文件）
       await rollbackPack(old, id, prevPath, mainPath);
       await reloadEngineMeta();
+      await notePackError(id, `装载未通过（${detail}）`);
       const target = old != null ? old.versionName : "内置基线";
       return applyResult(false, header.versionCode, `数据包装载未通过（${detail}）；已回退到 ${target}`);
     }
+    await notePackError(id, `装载未通过（${detail}）`);
     return applyResult(false, header.versionCode, `数据包装载未通过：${detail}（可在列表卸载后回退基线）`);
   }
+  await clearPackError(id);
   syncSourceUpdateBadge();
   return applyResult(
     true,
@@ -554,16 +589,20 @@ export async function applyActivePack(smokeSongs: Song[]): Promise<SourceApplyRe
     const kind = loadFailureKind();
     const detail = lastEngineError();
     if (kind == "invalid") {
+      await notePackError(pack.id, `播放包不可用：${detail}`);
       return applyResult(false, pack.versionCode, `该播放包不可用（已保留在列表，可卸载或重装）：${detail}`);
     }
+    await notePackError(pack.id, `播放包未能生效：${detail}`);
     return applyResult(false, pack.versionCode, `播放包未能生效：${detail}`);
   }
   const smoke = await smokeTest(smokeSongs);
   if (!smoke.ok) {
+    await notePackError(pack.id, `冒烟自检未通过：${smoke.message}`);
     return applyResult(false, pack.versionCode, `冒烟自检未通过（包已保留在列表，可直接试播）：${smoke.message}`);
   }
   // 新包真正生效：清掉前端播放地址缓存，否则旧链路的地址会继续用满 10 分钟 TTL
   musicApi.clearPlayUrlCache();
+  await clearPackError(pack.id);
   syncSourceUpdateBadge();
   return applyResult(true, pack.versionCode, `播放音源包已生效：${pack.name} ${pack.versionName}`);
 }
@@ -583,8 +622,10 @@ export async function activatePack(id: string, smokeSongs: Song[]): Promise<Sour
     if (!ok || loadedMetaCode() != pack.versionCode) {
       await setActiveMeta("");
       await reloadEngineMeta();
+      await notePackError(id, `装载未通过：${lastEngineError()}`);
       return applyResult(false, pack.versionCode, `数据包装载未通过：${lastEngineError()}（已回退内置基线）`);
     }
+    await clearPackError(id);
     syncSourceUpdateBadge();
     return applyResult(true, pack.versionCode, `数据包已生效：${pack.name} ${pack.versionName}`);
   }

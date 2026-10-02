@@ -90,9 +90,11 @@ import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { engineStatus, engineVersion, lastEngineError, loadedPlayPackId, playPackReady } from "@/services/source-engine";
-import { packsOfKind, activePack, activeMetaPack, packById, PACK_KIND_META, PACK_KIND_PLAY } from "@/services/source-bundle-fs";
-import { discoverUpdates, applyUpdate, installFromUrl, installFromLocalFile, uninstallPack, activatePack, activateBaselineMeta, pickSmokeSongs, pendingUpdates, syncSourceUpdateBadge, offerLabel } from "@/services/source-update";
+import { packsOfKind, activePack, activeMetaPack, packById, isOfficialPackId, PACK_KIND_META, PACK_KIND_PLAY } from "@/services/source-bundle-fs";
+import type { SourcePackMeta } from "@/services/source-bundle-fs";
+import { discoverUpdates, applyUpdate, installFromText, downloadPackText, uninstallPack, activatePack, activateBaselineMeta, pickSmokeSongs, pendingUpdates, syncSourceUpdateBadge, offerLabel } from "@/services/source-update";
 import type { PackUpdateOffer } from "@/services/source-update";
+import { parsePackHeader } from "@/services/source-pack-header";
 import { pickJsFile } from "@/services/app-native";
 import { useSourceUpdateStore } from "@/stores/source-update";
 
@@ -121,7 +123,7 @@ const metaRows = computed((): PackRow[] => {
   const list = packsOfKind(PACK_KIND_META);
   for (let i = 0; i < list.length; i++) {
     const p = list[i];
-    rows.push({ id: p.id, name: p.name, sub: "v" + p.versionName + (meta != null && meta.id == p.id ? " · 生效中" : ""), active: meta != null && meta.id == p.id, last: i == list.length - 1 } as PackRow);
+    rows.push({ id: p.id, name: p.name, sub: packSubText(p, meta != null && meta.id == p.id ? "生效中" : ""), active: meta != null && meta.id == p.id, last: i == list.length - 1 } as PackRow);
   }
   return rows;
 });
@@ -136,10 +138,44 @@ const playRows = computed((): PackRow[] => {
     const p = list[i];
     const isActive = active != null && active.id == p.id;
     const live = isActive && playPackReady() && loadedPlayPackId() == p.id;
-    rows.push({ id: p.id, name: p.name, sub: "v" + p.versionName + (live ? " · 生效中" : isActive ? " · 待生效" : ""), active: isActive, last: i == list.length - 1 } as PackRow);
+    rows.push({ id: p.id, name: p.name, sub: packSubText(p, live ? "生效中" : isActive ? "待生效" : ""), active: isActive, last: i == list.length - 1 } as PackRow);
   }
   return rows;
 });
+
+/** 包行次要信息：版本 · 来源 · 日期 ·（生效状态）·（上次失败） */
+function packSubText(p: SourcePackMeta, status: string): string {
+  const parts: string[] = ["v" + p.versionName];
+  const src = installSourceLabel(p.installSource);
+  if (src.length > 0) parts.push(src);
+  parts.push(shortDate(p.updatedAt));
+  if (status.length > 0) parts.push(status);
+  const sub = parts.join(" · ");
+  if (p.lastError.length > 0) {
+    return sub + "\n上次失败：" + truncateText(p.lastError, 30);
+  }
+  return sub;
+}
+
+function installSourceLabel(s: string): string {
+  if (s == "url") return "链接安装";
+  if (s == "file") return "本地安装";
+  if (s == "manifest") return "官方渠道";
+  return "";
+}
+
+/** 毫秒时间戳 → 短日期（同年省年份） */
+function shortDate(ms: number): string {
+  if (ms <= 0) return "";
+  const d = new Date(ms);
+  const now = new Date();
+  const md = (d.getMonth() + 1 < 10 ? "0" : "") + (d.getMonth() + 1) + "-" + (d.getDate() < 10 ? "0" : "") + d.getDate();
+  return d.getFullYear() == now.getFullYear() ? md : d.getFullYear() + "-" + md;
+}
+
+function truncateText(s: string, max: number): string {
+  return s.length > max ? s.substring(0, max) + "…" : s;
+}
 
 const offerRows = computed((): OfferRow[] => {
   const _tick = refreshTick.value;
@@ -190,7 +226,145 @@ function refreshSourceUi(): void {
 onShow(() => {
   sourceUpdateStore.refresh();
   refreshTick.value++;
+  checkClipboardPackLink();
 });
+
+/** 剪贴板里已提示过的链接（同一链接一次会话只提示一次） */
+let lastPromptedClip = "";
+
+/** 粗判剪贴板内容是否是音源包直链：https 且以 .js 结尾（允许带查询串） */
+function looksLikePackUrl(s: string): boolean {
+  const t = s.trim();
+  if (!t.startsWith("https://") || t.length > 2048) return false;
+  if (t.indexOf(" ") >= 0) return false;
+  const q = t.indexOf("?");
+  const path = q >= 0 ? t.substring(0, q) : t;
+  return path.endsWith(".js");
+}
+
+/** 进页检测剪贴板：像音源包直链就提示一键安装（读取失败静默——部分系统限制后台读） */
+function checkClipboardPackLink(): void {
+  uni.getClipboardData({
+    success: (res) => {
+      const data = res.data != null ? res.data : "";
+      if (!looksLikePackUrl(data)) return;
+      const link = data.trim();
+      if (link == lastPromptedClip) return;
+      lastPromptedClip = link;
+      uni.showModal({
+        title: "检测到音源包链接",
+        content: "剪贴板里有一个音源包直链：\n" + truncateText(link, 60) + "\n\n是否下载并安装？",
+        confirmText: "安装",
+        cancelText: "忽略",
+        success: (r) => {
+          if (r.confirm) installFromLink(link);
+        },
+      });
+    },
+    fail: (_e) => {},
+  });
+}
+
+/** 从 https 直链安装：下载全文 → 安装预览确认 → 统一安装管线 */
+function installFromLink(url: string): void {
+  const link = url.trim();
+  if (link.length == 0) {
+    uni.showToast({ title: "链接不能为空", icon: "none" });
+    return;
+  }
+  if (!link.startsWith("https://")) {
+    uni.showToast({ title: "只支持 https 直链", icon: "none" });
+    return;
+  }
+  uni.showLoading({ title: "下载中", mask: true });
+  downloadPackText(link).then((text) => {
+    uni.hideLoading();
+    if (text.length == 0) {
+      uni.showToast({ title: "下载失败，请检查链接是否可直连", icon: "none" });
+      return;
+    }
+    confirmAndInstall(text, "url", link);
+  }).catch(() => {
+    uni.hideLoading();
+    uni.showToast({ title: "下载失败，请重试", icon: "none" });
+  });
+}
+
+/**
+ * 安装预览：解析包头给用户过目再装（信息透明 + 官方 id 防仿冒）。
+ * id 自称 play-official/meta-official 但来自直链/本地文件时给醒目警告，
+ * 确认按钮加摩擦（「仍要安装」）。manifest 渠道更新不经过这里。
+ */
+function confirmAndInstall(text: string, source: string, ref: string): void {
+  const header = parsePackHeader(text);
+  if (header == null) {
+    uni.showModal({
+      title: "无法安装",
+      content: "不是有效的音源包：文件首行缺少 /*__QT_PACK__*/ 身份头（需要 2026-10 后构建的包）。",
+      showCancel: false,
+    });
+    return;
+  }
+  const kindLabel = header.kind == "meta" ? "数据包" : header.kind == "play" ? "播放包" : "未知类型（" + header.kind + "）";
+  const refLine = ref.length > 0 ? "来源：" + truncateText(ref, 50) + "\n" : "";
+  let content = "类型：" + kindLabel + "\n名称：" + (header.name.length > 0 ? header.name : header.id) + "\n版本：" + header.versionName + "（" + header.versionCode + "）\nid：" + header.id + "\n" + refLine;
+  let confirmText = "安装";
+  if (isOfficialPackId(header.id)) {
+    content += "\n⚠ 该文件自称官方" + (header.kind == "meta" ? "数据" : "播放") + "包。官方包只应来自应用内官方渠道；如非你主动从官方获取，请取消。";
+    confirmText = "仍要安装";
+  }
+  uni.showModal({
+    title: "安装音源包",
+    content: content,
+    confirmText: confirmText,
+    cancelText: "取消",
+    success: (res) => {
+      if (!res.confirm) return;
+      uni.showLoading({ title: "安装中", mask: true });
+      pickSmokeSongs().then((songs) => {
+        return installFromText(text, songs, source, ref);
+      }).then((r) => {
+        uni.hideLoading();
+        refreshSourceUi();
+        uni.showModal({ title: r.ok ? "安装完成" : "安装失败", content: r.message, showCancel: false });
+      }).catch(() => {
+        uni.hideLoading();
+        uni.showToast({ title: "安装失败，请重试", icon: "none" });
+      });
+    },
+  });
+}
+
+/** 「从链接安装」入口：弹输入框，拿链接走 installFromLink */
+function runSourceInstallUrl(): void {
+  uni.showModal({
+    title: "从链接安装",
+    editable: true,
+    placeholderText: "粘贴音源包 .js 文件的 https 直链",
+    confirmText: "下一步",
+    cancelText: "取消",
+    success: (res) => {
+      if (!res.confirm) return;
+      const url = res.content != null ? res.content.trim() : "";
+      if (url.length == 0) {
+        uni.showToast({ title: "链接不能为空", icon: "none" });
+        return;
+      }
+      installFromLink(url);
+    },
+  });
+}
+
+/** 从本地 .js 文件安装（系统选择器；content URI 一次性读权限，原生侧读完带回全文） */
+function runSourceInstallFile(): void {
+  pickJsFile().then((picked) => {
+    if (!picked.ok || picked.content.length == 0) {
+      if (picked.message.length > 0) uni.showToast({ title: picked.message, icon: "none" });
+      return;
+    }
+    confirmAndInstall(picked.content, "file", picked.name);
+  });
+}
 
 /** 行「启用」统一入口：数据包内置基线行走 activateBaselineMeta，其余走 activatePack */
 function onActivateClick(id: string): void {
@@ -284,58 +458,6 @@ function runUseBaseline(): void {
   }).catch(() => {
     uni.hideLoading();
     uni.showToast({ title: "切换失败", icon: "none" });
-  });
-}
-
-/** 从 https 直链安装一个包（官方发布的直链或任何作者分发的链接） */
-function runSourceInstallUrl(): void {
-  uni.showModal({
-    title: "从链接安装",
-    editable: true,
-    placeholderText: "粘贴音源包 .js 文件的 https 直链",
-    confirmText: "安装",
-    cancelText: "取消",
-    success: (res) => {
-      if (!res.confirm) return;
-      const url = res.content != null ? res.content.trim() : "";
-      if (url.length == 0) {
-        uni.showToast({ title: "链接不能为空", icon: "none" });
-        return;
-      }
-      uni.showLoading({ title: "下载安装中", mask: true });
-      pickSmokeSongs().then((songs) => {
-        return installFromUrl(url, songs);
-      }).then((r) => {
-        uni.hideLoading();
-        refreshSourceUi();
-        uni.showModal({ title: r.ok ? "安装完成" : "安装失败", content: r.message, showCancel: false });
-      }).catch(() => {
-        uni.hideLoading();
-        uni.showToast({ title: "安装失败，请重试", icon: "none" });
-      });
-    },
-  });
-}
-
-/** 从本地 .js 文件安装（系统文件选择器；content URI 只有一次读权限，原生侧读完带回全文） */
-function runSourceInstallFile(): void {
-  pickJsFile().then((picked) => {
-    if (!picked.ok || picked.content.length == 0) {
-      if (picked.message.length > 0) uni.showToast({ title: picked.message, icon: "none" });
-      return;
-    }
-    uni.showLoading({ title: "安装中", mask: true });
-    pickSmokeSongs().then((songs) => {
-      return installFromLocalFile(picked.content, songs);
-    }).then((r) => {
-      uni.hideLoading();
-      refreshSourceUi();
-      const nameSuffix = picked.name.length > 0 ? "（" + picked.name + "）" : "";
-      uni.showModal({ title: r.ok ? "安装完成" : "安装失败", content: r.message + nameSuffix, showCancel: false });
-    }).catch(() => {
-      uni.hideLoading();
-      uni.showToast({ title: "安装失败，请重试", icon: "none" });
-    });
   });
 }
 
