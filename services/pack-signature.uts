@@ -14,6 +14,11 @@
  * 曲线运算原生 API。验签发生在**装载/执行新包内容之前**，且验签表达式自包含（唯一
  * 依赖的全局 nacl 由 ensurePackVerifier 装载）——当前已生效的播放包无法靠篡改引擎
  * 全局伪造验签结果。
+ *
+ * 送验内容按块通过 evaluateJavascript 分批推进引擎（2026-10-08）：1.7MB 官方包整段
+ * 内联进单次求值会超过 Android Binder ~1MB 事务上限（见 qt-js-engine webview.uts
+ * 文档）。缓冲名带随机数、汇总时做 isArray/长度/双哈希三重校验——正在生效的旧包
+ * 既无法预埋同名陷阱，也无法把送验内容调包成另一份真正签过的旧官方包。
  */
 import { ensurePackVerifier, evalOnEngine } from "@/services/source-engine";
 
@@ -58,7 +63,8 @@ export function splitSignatureBlock(text: string): { content: string; sig: strin
 /**
  * 把任意文本转成可嵌入 JS 双引号字符串字面量的**纯 ASCII** 序列：
  * \\、"、' 与控制字符 → C 风格转义；其余非 ASCII codeUnit → \uXXXX。
- * 代入点只有一处（本文件的验签表达式），包内容里任何中文/引号/反斜杠都会被
+ * 代入点在本文件的验签表达式（分块送验时每块独立转义，先切块后转义，
+ * \uXXXX 不可能被从中间切断），包内容里任何中文/引号/反斜杠都会被
  * 无歧义转义，不存在注入面。
  */
 export function escapeJsAscii(text: string): string {
@@ -96,6 +102,37 @@ export function escapeJsAscii(text: string): string {
 }
 
 /**
+ * 分块送验的单块原始字符数：转义后最坏每字符 6 个 ASCII（\uXXXX），
+ * 96000 × 6 ≈ 576KB，加表达式包裹后仍远低于 evaluateJavascript 的
+ * Binder 事务上限（~1MB，见 qt-js-engine webview.uts 文档）。
+ */
+const SIGN_CHUNK_CHARS = 96000;
+
+/**
+ * 送验内容的双 32 位混合校验（xor + 乘法回绕 + 移位混淆，两条独立参数链）。
+ * UTS 侧与引擎侧（验签表达式里的同款内联实现）按完全相同的 32 位补码运算
+ * 各算一遍、对表——防止引擎里的缓冲在「分块推送」与「汇总验签」之间被正在
+ * 生效的旧包调包（拼出另一份真正签过的旧官方包来顶替本次送验内容）。
+ * 长度 + 两条非线性链 + nacl 验签同时满足才可能伪造，实际不可构造。
+ */
+function signContentHash(text: string): string {
+  let a = 0;
+  let b = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    a = (a ^ c) * -2048144789;
+    a = a ^ (a >> 13);
+    a = a * -1028477387;
+    a = a ^ (a >> 16);
+    b = (b ^ c) * 668265263;
+    b = b ^ (b >> 15);
+    b = b * 374761393;
+    b = b ^ (b >> 13);
+  }
+  return a.toString() + "_" + b.toString();
+}
+
+/**
  * 校验官方包签名（ed25519，签名对象=剥块后全文的 UTF-8 bytes）。
  * 在 JS 引擎里同步求值（nacl.sign.detached.verify），返回 qt:ok / qt:bad / qt:err:*。
  * 引擎不可用 / 资产缺失也判失败——官方包宁拒不装。
@@ -111,25 +148,75 @@ export async function verifyOfficialSignature(text: string): Promise<PackSignChe
   // atob→Uint8Array 的内联小函数（nacl 不带 base64；WebView 标配 atob）
   const b64ToBytes =
     "(function(x){var a=new Uint8Array(x.length);for(var i=0;i<x.length;i++)a[i]=x.charCodeAt(i);return a})";
-  const expr =
-    "(function(){try{" +
-    "var m=new TextEncoder().encode(\"" +
-    escapeJsAscii(parts.content) +
-    "\");" +
-    "var s=" +
-    b64ToBytes +
-    "(atob(\"" +
-    parts.sig +
-    "\"));" +
-    "var p=" +
-    b64ToBytes +
-    "(atob(\"" +
-    OFFICIAL_SIGN_PUBKEY_B64 +
-    "\"));" +
-    "return String(\"qt:\"+(nacl.sign.detached.verify(m,s,p)?\"ok\":\"bad\"));" +
-    "}catch(e){return String(\"qt:err:\"+e);}})()";
+  // 分块送验（2026-10-08 修复）：单次求值内联全文会超 Binder 上限，首个签名官方包
+  // 必装失败。原始文本按 SIGN_CHUNK_CHARS 切块、逐块独立转义后小求值推入引擎侧
+  // 随机名缓冲；最后一次小求值完成拼接 + 完整性校验 + nacl 验签（见函数头注释）。
+  const bufName = "__qtSbv_" + Math.floor(Math.random() * 2147483647).toString();
+  const content = parts.content;
   try {
-    const result = await evalOnEngine(expr);
+    // 重置缓冲（赋值覆盖任何残留或预埋的同名值）
+    const initAck = await evalOnEngine("(globalThis." + bufName + "=[],\"qt:ready\")");
+    if (initAck != "qt:ready") {
+      return { ok: false, message: "验签缓冲初始化失败" };
+    }
+    let index = 0;
+    let offset = 0;
+    while (offset < content.length) {
+      const end = offset + SIGN_CHUNK_CHARS < content.length ? offset + SIGN_CHUNK_CHARS : content.length;
+      const expr =
+        "(globalThis." +
+        bufName +
+        ".push(\"" +
+        escapeJsAscii(content.substring(offset, end)) +
+        "\"),\"qt:" +
+        index.toString() +
+        "\")";
+      const ack = await evalOnEngine(expr);
+      if (ack != "qt:" + index.toString()) {
+        return { ok: false, message: "验签分块送入失败（第 " + (index + 1).toString() + " 块）" };
+      }
+      offset = end;
+      index = index + 1;
+    }
+    const final =
+      "(function(){try{" +
+      "var A=globalThis." +
+      bufName +
+      ";" +
+      "if(!Array.isArray(A)||A.length!==" +
+      index.toString() +
+      ")return String(\"qt:err:buf\");" +
+      "var t=\"\";" +
+      "for(var i=0;i<A.length;i++){if(typeof A[i]!==\"string\")return String(\"qt:err:buf\");t+=A[i];}" +
+      "globalThis." +
+      bufName +
+      "=null;" +
+      "if(t.length!==" +
+      content.length.toString() +
+      ")return String(\"qt:err:length\");" +
+      "var a=0,b=0;" +
+      "for(var i=0;i<t.length;i++){var c=t.charCodeAt(i);" +
+      "a=Math.imul(a^c,-2048144789);a=a^(a>>13);a=Math.imul(a,-1028477387);a=a^(a>>16);" +
+      "b=Math.imul(b^c,668265263);b=b^(b>>15);b=Math.imul(b,374761393);b=b^(b>>13);}" +
+      "if((a+\"_\"+b)!==\"" +
+      signContentHash(content) +
+      "\")return String(\"qt:err:hash\");" +
+      "var m=new TextEncoder().encode(t);" +
+      "var sm=" +
+      b64ToBytes +
+      "(atob(\"" +
+      parts.sig +
+      "\"));" +
+      "var pm=" +
+      b64ToBytes +
+      "(atob(\"" +
+      OFFICIAL_SIGN_PUBKEY_B64 +
+      "\"));" +
+      "return String(\"qt:\"+(nacl.sign.detached.verify(m,sm,pm)?\"ok\":\"bad\"));" +
+      "}catch(e){try{globalThis." +
+      bufName +
+      "=null}catch(_){}return String(\"qt:err:\"+e);}})()";
+    const result = await evalOnEngine(final);
     if (result == "qt:ok") return { ok: true, message: "" };
     if (result.indexOf("qt:err:") == 0) {
       return { ok: false, message: "验签执行异常：" + result.substring(7) };
