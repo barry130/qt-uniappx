@@ -91,6 +91,7 @@ import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { engineStatus, engineVersion, lastEngineError, loadedPlayPackId, playPackReady } from "@/services/source-engine";
 import { packsOfKind, activePack, activeMetaPack, packById, isOfficialPackId, PACK_KIND_META, PACK_KIND_PLAY } from "@/services/source-bundle-fs";
+import { verifyOfficialSignature } from "@/services/pack-signature";
 import type { SourcePackMeta } from "@/services/source-bundle-fs";
 import { discoverUpdates, applyUpdate, installFromText, downloadPackText, uninstallPack, activatePack, activateBaselineMeta, pickSmokeSongs, pendingUpdates, syncSourceUpdateBadge, offerLabel } from "@/services/source-update";
 import type { PackUpdateOffer } from "@/services/source-update";
@@ -292,10 +293,13 @@ function installFromLink(url: string): void {
 
 /**
  * 安装预览：解析包头给用户过目再装（信息透明 + 官方 id 防仿冒）。
- * id 自称 play-official/meta-official 但来自直链/本地文件时给醒目警告，
- * 确认按钮加摩擦（「仍要安装」）。manifest 渠道更新不经过这里。
+ * 自称 play-official/meta-official 的包先做 ed25519 签名校验：
+ * 通过 → 预览标注「官方签名校验通过」正常安装（官方包也走直链/本地分发，
+ *        签名通过即证明官方原版，不再按渠道加摩擦）；
+ * 不通过 → 直接拒绝（文件被篡改或冒充，服务层还会再拦一道）。
+ * 第三方包不需要签名，走原预览。manifest 渠道更新不经过这里。
  */
-function confirmAndInstall(text: string, source: string, ref: string): void {
+async function confirmAndInstall(text: string, source: string, ref: string): Promise<void> {
   const header = parsePackHeader(text);
   if (header == null) {
     uni.showModal({
@@ -310,8 +314,18 @@ function confirmAndInstall(text: string, source: string, ref: string): void {
   let content = "类型：" + kindLabel + "\n名称：" + (header.name.length > 0 ? header.name : header.id) + "\n版本：" + header.versionName + "（" + header.versionCode + "）\nid：" + header.id + "\n" + refLine;
   let confirmText = "安装";
   if (isOfficialPackId(header.id)) {
-    content += "\n⚠ 该文件自称官方" + (header.kind == "meta" ? "数据" : "播放") + "包。官方包只应来自应用内官方渠道；如非你主动从官方获取，请取消。";
-    confirmText = "仍要安装";
+    uni.showLoading({ title: "校验签名", mask: true });
+    const check = await verifyOfficialSignature(text);
+    uni.hideLoading();
+    if (!check.ok) {
+      uni.showModal({
+        title: "官方包校验失败",
+        content: "该文件自称官方" + (header.kind == "meta" ? "数据" : "播放") + "包，但签名校验未通过：" + check.message + "。可能不是官方原版或已被篡改，已拒绝安装。",
+        showCancel: false,
+      });
+      return;
+    }
+    content += "✓ 官方签名校验通过\n";
   }
   uni.showModal({
     title: "安装音源包",

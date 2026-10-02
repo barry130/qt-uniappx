@@ -37,7 +37,16 @@ import type { SourcePackMeta } from "@/services/source-bundle-fs";
 import type { PackHeaderInfo } from "@/services/source-pack-header";
 import { metaBundleCode } from "@/services/source-meta-code";
 import { parsePackHeader } from "@/services/source-pack-header";
-import { start, stop, loadBundle, invoke, isRunning, isHealthy } from "@/uni_modules/qt-js-engine";
+import {
+  start,
+  stop,
+  loadBundle,
+  invoke,
+  evaluate,
+  readAssetText,
+  isRunning,
+  isHealthy,
+} from "@/uni_modules/qt-js-engine";
 import {
   activePack,
   activeMetaPack,
@@ -252,6 +261,83 @@ function callInvoke(name: string, argsJson: string, timeoutMs: number): Promise<
   });
 }
 
+/**
+ * 在引擎里执行一段同步 JS 表达式（String(...) 收尾），返回求值字符串。
+ * 官方包验签专用（nacl 装载 + verify），业务取链仍走 callInvoke。
+ * 返回值可能是 evaluateJavascript 的 JSON 序列化形式（两端带引号），调用方需 stripEvalQuotes。
+ */
+function callEvaluate(code: string): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    evaluate(code, (r: EvalResult) => {
+      if (r.ok) {
+        resolve(r.value);
+      } else {
+        reject(new Error(r.error));
+      }
+    });
+  });
+}
+
+/** 读 APK assets 里的文本（官方包验签的 nacl 实现就放在 static/pack-verify/） */
+function callReadAssetText(path: string): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    readAssetText(path, (ok: boolean, value: string, error: string) => {
+      if (ok) {
+        resolve(value);
+      } else {
+        reject(new Error(error));
+      }
+    });
+  });
+}
+
+/** 剥掉 evaluateJavascript JSON 序列化字符串两端可能带的引号（含 \" 转义还原） */
+export function stripEvalQuotes(value: string): string {
+  let v = value.trim();
+  if (v.length >= 2 && v.charAt(0) == '"' && v.charAt(v.length - 1) == '"') {
+    v = v.substring(1, v.length - 1);
+    v = v.split('\\"').join('"').split("\\\\").join("\\").split("\\n").join("\n");
+  }
+  return v;
+}
+
+/** 官方包验签器（nacl）是否已装进当前引擎 */
+let gVerifierReady = false;
+
+/**
+ * 确保引擎里已装载官方包验签器（tweetnacl，static/pack-verify/nacl.min.js，
+ * 纯 JS 同步实现，装载后挂全局 self.nacl）。引擎重建后归零重装（resetLoadedState）。
+ * 幂等：已就绪直接返回；重复装载也只重复定义全局，无副作用。
+ */
+export async function ensurePackVerifier(): Promise<boolean> {
+  if (gVerifierReady) return true;
+  if (!(await ensureEngine())) return false;
+  try {
+    const asset = await callReadAssetText("static/pack-verify/nacl.min.js");
+    if (asset.length < 1000) {
+      console.log("[SourceEngine] 验签器资产缺失或过短：" + String(asset.length));
+      return false;
+    }
+    // 末尾判断装载结果：nacl-fast.min 会挂 self.nacl（WebView 里 self === window）
+    const probe = await callEvaluate(asset + ";String(typeof self.nacl==='object'&&typeof nacl.sign==='object'&&typeof nacl.sign.detached==='object'?'ok':'missing')");
+    const ok = stripEvalQuotes(probe) == "ok";
+    if (ok) {
+      gVerifierReady = true;
+    } else {
+      console.log("[SourceEngine] 验签器装载探测失败：" + probe);
+    }
+    return ok;
+  } catch (e) {
+    console.log("[SourceEngine] 验签器装载异常：" + String(e));
+    return false;
+  }
+}
+
+/** 在引擎里跑验签表达式（pack-signature.uts 组装），返回剥引号后的结果字符串 */
+export async function evalOnEngine(code: string): Promise<string> {
+  return stripEvalQuotes(await callEvaluate(code));
+}
+
 // ==================== 引擎生命周期 ====================
 
 /**
@@ -298,7 +384,7 @@ export function ensureEngine(): Promise<boolean> {
   return p;
 }
 
-/** 引擎重建后归零「已装载」标记（meta 与播放包都要重装） */
+/** 引擎重建后归零「已装载」标记（meta、播放包与验签器都要重装） */
 function resetLoadedState(): void {
   gMetaReady = false;
   gMetaLoadedId = "";
@@ -306,6 +392,7 @@ function resetLoadedState(): void {
   gPlayPackLoadedId = "";
   gPlayPackLoadedCode = 0;
   gPlayPackFailedId = "";
+  gVerifierReady = false;
 }
 
 /** 被隔离后的重建：停掉旧引擎（放弃卡住的线程）再起一个新的 */

@@ -1,0 +1,141 @@
+/**
+ * 官方音源包 ed25519 签名校验（2026-10 官方身份防仿冒，与 qt-sources
+ * scripts/sign-pack.mjs / docs/PACK-AUTHORING.md §签名 同一约定）。
+ *
+ * 背景与威胁模型：官方包同样走「https 直链 / 本地 js 文件」分发，文件身份不能只靠
+ * 首行自述（否则任何第三方都能写 id=play-official 顶掉官方槽）。构建期发布机私钥
+ * 对「含 __QT_PACK__ 身份头的文件全文」做 ed25519 签名，尾部追加 __QT_SIGN__ 注释块
+ * （JSON：{"alg":"ed25519","sig":"base64 64B"}，见 qt-sources scripts/sign-pack.mjs）。
+ *
+ * 宿主只内置公钥（本文件常量，绝不放进包文件），安装/更新官方保留 id 时硬校验：
+ * 验不过（含无签名块）一律拒绝；第三方包不受影响。
+ *
+ * 验签在 JS 引擎里执行（tweetnacl 纯 JS 同步实现，ed25519 + SHA-512）——UTS 侧没有
+ * 曲线运算原生 API。验签发生在**装载/执行新包内容之前**，且验签表达式自包含（唯一
+ * 依赖的全局 nacl 由 ensurePackVerifier 装载）——当前已生效的播放包无法靠篡改引擎
+ * 全局伪造验签结果。
+ */
+import { ensurePackVerifier, evalOnEngine } from "@/services/source-engine";
+
+/** 官方发布公钥（ed25519 raw 32B，base64）。与 qt-sources sources.config.json packs.signing.publicKey、qt-pc 常量保持一致 */
+const OFFICIAL_SIGN_PUBKEY_B64 = "mOti+JoaX2Tn6VaP91E+TaYrth4oGaUqASv9Ot4NDcE=";
+/** 签名块起始标记（与 qt-sources sign-pack.mjs 同值） */
+const SIGN_BLOCK_MARK = "/*__QT_SIGN__";
+
+export type PackSignCheck = {
+  /** 验签是否通过（不需要验签的包恒 true） */
+  ok: boolean;
+  /** 失败原因（ok=true 时为 ""） */
+  message: string;
+};
+
+/**
+ * 拆掉文件尾部的 __QT_SIGN__ 签名块，返回 { content, sig }：
+ * - content = 签名对象（剥块后的全文，含身份头）；
+ * - sig = base64 签名；无尾部块 / 块不在文件尾 / JSON 非法时 sig=""。
+ * 只认 lastIndexOf——签名块必须整个位于文件末尾，其后只允许空白。
+ */
+export function splitSignatureBlock(text: string): { content: string; sig: string } {
+  const pos = text.lastIndexOf(SIGN_BLOCK_MARK);
+  if (pos < 0) return { content: text, sig: "" };
+  const end = text.indexOf("*/", pos);
+  if (end < 0) return { content: text, sig: "" };
+  const tail = text.substring(end + 2);
+  if (tail.trim().length > 0) return { content: text, sig: "" };
+  const json = text.substring(pos + SIGN_BLOCK_MARK.length, end);
+  try {
+    const info = JSON.parse(json) as UTSJSONObject;
+    const sig = info.get("sig");
+    if (sig != null) {
+      return { content: text.substring(0, pos), sig: `${sig}` };
+    }
+    return { content: text, sig: "" };
+  } catch (e) {
+    return { content: text, sig: "" };
+  }
+}
+
+/**
+ * 把任意文本转成可嵌入 JS 双引号字符串字面量的**纯 ASCII** 序列：
+ * \\、"、' 与控制字符 → C 风格转义；其余非 ASCII codeUnit → \uXXXX。
+ * 代入点只有一处（本文件的验签表达式），包内容里任何中文/引号/反斜杠都会被
+ * 无歧义转义，不存在注入面。
+ */
+export function escapeJsAscii(text: string): string {
+  const parts: string[] = [];
+  const n = text.length;
+  for (let i = 0; i < n; i++) {
+    const c = text.charCodeAt(i);
+    if (c == 92) {
+      // backslash
+      parts.push("\\\\");
+    } else if (c == 34) {
+      // double quote
+      parts.push('\\"');
+    } else if (c == 39) {
+      // single quote
+      parts.push("\\'");
+    } else if (c == 10) {
+      parts.push("\\n");
+    } else if (c == 13) {
+      parts.push("\\r");
+    } else if (c == 9) {
+      parts.push("\\t");
+    } else if (c < 32 || c > 126) {
+      const hex = "0123456789abcdef";
+      const h = (c >> 12) & 15;
+      const a = (c >> 8) & 15;
+      const b = (c >> 4) & 15;
+      const d = c & 15;
+      parts.push("\\u" + hex.charAt(h) + hex.charAt(a) + hex.charAt(b) + hex.charAt(d));
+    } else {
+      parts.push(String.fromCharCode(c));
+    }
+  }
+  return parts.join("");
+}
+
+/**
+ * 校验官方包签名（ed25519，签名对象=剥块后全文的 UTF-8 bytes）。
+ * 在 JS 引擎里同步求值（nacl.sign.detached.verify），返回 qt:ok / qt:bad / qt:err:*。
+ * 引擎不可用 / 资产缺失也判失败——官方包宁拒不装。
+ */
+export async function verifyOfficialSignature(text: string): Promise<PackSignCheck> {
+  if (!(await ensurePackVerifier())) {
+    return { ok: false, message: "验签环境不可用（引擎或验签器装载失败）" };
+  }
+  const parts = splitSignatureBlock(text);
+  if (parts.sig.length == 0) {
+    return { ok: false, message: "文件缺少官方签名（尾部 __QT_SIGN__ 块）" };
+  }
+  // atob→Uint8Array 的内联小函数（nacl 不带 base64；WebView 标配 atob）
+  const b64ToBytes =
+    "(function(x){var a=new Uint8Array(x.length);for(var i=0;i<x.length;i++)a[i]=x.charCodeAt(i);return a})";
+  const expr =
+    "(function(){try{" +
+    "var m=new TextEncoder().encode(\"" +
+    escapeJsAscii(parts.content) +
+    "\");" +
+    "var s=" +
+    b64ToBytes +
+    "(atob(\"" +
+    parts.sig +
+    "\"));" +
+    "var p=" +
+    b64ToBytes +
+    "(atob(\"" +
+    OFFICIAL_SIGN_PUBKEY_B64 +
+    "\"));" +
+    "return String(\"qt:\"+(nacl.sign.detached.verify(m,s,p)?\"ok\":\"bad\"));" +
+    "}catch(e){return String(\"qt:err:\"+e);}})()";
+  try {
+    const result = await evalOnEngine(expr);
+    if (result == "qt:ok") return { ok: true, message: "" };
+    if (result.indexOf("qt:err:") == 0) {
+      return { ok: false, message: "验签执行异常：" + result.substring(7) };
+    }
+    return { ok: false, message: "签名不匹配（文件被改动或非官方原版）" };
+  } catch (e) {
+    return { ok: false, message: "验签求值失败：" + String(e) };
+  }
+}

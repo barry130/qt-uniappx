@@ -112,6 +112,13 @@ export type SourcePackMeta = {
   lastError: string;
   /** lastError 时间（毫秒；0 = 无失败记录） */
   lastErrorAt: number;
+  /**
+   * 官方 id 包安装时 ed25519 签名校验通过（true）。
+   * 签名落地前安装的历史官方包为 false——manifest 渠道对这类包不按
+   * versionCode 压制（见 source-update.discoverUpdates），让真官方更新
+   * 总能提示出来，覆盖掉历史遗留的冒充包。第三方包恒 false（不参与判定）。
+   */
+  signVerified: boolean;
 };
 
 /** 本地状态（state.json，schema 3） */
@@ -492,6 +499,7 @@ export function clonePack(p: SourcePackMeta): SourcePackMeta {
     installRef: p.installRef,
     lastError: p.lastError,
     lastErrorAt: p.lastErrorAt,
+    signVerified: p.signVerified,
   } as SourcePackMeta;
 }
 
@@ -724,6 +732,7 @@ function packToJson(p: SourcePackMeta): UTSJSONObject {
   o.set("installRef", p.installRef);
   o.set("lastError", p.lastError);
   o.set("lastErrorAt", p.lastErrorAt);
+  o.set("signVerified", p.signVerified);
   return o;
 }
 
@@ -740,6 +749,8 @@ function packFromJson(v: UTSJSONObject | null): SourcePackMeta | null {
   meta.installRef = strOf(v, "installRef");
   meta.lastError = strOf(v, "lastError");
   meta.lastErrorAt = numOf(v, "lastErrorAt");
+  // boolean 缺字段/旧记录 → `${null}`=="null" != "true" → false（strOf 同款语义）
+  meta.signVerified = `${v.get("signVerified")}` == "true";
   const skip = v.get("skipCodes") as number[] | null;
   if (skip != null) {
     for (let i = 0; i < skip.length; i++) {
@@ -768,6 +779,7 @@ function packFromJsonParts(id: string, kind: string, v: UTSJSONObject): SourcePa
     installRef: "",
     lastError: "",
     lastErrorAt: 0,
+    signVerified: false,
   } as SourcePackMeta;
 }
 

@@ -60,12 +60,14 @@ import {
   pruneOrphans,
   packDirOf,
   OFFICIAL_PLAY_ID,
+  isOfficialPackId,
   PACK_KIND_META,
   PACK_KIND_PLAY,
   ARTIFACT_CHAIN,
   ARTIFACT_PLAY,
   ARTIFACT_META,
 } from "@/services/source-bundle-fs";
+import { verifyOfficialSignature } from "@/services/pack-signature";
 import {
   ensurePlayPackLoaded,
   unloadPlayPack,
@@ -231,7 +233,10 @@ export async function discoverUpdates(force: boolean): Promise<PackUpdateOffer[]
         if (a.path != ARTIFACT_PLAY || a.url.length == 0) continue;
         const local = packById(OFFICIAL_PLAY_ID);
         const currentCode = local != null ? local.versionCode : 0;
-        if (a.version <= currentCode || isPackBadVersion(OFFICIAL_PLAY_ID, a.version)) continue;
+        // 版本压制例外：本地官方包从未通过签名校验（签名落地前的历史冒充包）——
+        // manifest 真官方更新不按 versionCode 压制，总能提示出来覆盖掉它。
+        const unverifiedOfficial = local != null && !local.signVerified;
+        if ((a.version <= currentCode && !unverifiedOfficial) || isPackBadVersion(OFFICIAL_PLAY_ID, a.version)) continue;
         if (hasOfferFor(found, OFFICIAL_PLAY_ID, a.version)) continue;
         found.push(
           offerOf(PACK_KIND_PLAY, OFFICIAL_PLAY_ID, currentCode, a.version,
@@ -251,7 +256,9 @@ export async function discoverUpdates(force: boolean): Promise<PackUpdateOffer[]
             : baseline != null && baseline.id == remote.id
               ? baseline.versionCode
               : 0;
-        if (remote.versionCode <= currentCode || isPackBadVersion(remote.id, remote.versionCode)) continue;
+        // 版本压制例外：本地 meta 官方包从未通过签名校验（历史冒充包）→ 不压制
+        const unverifiedMeta = localMeta != null && isOfficialPackId(remote.id) && !localMeta.signVerified;
+        if ((remote.versionCode <= currentCode && !unverifiedMeta) || isPackBadVersion(remote.id, remote.versionCode)) continue;
         if (hasOfferFor(found, remote.id, remote.versionCode)) continue;
         found.push(
           offerOf(PACK_KIND_META, remote.id, currentCode, remote.versionCode,
@@ -417,6 +424,18 @@ async function installPackText(
       "该文件不是有效的播放包（缺少 " + PLAY_PACK_FACTORY_MARKER + " 导出）",
     );
   }
+  // ①′ 官方 id 签名硬校验：官方包同样走直链/本地分发，身份靠签名而非渠道——
+  // 验不过（含无签名块）一律拒绝，冒充/篡改的包进不了官方槽；第三方 id 不受影响。
+  // 对所有渠道生效（直链/本地/manifest/自管更新），是安装管线的最终闸门。
+  let signVerified = false;
+  if (isOfficialPackId(id)) {
+    const check = await verifyOfficialSignature(text);
+    if (!check.ok) {
+      console.log(`[SourceUpdate] 官方包签名校验失败 ${id}：${check.message}`);
+      return applyResult(false, header.versionCode, "官方包签名校验失败：" + check.message);
+    }
+    signVerified = true;
+  }
   const artifact = artifactOfKind(kind);
   const old = packById(id);
   if (old != null && old.kind != kind) {
@@ -461,6 +480,9 @@ async function installPackText(
     installRef: source == "keep" ? (old != null ? old.installRef : "") : ref,
     lastError: old != null ? old.lastError : "",
     lastErrorAt: old != null ? old.lastErrorAt : 0,
+    // 官方 id 包本次安装已验签；第三方包/自管更新保留原值（自管更新走同一闸门，
+    // 验过也会置 true——installPackText 里 signVerified 在此之前已算好）
+    signVerified: isOfficialPackId(id) ? signVerified : (source == "keep" && old != null ? old.signVerified : false),
   };
   await putPack(meta);
   await pruneOrphans();
