@@ -12,6 +12,7 @@
 import { apiRequest, parseJsonToUtso, resolveUrl } from "./http";
 import { getPlayUrlByEngine, invokeSource, consumePlayUrlLine } from "./source-engine";
 import type { PlayUrlLine } from "./source-engine";
+import { isLoggedIn } from "./auth";
 import { qtDiag } from "./diag";
 import type { Playlist, Song, Artist, Album } from "@/types/music";
 
@@ -1239,6 +1240,10 @@ function codesGrantQtAdmin(granted: string[]): boolean {
  * 兜底未跑迁移的线上库。
  */
 export function isQtAdmin(): boolean {
+  // 权限缓存只代表「最后一次成功登录的账号」：qt-permissions / qt-roles 仅在
+  // 手动退出登录时清理，token 过期/被服务端踢下线后会残留。不先验登录态的话，
+  // 未登录也会按旧账号权限显示播放页「播放地址」等管理入口。
+  if (!isLoggedIn()) return false;
   return (
     codesGrantQtAdmin(cachedStringList("qt-permissions")) ||
     codesGrantQtAdmin(cachedStringList("qt-roles"))

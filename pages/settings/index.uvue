@@ -20,7 +20,7 @@
         <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">音源包管理</text>
         <view v-if="sourceUpdateStore.updatePending" class="cell-dot" />
         <view class="cell-right">
-          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ sourcePackageText() }}</text>
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">安装 / 更新 / 启停</text>
           <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
         </view>
       </view>
@@ -169,8 +169,6 @@ import { useDownloadsStore } from "@/stores/downloads";
 import { useSourceStore } from "@/stores/source";
 import { useSourceRegistryStore } from "@/stores/source-registry";
 import { platformLabel } from "@/services/platform";
-import { engineStatus, loadedPlayPackId, playPackReady } from "@/services/source-engine";
-import { activePack, activeMetaPack } from "@/services/source-bundle-fs";
 import { useSourceUpdateStore } from "@/stores/source-update";
 import { clearCachedMe } from "@/services/user-cache";
 
@@ -186,8 +184,6 @@ const rates: number[] = [0.75, 1.0, 1.25, 1.5, 2.0];
 const currentRate = ref(audioPlayer.rate);
 const sleepMinutes = ref(0);
 const sources = computed<string[]>(() => registry.sourceIds());
-// 音源包：状态都在非响应式的 service 里，用 sourceRefresh 做一次重算触发
-const sourceRefresh = ref(0);
 // 「有新音源包」红点：检查下载后亮，立即应用 / 下次启动自动装载后灭
 const sourceUpdateStore = useSourceUpdateStore();
 // 桌面歌词（响应式镜像：服务是非响应式单例，模板要靠 ref 刷新）
@@ -219,7 +215,6 @@ onShow(() => {
   sourceStore.restore();
   registry.ensure();
   sourceUpdateStore.refresh();
-  sourceRefresh.value++;
   // 从系统授权页返回时刷新开关状态（去授权前开关先记为开，返回后真实生效状态以权限为准）
   // 同时与原生对账：通知栏「词」按钮改的是原生窗口，回调漏达时这里会显示错
   desktopLyric.refreshFromNative();
@@ -256,25 +251,8 @@ function pickSource(s: string): void {
   uni.showToast({ title: "默认音源：" + platformLabel(s), icon: "none" });
 }
 
-// ==================== 音源包管理（独立页 pages/source-pack/index，这里只留摘要与入口） ====================
-
-/** 设置行摘要：数据包 + 播放包两段状态（tick 用于强制重算） */
-function sourcePackageText(): string {
-  const tick = sourceRefresh.value;
-  const meta = activeMetaPack();
-  const active = activePack();
-  const parts: string[] = [];
-  parts.push(meta == null ? "数据包·未装" : "数据包 v" + meta.versionName);
-  if (active == null) {
-    // 两种包都不内置：未装播放包时在线取链不可用；未装数据包时在线搜索/歌单/歌词
-    // 不可用（本地音乐始终不受影响），入口页/首页负责引导安装
-    parts.push(engineStatus() == "failed" ? "未装播放包（引擎异常）" : "未装播放包");
-  } else {
-    const live = playPackReady() && loadedPlayPackId() == active.id;
-    parts.push("播放 v" + active.versionName + (live ? "" : "（待生效）"));
-  }
-  return parts.join(" · ");
-}
+// ==================== 音源包管理（独立页 pages/source-pack/index，这里只留入口） ====================
+// 行尾不展示包版本/状态明细：独立页里全都有，摘要重复且每装一次包都要跟着改。
 
 /** 音源包管理已拆成独立页（pages/source-pack/index）：状态/数据包/播放包/更新/安装都在那里 */
 function showSourcePackage(): void {
