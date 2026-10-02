@@ -52,6 +52,7 @@ import TimeUnit from 'java.util.concurrent.TimeUnit'
 import HashMap from 'java.util.HashMap'
 import File from 'java.io.File'
 import FileInputStream from 'java.io.FileInputStream'
+import ByteArrayInputStream from 'java.io.ByteArrayInputStream'
 import FileOutputStream from 'java.io.FileOutputStream'
 import OutputStreamWriter from 'java.io.OutputStreamWriter'
 import { UTSAndroid } from 'io.dcloud.uts'
@@ -115,6 +116,24 @@ const QT_V8_BOOTSTRAP = `
 (function () {
   if (globalThis.__qtV8Ready) { return; }
   globalThis.__qtV8Ready = true;
+
+  // ---------- 网络能力收缴（内容安全的运行时硬闸，与安装期静态扫描互为冗余） ----------
+  // 包代码与本页共享上下文：WebView 原生的 fetch/XHR/WebSocket 可以绕过
+  // __qtHost.request 的统一管控自由外联（含把数据编码进 URL 的 GET 上报）。
+  // 宿主自身不用这些 API（bundle 装载走 import + shouldInterceptRequest 本地拦截，
+  // HTTP 走原生 HttpTask），直接收缴；包代码唯一的网络出口是 __qtHost.request。
+  // official 包产物已核对：backend.fetch 是对象方法、'XMLHttpRequest' 只出现在
+  // 请求头字符串里——收缴不影响官方线路。
+  var __qtDenyApi = function (name) {
+    return function () { throw new Error('音源包环境禁止使用 ' + name); };
+  };
+  try { delete globalThis.fetch; } catch (e) {}
+  try { globalThis.XMLHttpRequest = __qtDenyApi('XMLHttpRequest'); } catch (e) {}
+  try { delete globalThis.WebSocket; } catch (e) {}
+  try { delete globalThis.EventSource; } catch (e) {}
+  try { delete globalThis.Worker; } catch (e) {}
+  try { delete globalThis.SharedWorker; } catch (e) {}
+  try { if (navigator && navigator.sendBeacon) { navigator.sendBeacon = __qtDenyApi('sendBeacon'); } } catch (e) {}
 
   // 信封：evaluateJavascript 不把异常回传（回调只拿到 null），
   // 所以每一次求值都包一层 try/catch + JSON.stringify，原生侧解两层 JSON 后能看到真实错误。
@@ -388,21 +407,36 @@ class V8Client extends WebViewClient {
 	}
 
 	/**
-	 * 本地提供 bundle 模块。
+	 * 403 空响应：网络收缴用（shouldInterceptRequest 里非 bundle 请求一律返回它，
+	 * WebView 不产真实网络流量）。UTS 的 Uint8Array 在 app-android 映射为 ByteArray。
+	 */
+	blockedResponse(): WebResourceResponse {
+		const res = new WebResourceResponse('text/plain', 'utf-8', new ByteArrayInputStream(new Uint8Array(0)))
+		res.setStatusCodeAndReasonPhrase(403, 'Blocked by qt-js-engine')
+		return res
+	}
+
+	/**
+	 * 本地提供 bundle 模块；其余请求一律 403 阻断。
 	 *
 	 * 走这里而不是 evaluateJavascript 传源码的原因：1.7MB 过一次 evaluateJavascript
 	 * 会撞 Binder 事务上限（约 1MB）。本回调在**后台线程**执行，读文件是安全的。
+	 *
+	 * 网络收缴（内容安全的运行时硬闸）：引擎页（https://qt.local/ origin）发起的
+	 * 任何非 bundle 请求——包代码用 fetch/XHR/img/script beacon 打向任意外部地址——
+	 * 都在这里断掉，WebView 不产真实网络流量，数据出不了设备。包代码的网络出口
+	 * 只有 __qtHost.request（走原生 HttpTask，受协议/内网校验管控）。
 	 */
 	override shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse | null {
 		try {
 			const url = request.getUrl()
-			if (url == null) return null
+			if (url == null) return blockedResponse()
 			const p = url.getPath()
-			if (p == null || p != V8_BUNDLE_PATH) return null
+			if (p == null || p != V8_BUNDLE_PATH) return blockedResponse()
 			const path = bundleFilePath()
-			if (path.length == 0) return null
+			if (path.length == 0) return blockedResponse()
 			const f = new File(path)
-			if (!f.exists()) return null
+			if (!f.exists()) return blockedResponse()
 			const res = new WebResourceResponse('text/javascript', 'utf-8', new FileInputStream(f))
 			// 模块脚本一律以 CORS 模式抓取；evaluateJavascript 注入脚本的 origin 可能是
 			// opaque（null），不给 ACAO 会过不了 CORS 检查。* 同时覆盖 null/opaque origin。
@@ -413,7 +447,7 @@ class V8Client extends WebViewClient {
 			return res
 		} catch (e) {
 			console.error('[qt-js-engine/v8] bundle 拦截失败:', e)
-			return null
+			return blockedResponse()
 		}
 	}
 

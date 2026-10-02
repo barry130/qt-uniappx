@@ -67,7 +67,8 @@ import {
   ARTIFACT_PLAY,
   ARTIFACT_META,
 } from "@/services/source-bundle-fs";
-import { verifyOfficialSignature } from "@/services/pack-signature";
+import { verifyOfficialSignature, splitSignatureBlock } from "@/services/pack-signature";
+import { scanPackText } from "@/services/pack-safety";
 import {
   ensurePlayPackLoaded,
   unloadPlayPack,
@@ -427,14 +428,23 @@ async function installPackText(
   // ①′ 官方 id 签名硬校验：官方包同样走直链/本地分发，身份靠签名而非渠道——
   // 验不过（含无签名块）一律拒绝，冒充/篡改的包进不了官方槽；第三方 id 不受影响。
   // 对所有渠道生效（直链/本地/manifest/自管更新），是安装管线的最终闸门。
+  const official = isOfficialPackId(id);
   let signVerified = false;
-  if (isOfficialPackId(id)) {
+  if (official) {
     const check = await verifyOfficialSignature(text);
     if (!check.ok) {
       console.log(`[SourceUpdate] 官方包签名校验失败 ${id}：${check.message}`);
       return applyResult(false, header.versionCode, "官方包签名校验失败：" + check.message);
     }
     signVerified = true;
+  }
+  // ①″ 内容安全扫描：签名只证明来源，不证明内容无害——第三方包任何命中即拒；
+  // 官方包已验签（来源可信），命中只记日志。扫描对象 = 剥掉签名块的正文。
+  // 规则与 qt-pc src-tauri/src/pack_safety.rs 逐条一致。
+  const scanFail = scanPackText(splitSignatureBlock(text).content, official);
+  if (scanFail.length > 0) {
+    console.log(`[SourceUpdate] 安全扫描拒绝 ${id}：${scanFail}`);
+    return applyResult(false, header.versionCode, scanFail);
   }
   const artifact = artifactOfKind(kind);
   const old = packById(id);

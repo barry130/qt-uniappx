@@ -1,0 +1,118 @@
+/**
+ * 音源包内容安全扫描（安装期第一道内容闸，与 qt-pc src-tauri/src/pack_safety.rs
+ * 规则逐条一致——两边任何改动都必须同步另一边）。
+ *
+ * 定位：纵深防御的「预警层」，不是唯一防线。签名（pack-signature.uts）证明
+ * **来源**，本模块检查**内容形态**：在包文本进入安装管线前扫描高风险代码特征。
+ * 与运行时隔离（qt-js-engine WebView 无原生桥 + bootstrap 删除网络 API +
+ * shouldInterceptRequest 白名单）互为冗余——即使某条规则被绕过，运行时还有硬防线。
+ *
+ * 规则形态：
+ * - RAW：纯子串匹配（高置信词：宿主桥名、外联 API 名）；
+ * - CALL：`词(` 且前一字符不是 [A-Za-z0-9_$.]（排除 backend.fetch( / prefetch(
+ *   这类方法/长词前缀），判定「全局调用形态」。
+ *
+ * 刻意不拦 eval( / Function(：crypto-js 的 Function("return this")() 探测是
+ * 作者内联加密库的标配（官方包产物里就有），拦了会误杀主流第三方包；且在
+ * 桥/网络/文件已全部封死的引擎里动态执行无法提权。
+ *
+ * 官方包策略：签名即背书——已验签的官方保留 id 命中只记日志不阻断
+ * （官方产物的良性字样，如请求头值 'XMLHttpRequest' 字符串，不该挡自家包）。
+ */
+
+/** 一条扫描规则：pattern（匹配模式）+ reason（拒绝理由） */
+type PackSafetyRule = {
+  pattern: string;
+  reason: string;
+};
+
+/** RAW 规则：纯子串命中即记（与 qt-pc pack_safety.rs RAW_PATTERNS 同表） */
+const RAW_RULES: PackSafetyRule[] = [
+  // 宿主/系统桥：拿到即可能越出引擎沙箱
+  { pattern: "__TAURI_INTERNALS__", reason: "Tauri IPC 内部对象（可跨过引擎直接调用应用命令）" },
+  { pattern: "__TAURI__", reason: "Tauri 宿主桥（可跨过引擎直接调用应用命令）" },
+  { pattern: "ipcRenderer", reason: "Electron IPC 桥" },
+  { pattern: "webkit.messageHandlers", reason: "WKWebView 原生桥" },
+  { pattern: "UTSAndroid", reason: "uni-app x 原生桥" },
+  { pattern: "io.dcloud", reason: "uni-app 原生运行时" },
+  // 自由外联面：绕过宿主网络出口（__qtHost.request 的统一管控）
+  { pattern: "WebSocket", reason: "自由长连接（绕过宿主网络出口）" },
+  { pattern: "EventSource", reason: "SSE 外联（绕过宿主网络出口）" },
+  { pattern: "sendBeacon", reason: "浏览器上报通道（绕过宿主网络出口）" },
+  { pattern: "new XMLHttpRequest", reason: "XHR 直连（绕过宿主网络出口）" },
+  // 后台执行体
+  { pattern: "importScripts", reason: "Worker 脚本注入" },
+  { pattern: "new Worker(", reason: "后台 Worker（不受引擎生命周期管理）" },
+  { pattern: "ServiceWorker", reason: "Service Worker（可劫持引擎页网络）" },
+  { pattern: "serviceWorker", reason: "Service Worker（可劫持引擎页网络）" },
+  // Node/本地文件面（引擎环境本就不该出现）
+  { pattern: "child_process", reason: "Node 子进程" },
+  { pattern: "process.binding", reason: "Node 进程内 API" },
+  { pattern: "content://", reason: "Android 内容提供器访问" },
+];
+
+/** CALL 规则：`pattern(` + 前一字符非标识符/`.`（与 qt-pc pack_safety.rs CALL_PATTERNS 同表） */
+const CALL_RULES: PackSafetyRule[] = [
+  { pattern: "fetch(", reason: "全局 fetch 直连（音源包的网络出口只能是 host.request）" },
+  { pattern: "require(", reason: "CommonJS require（引擎是 ESM 环境，无此全局）" },
+];
+
+/** 单字符是否为标识符字符或 `.`（ASCII 码点判断，UTS 下不用正则更稳） */
+function isIdentOrDotChar(c: string): boolean {
+  if (c.length != 1) return false;
+  const n = c.charCodeAt(0);
+  return (n >= 48 && n <= 57) || (n >= 65 && n <= 90) || (n >= 97 && n <= 122) || n == 95 || n == 36 || n == 46;
+}
+
+/** 命中下标 → 行号（1 起），供错误信息定位 */
+function lineOf(text: string, idx: number): number {
+  return text.substring(0, idx).split("\n").length;
+}
+
+/** 在 text 中找 CALL 形态的 pattern（首个命中下标；无则 -1） */
+function findCallPattern(text: string, pattern: string): number {
+  let from = 0;
+  while (from < text.length) {
+    const rel = text.substring(from).indexOf(pattern);
+    if (rel < 0) return -1;
+    const idx = from + rel;
+    const prev = idx > 0 ? text.charAt(idx - 1) : "";
+    if (!isIdentOrDotChar(prev)) return idx;
+    from = idx + pattern.length;
+  }
+  return -1;
+}
+
+/**
+ * 安装期内容安全扫描。返回 "" = 通过；否则返回拒绝原因（含命中词与行号）。
+ *
+ * @param text    包文本（调用方应先剥掉尾部 __QT_SIGN__ 签名块再传入）
+ * @param official 是否官方保留 id（上游签名已验过）：命中只记日志、返回通过
+ */
+export function scanPackText(text: string, official: boolean): string {
+  const hits: string[] = [];
+  for (let i = 0; i < RAW_RULES.length; i++) {
+    const rule = RAW_RULES[i];
+    const idx = text.indexOf(rule.pattern);
+    if (idx >= 0) {
+      hits.push(`第 ${lineOf(text, idx)} 行：${rule.pattern} —— ${rule.reason}`);
+    }
+  }
+  for (let i = 0; i < CALL_RULES.length; i++) {
+    const rule = CALL_RULES[i];
+    const idx = findCallPattern(text, rule.pattern);
+    if (idx >= 0) {
+      hits.push(`第 ${lineOf(text, idx)} 行：${rule.pattern} —— ${rule.reason}`);
+    }
+  }
+  if (hits.length == 0) return "";
+  if (official) {
+    console.log(`[PackSafety] 官方包命中安全扫描规则（已验签，放行）：${hits.join("；")}`);
+    return "";
+  }
+  return (
+    "包含不安全代码特征，已拒绝安装：" +
+    hits.join("；") +
+    "。音源包只能通过 host.request 访问网络，不能触碰宿主桥/直连网络/后台执行体；若为误报，请调整对应代码写法后重新打包"
+  );
+}
