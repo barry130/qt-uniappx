@@ -1,0 +1,21 @@
+# 轻听 UniAppX 客户端 —— CNB 云原生构建
+#
+# UniAppX 出包必须走 HBuilderX（本仓库没有打包脚本），CNB 上只做静态检查，
+# 与 GitHub 侧一致：推 master 即跑一次 `npm run check`。
+#
+# 与 GitHub 并行：`git push` 会同时推到 GitHub 与 CNB（origin 配了双 pushurl）。
+
+master:
+  push:
+    - name: 静态检查（uvue 语法 + 图标引用）
+      docker:
+        image: node:22
+      stages:
+        - name: 安装依赖
+          script:
+            # 本仓库只有 npm 锁文件（package-lock.json, registry.npmmirror.com），
+            # 不能用 pnpm。@vue/compiler-sfc 作为 peer 依赖由 npm ci 一并装入。
+            - npm ci
+        - name: 检查 uvue
+          script:
+            - npm run check
