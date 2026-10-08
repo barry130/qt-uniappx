@@ -104,6 +104,14 @@ globalThis.__qtEntries = {
 - 入参是 **JSON 数组文本**（`JSON.stringify([args])`），返回值是 **JSON 文本**；
 - `loadBundle` 的装载校验 = ① `v8LoadBundle()` 落盘 + 页面动态 `import`（语法错在 reject 里，
   顶层零执行，这就是热更新三道闸门的第 ② 道）→ ② `__qtEnvEntries()` 数入口必须 > 0；
+- `loadPlayBundle` 是**播放包专用**的第二条同款通道：落盘到 `qt-v8-play-bundle.js`
+  （与 meta 分文件）、受拦路径 `/qt-play-bundle.js`、装载状态与校验对象都独立
+  （`__qtPlayLoadStatus` / 认 `globalThis.__qtPlayPackFactory`），因此 meta 重装不会
+  冲掉播放包、反之亦然。装载成功后插件把工厂另存到 `globalThis.__qtPlayFactoryStash`，
+  供宿主用几十字节的交接桩交回 meta 完成装配（`installPlayPack` 在求值传参**之前**
+  会先把 `__qtPlayPackFactory` 置空，所以桩必须读 stash 而不是读它）。
+  模块 URL 每次带新的 `?v=N`：模块图按完整 URL 缓存，播放包会在同一引擎生命周期里
+  被反复装载，不带查询串会命中旧模块而拿到上一个包的工厂；
 - **平台过滤**：`__qtHost.platform`（prelude 固定 1101）透传到取链执行器，chain.json 的
   行级 `platforms` 白名单按它生效（PC 专属线路不会在安卓参与，反之亦然）；
 - prelude 提供 `__qtHost.request(url, opts)`（Promise）、`__qtHost.log(msg)`、
@@ -118,7 +126,7 @@ globalThis.__qtEntries = {
 ```ts
 import {
   start, stop, evaluate,
-  loadBundle, invoke, dropOp,
+  loadBundle, loadPlayBundle, invoke, dropOp,
   isRunning, isHealthy, dataDir,
   readTextFile, writeTextFile, exists, remove, mkdirs, listDir, readAssetText,
 } from '@/uni_modules/qt-js-engine'
@@ -130,6 +138,9 @@ start({}, (info, error) => {
 
 // 2) 装载音源包（写盘 → 页面动态 import → 校验 __qtEntries 非空；全程不触网）
 loadBundle('F:/.../source-bundle.js 的源码文本', (ok, error) => {})
+
+// 2b) 装载播放包（同款文件通道；校验 globalThis.__qtPlayPackFactory 已挂出）
+loadPlayBundle('F:/.../play-bundle.js 的源码文本', (ok, error) => {})
 
 // 3) 调入口（opId 由本函数生成并返回，用于超时后 dropOp 丢弃结果）
 const opId = invoke('getPlayUrl', JSON.stringify([args]), 12000, (ok, value, error) => {})
@@ -164,7 +175,9 @@ stop((r) => {})                // 正常关停；对已 poison 的引擎放弃�
 App.uvue onLaunch
   └─ prewarmSourceEngine()                    恢复 state.json → start() → loadBundle(meta 槽: 生效数据包，未装则跳过) → 装生效播放包
 music-api.resolvePlayUrl()
-  └─ getPlayUrlByEngine(song, quality)        引擎可用则走音源包；未安装/取不到返回 ""，由调用方报「暂时无法播放」
+  └─ getPlayUrlByEngineResult(song, quality)  引擎可用则走音源包；返回 {url, stalled, line}，
+                                               未安装/取不到时 url=""，失败性质与命中线路随返回值带回
+                                               （并发取链下不能用全局标记，见该函数注释）
 services/source-update.discoverUpdatesAtStartup()  启动更新发现（各包自述 updateUrl + astral manifest，4h 节流）
   └─ SOURCE_UPDATE_FOUND_EVENT                仅提示：App.uvue 弹确认框，用户点「更新」才 applyUpdate()（绝不静默安装）
 services/source-update.installFromUrl()/installFromLocalFile()/installFromText()

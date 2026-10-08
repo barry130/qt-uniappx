@@ -9,7 +9,7 @@ App 侧只需 import 本插件，无需关心上报细节；所有 API 全部 tr
 - **事件采集**：`launcher`（冷启动）、`show`/`hide`（前后台，hide 自动带 `duration` 停留时长）、`page`（页面 PV）、`error`（JS/UTS 运行错误）。
 - **批量上报**：内存队列，默认 **10 秒**定时或满 **50 条**触发；服务端单次限 200 条，超量自动分片。
 - **可靠性**：`hide` 时队列持久化到 storage（key `qt-stat-queue`），冷启动恢复并先上报；失败回队列重试 ≤3 次；队列上限 500 条丢最旧。
-- **匿名上报**：直连 `POST /api/v1/stat/report`（匿名公开接口，不走 satoken 刷新体系，属 `services/http.ts` 约定的例外，见设计文档 §7 异常说明）。
+- **匿名上报**：直连 `POST /api/v1/app/stat/report`（匿名公开接口，不走 satoken 刷新体系，属 `services/http.ts` 约定的例外，见设计文档 §7 异常说明）。
 - **错误采集边界**：仅覆盖 JS/UTS 层**可捕获的运行错误**（App `onError` → `error` 事件入库，含 message/stack/page/release）。原生崩溃（进程死亡 / NDK / ANR）**不做采集**（自托管 Sentry 因服务器资源受限未部署，M4 已取消）。
 
 ## App 侧接入（App.uvue）
@@ -21,7 +21,7 @@ import { resolveUrl } from '@/services/http'
 onLaunch(() => {
   // 统计采集最先初始化
   initQtStat({
-    ingestUrl: resolveUrl('stat/report'),
+    ingestUrl: resolveUrl('app/stat/report'),
     channel: 'official',
     debug: false,
     batchIntervalMs: 10000,
