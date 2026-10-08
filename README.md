@@ -96,6 +96,8 @@
 2. 确认 `manifest.json` 已启用相应配置
 3. 运行到 Android 或 iOS 真机 / 模拟器
 
+> **Android 版本要求**：最低 **Android 8.0（API 26）**，目标 **Android 14（API 34）**，且仅支持 **`arm64-v8a`** 架构（32 位设备无法安装）。对应 `manifest.json` 中的 `minSdkVersion` / `targetSdkVersion` / `abiFilters`。
+
 首次运行前，可在终端执行 `npm install` 安装 Pinia 等依赖。
 
 > ⚠️ 本项目含多个 UTS 原生插件（播放内核、悬浮窗歌词、音源包引擎等），**必须使用自定义基座或云端打包**运行；
