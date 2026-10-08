@@ -1,8 +1,11 @@
-import type { LyricLine } from "@/types/music";
+import type { LyricLine, LyricWord } from "@/types/music";
 
 /**
  * 共享 LRC 解析（播放页歌词 + 桌面歌词悬浮窗共用）。
  * 解析 [mm:ss.ff] 时间标签行；translationText 里的行按时间戳对齐（误差 < 0.05s）挂到主行。
+ *
+ * 另提供逐字解析（音源包 wordByWord，QRC 行内格式）与罗马音合并，
+ * 语义对齐 qt-pc 的 F:\qtMusic\qt-pc\src\lib\lrc.ts。
  */
 
 function numOrZero(text: string): number {
@@ -82,17 +85,248 @@ export function parseLrc(text: string, translationText: string = ""): LyricLine[
 }
 
 /**
+ * 解析逐字歌词（音源包 `wordByWord`，QRC 行内格式）：
+ * `[行起点ms,行时长ms]词(词起点ms,词时长ms)词(词起点ms,词时长ms)…`
+ *
+ * 例：`[0,2250]晴(0,160)天(160,160)…`；网易的 `[58740,5690]他(0,270)们(270,150)…`。
+ * 三个源（wyy YRC / qq QRC / kg KRC）在包里已统一成这个形态，故只有一套解析器，不按源分支。
+ *
+ * 与 PC 端 parseWordByWordLrc 同口径，两处刻意差异：
+ * - 不用正则：UTS 编译到 Kotlin/Swift 时正则支持面窄，这里一律 indexOf/substring 手写扫描；
+ * - 行 `time` 是**秒**（与 parseLrc 一致），词级 startMs/durationMs 才是毫秒。
+ *
+ * 词起点 **并不总是** 相对行首：包侧归一到这一行格式却沿用了各源自己的口径 ——
+ * qq/部分源给的是行内绝对时间（首词起点 ≈ 行起点），kg 给的是相对值（首词起点 0）。
+ * 统一在解析出口按下面的 normalizeWordTimeline 折算成相对行首，
+ * 上层（卡拉 OK 染色）只认相对口径，不再分支判源（与 PC 端同口径，改一处要改两处）。
+ *
+ * 读取方式是「文本段 + (数字,数字)」成对读，而不是先剥标签再按括号切：
+ * 词文本里理论上可以含括号，成对读才不会被文本里的括号带偏。
+ * 纯间奏的占位括号（如 `-(320,160)`，前面没有文本）会带出空文本的词，这里跳过。
+ */
+
+/**
+ * 把一行里的词时间轴统一折算成「相对行首」（毫秒口径）。
+ *
+ * 判定用两个锚点各自与两套口径的误差之和：首词起点（绝对 ≈ 行起点 / 相对 ≈ 0）
+ * 与末词终点（绝对 ≈ 行起点+时长 / 相对 ≈ 时长）。误差小的那套胜出；两套误差相等
+ * （典型是行起点为 0 的开场行）按契约保持相对，都贴合不了（异常数据）也不改写。
+ *
+ * 容忍度 400ms：行起点与首词起点在包侧各自四舍五入，几十毫秒的漂移要能吃下。
+ */
+const WORD_TIMELINE_TOLERANCE_MS = 400;
+
+/**
+ * 绝对值（UTS 版）：不用 Math.abs —— UTS number 编译到 Kotlin 是 Double，
+ * 而 java.lang.Math.abs 只有 Int/Float/Long 重载没有 Double（真机编译直接失败），
+ * 这里按符号取反，与 qt-audio-player 的 desktop-lyric.uts:367 同款规避。
+ */
+function absNum(value: number): number {
+  return value < 0 ? -value : value;
+}
+
+function normalizeWordTimeline(
+  timeMs: number,
+  durationMs: number,
+  words: LyricWord[],
+): LyricWord[] {
+  if (words.length == 0) return words;
+  const first = words[0] as LyricWord;
+  const last = words[words.length - 1] as LyricWord;
+  const lastEnd = last.startMs + last.durationMs;
+  const errAbsolute =
+    absNum(first.startMs - timeMs) + absNum(lastEnd - (timeMs + durationMs));
+  const errRelative = absNum(first.startMs) + absNum(lastEnd - durationMs);
+  if (errAbsolute < errRelative && errAbsolute <= WORD_TIMELINE_TOLERANCE_MS) {
+    const out: LyricWord[] = [];
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i] as LyricWord;
+      out.push({ startMs: w.startMs - timeMs, durationMs: w.durationMs, text: w.text });
+    }
+    return out;
+  }
+  return words;
+}
+export function parseWordByWordLrc(text: string): LyricLine[] {
+  const lines: LyricLine[] = [];
+  if (text.length == 0) return lines;
+  const parts = text.split("\n");
+  for (let i = 0; i < parts.length; i++) {
+    let line = parts[i] as string;
+    // 酷狗等源用 \r\n 换行，split("\n") 后尾部会留一个 \r；顺带去掉行首尾空白
+    line = trimSpace(line);
+    if (line.length == 0) continue;
+    // 行头必须是 [行起点ms,行时长ms]；元信息行（[ti:] 等）没有逐字时间轴，跳过
+    if (line.substring(0, 1) != "[") continue;
+    const headEnd = line.indexOf("]");
+    if (headEnd < 0) continue;
+    const head = line.substring(1, headEnd);
+    const comma = head.indexOf(",");
+    if (comma < 0) continue;
+    const startText = head.substring(0, comma);
+    if (!isAllDigits(startText)) continue;
+    // 行起点是毫秒，这里换算成秒存 time，与 parseLrc 的行保持同一单位
+    const timeMs = numOrZero(startText);
+    // 行时长（毫秒），只给词时间轴归一当判据用；个别源行头只有起点时取不到，
+    // 取不到就不归一（没有时长判不出两套口径，改了反而可能改错）
+    const durText = trimSpace(head.substring(comma + 1));
+    const durationMs = isAllDigits(durText) ? numOrZero(durText) : 0;
+    let body = line.substring(headEnd + 1);
+    const words: LyricWord[] = [];
+    let cursor = 0;
+    while (cursor < body.length) {
+      const open = body.indexOf("(", cursor);
+      if (open < 0) break;
+      const close = body.indexOf(")", open);
+      if (close < 0) break;
+      const inner = body.substring(open + 1, close);
+      const innerComma = inner.indexOf(",");
+      if (innerComma < 0) {
+        cursor = close + 1;
+        continue;
+      }
+      const startWordText = inner.substring(0, innerComma);
+      const durationText = inner.substring(innerComma + 1);
+      if (!isAllDigits(startWordText) || !isAllDigits(durationText)) {
+        // 括号里不是「数字,数字」：那是歌词正文里的普通括号，当文本处理，继续往下找
+        cursor = open + 1;
+        continue;
+      }
+      const wordText = body.substring(cursor, open);
+      if (wordText.length > 0) {
+        words.push({
+          startMs: numOrZero(startWordText),
+          durationMs: numOrZero(durationText),
+          text: wordText,
+        });
+      }
+      cursor = close + 1;
+    }
+    if (words.length == 0) continue;
+    let joined = "";
+    for (let w = 0; w < words.length; w++) {
+      joined = joined + (words[w] as LyricWord).text;
+    }
+    lines.push({
+      time: timeMs / 1000,
+      text: joined,
+      words: durationMs > 0 ? normalizeWordTimeline(timeMs, durationMs, words) : words,
+    });
+  }
+  // 音源包已按时间升序，但个别源会穿插元信息行导致乱序；排序后按行取才稳
+  sortLinesByTime(lines);
+  return lines;
+}
+
+/** 去掉字符串首尾空白（空格 / \t / \r / \n），不用正则与 trimTo 之类平台差异 API */
+function trimSpace(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && isSpaceAt(text, start)) start++;
+  while (end > start && isSpaceAt(text, end - 1)) end--;
+  return text.substring(start, end);
+}
+
+function isSpaceAt(text: string, index: number): boolean {
+  const ch = text.substring(index, index + 1);
+  return ch == " " || ch == "\t" || ch == "\r" || ch == "\n";
+}
+
+/** 按 time 升序（简单插入排序：歌词行数几十到几百，且输入基本已有序） */
+function sortLinesByTime(lines: LyricLine[]): void {
+  for (let i = 1; i < lines.length; i++) {
+    const current = lines[i] as LyricLine;
+    let j = i - 1;
+    while (j >= 0 && (lines[j] as LyricLine).time > current.time) {
+      lines[j + 1] = lines[j] as LyricLine;
+      j--;
+    }
+    lines[j + 1] = current;
+  }
+}
+
+/**
+ * 把罗马音按时间戳就近合并进歌词行（±500ms 内取最近的一条，且该条文本非空）。
+ *
+ * 口径与 mergeTranslation / parseLrc 的译文对齐完全一致（500ms 是 PC 端同值），
+ * 差异只在写入字段。空串（中文歌、老包没有这个字段）直接原样返回，行为与改前一致。
+ */
+export function mergeRomanization(main: LyricLine[], romanization: string): LyricLine[] {
+  if (romanization.length == 0) return main;
+  const roma = parseLrc(romanization, "");
+  if (roma.length == 0) return main;
+  for (let i = 0; i < main.length; i++) {
+    const line = main[i] as LyricLine;
+    if (line.text.length == 0) continue;
+    let best = -1;
+    let bestDiff = 0.5;
+    for (let j = 0; j < roma.length; j++) {
+      const r = roma[j] as LyricLine;
+      if (r.text.length == 0) continue;
+      const diff = Math.abs(r.time - line.time);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = j;
+      }
+    }
+    if (best >= 0) line.romanization = (roma[best] as LyricLine).text;
+  }
+  return main;
+}
+
+/**
+ * 行内当前唱到第几个词（下标），以及这个词的内部进度比例 0~1。
+ *
+ * 返回 { index, ratio }：
+ * - index：正在唱（或刚唱完）的词下标；还没到行首返回 0 且 ratio=0，整行唱完返回最后一个下标且 ratio=1；
+ * - ratio：该词已经唱过的比例（durationMs 为 0 的占位词按「已过起点即满」处理）。
+ * 调用方按它做逐词颜色：下标 < index 全亮，== index 按 ratio 判定（见播放页），> index 保持弱色。
+ */
+export function wordProgressAt(
+  words: LyricWord[],
+  elapsedMs: number
+): { index: number; ratio: number } {
+  const empty: { index: number; ratio: number } = { index: -1, ratio: 0 };
+  if (words.length == 0) return empty;
+  let index = -1;
+  let ratio = 0;
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i] as LyricWord;
+    const passed = elapsedMs - word.startMs;
+    if (passed < 0) break;
+    index = i;
+    ratio = word.durationMs > 0 ? passed / word.durationMs : 1;
+    if (ratio > 1) ratio = 1;
+    if (passed < word.durationMs) break;
+  }
+  // 整行都还没开始：给 0 号词 ratio=0，让整行保持未唱状态而不是「无词」
+  if (index < 0) return { index: 0, ratio: 0 };
+  return { index: index, ratio: ratio };
+}
+
+/**
  * 按当前播放进度取该显示的歌词行下标（无匹配返回 -1）。
  * 与播放页滚动版语义一致：取「时间 <= progress 的最后一行」。
+ *
+ * offsetSec 是「歌词偏移」的秒数（正数 = 歌词延后出现，与 qt-pc 同口径）：
+ * 判定用 progress - offsetSec，所以偏移只作用在这里的入参上。
+ * 绝对不能反过来去改歌词行的 time 字段——那份数据同时被拖动进度条、逐字染色、
+ * 桌面歌词复用，改数据会让「拖到某秒」的高亮和歌词自身时间永久错位。
+ * 默认 0：不传参的老调用点行为完全不变。
  */
-export function activeLyricIndex(lines: LyricLine[], progress: number): number {
+export function activeLyricIndex(
+  lines: LyricLine[],
+  progress: number,
+  offsetSec: number = 0
+): number {
   if (lines.length == 0) return -1;
+  const shifted = progress - offsetSec;
   let index = -1;
   // 不能 break：只要有一行时间异常（乱序、或被误解析成很大的值），
   // break 会让高亮永久停在它前面一行（桌面歌词整首不动就是这么来的）
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] as LyricLine;
-    if (line.time <= progress) index = i;
+    if (line.time <= shifted) index = i;
   }
   return index;
 }

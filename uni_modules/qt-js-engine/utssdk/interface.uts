@@ -74,6 +74,18 @@ export type QtJsIsRunning = () => boolean;
 export type QtJsLoadBundle = (code: string, callback: QtJsVoidCallback) => void;
 
 /**
+ * 装载**播放包**脚本（play-bundle.js），与 loadBundle 分槽。
+ *
+ * 为什么播放包不能复用 loadBundle：两者落地文件与装载状态都是分开的
+ * （meta 装完入口数在 `__qtEntries`，播放包装完认 `globalThis.__qtPlayPackFactory`），
+ * 且播放包会在同一引擎生命周期里被**重复**装载（切换生效包/覆盖更新）。
+ * 实现与 loadBundle 同一套「落盘 → shouldInterceptRequest → 动态 import」通道，
+ * 因此注入耗时是百毫秒级；而原先经 meta 的 `installPlayPack(code)` 走
+ * evaluateJavascript 传 1.4MB 源码，真机实测要 4.9s。
+ */
+export type QtJsLoadPlayBundle = (code: string, callback: QtJsVoidCallback) => void;
+
+/**
  * 调用 bundle 注册在 `globalThis.__qtEntries` 上的入口。
  *
  * - `name`  入口名，如 "getPlayUrl" / "verifyPlayable" / "bundleInfo"

@@ -122,6 +122,7 @@ import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { onLoad, onShow } from "@dcloudio/uni-app";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
 import type { Playlist, Song } from "@/types/music";
+import { collectDupMessage, type CollectDupConflict } from "@/services/collect-dup";
 import type { Source } from "@/services/music-api";
 const playlist = ref<Playlist | null>(null);
 const tracks = ref<Song[]>([]);
@@ -367,6 +368,54 @@ function getSelectedPlaylistIds(song: Song | null): string[] {
 function handlePickerConfirm(selectedIds: string[]): void {
   const song = currentSong.value;
   if (song == null) return;
+  // 收藏前查「同名不同源」：有冲突的歌单先弹确认，确认了才真的加
+  const currentIds = player.pickerSelectedIds(song);
+  const addIds: string[] = [];
+  for (let i = 0; i < selectedIds.length; i++) {
+    if (currentIds.indexOf(selectedIds[i]) < 0) addIds.push(selectedIds[i]);
+  }
+  const check = player.collectDupConflicts(song, addIds);
+  if (check.conflicts.length == 0) {
+    finishPickerSelection(song, selectedIds);
+    return;
+  }
+  const finalIds: string[] = [];
+  for (let i = 0; i < check.passed.length; i++) finalIds.push(check.passed[i]);
+  for (let i = 0; i < selectedIds.length; i++) {
+    const id = selectedIds[i];
+    if (addIds.indexOf(id) < 0 && check.passed.indexOf(id) < 0) finalIds.push(id);
+  }
+  confirmDups(song, check.conflicts, finalIds);
+}
+
+/** 依次弹冲突确认，确认的歌单 id 追加进 pendingIds，全部问完才提交 */
+function confirmDups(song: Song, conflicts: CollectDupConflict[], pendingIds: string[]): void {
+  if (conflicts.length == 0) {
+    finishPickerSelection(song, pendingIds);
+    return;
+  }
+  const first = conflicts[0];
+  const rest: CollectDupConflict[] = [];
+  for (let i = 1; i < conflicts.length; i++) rest.push(conflicts[i]);
+  uni.showModal({
+    title: '同名歌曲提示',
+    content: collectDupMessage(first.playlistName, first.dups),
+    confirmText: '继续收藏',
+    cancelText: '取消',
+    success: (res: any) => {
+      const ids: string[] = [];
+      for (let i = 0; i < pendingIds.length; i++) ids.push(pendingIds[i]);
+      const ok = res != null && (res.confirm as boolean);
+      if (ok) ids.push(first.playlistId);
+      confirmDups(song, rest, ids);
+    },
+    fail: () => {
+      confirmDups(song, rest, pendingIds);
+    }
+  });
+}
+
+function finishPickerSelection(song: Song, selectedIds: string[]): void {
   // 统一由 store 处理：按歌单 pid 增删（同步服务器）
   const changed = player.applyPickerSelection(song, selectedIds);
   // 如果当前显示的是本地歌单，刷新列表

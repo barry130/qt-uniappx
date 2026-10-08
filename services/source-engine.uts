@@ -3,14 +3,20 @@
  *
  * 引擎上下文分两层装配：
  *   ① 元数据包（meta-bundle.js，同样不内置）：用户在设置页从链接或本地文件安装，
- *      装进 qt-js-engine 的**唯一 bundle 槽**（插件经 https://qt.local/qt-bundle.js
+ *      装进 qt-js-engine 的 meta 槽（插件经 https://qt.local/qt-bundle.js
  *      动态 import ESM；meta 顶层检测到 globalThis.__qtHost 时自注册 __qtEntries）。
  *      搜索/歌单/专辑/歌词/封面等数据入口与 verifyPlayable 都由它提供——
  *      **未安装时数据面整体下线**（本地音乐不受影响），首页引导只指路设置页。
  *   ② 播放音源包（play-bundle.js，高版权风险，同样不内置）：用户在设置页安装
- *      （自定义直链；已装包的更新经 manifest 提示），文本经 meta 的
- *      installPlayPack 入口 eval 注入同一引擎上下文
- *      （globalThis.__qtPlayPackFactory 约定），getPlayUrl/loadChain 由 meta 转发给它。
+ *      （自定义直链；已装包的更新经 manifest 提示）。包体与 meta 走**同一条**
+ *      「落盘 → shouldInterceptRequest → 动态 import」通道（插件的 loadPlayBundle，
+ *      与 meta 分文件、分装载状态），import 成功后工厂挂在
+ *      globalThis.__qtPlayPackFactory；随后用一段几十字节的桩代码调 meta 的
+ *      installPlayPack 入口，把工厂交回 meta 上下文完成装配
+ *      （getPlayUrl/loadChain 由 meta 转发给它）。
+ *      2026-10 之前播放包是整份 1.4MB 源码经 installPlayPack 的 code 参数过
+ *      evaluateJavascript，真机冷启动实测要 4.9s（首页首批请求被整体推迟），
+ *      现在跨语言边界只过那几十字节。
  *
  * 生效中的播放包由 source-bundle-fs 的 activeId 指定（多包并存、其一生效）；
  * 这里维护「引擎里已注入的是哪个包」（gPlayPackLoadedId），切换/更新后热注入。
@@ -40,6 +46,7 @@ import {
   start,
   stop,
   loadBundle,
+  loadPlayBundle,
   invoke,
   evaluate,
   isRunning,
@@ -75,14 +82,43 @@ export type SourceLoadFailure = "" | "missing" | "invalid" | "engine" | "contrac
 
 /** 宿主契约版本（manifest 里也有这个字段，两边必须一致） */
 const HOST_API_VERSION = 1;
-/** 取链超时：包含 bundle 内所有 HTTP 与定时器等待 */
+/**
+ * 取链超时：包含 bundle 内所有 HTTP 与定时器等待。
+ *
+ * 12s = 链内真实预算 `CHAIN_BUDGET_MS = 9s` + 整链宽限 250ms
+ * （qt-sources/src/budget.ts，用户要求「原源搜索 5s + 换源兜底 4s」）
+ * + 引擎 evaluate/pump 调度余量。JS 侧 `URL_FETCH_BUDGET_MS = 10s` 先超时，
+ * 所以这个值只在「JS 侧回调链路本身卡住」时才兜底。
+ *
+ * 与原生侧 `RESOLVE_TIMEOUT_SECONDS = 15` 的关系（不变量）：
+ * 原生 loader 线程等 JS 回填的时长必须**大于**JS 侧的 10s，否则弱网下
+ * 会出现「原生已判超时抛IOException，JS 才刚拿到地址」的错配。
+ * 15s = 10s + 5s 余量。改 `URL_FETCH_BUDGET_MS` 时必须同步复核
+ * `qt-audio-player/utssdk/app-android/index.uts` 的同名常量。
+ */
 const PLAY_TIMEOUT_MS = 12000;
 /** 冒烟/试听校验超时 */
 const VERIFY_TIMEOUT_MS = 8000;
 /** 装载 chain 的超时（纯本地计算，给短一点） */
 const LOAD_CHAIN_TIMEOUT_MS = 4000;
-/** installPlayPack 注入超时：eval 1.7MB IIFE 一般 <1s，留足余量 */
+/** installPlayPack 注入超时：现在只传几十字节的交接桩，留足余量 */
 const INSTALL_PACK_TIMEOUT_MS = 15000;
+/**
+ * 把已 import 的播放包工厂交回 meta 的**交接桩**。
+ *
+ * 播放包与 meta 是两套独立上下文，而 `getPlayUrl`/`loadChain` 由 meta 的闭包
+ * 变量 `playPack` 转发（见 meta-entries.ts）。所以 import 出工厂后必须再调一次
+ * meta 的 installPlayPack 完成装配——但**只传这段桩，不传 1.4MB 包体**。
+ *
+ * 为什么读 `__qtPlayFactoryStash` 而不是直接读 `__qtPlayPackFactory`：
+ * evalPlayPackFactory 在求值传入的 code **之前**就把 `__qtPlayPackFactory`
+ * 置为 undefined（覆盖式挂出，防旧包残留），所以桩里直接读它只会拿到 undefined。
+ * 插件的 __qtImportPlay 在 import 成功后额外把工厂另存到 `__qtPlayFactoryStash`，
+ * 那份不被 meta 触碰，桩读它才能把真工厂交回去。
+ *
+ * 桩本身是常量字符串（不含用户数据），无需转义。
+ */
+const PLAY_FACTORY_HANDOFF_CODE = "globalThis.__qtPlayPackFactory = globalThis.__qtPlayFactoryStash";
 /** bundleInfo 探测超时 */
 const BUNDLE_INFO_TIMEOUT_MS = 4000;
 
@@ -245,6 +281,18 @@ function callInvoke(name: string, argsJson: string, timeoutMs: number): Promise<
     invoke(name, argsJson, timeoutMs, (r: EvalResult) => {
       if (r.ok) {
         resolve(r.value);
+      } else {
+        reject(new Error(r.error));
+      }
+    });
+  });
+}
+
+function callLoadPlayBundle(code: string): Promise<boolean> {
+  return new Promise<boolean>((resolve, reject) => {
+    loadPlayBundle(code, (r: VoidResult) => {
+      if (r.ok) {
+        resolve(true);
       } else {
         reject(new Error(r.error));
       }
@@ -559,7 +607,8 @@ async function loadMetaIntoEngine(): Promise<boolean> {
  * 返回 false 表示「本次取不了链」：没有生效包 / 引擎起不来 / meta 没装上 /
  * 播放包注入失败。记忆化必须**同时比对 id 与 versionCode**——同 id 的更新
  * （manifest/自管渠道都是原地替换）id 不变但代码已换，只看 id 会把旧版本
- * 留在引擎里冒充「已生效」。注意播放注入走 meta 的 installPlayPack 入口——
+ * 留在引擎里冒充「已生效」。播放包与 meta 分槽装载，但装配仍经 meta 的
+ * installPlayPack 入口完成（只传工厂交接桩，见 PLAY_FACTORY_HANDOFF_CODE）——
  * **数据包未装时在线播放同样不可用**（ensureDataEngine 先行失败，gLastError
  * 已给出指路文案）。没有生效播放包时广播 PLAY_PACK_MISSING_EVENT（节流），
  * 由 App.uvue 弹引导安装的提示。
@@ -582,8 +631,14 @@ export async function ensurePlayPackLoaded(): Promise<boolean> {
 }
 
 /**
- * 把一个播放包注入引擎：installPlayPack（eval play-bundle.js，约定
- * globalThis.__qtPlayPackFactory）→ 有 chain.json 时 loadChain。
+ * 把一个播放包注入引擎，分两步：
+ *   ① 装载包体：插件 loadPlayBundle 走「落盘 → shouldInterceptRequest →
+ *      动态 import」，1.4MB 源码**不进** evaluateJavascript（原先经 meta 的
+ *      installPlayPack(code) 传，真机冷启动实测 4.9s，是首页加载慢的根因）；
+ *      import 成功后工厂挂在 globalThis.__qtPlayFactoryStash。
+ *   ② 交接装配：用几十字节的桩调 meta 的 installPlayPack，让它把工厂装进
+ *      自己的闭包（getPlayUrl/loadChain 都转发到那份 playPack）。
+ * 之后有 chain.json 再 loadChain。
  * 失败分类：missing=文件没了；invalid=包代码/chain 非法（可拉黑）；
  * engine=meta 层都没就绪（环境问题）。
  */
@@ -596,11 +651,21 @@ async function applyPlayPackInEngine(pack: SourcePackMeta): Promise<boolean> {
       fail(`播放包文件缺失：${pack.id}`);
       return false;
     }
+    // 装载前必须先有 meta：交接桩要调 meta 的 installPlayPack 入口，
+    // 而 meta 未装时 __qtEntries 是空的（连入口都没有）。
+    if (!(await ensureDataEngine())) {
+      gLoadFailure = "engine";
+      fail(`播放包注入前 meta 未就绪：${pack.id}`);
+      return false;
+    }
     gStatus = "loading";
-    // meta 的 installPlayPack：new Function(code) 执行，取 __qtPlayPackFactory
-    // 构造播放层并替换当前生效层；包代码抛错 = 包本身有问题
+    // ① 包体走文件通道装载（语法错误在 import 的 reject 里报出，顶层零执行）
+    const t0 = Date.now();
+    await callLoadPlayBundle(code);
+    const loadCost = Date.now() - t0;
+    // ② 只把「工厂引用」交回 meta，1.4MB 源码不再跨语言边界
     const installArgs = new UTSJSONObject();
-    installArgs.set("code", code);
+    installArgs.set("code", PLAY_FACTORY_HANDOFF_CODE);
     const resText = await callInvoke(
       "installPlayPack",
       JSON.stringify([installArgs]),
@@ -612,7 +677,7 @@ async function applyPlayPackInEngine(pack: SourcePackMeta): Promise<boolean> {
       gPlayPackFailedId = pack.id;
       gLoadFailure = "invalid";
       const err = res.get("error") as string | null;
-      fail(`播放包注入失败：${pack.id}（${err != null ? err : "installPlayPack 未成功"}）`);
+      fail(`播放包装配失败：${pack.id}（${err != null ? err : "installPlayPack 未成功"}）`);
       return false;
     }
     // chain.json 是可选线路覆盖层（内容与播放包内置默认链同源）：custom 直链
@@ -639,11 +704,11 @@ async function applyPlayPackInEngine(pack: SourcePackMeta): Promise<boolean> {
     gLastError = "";
     gLoadFailure = "";
     console.log(
-      `[SourceEngine] 播放包已注入：${pack.id}（${pack.versionName}，code ${pack.versionCode}）`,
+      `[SourceEngine] 播放包已注入：${pack.id}（${pack.versionName}，code ${pack.versionCode}；装载 ${loadCost}ms）`,
     );
     return true;
   } catch (e) {
-    // invoke 抛错：装载阶段（eval/loadChain 都是同步计算）失败按包问题处理
+    // 装载阶段失败：包体语法错/缺工厂按包问题处理；其余（引擎/超时）也算装载失败
     gPlayPackFailedId = pack.id;
     gLoadFailure = "invalid";
     fail(`播放包装载失败：${pack.id}（${msgOf(e)}）`);
@@ -683,8 +748,8 @@ export async function unloadPlayPack(): Promise<void> {
 }
 
 /**
- * 让「生效 meta 变更」立即生效：整引擎重启（meta 在唯一 bundle 槽里，换它只能
- * 重装槽位）→ 重装 meta → 把生效播放包重新热注入。
+ * 让「生效 meta 变更」立即生效：整引擎重启（引擎里的 meta 只能整个换掉）→
+ * 重装 meta → 把生效播放包重新热注入。
  * meta 包安装/更新/卸载/停用后由 source-update 调用。音频播放器不受影响
  * （引擎只负责取链，正在放的歌继续放），之后的数据/取链请求自动走新 meta。
  */
@@ -718,18 +783,11 @@ export async function bundleInfo(): Promise<string> {
 export type PlayUrlLine = { id: string; name: string; kind: string; targetSong: Song | null };
 
 /**
- * 最近一次取链命中的线路。bundle 侧只在成功应答里带回来（失败走 trace），
- * 这里接住供调用方落进播放地址缓存——管理端要显示「当前这条地址走的是哪条源」，
- * 而地址会被缓存 10 分钟，线路信息必须与地址同生命周期，不能只看最后一次调用。
+ * 音源包在失败 trace 前缀打的「本次全灭纯属网络」标记。
+ * 与 qt-sources/src/actions/play-url.ts 的 `noteSourceMissFiltered` 同源：
+ * 整链没有一条线路拿到过实质响应时打这个标记，宿主据此把失败判为环境问题。
  */
-let lastPlayUrlLine: PlayUrlLine | null = null;
-
-/** 读走最近一次命中线路（读后即清）；无命中（包内缓存/老包）返回 null */
-export function consumePlayUrlLine(): PlayUrlLine | null {
-  const t = lastPlayUrlLine;
-  lastPlayUrlLine = null;
-  return t;
-}
+const STALLED_MARKER = "[网络]";
 
 /**
  * 跨源兜底命中的目标歌（bundle 侧搜索匹配到的目标平台条目）。
@@ -814,13 +872,44 @@ function parsePlayUrlLine(raw: any): PlayUrlLine | null {
 }
 
 /**
- * 用引擎取播放地址。失败一律返回 ""（不抛错）——
+ * 取链结果：地址 + 失败性质 + 命中线路，**随调用返回值带回**。
+ *
+ * 刻意不做成模块级「读后即清」标记：宿主侧取链是并发的（播放页换音质重取、
+ * 播放失败重取、熔断后的恢复探测、下载任务都会同时进行），全局标记会被另一个
+ * 调用方的结果串味 —— 弱网的那次读到内容失败的标记就被当成坏歌、消耗熔断额度，
+ * 连挂几首把自动切歌关死，正是用户反馈的「网络质量差一点就疯狂不可用」。
+ * 随返回值带回则天然按调用隔离。
+ */
+export type PlayUrlResult = {
+  url: string;
+  stalled: boolean;
+  line: PlayUrlLine | null;
+  /**
+   * 取链时 Range 预检实测到的文件总字节数（null = 没读到 `Content-Range`）。
+   * 老包不返回该字段 → null，调用方按未知处理。
+   */
+  size: number | null;
+  /**
+   * 按实测码率重标后的档位（**只降不升**；空串 = 未重标 / 老包）。
+   * 下载命名用它而非请求档，否则请求 flac 实际拿到 320k 会命名成 `.flac` 虚标。
+   */
+  actualQuality: string;
+};
+
+/**
+ * 用引擎取播放地址。失败一律返回空地址（不抛错）——
  * 调用方拿到空串直接报「暂时无法播放」，不再有第二套取链实现兜底。
  * 没装播放包 / meta 报「未安装播放音源包」时广播 PLAY_PACK_MISSING_EVENT。
- * 成功时把命中的线路存进 lastPlayUrlLine（见 consumePlayUrlLine）。
+ * 失败性质（弱网 vs 内容）与命中线路都随返回值带回，见 PlayUrlResult。
  */
-export async function getPlayUrlByEngine(song: Song, quality: string): Promise<string> {
-  if (!(await ensurePlayPackLoaded())) return "";
+export async function getPlayUrlByEngineResult(
+  song: Song,
+  quality: string,
+): Promise<PlayUrlResult> {
+  if (!(await ensurePlayPackLoaded())) {
+    // 没有可用的播放包 = 内容问题（引导安装），不是网络问题
+    return { url: "", stalled: false, line: null, size: null, actualQuality: "" };
+  }
   const args = new UTSJSONObject();
   args.set("platform", song.platform);
   args.set("id", song.id);
@@ -837,23 +926,47 @@ export async function getPlayUrlByEngine(song: Song, quality: string): Promise<s
     const message = msgOf(e);
     if (message.indexOf(PLAY_PACK_MISSING_MESSAGE_PART) >= 0) {
       emitPlayPackMissing();
-      return "";
+      return { url: "", stalled: false, line: null, size: null, actualQuality: "" };
     }
+    // 音源包在 trace 前缀打 `[网络]` 表示「整链没有一条线路拿到过响应」，
+    // 即本次全灭是弱网/引擎卡的环境问题，不是这个音源没这首歌
+    // （见 qt-sources/src/actions/play-url.ts 的 noteSourceMissFiltered）。
+    // 宿主据此不把本首计入熔断，而是原地等网络重试。
     // 单曲取不到不算引擎故障，不写 failed。
     // 错误文本里带歌/音质定位 + bundle 侧的逐线路追踪（meta 会把 trace 拼进 error）
     console.log(`[SourceEngine] 引擎取链失败：${message}（${song.platform} @${quality}「${song.name} ${song.singer}」id=${song.id}）`);
-    return "";
+    return { url: "", stalled: message.indexOf(STALLED_MARKER) >= 0, line: null, size: null, actualQuality: "" };
   }
   try {
     const o = JSON.parse(value) as UTSJSONObject;
     const url = o.get("url") as string | null;
-    if (url == null || url.length == 0) return "";
+    if (url == null || url.length == 0) {
+      // 引擎在预算内明确回了「没有地址」= 内容问题
+      return { url: "", stalled: false, line: null, size: null, actualQuality: "" };
+    }
     // 命中线路随应答一起回来（老包没有 line 字段 → null，管理端按未知展示）
-    lastPlayUrlLine = parsePlayUrlLine(o.get("line"));
-    return url;
+    // size / actualQuality 同理：老包不返回 → null / 空串，调用方按未知处理
+    const size = o.get("size") as number | null;
+    const actualQuality = o.get("actualQuality") as string | null;
+    return {
+      url: url,
+      stalled: false,
+      line: parsePlayUrlLine(o.get("line")),
+      size: size,
+      actualQuality: actualQuality != null ? actualQuality : "",
+    };
   } catch (e) {
-    return "";
+    return { url: "", stalled: false, line: null, size: null, actualQuality: "" };
   }
+}
+
+/**
+ * 只要地址的薄封装（冒烟自检等不关心失败性质的调用方用）。
+ * 新代码请用 getPlayUrlByEngineResult：并发取链下，性质必须随返回值带回。
+ */
+export async function getPlayUrlByEngine(song: Song, quality: string): Promise<string> {
+  const result = await getPlayUrlByEngineResult(song, quality);
+  return result.url;
 }
 
 // ==================== 音源数据接口 ====================

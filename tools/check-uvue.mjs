@@ -61,6 +61,33 @@ function indirectIcons(script, defined) {
   return names;
 }
 
+/**
+ * 元数据图标：部分图标名写在 .ts/.uts 的元数据数组里（如 stores/player-bar.ts 的
+ * PLAYER_BAR_TOOLS[].icon），由模板 v-for 出来渲染，模板里看不到字面量。
+ * 这类引用同样是真实引用，扫不到会把它们误报成 UNUSED。
+ */
+function metadataIcons(defined) {
+  const names = new Set();
+  for (const file of walkSources(ROOT)) {
+    const src = readFileSync(file, "utf8");
+    for (const m of src.matchAll(/\bicon:\s*["']([a-z0-9-]+)["']/g)) {
+      if (defined.has(m[1])) names.add(m[1]);
+    }
+  }
+  return names;
+}
+
+/** 收集全仓 .ts/.uts 源文件（图标元数据的可能宿主） */
+function walkSources(dir, out = []) {
+  for (const entry of readdirSync(dir)) {
+    if (entry === "node_modules" || entry === "unpackage" || entry.startsWith(".")) continue;
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) walkSources(full, out);
+    else if (entry.endsWith(".ts") || entry.endsWith(".uts")) out.push(full);
+  }
+  return out;
+}
+
 // 疑似“文字当图标”的符号区间：箭头、几何、杂项、emoji、全角尖括号、乘号
 const GLYPH_RE =
   /[\u2190-\u21FF\u2300-\u23FF\u2500-\u27BF\u2B00-\u2BFF\u00D7\u2039\u203A\uFF1C\uFF1E]|[\uD83C-\uDBFF][\uDC00-\uDFFF]/g;
@@ -76,6 +103,9 @@ const files = walk(ROOT);
 const defined = definedIcons();
 const used = new Set();
 let failed = 0;
+
+// 元数据表里的图标名（如 stores/player-bar.ts 的 PLAYER_BAR_TOOLS[].icon）先计入已引用
+for (const name of metadataIcons(defined)) used.add(name);
 
 for (const file of files) {
   const rel = relative(ROOT, file);

@@ -11,6 +11,7 @@ import {
   isFirstLogin,
   markFirstLoginShown,
   sortNotices,
+  stripHtml,
 } from "@/services/notice";
 import { unreadCountOf } from "@/services/notice-read";
 import { isLoggedIn } from "@/services/auth";
@@ -18,6 +19,17 @@ import { isLoggedIn } from "@/services/auth";
 /** 开屏“今日不显示”存储 key */
 function SplashHideKey(id: number): string {
   return "qt-notice-splash-hidden-" + id;
+}
+
+/**
+ * 开屏公告去重键：先转纯文本（去 HTML 标签、反转义实体），再去掉全部空白字符。
+ * 只比原文不够——后端富文本里 <p> 换行、缩进、&nbsp; 之类的差异会让「看起来
+ * 一模一样」的两条公告绕过精确比较：点「我知道了」后弹出的下一条内容相同，
+ * 用户会以为「点了没反应」。
+ */
+function splashDedupeKey(n: Notice): string {
+  const text = stripHtml(n.title ?? "") + "\n" + stripHtml(n.content ?? "");
+  return text.replace(/\s+/g, "");
 }
 
 /** 当天日期字符串 YYYY-M-D（跨天即自动恢复） */
@@ -73,7 +85,7 @@ class NoticeStore {
     // 置顶优先，多个置顶按创建时间由近及远
     const splashes = sortNotices(this.dispatch.splash);
     const queue: Notice[] = [];
-    // 标题+正文完全相同的开屏公告只保留一条：
+    // 标题+正文相同的开屏公告只保留一条（归一化后比较，见 splashDedupeKey）：
     // 后端若存在重复记录，点「我知道了」后弹出的下一条长得一模一样，
     // 用户会以为“点了没反应”，只能再点一次。
     const seen = new Set<string>();
@@ -82,7 +94,7 @@ class NoticeStore {
       if ((s.firstLoginOnly ?? 0) == 1) {
         if (!(isLoggedIn() && isFirstLogin())) continue;
       }
-      const key = (s.title ?? "") + "\n" + (s.content ?? "");
+      const key = splashDedupeKey(s);
       if (seen.has(key)) continue;
       seen.add(key);
       queue.push(s);

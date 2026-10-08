@@ -64,7 +64,7 @@
         <view v-if="allReady && allSongRows.length > 0" class="all-section" :class="layout.isWide ? 'all-section-wide' : ''">
           <view class="all-head" :class="layout.isWide ? 'all-head-wide' : ''">
             <text class="all-head-title" :class="layout.isWide ? 'all-head-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">单曲</text>
-            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" @click="gotoType(1)">查看更多</text>
+            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" @click="gotoType('song')">查看更多</text>
           </view>
           <view v-for="item in allSongRows" :key="item.key" class="all-row">
             <QtSongRowLite :song="item.song!" :showBadge="false" @play="play(item.song!)" @more="openSheet" />
@@ -73,7 +73,7 @@
         <view v-if="allReady && allPlaylistRows.length > 0" class="all-section" :class="layout.isWide ? 'all-section-wide' : ''">
           <view class="all-head" :class="layout.isWide ? 'all-head-wide' : ''">
             <text class="all-head-title" :class="layout.isWide ? 'all-head-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">歌单</text>
-            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" @click="gotoType(2)">查看更多</text>
+            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" @click="gotoType('playlist')">查看更多</text>
           </view>
           <view v-for="row in allPlaylistRows" :key="row.key" class="all-media-row" :class="layout.isWide ? 'all-media-row-wide' : ''" @click="openPlaylist(row.playlist!)">
             <image class="all-cover" :class="layout.isWide ? 'all-cover-wide' : ''" :src="row.playlist!.picUrl" mode="aspectFill" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" />
@@ -87,7 +87,7 @@
         <view v-if="allReady && allArtistRows.length > 0" class="all-section" :class="layout.isWide ? 'all-section-wide' : ''">
           <view class="all-head" :class="layout.isWide ? 'all-head-wide' : ''">
             <text class="all-head-title" :class="layout.isWide ? 'all-head-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">歌手</text>
-            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" @click="gotoType(3)">查看更多</text>
+            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" @click="gotoType('artist')">查看更多</text>
           </view>
           <view v-for="row in allArtistRows" :key="row.key" class="all-media-row" :class="layout.isWide ? 'all-media-row-wide' : ''" @click="openArtist(row.artist!)">
             <image class="all-cover all-cover-round" :class="layout.isWide ? 'all-cover-wide' : ''" :src="row.artist!.picUrl" mode="aspectFill" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" />
@@ -101,7 +101,7 @@
         <view v-if="allReady && allAlbumRows.length > 0" class="all-section" :class="layout.isWide ? 'all-section-wide' : ''">
           <view class="all-head" :class="layout.isWide ? 'all-head-wide' : ''">
             <text class="all-head-title" :class="layout.isWide ? 'all-head-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">专辑</text>
-            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" @click="gotoType(4)">查看更多</text>
+            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" @click="gotoType('album')">查看更多</text>
           </view>
           <view v-for="row in allAlbumRows" :key="row.key" class="all-media-row" :class="layout.isWide ? 'all-media-row-wide' : ''" @click="openAlbum(row.album!)">
             <image class="all-cover" :class="layout.isWide ? 'all-cover-wide' : ''" :src="row.album!.picUrl" mode="aspectFill" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" />
@@ -311,7 +311,7 @@
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { ref, reactive, computed, onMounted, onUnmounted } from "vue";
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import QtSongRowLite from "@/uni_modules/qt-ui/components/qt-song-row-lite/qt-song-row-lite.uvue";
 import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
@@ -326,6 +326,7 @@ import { musicApi } from "@/services/music-api";
 import { packsFingerprint, SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
 import { usePlayerStore } from "@/stores/player";
 import { useSourceStore } from "@/stores/source";
+import { useSourceRegistryStore } from "@/stores/source-registry";
 import { platformShort, platformLabel } from "@/services/platform";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
 import type { Song, Playlist, Artist, Album } from "@/types/music";
@@ -395,8 +396,29 @@ let hotSeq = 0;
 let allLoaded = false;
 /** 「全部」聚合的展示门：四个板块全部返回后才整体展示，不边回边刷 */
 const allReady = ref(false);
-const types: string[] = ["all", "song", "playlist", "artist", "album"];
-const typeLabels: string[] = ["全部", "歌曲", "歌单", "歌手", "专辑"];
+// 功能面门控（v4 契约）：数据包声明当前源有没有歌单载体/歌手页/专辑，
+// 不支持的类型连搜索 tag 都不显示（搜了也永远是空列表）；未声明（旧包）
+// 一律按支持处理，行为与门控上线前一致。全部/歌曲两个 tag 恒在——
+// 单曲搜索是所有源的必备能力。
+const sourceRegistry = useSourceRegistryStore();
+const types = computed<string[]>(() => {
+  const out: string[] = ["all", "song"];
+  if (sourceRegistry.supports(sourceStore.current, "playlists")) out.push("playlist");
+  if (sourceRegistry.supports(sourceStore.current, "artist")) out.push("artist");
+  if (sourceRegistry.supports(sourceStore.current, "album")) out.push("album");
+  return out;
+});
+const typeLabels = computed<string[]>(() => types.value.map((value) => typeLabel(value)));
+// 当前类型被功能面挤掉（切音源/换包后）时回退到「全部」，并同步 segmented
+// 高亮下标——否则内容视图会停在一个已不存在的 tag 上
+watch(types, (next) => {
+  if (next.indexOf(type.value) == -1) {
+    type.value = "all";
+    typeIndex.value = 0;
+  } else {
+    typeIndex.value = next.indexOf(type.value);
+  }
+});
 const HISTORY_KEY = "qt-search-history";
 
 function typeLabel(value: string): string {
@@ -449,15 +471,22 @@ function clearHistory(): void {
   saveHistory();
 }
 
+/** 热词兜底：未装数据包 / 取词失败时给一组常见词，避免「热门搜索」区空成光标题 */
+function defaultHotWords(): string[] {
+  return ["周杰伦", "陈奕迅", "晴天", "告白气球", "Taylor Swift"];
+}
+
 async function loadHot(): Promise<void> {
   const seq = ++hotSeq;
   try {
     const list = await musicApi.hotWords(sourceStore.current as Source);
     if (seq != hotSeq) return; // 已切到别的音源，丢弃过期热词
-    words.value = list;
+    // 未装数据包时 musicApi 不再抛错，而是给空列表（避免启动弹「加载失败」）；
+    // 空热词会让「热门搜索」整区只剩标题，故与 catch 同款兜底，保持原观感。
+    words.value = list.length > 0 ? list : defaultHotWords();
   } catch (_) {
     if (seq != hotSeq) return;
-    words.value = ["周杰伦", "陈奕迅", "晴天", "告白气球", "Taylor Swift"];
+    words.value = defaultHotWords();
   }
 }
 
@@ -477,6 +506,7 @@ function onPacksChanged(): void {
 
 onMounted(() => {
   sourceStore.restore();
+  sourceRegistry.ensure();
   loadHistory();
   ensureSource();
   uni.$on(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
@@ -540,8 +570,11 @@ const allEmpty = computed(
 function platLabel(p: string): string {
   return platformLabel(p);
 }
-/** 分节「查看更多」：带 index 跳对应 tag（与 segmented 的 v-model 保持同步） */
-function gotoType(index: number): void {
+/** 分节「查看更多」：带类型值跳对应 tag（与 segmented 的 v-model 保持同步）。
+ *  传类型值而不是下标：types 数组会按功能面动态裁剪，下标不固定 */
+function gotoType(value: string): void {
+  const index = types.value.indexOf(value);
+  if (index < 0) return; // 该类型被功能面隐藏（对应分节此时也不会出现，双保险）
   typeIndex.value = index;
   switchType(index);
 }
@@ -758,7 +791,7 @@ function useWord(word: string): void {
   doSearch();
 }
 function switchType(index: number): void {
-  const value = types[index];
+  const value = types.value[index];
   if (type.value == value) return;
   type.value = value;
   // 切换结果标签时回到顶部，避免共享 scrollTop 造成位置跳变
@@ -823,10 +856,14 @@ function openPlaylist(pl: Playlist): void {
   });
 }
 function openArtist(ar: Artist): void {
+  // 2026-10-06：带上歌手真实 id，歌手页按 id 取作品（同名歌手不再混进来）；
+  // 老路径（只有 name）依然可用，包内取不到 id 作品时自动退回名字搜索。
   uni.navigateTo({
     url:
       "/pages/artist/index?name=" +
       encodeURIComponent(ar.name) +
+      "&id=" +
+      encodeURIComponent(ar.id) +
       "&platform=" +
       ar.platform,
   });

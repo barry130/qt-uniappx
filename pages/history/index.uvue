@@ -1,14 +1,39 @@
 <template>
   <qt-page-frame :max-width="760">
   <view class="page" :class="layout.isWide ? 'page-wide' : ''">
-    <!-- 顶部：概览 + 清空 -->
+    <!-- 顶部：概览 + 清空 / 批量管理 -->
     <view class="summary" :class="layout.isWide ? 'summary-wide' : ''" :style="cardStyle">
-      <text class="sub" :class="layout.isWide ? 'sub-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">共 {{ historySongs.length }} 首播放记录</text>
-      <text
-        v-if="historySongs.length > 0"
-        class="clear-link" :class="layout.isWide ? 'clear-link-wide' : ''"
-        :style="'color:' + theme.skin.textSubtle + ';'" @click="clearHistory"
-      >清空记录</text>
+      <text class="sub" :class="layout.isWide ? 'sub-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ selecting ? ('已选 ' + selectedKeys.length + ' 首') : ('共 ' + historySongs.length + ' 首播放记录') }}</text>
+      <view class="summary-acts" :class="layout.isWide ? 'summary-acts-wide' : ''">
+        <template v-if="!selecting">
+          <text
+            v-if="historySongs.length > 0"
+            class="act-link" :class="layout.isWide ? 'act-link-wide' : ''"
+            :style="'color:' + theme.skin.textSubtle + ';'" @click="clearHistory"
+          >清空记录</text>
+          <text
+            v-if="historySongs.length > 0"
+            class="act-link" :class="layout.isWide ? 'act-link-wide' : ''"
+            :style="'color:' + theme.skin.accent + ';'" @click="toggleSelect"
+          >管理</text>
+        </template>
+        <template v-else>
+          <text
+            class="act-link" :class="layout.isWide ? 'act-link-wide' : ''"
+            :style="'color:' + theme.skin.textMuted + ';'" @click="toggleSelectAll"
+          >{{ allSel ? "取消全选" : "全选" }}</text>
+          <text
+            class="act-link" :class="layout.isWide ? 'act-link-wide' : ''"
+            :style="'color:' + theme.skin.textSubtle + ';'" @click="toggleSelect"
+          >取消</text>
+          <view
+            v-if="selectedKeys.length > 0"
+            class="danger-btn" :class="layout.isWide ? 'danger-btn-wide' : ''"
+            :style="'background-color:' + theme.skin.danger + ';'"
+            @click="confirmBatchRemove"
+          ><text class="danger-btn-text" :class="layout.isWide ? 'danger-btn-text-wide' : ''" :style="'color:#ffffff;'">移除（{{ selectedKeys.length }}）</text></view>
+        </template>
+      </view>
     </view>
 
     <list-view class="scroll" :class="layout.isWide ? 'scroll-wide' : ''" direction="vertical" :scroll-top="scrollTop" @scroll="onListScroll">
@@ -17,7 +42,7 @@
         :key="song.id + song.platform"
         class="row-item" :class="layout.isWide ? 'row-item-wide' : ''"
       >
-        <SongRow :song="song" :showBadge="true" :inHistory="true" @play="play(song)" />
+        <SongRow :song="song" :showBadge="true" :inHistory="true" :selecting="selecting" :selected="selecting && isSel(song)" @play="onRowTap(song)" />
       </list-item>
       <list-item v-if="historySongs.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
         <text class="empty-text" :style="'color:' + theme.skin.textMuted + ';'">还没有播放过歌曲</text>
@@ -52,6 +77,70 @@ const cardStyle = computed<string>(() =>
 );
 
 const historySongs = computed<Song[]>(() => player.history);
+
+// ==================== 批量移除 ====================
+// 只移除播放记录，不删本地文件（本地歌曲的记录同样只删记录）
+const selecting = ref<boolean>(false);
+/** 选中的行键（platform:id）：历史记录里同一首歌只会有一条，键足够唯一 */
+const selectedKeys = ref<string[]>([]);
+
+function rowKey(song: Song): string {
+  return song.platform + ":" + song.id;
+}
+function isSel(song: Song): boolean {
+  return selectedKeys.value.indexOf(rowKey(song)) >= 0;
+}
+const allSel = computed<boolean>(
+  () => historySongs.value.length > 0 && selectedKeys.value.length >= historySongs.value.length,
+);
+function toggleSelect(): void {
+  selecting.value = !selecting.value;
+  if (!selecting.value) selectedKeys.value = [];
+}
+function toggleSelectAll(): void {
+  if (allSel.value) {
+    selectedKeys.value = [];
+    return;
+  }
+  const keys: string[] = [];
+  const list = historySongs.value;
+  for (let i = 0; i < list.length; i++) keys.push(rowKey(list[i]));
+  selectedKeys.value = keys;
+}
+/** 选择态下点行 = 切换勾选；非选择态照常播放 */
+function onRowTap(song: Song): void {
+  if (selecting.value) {
+    const key = rowKey(song);
+    if (selectedKeys.value.indexOf(key) >= 0) {
+      selectedKeys.value = selectedKeys.value.filter((k: string): boolean => k != key);
+    } else {
+      selectedKeys.value = [...selectedKeys.value, key];
+    }
+    return;
+  }
+  play(song);
+}
+function confirmBatchRemove(): void {
+  const picked: Song[] = [];
+  const list = historySongs.value;
+  for (let i = 0; i < list.length; i++) {
+    if (selectedKeys.value.indexOf(rowKey(list[i])) >= 0) picked.push(list[i]);
+  }
+  if (picked.length == 0) return;
+  uni.showModal({
+    title: "移除播放记录",
+    content: "确定移除选中的 " + picked.length + " 首播放记录吗？",
+    confirmText: "移除",
+    confirmColor: theme.skin.danger,
+    success: (res) => {
+      if (!res.confirm) return;
+      player.removeHistoryMany(picked);
+      uni.showToast({ title: "已移除 " + picked.length + " 首", icon: "none" });
+      selectedKeys.value = [];
+      selecting.value = false;
+    },
+  });
+}
 
 // 回到顶部
 const scrollTop = ref(0);
@@ -128,6 +217,39 @@ function discover(): void {
   font-size: 24rpx;
 }
 .clear-link-wide {
+  font-size: 13px;
+}
+.summary-acts {
+  flex-direction: row;
+  align-items: center;
+}
+.summary-acts-wide {
+  flex-direction: row;
+  align-items: center;
+}
+/* 管理态的操作链接：靠右排列并互相留距（Vapor 禁后代/子选择器，逐个挂类） */
+.act-link {
+  margin-left: 24rpx;
+  font-size: 24rpx;
+}
+.act-link-wide {
+  margin-left: 14px;
+  font-size: 13px;
+}
+.danger-btn {
+  margin-left: 24rpx;
+  padding: 8rpx 22rpx;
+  border-radius: 999rpx;
+}
+.danger-btn-wide {
+  margin-left: 14px;
+  padding: 5px 13px;
+}
+.danger-btn-text {
+  font-size: 23rpx;
+  font-weight: 600;
+}
+.danger-btn-text-wide {
   font-size: 13px;
 }
 

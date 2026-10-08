@@ -197,7 +197,14 @@ async function update(): Promise<void> {
     }
     // 非强制更新：下载完成后关闭弹窗；强制更新等安装后由用户处理
     if (!info.isForce) {
-      setTimeout(() => {
+      // 句柄必须存到 closeTimer：onUnmounted 只清这一个变量，
+      // 丢了句柄就等于没清理，弹窗在 600ms 内被卸载时回调会在已销毁实例上触发。
+      if (closeTimer != null) {
+        clearTimeout(closeTimer);
+        closeTimer = null;
+      }
+      closeTimer = setTimeout(() => {
+        closeTimer = null;
         downloading.value = false;
         closeSelf();
       }, 600);

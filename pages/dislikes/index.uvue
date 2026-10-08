@@ -1,0 +1,249 @@
+<template>
+  <qt-page-frame :max-width="760">
+  <view class="page" :class="layout.isWide ? 'page-wide' : ''">
+    <!-- 顶部：概览 + 清空 -->
+    <view class="summary" :class="layout.isWide ? 'summary-wide' : ''" :style="cardStyle">
+      <text class="sub" :class="layout.isWide ? 'sub-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">共 {{ rules.length }} 条屏蔽规则</text>
+      <text
+        v-if="rules.length > 0"
+        class="clear-link" :class="layout.isWide ? 'clear-link-wide' : ''"
+        :style="'color:' + theme.skin.textSubtle + ';'" @click="clearAll"
+      >清空全部</text>
+    </view>
+
+    <list-view class="scroll" :class="layout.isWide ? 'scroll-wide' : ''" direction="vertical" :scroll-top="scrollTop" @scroll="onListScroll">
+      <list-item
+        v-for="rule in rules"
+        :key="rule.id + ''"
+        class="rule-item" :class="layout.isWide ? 'rule-item-wide' : ''"
+      >
+        <view class="rule" :class="layout.isWide ? 'rule-wide' : ''" :style="'background-color:' + theme.skin.surface + ';border-top-color:' + theme.skin.divider + ';'">
+          <view class="kind-badge" :class="layout.isWide ? 'kind-badge-wide' : ''" :style="kindBadgeStyle(rule.kind)">
+            <text class="kind-text" :class="layout.isWide ? 'kind-text-wide' : ''">{{ rule.kind == "song" ? "歌" : "手" }}</text>
+          </view>
+          <view class="rule-info">
+            <text
+              class="rule-name" :class="layout.isWide ? 'rule-name-wide' : ''"
+              :style="'color:' + theme.skin.text + ';'"
+              :max-lines="1"
+            >{{ rule.nameRaw }}</text>
+            <text
+              class="rule-meta" :class="layout.isWide ? 'rule-meta-wide' : ''"
+              :style="'color:' + theme.skin.textMuted + ';'"
+              :max-lines="1"
+            >{{ ruleMeta(rule) }}</text>
+          </view>
+          <QtIcon
+            name="trash"
+            :size="layout.isWide ? 22 : 36"
+            :color="theme.skin.iconMuted"
+            @click.stop="removeRule(rule)"
+          />
+        </view>
+      </list-item>
+      <list-item v-if="rules.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
+        <text class="empty-text" :style="'color:' + theme.skin.textMuted + ';'">还没有屏蔽任何歌曲或歌手</text>
+        <text class="empty-hint" :class="layout.isWide ? 'empty-hint-wide' : ''" :style="'color:' + theme.skin.textSubtle + ';'">在歌曲的长按菜单里选「屏蔽这首歌」或「屏蔽该歌手」</text>
+      </list-item>
+      <!-- 让位固定悬浮的 MiniPlayer，避免最后一行被遮住 -->
+      <list-item class="foot-space" :class="layout.isWide ? 'foot-space-wide' : ''"></list-item>
+    </list-view>
+    <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+    <MiniPlayer />
+  </view>
+  </qt-page-frame>
+</template><script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
+import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { ref, computed } from "vue";
+import { useDislikesStore } from "@/stores/dislikes";
+import type { DislikeRule } from "@/stores/dislikes";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+
+const dislikes = useDislikesStore();
+const layout = useQtLayout();
+const theme = useThemeStore();
+
+const cardStyle = computed<string>(() =>
+  "background-color:" + theme.skin.surface +
+  ";border-color:" + theme.skin.border + ";"
+);
+
+const rules = computed<DislikeRule[]>(() => dislikes.rules);
+
+function kindBadgeStyle(kind: string): string {
+  // 与歌行平台角标同风格：歌曲规则用强调色、歌手规则用中性底
+  return kind == "song"
+    ? "background-color:" + theme.skin.accent + ";"
+    : "background-color:" + theme.skin.iconMuted + ";";
+}
+
+function ruleMeta(rule: DislikeRule): string {
+  if (rule.kind == "singer") return "该歌手的全部歌曲";
+  if (rule.singerRaw.length > 0) return rule.singerRaw;
+  return "同名歌曲全部屏蔽";
+}
+
+// 回到顶部
+const scrollTop = ref(0);
+const showBackToTop = ref(false);
+function onListScroll(e: any) {
+  const st = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
+  showBackToTop.value = st > 600;
+}
+function backToTop() {
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  showBackToTop.value = false;
+}
+
+function removeRule(rule: DislikeRule): void {
+  dislikes.removeById(rule.id);
+  uni.showToast({ title: "已取消屏蔽", icon: "none" });
+}
+
+function clearAll(): void {
+  uni.showModal({
+    title: "清空屏蔽规则",
+    content: "确定取消全部屏蔽吗？被屏蔽的歌曲与歌手将恢复自动播放。",
+    confirmText: "清空",
+    confirmColor: theme.skin.danger,
+    success: (res) => {
+      if (res.confirm) {
+        dislikes.clearAll();
+        uni.showToast({ title: "已清空", icon: "none" });
+      }
+    },
+  });
+}
+</script>
+
+<style>
+.page {
+  flex: 1;
+  min-height: 0;
+  padding: 20rpx 24rpx 0;
+}
+.page-wide {
+  padding: 20px 26px 0;
+}
+
+.summary {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24rpx 28rpx;
+  border-width: 1px;
+  border-radius: 24rpx;
+}
+.summary-wide {
+  padding: 16px 20px;
+  border-radius: 14px;
+}
+.sub {
+  font-size: 24rpx;
+}
+.sub-wide {
+  font-size: 13px;
+}
+.clear-link {
+  font-size: 24rpx;
+}
+.clear-link-wide {
+  font-size: 13px;
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+  margin-top: 20rpx;
+}
+.scroll-wide {
+  margin-top: 12px;
+}
+.rule-item {
+  padding: 4rpx 0;
+}
+.rule-item-wide {
+  padding: 4px 0;
+}
+.rule {
+  flex-direction: row;
+  align-items: center;
+  padding: 20rpx 24rpx;
+  border-top-width: 1px;
+}
+.rule-wide {
+  padding: 12px 16px;
+}
+.kind-badge {
+  width: 56rpx;
+  height: 56rpx;
+  border-radius: 12rpx;
+  margin-right: 22rpx;
+  justify-content: center;
+  align-items: center;
+}
+.kind-badge-wide {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  margin-right: 14px;
+}
+.kind-text {
+  font-size: 22rpx;
+  color: #ffffff;
+}
+.kind-text-wide {
+  font-size: 13px;
+}
+.rule-info {
+  flex: 1;
+  overflow: hidden;
+}
+.rule-name {
+  font-size: 29rpx;
+  font-weight: 500;
+  text-overflow: ellipsis;
+}
+.rule-name-wide {
+  font-size: 16px;
+}
+.rule-meta {
+  margin-top: 8rpx;
+  font-size: 23rpx;
+  text-overflow: ellipsis;
+}
+.rule-meta-wide {
+  margin-top: 5px;
+  font-size: 13px;
+}
+.empty {
+  align-items: center;
+  padding: 100rpx 40rpx 60rpx;
+}
+.empty-wide {
+  padding: 80px 30px 40px;
+}
+.empty-text {
+  font-size: 26rpx;
+}
+.empty-hint {
+  margin-top: 16rpx;
+  font-size: 23rpx;
+  text-align: center;
+}
+.empty-hint-wide {
+  margin-top: 10px;
+  font-size: 13px;
+}
+/* 让位固定悬浮的 MiniPlayer（120rpx 高），避免最后一行被遮住 */
+.foot-space {
+  height: 140rpx;
+}
+.foot-space-wide {
+  height: 80px;
+}
+</style>

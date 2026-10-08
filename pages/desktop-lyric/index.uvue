@@ -48,8 +48,25 @@
         </view>
         <view class="cell-body cell-body-pad cell-no-border" :class="layout.isWide ? 'cell-body-pad-wide' : ''" :style="cellStyle">
           <view class="preview-box" :class="layout.isWide ? 'preview-box-wide' : ''">
-            <text class="preview-main" :class="previewFontClass" :style="previewMainStyle">轻听桌面歌词</text>
-            <text class="preview-tr" :class="previewFontClass" :style="previewTrStyle">Desktop Lyric Preview</text>
+            <!-- 背景层放最前、铺满整个盒子（含内边距）：原生是 box.setBackgroundColor，覆盖 padding -->
+            <view class="preview-bg" :style="previewBgStyle"></view>
+            <view class="preview-inner" :class="layout.isWide ? 'preview-inner-wide' : ''">
+              <view class="preview-line">
+                <!--
+                  描边 / 阴影模拟层。uni-app x 的 CSS 没有 text-shadow / -webkit-text-stroke
+                  （全仓 grep 无先例，HBuilderX 的样式类型定义里也没有），只能用「同一个字按偏移
+                  叠几份」近似原生 canvas 的 STROKE 层与 setShadowLayer。真机观感以悬浮窗为准，
+                  预览只保证方向正确：描边八向铺开、阴影朝下。层在 DOM 里排在填充层之前，
+                  所以填充层盖住中心，露出的只有偏移出来的边。
+                -->
+                <text v-for="(layer, i) in previewLayers" :key="i" class="preview-layer" :class="previewFontClass" :style="previewLayerStyle(layer)">轻听桌面歌词</text>
+                <text class="preview-fill" :class="previewFontClass" :style="previewMainStyle">轻听桌面歌词</text>
+              </view>
+              <view class="preview-line preview-line-tr">
+                <text v-for="(layer, i) in previewTrLayers" :key="i" class="preview-layer" :class="previewFontClass" :style="previewTrLayerStyle(layer)">Desktop Lyric Preview</text>
+                <text class="preview-tr" :class="previewFontClass" :style="previewTrStyle">Desktop Lyric Preview</text>
+              </view>
+            </view>
           </view>
         </view>
       </view>
@@ -169,6 +186,132 @@
         </view>
       </view>
 
+      <!-- 描边 -->
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="sliders" :size="36" color="#6d8fd6" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">描边</text>
+          <view class="cell-right">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ strokeOn ? liveStrokeWidth.toFixed(1) : "已关闭" }}</text>
+            <view class="switch" :class="strokeOn ? 'switch-on' : ''" :style="strokeOn ? 'background-color:' + theme.skin.accent + ';' : 'background-color:' + theme.skin.surfaceMuted + ';'" @click="toggleStroke">
+              <view class="switch-dot" :style="strokeOn ? '' : 'background-color:' + theme.skin.iconMuted + ';'"></view>
+            </view>
+          </view>
+        </view>
+        <view class="cell-body cell-no-border" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
+          <view
+            class="stroke-track"
+            :class="layout.isWide ? 'stroke-track-wide' : ''"
+            @touchstart="onStrokeTouchStart"
+            @touchmove="onStrokeTouchMove"
+            @touchend="onStrokeTouchEnd"
+            @touchcancel="onStrokeTouchCancel"
+          >
+            <view class="stroke-rail" :class="layout.isWide ? 'stroke-rail-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'"></view>
+            <view class="stroke-fill" :class="layout.isWide ? 'stroke-fill-wide' : ''" :style="'width:' + strokePct() + '%;background-color:' + theme.skin.accent + ';'"></view>
+            <view class="stroke-thumb" :class="layout.isWide ? 'stroke-thumb-wide' : ''" :style="'left:' + strokeThumbLeft() + 'px;background-color:' + theme.skin.accent + ';'"></view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 阴影 -->
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="eye-off" :size="36" color="#9b82d9" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">阴影</text>
+          <view class="cell-right">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ shadowOn ? "已开启" : "已关闭" }}</text>
+            <view class="switch" :class="shadowOn ? 'switch-on' : ''" :style="shadowOn ? 'background-color:' + theme.skin.accent + ';' : 'background-color:' + theme.skin.surfaceMuted + ';'" @click="toggleShadow">
+              <view class="switch-dot" :style="shadowOn ? '' : 'background-color:' + theme.skin.iconMuted + ';'"></view>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 对齐 -->
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="list" :size="36" color="#4fb186" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">对齐</text>
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ currentAlignName }}</text>
+        </view>
+        <view class="cell-body cell-no-border" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
+          <view class="align-wrap">
+            <view
+              v-for="opt in alignOptions"
+              :key="opt.value"
+              class="align-chip"
+              :class="[isCurrentAlign(opt.value) ? 'align-chip-active' : '', layout.isWide ? 'align-chip-wide' : '']"
+              :style="'background-color:' + (isCurrentAlign(opt.value) ? theme.skin.accentSoft : theme.skin.surfaceMuted) + ';border-color:' + (isCurrentAlign(opt.value) ? theme.skin.accent : theme.skin.border) + ';'"
+              @click="pickAlign(opt.value)"
+            >
+              <text class="align-chip-text" :class="layout.isWide ? 'align-chip-text-wide' : ''" :style="'color:' + theme.skin.text + ';'">{{ opt.label }}</text>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 背景 -->
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="disc" :size="36" color="#d99b3f" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">背景</text>
+          <view class="cell-right">
+            <view class="value-dot" :style="'background-color:' + (bgMode == 'solid' ? bgColor : 'transparent') + ';border-color:' + theme.skin.border + ';'"></view>
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ bgMode == "solid" ? "纯色" : "无" }}</text>
+            <view class="switch" :class="bgMode == 'solid' ? 'switch-on' : ''" :style="bgMode == 'solid' ? 'background-color:' + theme.skin.accent + ';' : 'background-color:' + theme.skin.surfaceMuted + ';'" @click="toggleBgMode">
+              <view class="switch-dot" :style="bgMode == 'solid' ? '' : 'background-color:' + theme.skin.iconMuted + ';'"></view>
+            </view>
+          </view>
+        </view>
+        <view class="cell-body" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
+          <view class="swatch-wrap">
+            <view
+              v-for="c in presetColors"
+              :key="c.hex"
+              class="swatch"
+              :class="[isCurrentBgColor(c.hex) ? 'swatch-active' : '', layout.isWide ? 'swatch-wide' : '']"
+              :style="'background-color:' + c.hex + ';border-color:' + (isCurrentBgColor(c.hex) ? theme.skin.accent : theme.skin.border) + ';'"
+              @click="pickBgColor(c.hex)"
+            >
+              <QtIcon v-if="isCurrentBgColor(c.hex)" name="check" :size="22" :color="c.ink" />
+            </view>
+          </view>
+        </view>
+        <view class="cell-body cell-body-pad" :class="layout.isWide ? 'cell-body-pad-wide' : ''" :style="cellStyle">
+          <view class="custom-row" :class="layout.isWide ? 'custom-row-wide' : ''" :style="'border-color:' + theme.skin.border + ';background-color:' + theme.skin.surfaceMuted + ';'">
+            <view class="custom-preview" :class="layout.isWide ? 'custom-preview-wide' : ''" :style="'background-color:' + (bgCustomValid ? bgCustomColor : 'transparent') + ';border-color:' + theme.skin.border + ';'"></view>
+            <input
+              class="custom-input"
+              :class="layout.isWide ? 'custom-input-wide' : ''"
+              :value="bgCustomText"
+              @input="onBgCustomInput"
+              placeholder="#RRGGBB"
+              :placeholder-class="layout.isWide ? 'ph-wide' : 'ph'"
+            />
+          </view>
+          <text class="custom-hint" :style="'color:' + (bgCustomText.length > 0 && !bgCustomValid ? theme.skin.danger : theme.skin.textMuted) + ';'">{{ bgCustomHint }}</text>
+        </view>
+        <view class="cell-body cell-body-pad cell-no-border" :class="layout.isWide ? 'cell-body-pad-wide' : ''" :style="cellStyle">
+          <view class="cell-inline">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">不透明度</text>
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ liveBgOpacity.toFixed(2) }}</text>
+          </view>
+          <view
+            class="bgop-track"
+            :class="layout.isWide ? 'bgop-track-wide' : ''"
+            @touchstart="onBgOpTouchStart"
+            @touchmove="onBgOpTouchMove"
+            @touchend="onBgOpTouchEnd"
+            @touchcancel="onBgOpTouchCancel"
+          >
+            <view class="bgop-rail" :class="layout.isWide ? 'bgop-rail-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'"></view>
+            <view class="bgop-fill" :class="layout.isWide ? 'bgop-fill-wide' : ''" :style="'width:' + bgOpPct() + '%;background-color:' + theme.skin.accent + ';'"></view>
+            <view class="bgop-thumb" :class="layout.isWide ? 'bgop-thumb-wide' : ''" :style="'left:' + bgOpThumbLeft() + 'px;background-color:' + theme.skin.accent + ';'"></view>
+          </view>
+        </view>
+      </view>
+
     </scroll-view>
   </qt-page-frame>
 </template>
@@ -186,6 +329,14 @@ const layout = useQtLayout();
 const theme = useThemeStore();
 /** 本页轨道测量重试定时器句柄：页面卸载时统一清掉，避免在已注销的实例上触发回调 */
 let measureRetryTimers: number[] = [];
+// 页面存活标志（onUnmounted 置 false）。
+// 不能只靠上面那份句柄：框架路由（reLaunch/redirectTo/navigateBack）先 closeWebview
+// 销毁原生页、再 unmountPage 跑 onUnmounted，中间窗口原生 UniPage 已反注册而本页脚本
+// 还在，此时 createSelectorQuery().exec() 会走到 $nativePage.waitNativeRender —— 桥调用
+// 带着已反注册的 instanceId → "UTS instance N is not registered"（真机堆栈：
+// Bridge.onJSTimerFired ← Bridge$scheduleJSTimer$runnable$1.run ← Handler.handleCallback）。
+// 所以定时器回调进场先判这个标志。
+let measureAlive = true;
 
 // 字体表：index 与 service.setTypefaceIndex / 原生 typefaceForIndex 对应。
 // font-family 用 class 而不是内联 style：字体族不是尺寸，没必要走动态样式通道。
@@ -216,6 +367,29 @@ const fontIndex = ref(desktopLyric.getTypefaceIndex());
 const customText = ref("");
 const customColor = ref("");
 const customValid = ref(false);
+
+// ---------- 描边 / 阴影 / 对齐 / 背景 的状态 ----------
+// 与字号、宽度一样分「live 值」和「已落盘值」：拖动中只改 live，松手才 setXxx 落盘
+const strokeOn = ref(desktopLyric.getStrokeEnabled());
+const liveStrokeWidth = ref(desktopLyric.getStrokeWidth());
+const shadowOn = ref(desktopLyric.getShadowEnabled());
+const align = ref(desktopLyric.getAlign());
+const bgMode = ref(desktopLyric.getBackgroundMode());
+const bgColor = ref(desktopLyric.getBackgroundColor());
+const liveBgOpacity = ref(desktopLyric.getBackgroundOpacity());
+
+// 背景色的自定义输入与歌词颜色输入各自独立：共用一套会让「改背景色」把歌词颜色的
+// 输入框内容也清掉，用户看不出为什么刚输入的颜色消失了
+const bgCustomText = ref("");
+const bgCustomColor = ref("");
+const bgCustomValid = ref(false);
+
+type AlignOption = { value: string; label: string };
+const alignOptions = ref<AlignOption[]>([
+  { value: "left", label: "左对齐" },
+  { value: "center", label: "居中" },
+  { value: "right", label: "右对齐" },
+]);
 
 // 分组行样式，与设置页 groupStyle / cellStyle 同一套取色。
 // 版式尺寸对齐设置页的 rpx 值：rpx 实际渲染随设备宽变化（28rpx 在 480 宽设备 ≈18px），
@@ -253,6 +427,13 @@ function refresh(): void {
   liveWidth.value = desktopLyric.getWidthPct();
   color.value = desktopLyric.getColor();
   fontIndex.value = desktopLyric.getTypefaceIndex();
+  strokeOn.value = desktopLyric.getStrokeEnabled();
+  liveStrokeWidth.value = desktopLyric.getStrokeWidth();
+  shadowOn.value = desktopLyric.getShadowEnabled();
+  align.value = desktopLyric.getAlign();
+  bgMode.value = desktopLyric.getBackgroundMode();
+  bgColor.value = desktopLyric.getBackgroundColor();
+  liveBgOpacity.value = desktopLyric.getBackgroundOpacity();
 }
 
 /** 点了「去开启」跳系统权限页：回来时若已授权就自动打开，省掉再点一次开关 */
@@ -260,6 +441,9 @@ let pendingOverlayGrant = false;
 
 // 从系统授权页返回后要刷新开关真实状态
 onShow(() => {
+  // 复位存活标志：onUnmounted 置 false 后若页面被复用（框架保活/重建），
+  // 不置回 true 会让所有轨道测量直接 return，圆点永远停在起点
+  measureAlive = true;
   refresh();
   if (pendingOverlayGrant && desktopLyric.hasPermission()) {
     pendingOverlayGrant = false;
@@ -271,6 +455,8 @@ onShow(() => {
   nextTick(() => {
     measureSizeTrack(0);
     measureWidthTrack(0);
+    measureStrokeTrack(0);
+    measureBgOpTrack(0);
   });
 });
 
@@ -278,9 +464,12 @@ onMounted(() => {
   nextTick(() => {
     measureSizeTrack(0);
     measureWidthTrack(0);
+    measureStrokeTrack(0);
+    measureBgOpTrack(0);
   });
 });
 onUnmounted(() => {
+  measureAlive = false;
   // 页面卸载时清掉全部测量重试定时器，避免在已注销的 UTS 实例上触发回调
   for (const t of measureRetryTimers) {
     if (t != null) clearTimeout(t);
@@ -387,6 +576,7 @@ function sizeFromClientX(clientX: number): number {
  * 期间拖拽仍可用（sizeFromClientX 会保持当前值），测到后立即对齐。
  */
 function measureSizeTrack(attempt: number): void {
+  if (!measureAlive) return;
   const query = uni.createSelectorQuery();
   query
     .select(".size-track")
@@ -451,6 +641,7 @@ function widthFromClientX(clientX: number): number {
 
 /** 测量宽度轨道几何。首帧可能返回 0 宽度，最多重试 3 次 */
 function measureWidthTrack(attempt: number): void {
+  if (!measureAlive) return;
   const query = uni.createSelectorQuery();
   query
     .select(".width-track")
@@ -535,6 +726,264 @@ function onSizeTouchEnd(event: UniTouchEvent): void {
   desktopLyric.setFontSp(v);
 }
 
+// ---------- 描边宽度 ----------
+
+// 与原生 desktop-lyric.uts 的 STROKE_MIN / STROKE_MAX 必须一致，否则会出现
+// 「页面能拖到 4.2、原生夹回 4.0」的显示与实际不一致
+const STROKE_MIN = 0.5;
+const STROKE_MAX = 4.0;
+
+let strokeLeft = 0;
+const strokeWidth = ref(0);
+const strokeDragging = ref(false);
+
+/** 归一化到 0.5~4.0，保留一位小数（步进 0.1） */
+function clampStroke(value: number): number {
+  let v = Math.round(value * 10) / 10;
+  if (!(v >= STROKE_MIN)) v = STROKE_MIN;
+  if (v > STROKE_MAX) v = STROKE_MAX;
+  return v;
+}
+
+function strokePct(): number {
+  const span = STROKE_MAX - STROKE_MIN;
+  if (span <= 0) return 0;
+  const p = ((liveStrokeWidth.value - STROKE_MIN) / span) * 100;
+  return Math.max(0, Math.min(100, p));
+}
+
+function strokeThumbLeft(): number {
+  const width = strokeWidth.value;
+  if (width <= 0) return 0;
+  const span = STROKE_MAX - STROKE_MIN;
+  const fillPx = ((liveStrokeWidth.value - STROKE_MIN) / span) * width;
+  const size = thumbSize();
+  return Math.max(0, Math.min(width - size, fillPx - size / 2));
+}
+
+function strokeFromClientX(clientX: number): number {
+  const width = strokeWidth.value;
+  if (width <= 0) return liveStrokeWidth.value;
+  const frac = Math.max(0, Math.min(1, (clientX - strokeLeft) / width));
+  return STROKE_MIN + frac * (STROKE_MAX - STROKE_MIN);
+}
+
+/** 测量描边轨道几何。首帧可能返回 0 宽度，最多重试 3 次 */
+function measureStrokeTrack(attempt: number): void {
+  if (!measureAlive) return;
+  const query = uni.createSelectorQuery();
+  query
+    .select(".stroke-track")
+    .boundingClientRect((rect: UniNodeInfo) => {
+      if (rect != null && rect.width > 0) {
+        strokeLeft = rect.left;
+        strokeWidth.value = rect.width;
+        return;
+      }
+      if (attempt < 3) {
+        measureRetryTimers.push(setTimeout(() => {
+          measureStrokeTrack(attempt + 1);
+        }, 120) as number);
+      }
+    })
+    .exec();
+}
+
+function onStrokeTouchStart(event: UniTouchEvent): void {
+  const touch = event.touches[0];
+  if (touch == null) return;
+  strokeDragging.value = true;
+  measureStrokeTrack(0);
+  liveStrokeWidth.value = clampStroke(strokeFromClientX(touch.clientX));
+}
+
+function onStrokeTouchMove(event: UniTouchEvent): void {
+  if (!strokeDragging.value) return;
+  const touch = event.touches[0];
+  if (touch == null) return;
+  liveStrokeWidth.value = clampStroke(strokeFromClientX(touch.clientX));
+}
+
+function onStrokeTouchCancel(): void {
+  if (!strokeDragging.value) return;
+  strokeDragging.value = false;
+  desktopLyric.setStrokeWidth(liveStrokeWidth.value);
+}
+
+function onStrokeTouchEnd(event: UniTouchEvent): void {
+  if (!strokeDragging.value) return;
+  const changed = event.changedTouches;
+  const touch = changed != null && changed.length > 0 ? changed[0] : null;
+  strokeDragging.value = false;
+  const v = touch != null ? clampStroke(strokeFromClientX(touch.clientX)) : liveStrokeWidth.value;
+  liveStrokeWidth.value = v;
+  desktopLyric.setStrokeWidth(v);
+}
+
+// ---------- 背景不透明度 ----------
+
+const BG_OP_MIN = 0.0;
+const BG_OP_MAX = 1.0;
+
+let bgOpLeft = 0;
+const bgOpWidth = ref(0);
+const bgOpDragging = ref(false);
+
+/** 归一化到 0~1，保留两位小数 */
+function clampBgOpacity(value: number): number {
+  let v = Math.round(value * 100) / 100;
+  if (!(v >= BG_OP_MIN)) v = BG_OP_MIN;
+  if (v > BG_OP_MAX) v = BG_OP_MAX;
+  return v;
+}
+
+function bgOpPct(): number {
+  const span = BG_OP_MAX - BG_OP_MIN;
+  if (span <= 0) return 0;
+  const p = ((liveBgOpacity.value - BG_OP_MIN) / span) * 100;
+  return Math.max(0, Math.min(100, p));
+}
+
+function bgOpThumbLeft(): number {
+  const width = bgOpWidth.value;
+  if (width <= 0) return 0;
+  const span = BG_OP_MAX - BG_OP_MIN;
+  const fillPx = ((liveBgOpacity.value - BG_OP_MIN) / span) * width;
+  const size = thumbSize();
+  return Math.max(0, Math.min(width - size, fillPx - size / 2));
+}
+
+function bgOpFromClientX(clientX: number): number {
+  const width = bgOpWidth.value;
+  if (width <= 0) return liveBgOpacity.value;
+  const frac = Math.max(0, Math.min(1, (clientX - bgOpLeft) / width));
+  return BG_OP_MIN + frac * (BG_OP_MAX - BG_OP_MIN);
+}
+
+/** 测量不透明度轨道几何。首帧可能返回 0 宽度，最多重试 3 次 */
+function measureBgOpTrack(attempt: number): void {
+  if (!measureAlive) return;
+  const query = uni.createSelectorQuery();
+  query
+    .select(".bgop-track")
+    .boundingClientRect((rect: UniNodeInfo) => {
+      if (rect != null && rect.width > 0) {
+        bgOpLeft = rect.left;
+        bgOpWidth.value = rect.width;
+        return;
+      }
+      if (attempt < 3) {
+        measureRetryTimers.push(setTimeout(() => {
+          measureBgOpTrack(attempt + 1);
+        }, 120) as number);
+      }
+    })
+    .exec();
+}
+
+function onBgOpTouchStart(event: UniTouchEvent): void {
+  const touch = event.touches[0];
+  if (touch == null) return;
+  bgOpDragging.value = true;
+  measureBgOpTrack(0);
+  liveBgOpacity.value = clampBgOpacity(bgOpFromClientX(touch.clientX));
+}
+
+function onBgOpTouchMove(event: UniTouchEvent): void {
+  if (!bgOpDragging.value) return;
+  const touch = event.touches[0];
+  if (touch == null) return;
+  liveBgOpacity.value = clampBgOpacity(bgOpFromClientX(touch.clientX));
+}
+
+function onBgOpTouchCancel(): void {
+  if (!bgOpDragging.value) return;
+  bgOpDragging.value = false;
+  desktopLyric.setBackgroundOpacity(liveBgOpacity.value);
+}
+
+function onBgOpTouchEnd(event: UniTouchEvent): void {
+  if (!bgOpDragging.value) return;
+  const changed = event.changedTouches;
+  const touch = changed != null && changed.length > 0 ? changed[0] : null;
+  bgOpDragging.value = false;
+  const v = touch != null ? clampBgOpacity(bgOpFromClientX(touch.clientX)) : liveBgOpacity.value;
+  liveBgOpacity.value = v;
+  desktopLyric.setBackgroundOpacity(v);
+}
+
+// ---------- 开关：描边 / 阴影 / 背景 ----------
+
+function toggleStroke(): void {
+  const next = !strokeOn.value;
+  strokeOn.value = next;
+  desktopLyric.setStrokeEnabled(next);
+}
+
+function toggleShadow(): void {
+  const next = !shadowOn.value;
+  shadowOn.value = next;
+  desktopLyric.setShadowEnabled(next);
+}
+
+function toggleBgMode(): void {
+  const next = bgMode.value == "solid" ? "none" : "solid";
+  bgMode.value = next;
+  desktopLyric.setBackgroundMode(next);
+}
+
+// ---------- 对齐 ----------
+
+function isCurrentAlign(value: string): boolean {
+  return align.value == value;
+}
+
+function pickAlign(value: string): void {
+  align.value = value;
+  desktopLyric.setAlign(value);
+}
+
+const currentAlignName = computed<string>((): string => {
+  for (const opt of alignOptions.value) {
+    if (opt.value == align.value) return opt.label;
+  }
+  return alignOptions.value[1].label;
+});
+
+// ---------- 背景色 ----------
+
+function isCurrentBgColor(hex: string): boolean {
+  return bgColor.value.toUpperCase() == hex.toUpperCase();
+}
+
+function pickBgColor(hex: string): void {
+  bgColor.value = hex;
+  bgCustomText.value = "";
+  bgCustomColor.value = "";
+  bgCustomValid.value = false;
+  desktopLyric.setBackgroundColor(hex);
+}
+
+function onBgCustomInput(e: InputEvent): void {
+  const raw = String((e.detail as any).value ?? "");
+  bgCustomText.value = raw;
+  // 复用 normalizeHex：背景色与歌词颜色都是 #RRGGBB，规则没必要写两遍
+  const hex = normalizeHex(raw);
+  const valid = hex.length == 7;
+  bgCustomValid.value = valid;
+  bgCustomColor.value = hex;
+  if (valid) {
+    bgColor.value = hex;
+    desktopLyric.setBackgroundColor(hex);
+  }
+}
+
+const bgCustomHint = computed<string>((): string => {
+  if (bgCustomText.value.length == 0) return "自定义背景色：#RRGGBB";
+  if (bgCustomValid.value) return "已应用 " + bgCustomColor.value;
+  return "格式不正确，示例 #12161D";
+});
+
 // ---------- 预览样式 ----------
 
 /** 字体族 class（只有 font-family，不含尺寸） */
@@ -545,13 +994,89 @@ const previewFontClass = computed<string>((): string => {
 });
 
 const previewMainStyle = computed<string>((): string => {
-  return "font-size:" + liveSize.value + "px;color:" + color.value + ";";
+  // width:100% 让 text-align 真正生效：否则 text 收缩到内容宽，左/右对齐看不出差别
+  return "width:100%;font-size:" + liveSize.value + "px;color:" + color.value + ";text-align:" + align.value + ";";
 });
 
-const previewTrStyle = computed<string>((): string => {
+/** 翻译行字号：主行 0.8 倍，最小 5（与 service.setFontSp 下发原生的算法一致） */
+function previewTrSize(): number {
   let tr = Math.round(liveSize.value * 0.8);
   if (tr < 5) tr = 5;
-  return "font-size:" + tr + "px;color:" + color.value + ";";
+  return tr;
+}
+
+const previewTrStyle = computed<string>((): string => {
+  return "width:100%;font-size:" + previewTrSize() + "px;color:" + color.value + ";text-align:" + align.value + ";";
+});
+
+/**
+ * 预览叠加层：dx/dy 为相对填充层的偏移（px），color/opacity 为图层颜色与整体透明度。
+ * 原生是 canvas 的 STROKE + setShadowLayer，CSS 没有对应能力（全仓无 text-shadow /
+ * -webkit-text-stroke 先例，HBuilderX 的样式类型里也没有），只能用叠字近似。
+ */
+type PreviewLayer = { dx: number; dy: number; color: string; opacity: number };
+
+/** 文字色的对比色：亮字配黑描边、暗字配白描边，判据与原生 strokeColor() 的 BT.601 亮度一致 */
+function contrastInk(hex: string): string {
+  const u = hex.toUpperCase();
+  if (u.length != 7 || u.charAt(0) != "#") return "#000000";
+  const r = parseInt(u.substring(1, 3), 16);
+  const g = parseInt(u.substring(3, 5), 16);
+  const b = parseInt(u.substring(5, 7), 16);
+  // NaN 与任何值比较都是 false，可同时挡住解析失败和超范围
+  if (!(r >= 0 && r <= 255) || !(g >= 0 && g <= 255) || !(b >= 0 && b <= 255)) return "#000000";
+  const luma = (r * 299 + g * 587 + b * 114) / 1000;
+  return luma > 128 ? "#000000" : "#FFFFFF";
+}
+
+const previewLayers = computed<PreviewLayer[]>((): PreviewLayer[] => {
+  const layers: PreviewLayer[] = [];
+  // 阴影先画、描边后画：原生 onDraw 里描边层用的是 clearShadowLayer 后的 paint，
+  // 描边不该带阴影，所以叠放顺序必须是 阴影 → 描边 → 填充
+  if (shadowOn.value) {
+    layers.push({ dx: 0, dy: 1, color: "#000000", opacity: 0.55 });
+    layers.push({ dx: 0, dy: 2, color: "#000000", opacity: 0.25 });
+  }
+  if (strokeOn.value) {
+    const ink = contrastInk(color.value);
+    const w = liveStrokeWidth.value;
+    // 八向铺开近似 STROKE：四正向给宽度、四斜向补圆角处的缺口。
+    // 不用 [number, number][] 二维数组：UTS 对嵌套数组字面量的推断在真机上不如
+    // 一维数组稳，这里拆成两条一维数组按下标配对
+    const dxs: number[] = [-1, 1, 0, 0, -1, 1, -1, 1];
+    const dys: number[] = [0, 0, -1, 1, -1, -1, 1, 1];
+    for (let i = 0; i < dxs.length; i++) {
+      layers.push({ dx: dxs[i] * w, dy: dys[i] * w, color: ink, opacity: 1 });
+    }
+  }
+  return layers;
+});
+
+/** 翻译行只有阴影：原生 applyTrShadow 不对翻译行做描边 */
+const previewTrLayers = computed<PreviewLayer[]>((): PreviewLayer[] => {
+  const layers: PreviewLayer[] = [];
+  if (shadowOn.value) {
+    layers.push({ dx: 0, dy: 1, color: "#000000", opacity: 0.55 });
+  }
+  return layers;
+});
+
+function previewLayerStyle(layer: PreviewLayer): string {
+  // 用 left/top 偏移而不是 transform：绝对定位 + left/top 在本仓有大量先例，
+  // transform 对 <text> 的命中与重绘行为在 Vapor 下没验证过，不值得为预览冒险
+  return "font-size:" + liveSize.value + "px;color:" + layer.color + ";opacity:" + layer.opacity.toFixed(2) +
+    ";text-align:" + align.value + ";left:" + layer.dx.toFixed(1) + "px;top:" + layer.dy.toFixed(1) + "px;";
+}
+
+function previewTrLayerStyle(layer: PreviewLayer): string {
+  return "font-size:" + previewTrSize() + "px;color:" + layer.color + ";opacity:" + layer.opacity.toFixed(2) +
+    ";text-align:" + align.value + ";left:" + layer.dx.toFixed(1) + "px;top:" + layer.dy.toFixed(1) + "px;";
+}
+
+/** 预览背景：模拟原生 box.setBackgroundColor（背景覆盖整个盒子含 padding，所以是独立一层） */
+const previewBgStyle = computed<string>((): string => {
+  if (bgMode.value != "solid") return "background-color:transparent;";
+  return "background-color:" + bgColor.value + ";opacity:" + liveBgOpacity.value.toFixed(2) + ";";
 });
 
 // ---------- 颜色 ----------
@@ -724,25 +1249,190 @@ function pickFont(index: number): void {
   background-color: #ffffff;
 }
 
-/* 实时预览：固定深色底，模拟悬浮窗在壁纸上的观感，颜色判断才准 */
+/* 实时预览：固定深色底，模拟悬浮窗在壁纸上的观感，颜色判断才准。
+   背景层绝对定位铺满整个盒子（含内边距），对应原生 box.setBackgroundColor 覆盖 padding；
+   内容层留在常规流里撑高盒子，所以盒子自身不再设内边距 */
 .preview-box {
-  min-height: 85px;
-  padding: 17px 10px;
+  position: relative;
   border-radius: 9px;
   background-color: #12161d;
+}
+.preview-box-wide {
+  border-radius: 11px;
+}
+.preview-bg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  border-radius: 9px;
+}
+.preview-inner {
+  min-height: 85px;
+  padding: 17px 10px;
   align-items: center;
   justify-content: center;
 }
-.preview-box-wide {
+.preview-inner-wide {
   min-height: 108px;
   padding: 22px 16px;
 }
-.preview-main {
-  text-align: center;
+/* 描边 / 阴影层绝对定位叠在填充层上；填充层留在流里决定行高。
+   只给 left + width（不给 right）：偏移是内联 left，若同时钉住 right 会让叠加层
+   随偏移量变窄，描边宽度越大字越挤 */
+.preview-line {
+  position: relative;
+  width: 100%;
+}
+.preview-line-tr {
+  margin-top: 5px;
+}
+.preview-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+}
+.preview-fill {
+  width: 100%;
 }
 .preview-tr {
-  margin-top: 5px;
-  text-align: center;
+  width: 100%;
+}
+
+/* 描边宽度拖拽条（几何常量与脚本里的 thumbSize() 必须同步） */
+.stroke-track {
+  position: relative;
+  height: 30px;
+}
+.stroke-track-wide {
+  height: 44px;
+}
+.stroke-rail {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  top: 13px;
+  height: 4px;
+  border-radius: 2px;
+}
+.stroke-rail-wide {
+  top: 19px;
+  height: 6px;
+  border-radius: 3px;
+}
+.stroke-fill {
+  position: absolute;
+  left: 0;
+  top: 13px;
+  height: 4px;
+  border-radius: 2px;
+}
+.stroke-fill-wide {
+  top: 19px;
+  height: 6px;
+  border-radius: 3px;
+}
+.stroke-thumb {
+  position: absolute;
+  top: 7px;
+  width: 16px;
+  height: 16px;
+  border-radius: 8px;
+}
+.stroke-thumb-wide {
+  top: 10px;
+  width: 24px;
+  height: 24px;
+  border-radius: 12px;
+}
+
+/* 背景不透明度拖拽条（与字号条同一套几何常量） */
+.bgop-track {
+  position: relative;
+  height: 30px;
+}
+.bgop-track-wide {
+  height: 44px;
+}
+.bgop-rail {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  top: 13px;
+  height: 4px;
+  border-radius: 2px;
+}
+.bgop-rail-wide {
+  top: 19px;
+  height: 6px;
+  border-radius: 3px;
+}
+.bgop-fill {
+  position: absolute;
+  left: 0;
+  top: 13px;
+  height: 4px;
+  border-radius: 2px;
+}
+.bgop-fill-wide {
+  top: 19px;
+  height: 6px;
+  border-radius: 3px;
+}
+.bgop-thumb {
+  position: absolute;
+  top: 7px;
+  width: 16px;
+  height: 16px;
+  border-radius: 8px;
+}
+.bgop-thumb-wide {
+  top: 10px;
+  width: 24px;
+  height: 24px;
+  border-radius: 12px;
+}
+
+/* 对齐三选一（复用字体按钮的选中态取色，不新增取色规则） */
+.align-wrap {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.align-chip {
+  min-width: 65px;
+  margin-top: 8px;
+  margin-right: 9px;
+  padding: 8px 13px;
+  border-radius: 8px;
+  border-width: 1px;
+  align-items: center;
+  justify-content: center;
+}
+.align-chip-wide {
+  min-width: 78px;
+  margin-top: 10px;
+  margin-right: 11px;
+  padding: 10px 16px;
+  border-radius: 10px;
+}
+.align-chip-active {
+  border-width: 2px;
+}
+.align-chip-text {
+  font-size: 14px;
+}
+.align-chip-text-wide {
+  font-size: 17px;
+}
+
+/* 不透明度行：标签在左、数值在右，与上方 .cell 的取值排版呼应 */
+.cell-inline {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 2px;
 }
 
 /* 字号拖拽条（几何常量与脚本里的 thumbSize() 必须同步） */

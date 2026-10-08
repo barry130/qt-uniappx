@@ -9,8 +9,8 @@
  * （编译进原生层），此处通过平台分发导入调用；H5 保留 window 实现，其余降级为复制+提示。
  */
 
-import { openExternalUrl, exitAppNative, installApkNative, openNotificationSettings as openNotificationSettingsNative, applyLegacyInsets as applyLegacyInsetsNative, pickJsFile as pickJsFileNative } from "@/uni_modules/qt-app-native";
-import type { PickFileResult } from "@/uni_modules/qt-app-native";
+import { openExternalUrl, exitAppNative, installApkNative, openNotificationSettings as openNotificationSettingsNative, isIgnoringBatteryOptimizations as isIgnoringBatteryOptimizationsNative, openBatteryOptimizationSettings as openBatteryOptimizationSettingsNative, openAutoStartSettings as openAutoStartSettingsNative, openAppDetailsSettings as openAppDetailsSettingsNative, applyLegacyInsets as applyLegacyInsetsNative, pickJsFile as pickJsFileNative, queryPermissionStates as queryPermissionStatesNative, openPermissionSettings as openPermissionSettingsNative } from "@/uni_modules/qt-app-native";
+import type { PickFileResult, PermissionState } from "@/uni_modules/qt-app-native";
 import { ensureNotificationPermission as ensureNotificationPermissionNative } from "@/uni_modules/qt-audio-player";
 
 export type DownloadProgress = (received: number, total: number, percent: number) => void;
@@ -149,6 +149,84 @@ export function openNotificationSettings(): boolean {
 }
 
 /**
+ * 本应用是否已加入系统电池优化白名单（即后台不会被 Doze 冻结）。
+ *
+ * 用途：后台取链/后台播放被系统限制时，引导用户去把本应用设为「不优化」。
+ * 保守策略：查询失败一律返回 true（视为已放行）——误报会打扰用户，漏报只是少一次提示。
+ * 非 Android 平台恒为 true（iOS/H5 无此概念）。
+ * @returns 是否已放行（true 表示无需引导）
+ */
+export function isIgnoringBatteryOptimizations(): boolean {
+  // #ifdef APP-ANDROID
+  try {
+    return isIgnoringBatteryOptimizationsNative();
+  } catch (e) {
+    console.log("[AppNative] isIgnoringBatteryOptimizations error", e);
+    return true;
+  }
+  // #endif
+  // #ifndef APP-ANDROID
+  return true;
+  // #endif
+}
+
+/**
+ * 打开系统「电池优化」列表页，让用户把本应用改为「不优化」。
+ * 用的是零权限的列表页 action（详见 qt-app-native 实现注释），失败时降级到应用详情页。
+ * @returns 是否成功拉起设置页
+ */
+export function openBatteryOptimizationSettings(): boolean {
+  // #ifdef APP-ANDROID
+  try {
+    return openBatteryOptimizationSettingsNative();
+  } catch (e) {
+    console.log("[AppNative] openBatteryOptimizationSettings error", e);
+    return false;
+  }
+  // #endif
+  // #ifndef APP-ANDROID
+  return false;
+  // #endif
+}
+
+/**
+ * 打开厂商「自启动 / 后台运行管理」页（国产 ROM 私有入口，逐个厂商试）。
+ * 全部候选都落空时原生侧会自动降级到应用详情页，因此返回 true 只代表拉起过某个页面。
+ * @returns 是否成功拉起设置页
+ */
+export function openAutoStartSettings(): boolean {
+  // #ifdef APP-ANDROID
+  try {
+    return openAutoStartSettingsNative();
+  } catch (e) {
+    console.log("[AppNative] openAutoStartSettings error", e);
+    return false;
+  }
+  // #endif
+  // #ifndef APP-ANDROID
+  return false;
+  // #endif
+}
+
+/**
+ * 打开本应用的系统详情设置页（所有 ROM 都有的最终兜底入口）。
+ * @returns 是否成功拉起设置页
+ */
+export function openAppDetailsSettings(): boolean {
+  // #ifdef APP-ANDROID
+  try {
+    return openAppDetailsSettingsNative();
+  } catch (e) {
+    console.log("[AppNative] openAppDetailsSettings error", e);
+    return false;
+  }
+  // #endif
+  // #ifndef APP-ANDROID
+  return false;
+  // #endif
+}
+
+/**
  * 强制窗口回归传统布局模式（decorFitsSystemWindows = true），绕开
  * 三星 One UI 手势导航下 edge-to-edge 窗口的首屏挂载竞态（S24 Ultra 全屏
  * 白屏根因，见 services/boot-guard.ts）。须在 App 启动最早点调用；
@@ -189,5 +267,57 @@ export function pickJsFile(): Promise<PickFileResult> {
   // #endif
   // #ifndef APP-ANDROID
   return Promise.resolve({ ok: false, name: "", content: "", message: "当前平台不支持本地文件安装" } as PickFileResult);
+  // #endif
+}
+
+/**
+ * 查询一批权限的当前授权状态（设置页「权限管理」用）。
+ *
+ * id 与 manifest.json 的声明串一致（android.permission.XXX）。原生侧已把
+ * 「普通权限 / 运行时权限 / 特殊权限」三类收敛成统一结构：applicable 表示
+ * 该权限在当前系统版本上是否还适用（如 WRITE_EXTERNAL_STORAGE 只到 Android 9），
+ * unknown 表示查不到（窗口未就绪、平台不支持），页面据此显示「无法确定」
+ * 而不是误报「未授权」。
+ *
+ * 非 Android 平台没有与 Android 权限一一对应的授权模型，一律返回 unknown。
+ */
+export function queryPermissionStates(ids: string[]): PermissionState[] {
+  // #ifdef APP-ANDROID
+  try {
+    return queryPermissionStatesNative(ids);
+  } catch (e) {
+    console.log("[AppNative] queryPermissionStates error", e);
+    return unknownPermissionStates(ids);
+  }
+  // #endif
+  // #ifndef APP-ANDROID
+  return unknownPermissionStates(ids);
+  // #endif
+}
+
+/** 查询失败/平台不支持时的保守结果：全部标 unknown，绝不误报「未授权」 */
+function unknownPermissionStates(ids: string[]): PermissionState[] {
+  const out: PermissionState[] = [];
+  for (let i = 0; i < ids.length; i++) {
+    out.push({ id: ids[i], applicable: true, granted: false, unknown: true } as PermissionState);
+  }
+  return out;
+}
+
+/**
+ * 跳到某条权限对应的系统设置页（能直达就直达，ROM 不认则退回应用详情页）。
+ * @returns 已成功发起跳转返回 true；平台不支持返回 false（调用方提示手动前往）
+ */
+export function openPermissionSettings(id: string): boolean {
+  // #ifdef APP-ANDROID
+  try {
+    return openPermissionSettingsNative(id);
+  } catch (e) {
+    console.log("[AppNative] openPermissionSettings error", e);
+    return false;
+  }
+  // #endif
+  // #ifndef APP-ANDROID
+  return false;
   // #endif
 }

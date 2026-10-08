@@ -169,6 +169,18 @@ function openPlayer(): void {
     moved = false;
     return;
   }
+  // 栈顶已是播放页时不再 push：本组件被 11 个页面引用，且页面上没有「已在播放页」的守卫，
+  // 连点悬浮球会堆叠出多个播放页实例 —— 每个实例各自 ensureLyric 取一遍歌词、
+  // 各起一套定时器与逐字 rAF。真机表现就是同一首歌的「命中预热缓存」日志重复出现，
+  // 内存与后台任务随栈深线性增长。返回键本来就能回到已有实例，无需再叠一层。
+  try {
+    const pages = getCurrentPages();
+    if (pages.length > 0) {
+      const top = pages[pages.length - 1];
+      const route = top.route;
+      if (route != null && route == "pages/player/index") return;
+    }
+  } catch (_) {}
   uni.navigateTo({ url: "/pages/player/index" });
 }
 

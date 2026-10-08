@@ -1,7 +1,14 @@
 import { reactive } from "vue";
-import { musicApi, RegistryQuality, RegistrySource } from "@/services/music-api";
+import { musicApi, RegistryQuality, RegistrySort, RegistrySource } from "@/services/music-api";
 import { SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
 import { useSourceStore } from "@/stores/source";
+
+/**
+ * 数据包可声明的「功能面」（v4 契约，包侧 registry.ts 的 SourceFeatures）：
+ * 该源有没有排行榜 / 歌单载体 / 歌手页 / 专辑 / 新歌流。
+ * 页面用它做展示门控：源不支持的功能不显示对应入口/标签/磁贴。
+ */
+export type SourceFeature = "charts" | "playlists" | "artist" | "album" | "latest";
 
 /**
  * 音源/音质注册表（数据包声明，宿主不内置清单）。
@@ -64,6 +71,55 @@ class SourceRegistryStore {
     return this.sources.map((s) => s.id);
   }
 
+  /**
+   * 声明支持某项功能的源 id 列表（顺序 = 数据包声明顺序）。
+   *
+   * 例：榜单页用它取「有排行榜的源」渲染来源标签，没有榜单的源不再出现。
+   */
+  sourceIdsWith(feature: SourceFeature): string[] {
+    const out: string[] = [];
+    for (let i = 0; i < this.sources.length; i++) {
+      if (this.supports(this.sources[i].id, feature)) out.push(this.sources[i].id);
+    }
+    return out;
+  }
+
+  /**
+   * 某源是否支持某项功能（展示门控的唯一入口）。
+   *
+   * 语义按「保守方向是不隐藏」：
+   * - 未声明（v3 及更早的旧包、`local`/未知 id、注册表还没拉到）→ **true**，
+   *   与旧包行为一致——错误地隐藏入口比多显示一个空区块伤害大；
+   * - 声明为 false → false（页面据此不显示该源的这个功能入口/标签）。
+   */
+  supports(id: string, feature: SourceFeature): boolean {
+    for (let i = 0; i < this.sources.length; i++) {
+      const s = this.sources[i];
+      if (s.id != id) continue;
+      if (feature == "charts") return s.charts != false;
+      if (feature == "playlists") return s.playlists != false;
+      if (feature == "artist") return s.artist != false;
+      if (feature == "album") return s.album != false;
+      if (feature == "latest") return s.latest != false;
+      return true;
+    }
+    return true;
+  }
+
+  /**
+   * 是否**存在**支持某项功能的源（聚合级门控）。
+   *
+   * 全部源都不支持（或明确声明 false）→ false，页面级入口整体隐藏
+   * （如首页「排行榜」磁贴、侧栏「歌单广场」）。注册表还没拉到（空清单）
+   * 按 true 处理——门控只在拿到明确声明后才收口。
+   */
+  anySupports(feature: SourceFeature): boolean {
+    for (let i = 0; i < this.sources.length; i++) {
+      if (this.supports(this.sources[i].id, feature)) return true;
+    }
+    return this.sources.length == 0;
+  }
+
   has(id: string): boolean {
     for (let i = 0; i < this.sources.length; i++) {
       if (this.sources[i].id == id) return true;
@@ -105,6 +161,43 @@ class SourceRegistryStore {
     }
     if (id == "320") return "高品 320k";
     return id;
+  }
+
+  /**
+   * 某源可用的音质档位（v5 契约：包侧 qualities 子集过滤全局档位）。
+   *
+   * 语义按「保守方向是不隐藏」：未声明（v4 及更早的旧包、`local`/未知 id）→
+   * 全部档位，与旧包行为一致；声明了子集 → 只保留子集里的档位（如 B 站无真
+   * 无损，flac 不再出现在音质选项里）。声明的 id 与全局档位对不上时退回全部，
+   * 宁可多展示也不把选项清空。
+   */
+  sourceQualities(id: string): RegistryQuality[] {
+    let declared: string[] | null = null;
+    for (let i = 0; i < this.sources.length; i++) {
+      const s = this.sources[i];
+      if (s.id == id) {
+        declared = s.qualities != null ? s.qualities : null;
+        break;
+      }
+    }
+    if (declared == null) return this.qualities;
+    const out: RegistryQuality[] = [];
+    for (let i = 0; i < this.qualities.length; i++) {
+      if (declared.indexOf(this.qualities[i].id) >= 0) out.push(this.qualities[i]);
+    }
+    return out.length > 0 ? out : this.qualities;
+  }
+
+  /**
+   * 某源的歌单广场排序选项（v5 契约）。未声明 / 空数组（qq/kw/bili）→ []，
+   * 页面据此不渲染排序选择器；有多个选项时展示（wyy 最热/最新、kg 最热/最新/推荐）。
+   */
+  playlistSorts(id: string): RegistrySort[] {
+    for (let i = 0; i < this.sources.length; i++) {
+      const s = this.sources[i];
+      if (s.id == id) return s.playlistSorts != null ? s.playlistSorts : [];
+    }
+    return [];
   }
 
   /**

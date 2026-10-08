@@ -1,0 +1,177 @@
+<template>
+  <qt-page-frame :max-width="640">
+  <view class="page">
+    <scroll-view class="list" :class="layout.isWide ? 'list-wide' : ''" direction="vertical" :show-scrollbar="false">
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">已展示 {{ barToolCounted }}/{{ maxVisible }} 个，关掉的按钮播放页不再显示</text>
+        </view>
+        <view
+          v-for="(tool, index) in barTools"
+          :key="tool.id"
+          class="cell"
+          :class="[layout.isWide ? 'cell-wide' : '', index == barTools.length - 1 ? 'cell-no-border' : '']"
+          :style="cellStyle"
+          @click="toggleBarTool(tool.id)"
+        >
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" :name="tool.icon" :size="36" :color="toolColor(index)" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">{{ tool.label }}</text>
+          <view class="cell-right">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + barToolColor(tool.id) + ';'">{{ barToolText(tool.id) }}</text>
+          </view>
+        </view>
+      </view>
+
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="resetDefault">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="refresh" :size="36" color="#7c6cf2" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">恢复默认展示</text>
+          <view class="cell-right">
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </view>
+      </view>
+
+      <view class="hint">
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">播放页进度条上方那一行、以及横屏控制行右侧那一组，都按这里的开关渲染。最多同时展示 {{ maxVisible }} 个。</text>
+      </view>
+    </scroll-view>
+  </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { computed, ref } from "vue";
+import { onShow } from "@dcloudio/uni-app";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import {
+  PLAYER_BAR_MAX_VISIBLE,
+  PLAYER_BAR_TOOLS,
+  type PlayerBarToolMeta,
+  playerBarCounted,
+  usePlayerBarStore,
+} from "@/stores/player-bar";
+import { isQtAdmin } from "@/services/music-api";
+
+const playerBar = usePlayerBarStore();
+/** playUrl 开关只对 qt_admin 展示（与播放页的入口可见性同一权限来源） */
+const qtAdmin = ref(isQtAdmin());
+const layout = useQtLayout();
+const theme = useThemeStore();
+const groupStyle = computed<string>(() => "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";");
+const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
+
+const maxVisible = PLAYER_BAR_MAX_VISIBLE;
+/** 当前行清单：非管理员的 playUrl（adminOnly）不出现 */
+const barTools = computed<PlayerBarToolMeta[]>(() => {
+  const out: PlayerBarToolMeta[] = [];
+  for (let i = 0; i < PLAYER_BAR_TOOLS.length; i++) {
+    const tool = PLAYER_BAR_TOOLS[i];
+    if (tool.adminOnly && !qtAdmin.value) continue;
+    out.push(tool);
+  }
+  return out;
+});
+/** 计数口径：把当前不可能出现的项（非管理员的播放链接）排除 */
+const countedTool = (id: string): boolean => playerBarCounted(id, qtAdmin.value);
+const barToolCounted = computed<number>(() => playerBar.countVisible(countedTool));
+const toolColors: string[] = ["#d97b66", "#6d8fd6", "#5f9ea0", "#4fb186", "#d99b3f", "#9b82d9"];
+function toolColor(index: number): string {
+  return toolColors[index % toolColors.length];
+}
+function toggleBarTool(id: string): void {
+  const ok = playerBar.toggle(id, countedTool);
+  if (!ok) {
+    uni.showToast({ title: "最多展示 " + maxVisible + " 个，请先关掉一个", icon: "none" });
+  }
+}
+function barToolText(id: string): string {
+  return playerBar.isVisible(id) ? "已展示" : "未展示";
+}
+function barToolColor(id: string): string {
+  return playerBar.isVisible(id) ? theme.skin.accent : theme.skin.textMuted;
+}
+function resetDefault(): void {
+  playerBar.reset();
+  uni.showToast({ title: "已恢复默认展示", icon: "none" });
+}
+
+onShow(() => {
+  // 权限缓存可能在「我的」页刷新过；展示集也可能被播放页或其它入口改过。
+  // restore 必须带名额口径：非管理员的「播放链接」不渲染、不占名额，
+  // 否则它会把刚开的按钮从白名单里挤掉（表现为「设置了，返回又没了」）。
+  qtAdmin.value = isQtAdmin();
+  playerBar.restore(countedTool);
+});
+</script>
+
+<style>
+.page {
+  flex: 1;
+}
+.list {
+  flex: 1;
+  padding: 16rpx 0 40rpx;
+}
+.list-wide {
+  padding: 12px 0 24px;
+}
+.group {
+  margin-top: 20rpx;
+  margin-left: 24rpx;
+  margin-right: 24rpx;
+  border-radius: 24rpx;
+  overflow: hidden;
+
+  border-width: 1px;
+
+}
+.cell {
+  height: 96rpx;
+  padding: 0 32rpx;
+  flex-direction: row;
+  align-items: center;
+  border-bottom-width: 1px;
+}
+.cell-no-border {
+  border-bottom-width: 0;
+}
+.cell-icon {
+  margin-right: 20rpx;
+}
+.cell-title {
+  flex: 1;
+
+  font-size: 28rpx;
+  font-weight: 500;
+}
+.cell-right {
+  flex-direction: row;
+  align-items: center;
+}
+.cell-value {
+
+  font-size: 24rpx;
+  margin-right: 12rpx;
+}
+.group-wide { margin-top: 14px; margin-left: 24px; margin-right: 24px; border-radius: 14px; }
+.cell-wide { height: 64px; padding-left: 24px; padding-right: 24px; }
+.cell-title-wide { font-size: 17px; }
+.cell-value-wide { font-size: 14px; }
+.cell-icon-wide { margin-right: 10px; }
+
+.hint {
+  margin-top: 18rpx;
+  padding: 0 40rpx;
+}
+.hint-text {
+  font-size: 22rpx;
+  line-height: 32rpx;
+}
+.hint-text-wide {
+  font-size: 12px;
+  line-height: 18px;
+}
+</style>

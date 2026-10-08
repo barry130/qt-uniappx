@@ -42,8 +42,82 @@
           <qt-button v-if="theme.skin.backgroundImage.length > 0" label="移除当前壁纸" variant="ghost" size="sm" @click="clearBackground" />
         </qt-card>
 
+        <qt-card title="自定义色码" description="输入 #RRGGBB 覆盖当前皮肤的令牌；留空表示沿用当前值。" elevated>
+          <view class="custom-name-row">
+            <text class="custom-label" :style="'color:' + theme.skin.textMuted + ';'">名称</text>
+            <input
+              class="custom-input" :class="layout.isWide ? 'custom-input-wide' : ''"
+              :style="customInputStyle"
+              :value="customName"
+              @input="onNameInput"
+              placeholder="自定义皮肤"
+              :placeholder-style="'color:' + theme.skin.placeholder + ';'"
+              :maxlength="16"
+            />
+          </view>
+          <view v-for="field in colorFields" :key="field.id" class="custom-row">
+            <view class="custom-swatch" :class="pickerOpen && pickerFieldId == field.id ? 'custom-swatch-active' : ''" :style="'background-color:' + swatchOf(field.id) + ';border-color:' + theme.skin.border + ';'" @click="openPicker(field.id)" />
+            <text class="custom-label" :style="'color:' + theme.skin.textMuted + ';'" @click="openPicker(field.id)">{{ field.label }}</text>
+            <input
+              class="custom-input" :class="layout.isWide ? 'custom-input-wide' : ''"
+              :style="customInputStyle"
+              :value="valueOf(field.id)"
+              @input="onColorInput(field.id, $event)"
+              :placeholder="field.hint"
+              :placeholder-style="'color:' + theme.skin.placeholder + ';'"
+              :maxlength="7"
+            />
+          </view>
+
+          <!-- 全色取色器：Vapor 不支持 linear-gradient，色带只能用一排纯色 view 拼出来 -->
+          <view v-if="pickerOpen" class="picker-panel" :style="'background-color:' + theme.skin.surfaceInset + ';border-color:' + theme.skin.border + ';'">
+            <view class="picker-head">
+              <view class="picker-preview" :class="layout.isWide ? 'picker-preview-wide' : ''" :style="'background-color:' + pickerHex + ';border-color:' + theme.skin.border + ';'" />
+              <view class="picker-head-text">
+                <text class="picker-title" :class="layout.isWide ? 'picker-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">{{ pickerLabel() }}</text>
+                <text class="picker-hex" :class="layout.isWide ? 'picker-hex-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ pickerHex }}</text>
+              </view>
+              <QtIcon name="close" :size="layout.isWide ? 16 : 30" :color="theme.skin.iconMuted" @click="closePicker" />
+            </view>
+
+            <view v-for="rail in pickerRails" :key="rail.key" class="picker-block">
+              <text class="picker-caption" :class="layout.isWide ? 'picker-caption-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ rail.caption }}</text>
+              <view class="picker-rail">
+                <view
+                  v-for="(seg, segIndex) in rail.colors" :key="segIndex"
+                  class="picker-seg" :class="segIndex == rail.active ? 'picker-seg-on' : ''"
+                  :style="'background-color:' + seg + ';border-color:' + inkOf(seg) + ';'"
+                  @click="pickSegment(rail.key, segIndex)"
+                />
+              </view>
+            </view>
+
+            <text class="picker-caption" :class="layout.isWide ? 'picker-caption-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">常用颜色</text>
+            <view v-for="(presetRow, rowIndex) in presetRows" :key="rowIndex" class="picker-presets">
+              <view
+                v-for="(preset, colIndex) in presetRow" :key="colIndex"
+                class="picker-preset"
+                :style="'background-color:' + preset + ';border-color:' + theme.skin.border + ';'"
+                @click="pickPreset(preset)"
+              />
+            </view>
+
+            <view class="picker-actions">
+              <qt-button class="custom-button" label="使用此颜色" variant="secondary" size="sm" @click="applyPicker" />
+              <qt-button class="custom-button" label="取消" variant="ghost" size="sm" @click="closePicker" />
+            </view>
+          </view>
+
+          <text v-if="customError.length > 0" class="error-text" :style="'color:' + theme.skin.danger + ';'">{{ customError }}</text>
+          <view class="custom-actions">
+            <qt-button class="custom-button" label="应用自定义" variant="secondary" size="sm" @click="applyCustom" />
+            <qt-button class="custom-button" label="从当前皮肤填充" variant="ghost" size="sm" @click="fillFromCurrent" />
+          </view>
+        </qt-card>
+
         <qt-card title="当前令牌" variant="muted">
           <view class="token-row"><text class="token-key">模式</text><text class="token-value" :style="'color:' + theme.skin.text + ';'">{{ theme.mode }} / {{ theme.dark ? 'dark' : 'light' }}</text></view>
+          <view class="token-row"><text class="token-key">皮肤</text><text class="token-value" :style="'color:' + theme.skin.text + ';'">{{ theme.skinId == 'custom' ? 'custom' : theme.skinId }}</text></view>
           <view class="token-row"><text class="token-key">accent</text><text class="token-value" :style="'color:' + theme.skin.accent + ';'">{{ theme.skin.accent }}</text></view>
           <view class="token-row"><text class="token-key">surface</text><text class="token-value" :style="'color:' + theme.skin.text + ';'">{{ theme.skin.surface }}</text></view>
         </qt-card>
@@ -56,7 +130,8 @@
   </qt-page-frame>
 </template>
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, computed } from "vue";
+import { onShow } from "@dcloudio/uni-app";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtCard from "@/uni_modules/qt-ui/components/qt-card/qt-card.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
@@ -77,6 +152,292 @@ const backgroundUrl = ref(theme.skin.backgroundImage);
 const previewImage = ref(theme.skin.backgroundImage);
 const pendingImage = ref("");
 const wallpaperError = ref("");
+
+// ==================== 自定义色码 ====================
+// setCustomSkin 只接受 8 个颜色令牌，其余字段继承「当前解析出的皮肤」，
+// 所以这里把当前值预填进去，用户只改想改的那几个即可。
+
+type ColorField = { id: string; label: string; hint: string };
+// overlay 不在可编辑列表里：预置用的是 rgba(...) 半透明写法，纯色码会把壁纸整个盖住，
+// 交给 setCustomSkin 传空串沿用当前皮肤的遮罩更安全。
+const colorFields: ColorField[] = [
+  { id: "accent", label: "强调色", hint: "#3f6fd8" },
+  { id: "background", label: "背景", hint: "#f4f2ee" },
+  { id: "surface", label: "卡片", hint: "#ffffff" },
+  { id: "text", label: "主文字", hint: "#1f2430" },
+  { id: "textMuted", label: "次文字", hint: "#737b8e" },
+  { id: "border", label: "描边", hint: "#e3e1dc" },
+];
+
+const customName = ref("");
+const customValues = ref<Record<string, string>>({});
+const customError = ref("");
+
+const customInputStyle = computed<string>(() =>
+  "background-color:" + theme.skin.surfaceInset + ";color:" + theme.skin.text + ";border-color:" + theme.skin.border + ";"
+);
+
+function valueOf(id: string): string {
+  const v = customValues.value[id];
+  return v != null ? v : "";
+}
+/** 色块预览：非法值回落到当前皮肤同名字段，避免色块变透明误导用户 */
+function swatchOf(id: string): string {
+  const raw = valueOf(id).trim();
+  if (isHexColor(raw)) return raw;
+  const current = currentTokenOf(id);
+  return current.length > 0 ? current : theme.skin.accent;
+}
+function currentTokenOf(id: string): string {
+  if (id == "accent") return theme.skin.accent;
+  if (id == "background") return theme.skin.background;
+  if (id == "surface") return theme.skin.surface;
+  if (id == "text") return theme.skin.text;
+  if (id == "textMuted") return theme.skin.textMuted;
+  if (id == "border") return theme.skin.border;
+  return theme.skin.accent;
+}
+/** 只接受 #RRGGBB（theme.withAlpha 等派生逻辑只认这一种写法，带 alpha 的会走兜底色） */
+function isHexColor(value: string): boolean {
+  if (value.length != 7 || !value.startsWith("#")) return false;
+  for (let i = 1; i < 7; i++) {
+    const c = value.charAt(i).toLowerCase();
+    const isDigit = c >= "0" && c <= "9";
+    const isHex = c >= "a" && c <= "f";
+    if (!isDigit && !isHex) return false;
+  }
+  return true;
+}
+function fillFromCurrent(): void {
+  const next: Record<string, string> = {};
+  for (let i = 0; i < colorFields.length; i++) {
+    next[colorFields[i].id] = currentTokenOf(colorFields[i].id);
+  }
+  customValues.value = next;
+  customError.value = "";
+}
+function onNameInput(e: InputEvent): void {
+  customName.value = e.detail.value;
+}
+function onColorInput(id: string, e: InputEvent): void {
+  const next: Record<string, string> = {};
+  const current = customValues.value;
+  for (let i = 0; i < colorFields.length; i++) {
+    const key = colorFields[i].id;
+    next[key] = key == id ? e.detail.value : (current[key] != null ? current[key] : "");
+  }
+  customValues.value = next;
+  if (customError.value.length > 0) customError.value = "";
+}
+// ==================== 全色取色器 ====================
+// Vapor 禁 linear-gradient，所以色相/饱和度/明度色带只能用一排纯色 view 拼出来；
+// 只做点击选段、不做拖动：卡片有 overflow:hidden，浮层会被裁掉，而拖动还要额外量轨道
+// 宽度并在首帧为 0 时重试。24 段色相每段 15 度，点选精度对配色足够。
+
+type Hsv = { h: number; s: number; v: number };
+type PickerRail = { key: string; caption: string; colors: string[]; active: number };
+
+const HUE_STEPS = 24;
+const SAT_STEPS = 16;
+const VAL_STEPS = 16;
+
+/** 两位十六进制查表：仓库里 .uvue 没有 toString(16) 的先例，查表最稳 */
+const HEX_DIGITS = "0123456789abcdef";
+function hex2(n: number): string {
+  let v = Math.round(n);
+  if (v < 0) v = 0;
+  if (v > 255) v = 255;
+  return HEX_DIGITS.charAt(Math.floor(v / 16)) + HEX_DIGITS.charAt(v % 16);
+}
+function hsvToHex(h: number, s: number, v: number): string {
+  const hue = ((h % 360) + 360) % 360;
+  const sat = Math.max(0, Math.min(100, s)) / 100;
+  const val = Math.max(0, Math.min(100, v)) / 100;
+  const chroma = val * sat;
+  const seg = hue / 60;
+  const x = chroma * (1 - Math.abs(seg % 2 - 1));
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  if (seg < 1) {
+    r = chroma;
+    g = x;
+  } else if (seg < 2) {
+    r = x;
+    g = chroma;
+  } else if (seg < 3) {
+    g = chroma;
+    b = x;
+  } else if (seg < 4) {
+    g = x;
+    b = chroma;
+  } else if (seg < 5) {
+    r = x;
+    b = chroma;
+  } else {
+    r = chroma;
+    b = x;
+  }
+  const m = val - chroma;
+  return "#" + hex2((r + m) * 255) + hex2((g + m) * 255) + hex2((b + m) * 255);
+}
+function hexToHsv(hex: string): Hsv {
+  const out: Hsv = { h: 0, s: 0, v: 0 };
+  if (!isHexColor(hex)) return out;
+  const r = parseInt(hex.substring(1, 3), 16) / 255;
+  const g = parseInt(hex.substring(3, 5), 16) / 255;
+  const b = parseInt(hex.substring(5, 7), 16) / 255;
+  const max = Math.max(r, Math.max(g, b));
+  const min = Math.min(r, Math.min(g, b));
+  const d = max - min;
+  out.v = Math.round(max * 100);
+  if (max > 0) out.s = Math.round((d / max) * 100);
+  if (d > 0) {
+    if (max == r) out.h = Math.round(60 * (((g - b) / d) % 6));
+    else if (max == g) out.h = Math.round(60 * ((b - r) / d + 2));
+    else out.h = Math.round(60 * ((r - g) / d + 4));
+  }
+  out.h = ((out.h % 360) + 360) % 360;
+  return out;
+}
+/** 色段描边：亮色段配深墨、暗色段配浅墨，否则白段上的白边根本看不见 */
+function inkOf(hex: string): string {
+  if (!isHexColor(hex)) return theme.skin.border;
+  const r = parseInt(hex.substring(1, 3), 16);
+  const g = parseInt(hex.substring(3, 5), 16);
+  const b = parseInt(hex.substring(5, 7), 16);
+  if (r * 299 + g * 587 + b * 114 > 148000) return "#1f2430";
+  return "#ffffff";
+}
+
+const pickerOpen = ref(false);
+/** 取色器当前作用的自定义色码字段（点哪个色块就改哪个） */
+const pickerFieldId = ref("accent");
+const pickerHue = ref(0);
+const pickerSat = ref(80);
+const pickerVal = ref(90);
+
+const pickerHex = computed((): string => hsvToHex(pickerHue.value, pickerSat.value, pickerVal.value));
+
+/** 三根色带的纯色段：色相带固定满饱和满明度（否则选暗色时色相带全黑没法选） */
+const pickerRails = computed((): PickerRail[] => {
+  const hueColors: string[] = [];
+  for (let i = 0; i < HUE_STEPS; i++) {
+    hueColors.push(hsvToHex((360 * i) / HUE_STEPS, 100, 100));
+  }
+  const satColors: string[] = [];
+  for (let i = 0; i < SAT_STEPS; i++) {
+    satColors.push(hsvToHex(pickerHue.value, (100 * i) / (SAT_STEPS - 1), pickerVal.value));
+  }
+  const valColors: string[] = [];
+  for (let i = 0; i < VAL_STEPS; i++) {
+    valColors.push(hsvToHex(pickerHue.value, pickerSat.value, (100 * i) / (VAL_STEPS - 1)));
+  }
+  const rails: PickerRail[] = [
+    // 用 floor 而非 round：hue 接近 359 时 round 会算出 24 再取模成 0，标记会跳到首段
+    { key: "hue", caption: "色相", colors: hueColors, active: Math.floor((pickerHue.value / 360) * HUE_STEPS) },
+    { key: "sat", caption: "饱和度", colors: satColors, active: Math.round((pickerSat.value / 100) * (SAT_STEPS - 1)) },
+    { key: "val", caption: "明度", colors: valColors, active: Math.round((pickerVal.value / 100) * (VAL_STEPS - 1)) },
+  ];
+  return rails;
+});
+
+/** 常用颜色 6 行 x 8 列：前 5 行同色相不同饱和/明度，末行灰阶。
+    分行存是为了让每行各自 flex:1 平分宽度，避免定宽色块在窄屏溢出。 */
+function buildPresetRows(): string[][] {
+  const rows: string[][] = [];
+  const sats: number[] = [100, 72, 46, 100, 26];
+  const vals: number[] = [100, 96, 92, 62, 100];
+  for (let row = 0; row < 5; row++) {
+    const cells: string[] = [];
+    for (let col = 0; col < 8; col++) {
+      cells.push(hsvToHex(col * 45, sats[row], vals[row]));
+    }
+    rows.push(cells);
+  }
+  const grays: string[] = [];
+  for (let col = 0; col < 8; col++) {
+    grays.push(hsvToHex(0, 0, 100 - col * 12));
+  }
+  rows.push(grays);
+  return rows;
+}
+const presetRows: string[][] = buildPresetRows();
+
+function pickerLabel(): string {
+  for (let i = 0; i < colorFields.length; i++) {
+    if (colorFields[i].id == pickerFieldId.value) return colorFields[i].label;
+  }
+  return "颜色";
+}
+function openPicker(id: string): void {
+  pickerFieldId.value = id;
+  // 从色块显示的颜色起步：非法输入时 swatchOf 已回落到当前皮肤，不会出现全黑开局
+  const hsv = hexToHsv(swatchOf(id));
+  pickerHue.value = hsv.h;
+  pickerSat.value = hsv.s;
+  pickerVal.value = hsv.v;
+  pickerOpen.value = true;
+}
+function closePicker(): void {
+  pickerOpen.value = false;
+}
+/** 写回 customValues：与 onColorInput 同一形状（整表重建），保证响应式且「应用自定义」照常生效 */
+function writeValue(id: string, hex: string): void {
+  const next: Record<string, string> = {};
+  const current = customValues.value;
+  for (let i = 0; i < colorFields.length; i++) {
+    const key = colorFields[i].id;
+    next[key] = key == id ? hex : (current[key] != null ? current[key] : "");
+  }
+  customValues.value = next;
+  if (customError.value.length > 0) customError.value = "";
+}
+function pickSegment(key: string, index: number): void {
+  if (key == "hue") {
+    pickerHue.value = Math.round((360 * index) / HUE_STEPS);
+    // 明度为 0 时整块预览都是黑的，点色相看不出变化，直接抬到满明度
+    if (pickerVal.value == 0) pickerVal.value = 100;
+    return;
+  }
+  if (key == "sat") {
+    pickerSat.value = Math.round((100 * index) / (SAT_STEPS - 1));
+    return;
+  }
+  pickerVal.value = Math.round((100 * index) / (VAL_STEPS - 1));
+}
+function pickPreset(hex: string): void {
+  const hsv = hexToHsv(hex);
+  pickerHue.value = hsv.h;
+  pickerSat.value = hsv.s;
+  pickerVal.value = hsv.v;
+}
+function applyPicker(): void {
+  writeValue(pickerFieldId.value, pickerHex.value);
+  pickerOpen.value = false;
+}
+
+function applyCustom(): void {
+  const accent = valueOf("accent").trim();
+  if (accent.length > 0 && !isHexColor(accent)) {
+    customError.value = "颜色需为 #RRGGBB 形式，例如 #3f6fd8";
+    return;
+  }
+  // 留空 = 沿用当前皮肤该字段（setCustomSkin 内部 validString 也是这个语义）
+  theme.setCustomSkin(
+    customName.value.trim(),
+    accent,
+    valueOf("background").trim(),
+    valueOf("surface").trim(),
+    valueOf("text").trim(),
+    valueOf("textMuted").trim(),
+    valueOf("border").trim(),
+    "",
+  );
+  customError.value = "";
+  fillFromCurrent();
+  uni.showToast({ title: "已应用自定义皮肤", icon: "none" });
+}
 
 function pickMode(mode: QtThemeMode): void {
   theme.setMode(mode);
@@ -148,8 +509,21 @@ function resetAll(): void {
   previewImage.value = "";
   backgroundUrl.value = "";
   wallpaperError.value = "";
+  customName.value = "";
+  customValues.value = {};
+  customError.value = "";
+  // 恢复默认后取色器还停在被清空的那一栏上，直接收起避免误用旧 HSV 状态
+  pickerOpen.value = false;
   uni.showToast({ title: "已恢复 Linen、跟随系统并移除壁纸", icon: "none" });
 }
+
+// 进页面把自定义色码预填为当前皮肤的值，用户改哪项就动哪项
+onShow(() => {
+  fillFromCurrent();
+  if (customName.value.length == 0 && theme.skinId == "custom") {
+    customName.value = theme.skin.name;
+  }
+});
 </script>
 
 <style>
@@ -181,6 +555,35 @@ function resetAll(): void {
 .token-row { flex-direction: row; align-items: center; justify-content: space-between; min-height: 54rpx; }
 .token-key { color: #737b8e; font-size: 22rpx; }
 .token-value { font-size: 22rpx; font-family: monospace; }
+/* 自定义色码 */
+.custom-name-row { flex-direction: row; align-items: center; margin-bottom: 14rpx; }
+.custom-row { flex-direction: row; align-items: center; margin-bottom: 14rpx; }
+.custom-swatch { width: 36rpx; height: 36rpx; border-radius: 18rpx; border-width: 1px; margin-right: 16rpx; }
+.custom-swatch-active { border-width: 3px; }
+.custom-label { width: 120rpx; font-size: 23rpx; }
+.custom-input { flex: 1; height: 68rpx; padding: 0 18rpx; border-width: 1px; border-radius: 12rpx; font-size: 23rpx; font-family: monospace; }
+.custom-input-wide { height: 40px; padding: 0 10px; border-radius: 8px; font-size: 13px; }
+.custom-actions { flex-direction: row; margin-top: 8rpx; }
+.custom-button { margin-right: 14rpx; }
+/* 取色器：卡片 overflow:hidden，所以面板走普通文档流，不用绝对定位浮层 */
+.picker-panel { margin-top: 10rpx; margin-bottom: 16rpx; padding: 20rpx; border-width: 1px; border-radius: 16rpx; }
+.picker-head { flex-direction: row; align-items: center; margin-bottom: 16rpx; }
+.picker-preview { width: 64rpx; height: 64rpx; border-radius: 32rpx; border-width: 2px; margin-right: 18rpx; }
+.picker-preview-wide { width: 40px; height: 40px; border-radius: 20px; }
+.picker-head-text { flex: 1; }
+.picker-title { font-size: 26rpx; font-weight: 650; }
+.picker-title-wide { font-size: 15px; }
+.picker-hex { margin-top: 4rpx; font-size: 22rpx; font-family: monospace; }
+.picker-hex-wide { font-size: 13px; }
+.picker-block { margin-bottom: 14rpx; }
+.picker-caption { margin-bottom: 8rpx; font-size: 21rpx; }
+.picker-caption-wide { font-size: 12px; }
+.picker-rail { flex-direction: row; height: 56rpx; border-radius: 10rpx; overflow: hidden; }
+.picker-seg { flex: 1; height: 56rpx; border-width: 1px; }
+.picker-seg-on { border-width: 4px; }
+.picker-presets { flex-direction: row; margin-bottom: 8rpx; }
+.picker-preset { flex: 1; height: 46rpx; border-width: 1px; margin-right: 6rpx; border-radius: 8rpx; }
+.picker-actions { flex-direction: row; margin-top: 10rpx; }
 .footer-actions { flex-direction: row; margin-top: 24rpx; }
 .footer-button { flex: 1; }
 </style>

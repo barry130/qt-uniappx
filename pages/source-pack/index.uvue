@@ -77,7 +77,16 @@
             <qt-button class="install-btn" label="从链接安装" variant="secondary" size="sm" @click="openUrlSheet" />
             <qt-button class="install-btn" label="从本地文件安装" variant="outline" size="sm" @click="runSourceInstallFile" />
           </view>
-          <text class="install-hint" :style="'color:' + theme.skin.textMuted + ';'">链接需为 http(s) 直链；本地安装支持微信/QQ/网盘下载的 .js 文件。装完不抢已有生效位，首个包自动生效。</text>
+          <text class="install-hint" :style="'color:' + theme.skin.textMuted + ';'">链接需为 https 直链；本地安装支持微信/QQ/网盘下载的 .js 文件。装完不抢已有生效位，首个包自动生效。</text>
+          <!-- 官网教程：装包方式 / 换源 / 音质 / 故障速查都在这一页，比在客户端里逐步描述更完整 -->
+          <view class="guide-row" :style="guideBorderStyle" @click="openSourceSetupGuide">
+            <QtIcon class="guide-icon" name="globe" :size="layout.isWide ? 18 : 32" :color="theme.skin.accent" />
+            <view class="guide-main">
+              <text class="guide-title" :style="'color:' + theme.skin.accent + ';'">如何设置音源包</text>
+              <text class="guide-sub" :style="'color:' + theme.skin.textMuted + ';'">三种安装方式、换源、音质与装不上排查</text>
+            </view>
+            <QtIcon name="chevron-right" :size="layout.isWide ? 18 : 28" :color="theme.skin.iconMuted" />
+          </view>
         </qt-card>
       </view>
     </scroll-view>
@@ -86,7 +95,7 @@
     <view v-if="urlSheetVisible" class="url-mask" @click="closeUrlSheet">
       <view class="url-card" :class="layout.isWide ? 'url-card-wide' : ''" :style="layout.isWide ? urlCardStyleWide : urlCardStyle" @click.stop>
         <text class="url-title" :class="layout.isWide ? 'url-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">从链接安装</text>
-        <text class="url-desc" :class="layout.isWide ? 'url-desc-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">粘贴音源包 .js 文件的 http(s) 直链</text>
+        <text class="url-desc" :class="layout.isWide ? 'url-desc-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">粘贴音源包 .js 文件的 https 直链</text>
         <input
           class="url-input"
           :class="layout.isWide ? 'url-input-wide' : ''"
@@ -123,7 +132,8 @@ import type { SourcePackMeta } from "@/services/source-bundle-fs";
 import { discoverUpdates, applyUpdate, installFromText, downloadPackText, uninstallPack, activatePack, pickSmokeSongs, pendingUpdates, syncSourceUpdateBadge, offerLabel } from "@/services/source-update";
 import type { PackUpdateOffer } from "@/services/source-update";
 import { parsePackHeader } from "@/services/source-pack-header";
-import { pickJsFile } from "@/services/app-native";
+import { openInBrowser, pickJsFile } from "@/services/app-native";
+import { OFFICIAL_SOURCE_SETUP_URL } from "@/services/official-site";
 import { useSourceUpdateStore } from "@/stores/source-update";
 
 /**
@@ -141,6 +151,9 @@ type OfferRow = { id: string; label: string; last: boolean };
 
 /** 行底分隔线颜色（主题切换时随 skin 重算） */
 const rowBorderStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
+
+/** 卡底「如何设置音源包」入口行的上分隔线颜色（与包行同色，同样随皮肤联动） */
+const guideBorderStyle = computed<string>(() => "border-top-color:" + theme.skin.divider + ";");
 
 /** 数据包行：已安装数据包（不设「停用」入口，不用就卸载）；last 行不带分隔线 */
 const metaRows = computed((): PackRow[] => {
@@ -250,6 +263,11 @@ function refreshSourceUi(): void {
   syncSourceUpdateBadge();
 }
 
+/** 打开官网「如何设置音源包」教程（系统浏览器）：三种安装方式、换源、音质与排查都在那一页 */
+function openSourceSetupGuide(): void {
+  openInBrowser(OFFICIAL_SOURCE_SETUP_URL);
+}
+
 onShow(() => {
   sourceUpdateStore.refresh();
   refreshTick.value++;
@@ -291,7 +309,9 @@ function isValidHostName(host: string): boolean {
 
 /**
  * 严格校验音源包直链，返回错误文案；空串 = 通过。
- * 规则：http/https 直链；无空格/换行/制表；长度 ≤2048；主机合法（域名 ≥2 段、
+ * 规则：**仅 https** 直链（明文 http 可被中间人替换包全文，而装包 = 注入代码到
+ * 引擎 realm 执行，故不做兜底，与服务层 isSecurePackLink / downloadToTemp 同口径）；
+ * 无空格/换行/制表；长度 ≤2048；主机合法（域名 ≥2 段、
  * localhost、IPv6 [..]，可带端口 1-65535）；路径以 / 开始、以 .js 结尾
  * （? 查询串和 # 锚点截断后再判）。剪贴板粗判与输入弹层共用这一套。
  */
@@ -303,9 +323,8 @@ function validatePackLink(raw: string): string {
     return "链接里不能包含空格或换行";
   }
   const isHttps = t.startsWith("https://");
-  const isHttp = !isHttps && t.startsWith("http://");
-  if (!isHttps && !isHttp) return "只支持 http(s):// 开头的直链";
-  const rest = t.substring(isHttps ? "https://".length : "http://".length);
+  if (!isHttps) return "只支持 https:// 直链（明文 http 已禁用）";
+  const rest = t.substring("https://".length);
   // 主机段：到第一条 / ? # 为止
   let hostEnd = rest.length;
   const slash = rest.indexOf("/");
@@ -374,7 +393,7 @@ function checkClipboardPackLink(): void {
   });
 }
 
-/** 从 http(s) 直链安装：严格校验 → 下载全文 → 安装预览确认 → 统一安装管线 */
+/** 从 https 直链安装：严格校验 → 下载全文 → 安装预览确认 → 统一安装管线 */
 function installFromLink(url: string): void {
   const vErr = validatePackLink(url);
   if (vErr.length > 0) {
@@ -721,6 +740,31 @@ function runSourceUninstall(id: string): void {
   margin-top: 14rpx;
   font-size: 22rpx;
   line-height: 1.6;
+}
+/* 官网教程入口：与包行同构的一条可点行，视觉上从「安装音源包」卡里分出来 */
+.guide-row {
+  flex-direction: row;
+  align-items: center;
+  margin-top: 18rpx;
+  padding-top: 18rpx;
+  border-top-width: 1px;
+  border-top-style: solid;
+}
+.guide-icon {
+  margin-right: 14rpx;
+}
+.guide-main {
+  flex-direction: column;
+  flex: 1;
+  padding-right: 12rpx;
+}
+.guide-title {
+  font-size: 26rpx;
+  font-weight: 600;
+}
+.guide-sub {
+  margin-top: 4rpx;
+  font-size: 22rpx;
 }
 
 /* 从链接安装：页内输入弹层（遮罩 + 居中卡片），宽窄两套尺寸 */

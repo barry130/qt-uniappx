@@ -24,7 +24,7 @@
     <view class="lite-info">
       <text
         class="lite-name" :class="layout.isWide ? 'lite-name-wide' : ''"
-        :style="'color:' + themeStore.skin.text + ';'"
+        :style="'color:' + (disliked ? themeStore.skin.textMuted : themeStore.skin.text) + ';'"
         :max-lines="1"
         >{{ song.name }}</text
       >
@@ -60,6 +60,7 @@ import type { Song } from "@/types/music";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { usePlayerStore } from "@/stores/player";
+import { useDislikesStore } from "@/stores/dislikes";
 import { platformShort, platformColor } from "@/services/platform";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 
@@ -73,8 +74,11 @@ const emit = defineEmits<{ play: []; more: [Song]; pick: [Song, any] }>();
 const themeStore = useThemeStore();
 const layout = useQtLayout();
 const player = usePlayerStore();
+const dislikes = useDislikesStore();
 
 const liked = computed(() => player.isLiked(props.song));
+// 不喜欢列表：命中任何规则（歌或歌手）→ 歌名置灰提示（读 store 是既有先例，见 liked）
+const disliked = computed(() => dislikes.isDisliked(props.song));
 
 const badgeStyle = computed(
   (): string => "background-color:" + platformColor(props.song.platform) + ";"

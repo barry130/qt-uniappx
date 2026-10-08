@@ -4,7 +4,7 @@
     :class="layout.isWide ? 'row-wide' : ''"
     :style="'background-color:' + themeStore.skin.surface + ';'"
     @click="emit('play')"
-    @longpress="openSheet"
+    @longpress="onLongPress"
   >
     <view class="cover-wrap" :class="layout.isWide ? 'cover-wrap-wide' : ''">
       <image class="cover" :class="layout.isWide ? 'cover-wide' : ''" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
@@ -18,7 +18,7 @@
     <view class="info" :class="layout.isWide ? 'info-wide' : ''">
       <text
         class="name" :class="layout.isWide ? 'name-wide' : ''"
-        :style="'color:' + themeStore.skin.text + ';'"
+        :style="'color:' + (disliked ? themeStore.skin.textMuted : themeStore.skin.text) + ';'"
         :max-lines="1"
         >{{ song.name }}</text
       >
@@ -29,7 +29,7 @@
         >{{ song.singer }} - {{ song.album }}</text
       >
     </view>
-    <view class="actions" :class="layout.isWide ? 'actions-wide' : ''">
+    <view v-if="!selecting" class="actions" :class="layout.isWide ? 'actions-wide' : ''">
       <QtIcon
         class="act-heart"
         :name="liked ? 'heart-fill' : 'heart'"
@@ -58,6 +58,7 @@ import { ref, computed } from "vue";
 import type { Song } from "@/types/music";
 import { usePlayerStore } from "@/stores/player";
 import { useDownloadsStore } from "@/stores/downloads";
+import { useDislikesStore } from "@/stores/dislikes";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { platformShort, platformColor } from "@/services/platform";
@@ -71,15 +72,20 @@ const props = defineProps<{
   inHistory?: boolean;
   selected?: boolean;
   usePicker?: boolean;
+  /** 宿主处于多选态：屏蔽长按/三点菜单，避免与勾选操作冲突 */
+  selecting?: boolean;
 }>();
 const emit = defineEmits<{ play: []; more: []; pick: [Song, any] }>();
 
 const player = usePlayerStore();
 const downloads = useDownloadsStore();
+const dislikes = useDislikesStore();
 const themeStore = useThemeStore();
 const layout = useQtLayout();
 const liked = computed(() => player.isLiked(props.song));
 const downloaded = computed(() => downloads.has(props.song));
+// 不喜欢列表：命中任何规则（歌或歌手）→ 行置灰提示
+const disliked = computed(() => dislikes.isDisliked(props.song));
 const sheetVisible = ref(false);
 
 const badgeStyle = computed(() => {
@@ -88,6 +94,11 @@ const badgeStyle = computed(() => {
 });
 
 const sheetActions = computed<SheetAction[]>(() => {
+  // 歌曲按钮看 hasSongRule（不含歌手规则——歌手规则命中的歌，取歌按钮
+  // 必须独立可单独解除）；歌手按钮恒占一位（串空时置灰），保持 index 稳定
+  const songBanned = dislikes.hasSongRule(props.song);
+  const hasSinger = props.song.singer != null && props.song.singer.length > 0;
+  const singerBanned = hasSinger && dislikes.hasSingerRule(props.song);
   const actions: SheetAction[] = [
     { name: "下一首播放" },
     {
@@ -101,6 +112,15 @@ const sheetActions = computed<SheetAction[]>(() => {
     },
     { name: "分享" },
     { name: "查看歌手" },
+    {
+      name: songBanned ? "取消屏蔽这首歌" : "屏蔽这首歌",
+      color: songBanned ? themeStore.skin.accent : undefined,
+    },
+    {
+      name: singerBanned ? "取消屏蔽该歌手" : "屏蔽该歌手",
+      color: singerBanned ? themeStore.skin.accent : undefined,
+      disabled: !hasSinger,
+    },
   ];
   if (props.inHistory) actions.push({ name: "从最近播放移除" });
   return actions;
@@ -126,6 +146,11 @@ function toggleLike(): void {
 function openSheet(): void {
   sheetVisible.value = true;
 }
+/** 多选态下长按不弹菜单：宿主点行是勾选，弹菜单会打断批量操作 */
+function onLongPress(): void {
+  if (props.selecting) return;
+  openSheet();
+}
 function onSheetSelect(_action: SheetAction, index: number): void {
   if (index == 0) {
     player.playNext(props.song);
@@ -148,6 +173,26 @@ function onSheetSelect(_action: SheetAction, index: number): void {
         props.song.platform,
     });
   } else if (index == 6) {
+    const songBanned = dislikes.hasSongRule(props.song);
+    if (songBanned) {
+      dislikes.unbanSong(props.song);
+      uni.showToast({ title: "已取消屏蔽", icon: "none" });
+    } else if (dislikes.banSong(props.song)) {
+      uni.showToast({ title: "已屏蔽，不再自动播放", icon: "none" });
+    } else {
+      uni.showToast({ title: "这首歌无法按歌名屏蔽", icon: "none" });
+    }
+  } else if (index == 7) {
+    const singer = props.song.singer != null ? props.song.singer : "";
+    if (singer.length == 0) return;
+    if (dislikes.hasSingerRule(singer)) {
+      dislikes.unbanSinger(singer);
+      uni.showToast({ title: "已取消屏蔽该歌手", icon: "none" });
+    } else {
+      dislikes.banSinger(singer);
+      uni.showToast({ title: "已屏蔽该歌手", icon: "none" });
+    }
+  } else if (index == 8) {
     player.removeHistory(props.song);
     uni.showToast({ title: "已从最近播放移除", icon: "none" });
   }

@@ -57,9 +57,12 @@ const themeStore = useThemeStore();
 const sourceStore = useSourceStore();
 const layout = useQtLayout();
 
-// 音源清单来自数据包注册表：注册表异步加载完成后由 watch 同步选中项
+// 音源清单来自数据包注册表：注册表异步加载完成后由 watch 同步选中项。
+// 只列**声明了有排行榜**的源（sourceIdsWith）：没有榜单的源不渲染来源标签，
+// 否则点了只剩一个「暂无榜单数据」的空页（v4 包按 features 声明过滤；
+// 旧包未声明 features 时全部源照常显示，行为不变）。
 const sourceRegistry = useSourceRegistryStore();
-const sources = computed<Source[]>(() => sourceRegistry.sourceIds() as Source[]);
+const sources = computed<Source[]>(() => sourceRegistry.sourceIdsWith("charts") as Source[]);
 const sourceLabels = computed<string[]>(() => sources.value.map((s) => platformLabel(s)));
 const sourceIndex = ref(0);
 const loading = ref(false);
@@ -87,11 +90,21 @@ function backToTop(): void {
 const contentWidth = computed<number>(() => Math.min(layout.windowWidth, 1280));
 // 本页所有延迟/重试定时器句柄：页面卸载时统一清掉，避免在已注销的实例上触发原生回调
 let gridTimers: number[] = [];
+// 页面是否仍存活：onUnmounted 置 false。
+// 必须单独留这个标志，不能只靠 onUnmounted 里清句柄：框架路由（reLaunch/redirectTo/
+// navigateBack）先 closeWebview 销毁原生页、再 unmountPage 跑 onUnmounted，中间那段
+// 窗口里原生 UniPage 已反注册而本页脚本还在，此时任何 createSelectorQuery().exec()
+// 都会走到 $nativePage.waitNativeRender —— 桥调用带着已反注册的 instanceId，抛
+// "UTS instance N is not registered"（真机堆栈：Bridge.onJSTimerFired ←
+// Bridge$scheduleJSTimer$runnable$1.run ← Handler.handleCallback ← Looper.loop）。
+// 定时器回调进场先判它，比清句柄更保险（句柄可能在窗口期已经排进原生队列）。
+let gridAlive = true;
 // 宽屏下 windowWidth 可能与真实渲染宽度不符（见 use-qt-layout 注释），按它算卡宽会留出大片空白。
 // 且 scroll-view 子节点 width:100% 解析不出（会收缩成卡片总宽），所以：
 // 1) 测外层 scroll-view（定宽元素）拿真实可用宽度；2) 把该宽度显式写成网格的 px 宽度。
 const scrollWidth = ref(0);
 function measureGrid(attempt: number): void {
+  if (!gridAlive) return;
   uni.createSelectorQuery()
     .select("#chart-scroll")
     .boundingClientRect((rect: UniNodeInfo) => {
@@ -230,6 +243,7 @@ onShow(() => {
   }
 });
 onUnmounted(() => {
+  gridAlive = false;
   // 页面卸载时清掉全部延迟/重试定时器，避免在已注销的 UTS 实例上触发回调
   for (const t of gridTimers) {
     if (t != null) clearTimeout(t);

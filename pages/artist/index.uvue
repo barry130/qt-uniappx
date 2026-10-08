@@ -28,13 +28,12 @@
       :class="layout.isWide ? 'scroll-wide' : ''"
       direction="vertical"
       :lower-threshold="200"
-      @scrolltolower="loadMore"
       :scroll-top="scrollTop"
       @scroll="onListScroll"
     >
       <list-item class="head-item">
         <view class="list-head" :class="[themeStore.dark ? 'list-head-dark' : '', layout.isWide ? 'list-head-wide' : '']"
-          ><text class="list-title" :class="[themeStore.dark ? 'list-title-dark' : '', layout.isWide ? 'list-title-wide' : '']">热门歌曲 {{ songs.length }} 首</text
+          ><text class="list-title" :class="[themeStore.dark ? 'list-title-dark' : '', layout.isWide ? 'list-title-wide' : '']">热门歌曲 {{ songs.length }} 首{{ finished ? "" : "，加载中" }}</text
             ><view class="play-all" :class="layout.isWide ? 'play-all-wide' : ''" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="playAll"
             ><QtIcon name="play" :size="layout.isWide ? 16 : 28" :color="themeStore.skin.accent" /><text class="play-all-text" :class="layout.isWide ? 'play-all-text-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">播放全部</text></view
           ></view
@@ -58,12 +57,14 @@
       </list-item>
       <list-item v-if="!loading && songs.length == 0" class="empty-item" :class="layout.isWide ? 'empty-item-wide' : ''">
         <text class="empty-text" :class="[themeStore.dark ? 'empty-text-dark' : '', layout.isWide ? 'empty-text-wide' : '']">暂无该歌手的热门歌曲</text>
+        <text class="empty-retry" :class="layout.isWide ? 'empty-retry-wide' : ''" @click="retry">重新加载</text>
       </list-item>
-      <list-item v-if="loadingMore" class="foot-item" :class="layout.isWide ? 'foot-item-wide' : ''">
+      <list-item v-if="!finished && songs.length > 0" class="foot-item foot-item-progress" :class="layout.isWide ? 'foot-item-wide foot-item-progress-wide' : ''">
         <qt-loading :visible="true" :size="44" />
+        <text class="foot-text" :class="[themeStore.dark ? 'foot-text-dark' : '', layout.isWide ? 'foot-text-wide' : '']">正在取完其余…已加载 {{ songs.length }} 首</text>
       </list-item>
-      <list-item v-else-if="!hasMore && !emptyShow" class="foot-item" :class="layout.isWide ? 'foot-item-wide' : ''">
-        <text class="foot-text" :class="[themeStore.dark ? 'foot-text-dark' : '', layout.isWide ? 'foot-text-wide' : '']">已加载全部</text>
+      <list-item v-else-if="finished && songs.length > 0" class="foot-item" :class="layout.isWide ? 'foot-item-wide' : ''">
+        <text class="foot-text" :class="[themeStore.dark ? 'foot-text-dark' : '', layout.isWide ? 'foot-text-wide' : '']">已加载全部 {{ songs.length }} 首</text>
       </list-item>
     </list-view>
     <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
@@ -89,6 +90,9 @@ import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-act
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import { useSongSheet } from "@/composables/use-song-sheet";
 import { musicApi } from "@/services/music-api";
+import { startPagedAllJob, clearPagedAllJob } from "@/services/paged-all";
+import type { PagedAllJob, PagedAllPage, PagedAllState } from "@/services/paged-all";
+import { resolveArtistId } from "@/services/artist-id";
 import { packsFingerprint, SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
 import { usePlayerStore } from "@/stores/player";
 import { useSourceStore } from "@/stores/source";
@@ -116,76 +120,120 @@ function backToTop() {
 const { sheetVisible, sheetActions, openSheet, onSheetSelect, sheetTitle } =
   useSongSheet();
 const artist = ref("");
+/** 歌手真实 id（2026-10-06）：跳转带了就按 id 取作品，没有就退回名字搜索 */
+const artistId = ref("");
 const songs = ref<Song[]>([]);
 const avatarUrl = ref("");
 const loading = ref(false);
-const page = ref(1);
-const loadingMore = ref(false);
-const hasMore = ref(true);
+/** 全量是否收尾：收尾前底部一直显示进度（以前只看「还有下一页」，翻页失效时停不下来） */
+const finished = ref(false);
+/** 每页期望条数；实际下发值再按数据包声明的上限收敛（见 ensureLoad） */
+const ARTIST_PAGE_SIZE = 30;
+/**
+ * 缓存键（同时也是「要不要重拉」的判据）：音源 + 歌手名 + 每页条数 + 歌手 id。
+ * 命中缓存任务时一次请求都不发；即使中途离开页面，后台也继续跑完并留在缓存里。
+ */
+let cacheKey = "";
+/** 当前订阅的全量任务（退订只停止接收，任务继续跑完） */
+let job: PagedAllJob | null = null;
+let onJobState: ((state: PagedAllState) => void) | null = null;
 let loadedSource = "";
 /** 上次加载时的包态指纹：音源包安装/更新/卸载/启停后变化，整页重拉 */
 let loadedPackFp = "";
+/** 上次加载时的每页条数：注册表晚到导致上限变化时也要重拉（否则翻页粒度不一致） */
+let loadedPageSize = 0;
 
 const emptyShow = computed(() => songs.value.length == 0);
 
 onLoad((option: UTSJSONObject) => {
   const nameValue = option.get("name") as string | null;
   artist.value = nameValue != null ? nameValue : "";
+  const idValue = option.get("id") as string | null;
+  artistId.value = idValue != null ? idValue : "";
 });
 
-// 加载序号：快速切音源/翻页时旧响应晚到不得覆盖新数据（写回前比对）
-let loadSeq = 0;
+/**
+ * 取一页（供全量任务并发调用）。
+ *
+ * 没带真 id（从歌单/播放页点歌手名进来）时先补一次：包里拿不到 id 会退回
+ * 「把歌手名当关键词全局搜索」，越往后越跑偏（翻唱 / 合作 / 同名歌手）。
+ */
+async function fetchPage(page: number): Promise<PagedAllPage> {
+  const source = sourceStore.current as Source;
+  const id = artistId.value.length > 0 ? artistId.value : await resolveArtistId(source, artist.value);
+  const result = await musicApi.artistSongs(artist.value, source, page, loadedPageSize, id);
+  // 包给了权威 hasMore 就用它；旧包没有该字段（null）才退回「本页非空 = 还有」——
+  // 歌手作品是过滤型列表，逐页条数天然不齐，拿「不满一页」当到底会在中途收尾。
+  const hasMore = result.hasMore != null ? (result.hasMore as boolean) : result.songs.length > 0;
+  return { songs: result.songs, meta: page <= 1 ? result.picUrl : "", hasMore: hasMore };
+}
 
-async function load(targetPage: number): Promise<void> {
-  const seq = ++loadSeq;
-  loading.value = true;
-  try {
-    const result = await musicApi.artistSongs(
-      artist.value,
-      sourceStore.current as Source,
-      targetPage,
-      30
-    );
-    if (seq !== loadSeq) return;
-    if (targetPage == 1) {
-      avatarUrl.value = result.picUrl;
-      songs.value = result.songs;
-    } else {
-      for (let index = 0; index < result.songs.length; index++) {
-        const item = result.songs[index] as Song;
-        let exists = false;
-        for (let c = 0; c < songs.value.length; c++) {
-          const current = songs.value[c];
-          if (current.id == item.id && current.platform == item.platform) {
-            exists = true;
-            break;
-          }
-        }
-        if (!exists) songs.value.push(item);
-      }
-      // 页码只在写回成功后推进：加载失败/被取代时下次翻页重取同一页，不跳页
-      page.value = targetPage;
-    }
-    if (result.songs.length == 0) hasMore.value = false;
-  } catch (error) {
-    console.error("[QT Music Artist]", artist.value, error);
-    if (seq !== loadSeq) return;
-    uni.showToast({ title: "歌手歌曲加载失败", icon: "none" });
-  } finally {
-    if (seq === loadSeq) loading.value = false;
-  }
+/** 退订当前任务（页面销毁 / 换歌手），任务本身继续跑完 */
+function detach(): void {
+  if (job != null && onJobState != null) job.unsubscribe(onJobState as (state: PagedAllState) => void);
+  job = null;
+  onJobState = null;
 }
 
 function ensureLoad(): void {
   const fp = packsFingerprint();
-  if (loadedSource == sourceStore.current && loadedPackFp == fp) return;
+  // 注册表异步到达：首帧可能按兜底值取过一页，真实上限一到就整页重拉，
+  // 否则首页粒度与后续页不一致，「满页 = 还有下一页」的推断会失真。
+  const pageSize = musicApi.clampSearchPageSize(sourceStore.current as Source, ARTIST_PAGE_SIZE);
+  const key =
+    "artist:" + sourceStore.current + ":" + artist.value + ":" + pageSize + ":" + artistId.value + ":" + fp;
+  if (loadedSource == sourceStore.current && loadedPackFp == fp && loadedPageSize == pageSize && cacheKey == key) {
+    // 同一个歌手再进来：任务还在缓存里（甚至还在跑），但订阅在上次 onUnmounted 时退掉了，
+    // 必须重新挂上 —— 否则这次页面永远收不到状态，列表是空的。
+    if (job == null) startLoad();
+    return;
+  }
   loadedSource = sourceStore.current;
   loadedPackFp = fp;
+  loadedPageSize = pageSize;
+  cacheKey = key;
+  // 这里**不能** clearPagedAllJob(key)：key 里含歌手 / 音源 / 包指纹 / 每页条数，
+  // 任一变化就是另一个 key，旧任务自然没人再用；而 key 相同时清掉，等于把刚
+  // 缓存好的全量结果丢掉（第二次进页又要重拉）。真正需要清缓存的是 retry。
+  detach();
   songs.value = [];
-  avatarUrl.value = "";
-  page.value = 1;
-  hasMore.value = true;
-  load(1);
+  finished.value = false;
+  loading.value = true;
+  // 头像只跟第 1 页回来，而命中缓存时不会再取第 1 页：另存一份，第二次进页头像不能丢
+  avatarUrl.value = readAvatar(key);
+  startLoad();
+}
+
+async function startLoad(): Promise<void> {
+  // 每页条数依赖注册表：先等它就绪，否则按兜底值取会拿到 0 条，全量任务直接收尾
+  await musicApi.ensureRegistry();
+  const key = cacheKey;
+  const pageSize = musicApi.clampSearchPageSize(sourceStore.current as Source, ARTIST_PAGE_SIZE);
+  if (key != cacheKey) return;
+  // onMounted / onShow 会连着各调一次 ensureLoad，而这里 await 过注册表：
+  // 两次都可能在 await 之后才走到这里，谁先到谁订阅，后来的直接退出（否则订阅两份）。
+  if (job != null) return;
+  loadedPageSize = pageSize;
+  const current = startPagedAllJob(key, {
+    fetchPage: fetchPage,
+    keyOf: (song: Song) => song.id + ":" + song.platform,
+    pageSize: pageSize,
+    // 歌手歌曲最多几千首（100/页 → 几十页）：上限只是防上游一直给满页时打转
+    maxPages: 60,
+  });
+  job = current;
+  const listener = (state: PagedAllState): void => {
+    if (key != cacheKey) return;
+    songs.value = state.items;
+    loading.value = state.loading;
+    finished.value = state.finished;
+    if (state.meta.length > 0) {
+      avatarUrl.value = state.meta;
+      rememberAvatar(key, state.meta);
+    }
+  };
+  onJobState = listener;
+  current.subscribe(listener);
 }
 
 /** 音源包变更广播：App 层更新弹窗确认时收不到 onShow，事件实时重拉 */
@@ -193,18 +241,12 @@ function onPacksChanged(): void {
   ensureLoad();
 }
 
-function loadMore(): void {
-  if (loading.value || loadingMore.value || !hasMore.value) return;
-  loadingMore.value = true;
-  // 页码由 load 成功写回后推进，失败不跳页
-  load(page.value + 1).then(
-    () => {
-      loadingMore.value = false;
-    },
-    () => {
-      loadingMore.value = false;
-    }
-  );
+/** 重试：先丢掉缓存任务，否则会立刻拿回同一份结果 */
+function retry(): void {
+  clearPagedAllJob(cacheKey);
+  // 清空键让 ensureLoad 判定「换了歌手」，走完整重拉分支
+  cacheKey = "";
+  ensureLoad();
 }
 
 async function play(song: Song): Promise<void> {
@@ -234,7 +276,36 @@ onShow(() => {
 });
 onUnmounted(() => {
   uni.$off(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
+  // 只退订：任务留在缓存里继续跑完，下次进同一个歌手页直接拿到全量
+  detach();
 });
+
+/**
+ * 头像缓存（进程内）：头像只跟第 1 页回来，命中缓存后不会再取第 1 页。
+ * 平行数组 + indexOf（UTS 容器键序在两端实现有差异，与 services/source-switch.ts 同招）。
+ */
+const AVATAR_CACHE_CAP = 64;
+const avatarKeys: string[] = [];
+const avatarValues: string[] = [];
+
+function readAvatar(key: string): string {
+  const at = avatarKeys.indexOf(key);
+  return at >= 0 ? (avatarValues[at] as string) : "";
+}
+
+function rememberAvatar(key: string, url: string): void {
+  const at = avatarKeys.indexOf(key);
+  if (at >= 0) {
+    avatarKeys.splice(at, 1);
+    avatarValues.splice(at, 1);
+  }
+  avatarKeys.push(key);
+  avatarValues.push(url);
+  while (avatarKeys.length > AVATAR_CACHE_CAP) {
+    avatarKeys.splice(0, 1);
+    avatarValues.splice(0, 1);
+  }
+}
 </script>
 
 <style>
@@ -322,6 +393,12 @@ onUnmounted(() => {
   color: #6b7385;
   font-size: 27rpx;
 }
+.empty-retry {
+  margin-top: 24rpx;
+  padding: 12rpx 32rpx;
+  color: #2563eb;
+  font-size: 26rpx;
+}
 .row-item {
   height: 128rpx;
   justify-content: center;
@@ -330,6 +407,11 @@ onUnmounted(() => {
   height: 88rpx;
   justify-content: center;
   align-items: center;
+}
+/* 进度行：转圈 + 文案同行（文案不能省，用户要看「条数还在涨」） */
+.foot-item-progress {
+  height: 108rpx;
+  flex-direction: row;
 }
 .foot-text {
   color: #6b7385;
@@ -362,7 +444,9 @@ onUnmounted(() => {
 .row-item-wide { height: 82px; padding-left: 20px; padding-right: 20px; }
 .empty-item-wide { padding-top: 80px; padding-bottom: 80px; }
 .empty-text-wide { font-size: 16px; }
+.empty-retry-wide { margin-top: 14px; padding-top: 8px; padding-bottom: 8px; padding-left: 20px; padding-right: 20px; font-size: 14px; }
 .foot-item-wide { height: 52px; }
+.foot-item-progress-wide { height: 64px; flex-direction: row; }
 .foot-text-wide { font-size: 14px; }
 
 /* 宽屏左右布局：左栏歌手信息 + 右栏歌曲列表（竖屏保持上下） */

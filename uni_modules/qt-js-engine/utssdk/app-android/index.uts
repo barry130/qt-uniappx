@@ -66,6 +66,7 @@ import {
 	v8Stop,
 	v8EvalSync,
 	v8LoadBundle,
+	v8LoadPlayBundle,
 	v8Version,
 	v8LastError,
 	v8RenderGone,
@@ -84,6 +85,7 @@ import type {
 	QtJsEvaluate,
 	QtJsIsRunning,
 	QtJsLoadBundle,
+	QtJsLoadPlayBundle,
 	QtJsInvoke,
 	QtJsDropOp,
 	QtJsIsHealthy,
@@ -184,13 +186,15 @@ function hex4(c: number): string {
 }
 
 /**
- * 生成纯 ASCII 的双引号字面量，同时可用作 JS 字符串字面量和 JSON 字符串。
- * 非 ASCII 一律转成 \uXXXX —— 见 prelude.uts 文件头：跨 JNI 边界的字符串保持纯 ASCII，
- * 既避开 NewStringUTF（modified UTF-8）的编码坑，也顺手解决了引号/换行注入问题。
+ * 生成纯 ASCII 的**双引号**字面量，可同时当 JS 字符串字面量和 JSON 字符串用。
+ * 非 ASCII 一律转成 \uXXXX —— 见 prelude.uts 文件头：跨 JNI 边界的字符串保持纯 ASCII。
+ *
+ * 现在只服务「拼 JSON 文本」这类**短串**（collectHeaders 的响应头、listDir 的文件名）：
+ * 这些文本要交给 JS 侧 JSON.parse，必须是双引号 + 全 ASCII。
+ * 求值代码里的长串一律走 quoteJs（单引号、BMP 不转义），原因见那里的注释。
  */
 function quoteAscii(s: string): string {
 	// 逐字符转义必须走 StringBuilder：String += 在 Kotlin 里每次都整串复制，是 O(n²)。
-	// 数据接口的响应体动辄几百 KB，此前这里烧掉几十秒（真机所有接口都慢的元凶）。
 	const sb = new StringBuilder()
 	sb.append('"')
 	for (let i = 0; i < s.length; i++) {
@@ -208,6 +212,66 @@ function quoteAscii(s: string): string {
 	}
 	sb.append('"')
 	return sb.toString()
+}
+
+/**
+ * quoteJs 需要转义的字符集（一个字符类，一次扫描）：
+ * C0 控制符（含 NUL/LF/CR/TAB）、单引号、反斜杠、代理项区（只兜住落单代理项，
+ * 合法代理项对会被正则折叠成补充码点而绕过）、U+2028/U+2029（JS 行终止符）。
+ */
+const QT_JS_ESC_PATTERN = "[\\x00-\\x1f'\\\\\\ud800-\\udfff\\u2028\\u2029]"
+
+let gJsEscRe: RegExp | null = null
+
+/**
+ * 生成可嵌入求值代码的**单引号** JS 字符串字面量（求值路径唯一的转义入口）。
+ *
+ * 为什么不再把非 ASCII 全转 \uXXXX：`quoteAscii` 那条「跨边界保持纯 ASCII」的约束是为
+ * JNI 的 NewStringUTF（modified UTF-8）准备的，而这段代码的终点是
+ * `WebView.evaluateJavascript(String, ValueCallback)` —— Java 到 Java 的调用，
+ * 进 native 走 GetStringChars（UTF-16）；且 **BMP 内的非 ASCII 在 modified UTF-8 与
+ * 标准 UTF-8 下字节完全相同**，本来就安全。真正会分叉的只有 NUL 与落单代理项，
+ * 它们连同 JS 语法字符一起被上面的字符类兜住（合法代理项对即 emoji 被正则折叠后原样通过，
+ * 见下面回调里的说明）。
+ *
+ * 性能（这是全链路最热的一段，HTTP 响应体动辄几百 KB）：
+ * - UTS 把 `number` 映射成**装箱的 `kotlin.Number`**，逐字符循环里 `i++` / `charCodeAt` /
+ *   `charAt` 每次都要装箱 + 跨运行时调用，实测 ~3.3µs/字符，405KB 光转义就要 1.2s；
+ *   而所有 op 共用同一条引擎线程，它会把排在后面的小响应一起压住。
+ * - UTS 的 `String.replace(RegExp, Function3)` 落到
+ *   `kotlin.text.Regex.replace(CharSequence, Function1)`，每命中一次跨 UTS 调一次闭包，
+ *   实测 150-370µs/次且随串长增长。曾把非 ASCII 也交给它转义，405KB 有 5.5 万次回调，
+ *   真机 20459ms（比逐字符还慢 16.5×）。**纯 Java lambda 的 JVM 基准不能外推到这条路。**
+ * - 所以先用 `search()` 让 **Kotlin** 扫一遍（走 Regex.find，不碰 UTS 回调）：
+ *   干净串直接拼字面量返回，0 次逐字符 UTS 调用、0 次回调；只有少数脏串才走回调替换。
+ *   按上面的字符类，JSON 响应里要转义的通常只有个位数
+ *   （真机实测命中数：404964 字符的 newsongs **0** 个、74972 的 toplist 36 个、90096 的 playlist 80 个）。
+ *
+ * 用单引号而不是双引号：响应体本身是 JSON，双引号数以万计（100 首歌约 1 万个），
+ * 用双引号会直接把上面「命中数必须小」的前提毁掉。
+ */
+function quoteJs(s: string): string {
+	if (gJsEscRe == null) gJsEscRe = new RegExp(QT_JS_ESC_PATTERN, 'g')
+	// 一次纯 Kotlin 扫描：干净串（绝大多数短串）不做任何逐字符 UTS 循环
+	if (s.search(gJsEscRe!) < 0) return "'" + s + "'"
+	return (
+		"'" +
+		s.replace(gJsEscRe!, (match: string, _offset: number, _whole: string): string => {
+			// 合法代理项对（emoji 等补充平面）**不会命中**上面的字符类：Java/Kotlin 的正则
+			// 会先把它折成一个补充码点，而字符类里只有 BMP 的 D800-DFFF。于是 emoji 原样
+			// 通过 —— 这是安全的：求值走 evaluateJavascript（UTF-16，Java 到 Java），
+			// 补充平面本来就不经 modified UTF-8。真正会破坏 JS 字面量的只有**落单**代理项，
+			// 它们仍会被下面的分支转成 \uXXXX。match.length==2 是对不折叠的引擎做防御。
+			if (match.length == 2) {
+				return '\\u' + hex4(match.charCodeAt(0)!) + '\\u' + hex4(match.charCodeAt(1)!)
+			}
+			const c = match.charCodeAt(0)!
+			if (c == 39) return "\\'"
+			if (c == 92) return '\\\\'
+			return '\\u' + hex4(c)
+		}) +
+		"'"
+	)
 }
 
 /** 取 JSON 对象的字符串字段（null → 空串） */
@@ -344,7 +408,7 @@ function engineEvalReady(): boolean {
 // 另外 evaluateJavascript 不回传异常，所以求值一律包 __qtEnv 信封（见文件头 ②）。
 
 function exprCall(name: string, argsJson: string): string {
-	return v8ExprCall(quoteAscii(name), quoteAscii(argsJson))
+	return v8ExprCall(quoteJs(name), quoteJs(argsJson))
 }
 
 function exprPump(): string {
@@ -352,15 +416,15 @@ function exprPump(): string {
 }
 
 function exprResolveHttp(id: string, status: number, headersJson: string, body: string, error: string): string {
-	return v8ExprResolveHttp(quoteAscii(id), status, quoteAscii(headersJson), quoteAscii(body), quoteAscii(error))
+	return v8ExprResolveHttp(quoteJs(id), status, quoteJs(headersJson), quoteJs(body), quoteJs(error))
 }
 
 function exprFireTimer(id: string): string {
-	return v8ExprFireTimer(quoteAscii(id))
+	return v8ExprFireTimer(quoteJs(id))
 }
 
 function exprDropOp(id: string): string {
-	return v8ExprDropOp(quoteAscii(id))
+	return v8ExprDropOp(quoteJs(id))
 }
 
 function engineHandler(): Handler | null {
@@ -485,6 +549,34 @@ class LoadBundleTask implements Runnable {
 	}
 }
 
+/**
+ * 装载播放包。与 LoadBundleTask 同形，差别只在落点：
+ * 走 v8LoadPlayBundle（独立文件 + 独立状态 + 认 __qtPlayPackFactory），
+ * 不碰 __qtEntries，因此不会把已装的 meta 冲掉。
+ */
+class LoadPlayBundleTask implements Runnable {
+	private code: string
+	private callback: QtJsVoidCallback
+
+	constructor(code: string, callback: QtJsVoidCallback) {
+		this.code = code
+		this.callback = callback
+	}
+
+	override run(): void {
+		if (!gStarted) {
+			deliverVoid(this.callback, false, '引擎未启动')
+			return
+		}
+		if (gPoisoned) {
+			deliverVoid(this.callback, false, '引擎已停用，需重启音源引擎')
+			return
+		}
+		const v8err = v8LoadPlayBundle(this.code)
+		deliverVoid(this.callback, v8err.length == 0, v8err)
+	}
+}
+
 // ==================== invoke：原生拉取队列 ====================
 
 class InvokeTask implements Runnable {
@@ -590,6 +682,13 @@ function dispatchLines(text: string): void {
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i]
 		if (line.length == 0) continue
+		// 只 parse 对象行：JSON.parse 非法输入不抛异常，而是把异常存进
+		// ObjectKt.getGlobalError()（详见 webview.uts unwrapEval 注释），
+		// 后续任一 consoleDebugError 调用都会把它当 error 吐出来。
+		if (line.charCodeAt(0)! != 123) {
+			console.error('[qt-js-engine] pump 行不是对象:', line)
+			continue
+		}
 		try {
 			const o = JSON.parse(line) as UTSJSONObject
 			const k = fieldStr(o, 'k')
@@ -1007,6 +1106,19 @@ export const loadBundle: QtJsLoadBundle = function (code: string, callback: QtJs
 		return
 	}
 	h.post(new LoadBundleTask(code, callback))
+}
+
+/**
+ * 装载播放包脚本。与 loadBundle 分槽（独立文件/状态/校验对象），
+ * 走「落盘 + 动态 import」快通道：1.4MB 源码不再经 evaluateJavascript 传输。
+ */
+export const loadPlayBundle: QtJsLoadPlayBundle = function (code: string, callback: QtJsVoidCallback) {
+	const h = engineHandler()
+	if (h == null) {
+		deliverVoid(callback, false, '引擎未启动')
+		return
+	}
+	h.post(new LoadPlayBundleTask(code, callback))
 }
 
 /** 调用 bundle 入口（回调式，内部走 pump 协议） */

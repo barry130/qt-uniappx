@@ -273,8 +273,14 @@ function pickPlat(idx: number): void {
   platOpen.value = false;
 }
 
-/** 按当前平台选择解析输入；识别不出时不再弹窗，直接提示（可手动选平台后重试） */
-function parseInput(): { platform: Source; id: string } | null {
+/**
+ * 按当前平台选择解析输入；识别不出时不再弹窗，直接提示（可手动选平台后重试）。
+ *
+ * 2026-10-06：歌单链接解析已下沉到音源包（qt-sources 的 `parseSheet` 入口），
+ * 权威实现在包里、两端共用，所以这里必须 `await` —— 同步调用只会拿到 Promise。
+ * 拿不到包答案（老包/引擎未就绪/超时）时，music-api 内部回退本地旧版解析。
+ */
+async function parseInput(): Promise<{ platform: Source; id: string } | null> {
   const text = rawInput.value.trim();
   if (text.length == 0) {
     uni.showToast({ title: "请先粘贴歌单链接", icon: "none" });
@@ -283,8 +289,8 @@ function parseInput(): { platform: Source; id: string } | null {
   const sel = platValues.value[platIndex.value] ?? "";
   const parsed =
     sel.length > 0
-      ? musicApi.parsePlaylistInput(text, sel as Source)
-      : musicApi.parsePlaylistInput(text);
+      ? await musicApi.parseSheetInput(text, sel as Source)
+      : await musicApi.parseSheetInput(text);
   if (parsed == null) {
     uni.showToast({ title: "无法识别歌单ID，可试试在平台里手动选择", icon: "none", duration: 3000 });
     return null;
@@ -295,7 +301,7 @@ function parseInput(): { platform: Source; id: string } | null {
 /** 解析链接 → 拉取歌单详情；导入歌曲做全量预览，收藏歌单做确认页 */
 async function onParse(): Promise<void> {
   if (parsing.value || importing.value) return;
-  const parsed = parseInput();
+  const parsed = await parseInput();
   if (parsed == null) return;
   const sel = platValues.value[platIndex.value] ?? "";
   platNote.value =

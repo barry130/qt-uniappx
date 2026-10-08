@@ -70,10 +70,34 @@ export type PendingLikeOp = {
   /** song 用 Song、playlist 用 Playlist（序列化为 JSON 字符串暂存） */
   dataJson: string;
 };
+/**
+ * 逐字歌词里的一个词（音源包 `wordByWord` 解析产物，卡拉 OK 染色用）。
+ *
+ * 时间单位一律**毫秒**，且与 qt-pc 的 LyricWord（F:\qtMusic\qt-pc\src\lib\lrc.ts:4）同义：
+ * `startMs` 是**相对行首**的起点，不是曲目的绝对时间 —— 染色时要用
+ * 「当前行已过去的时间」跟它比，不要拿 player.progress（秒）直接比。
+ * 命名带 Ms 后缀就是为了跟 LyricLine.time（**秒**）区分开，别混用。
+ *
+ * 音源包给的词时间轴本身有「行内绝对」与「相对行首」两种口径，解析出口
+ * （lrc.uts 的 normalizeWordTimeline）已统一折算成本契约的相对行首，上层不判源。
+ */
+export type LyricWord = {
+  /** 相对行首的起点，毫秒 */
+  startMs: number;
+  /** 时长，毫秒 */
+  durationMs: number;
+  /** 词文本（可能含尾部空格，音源包按原样保留） */
+  text: string;
+};
 export type LyricLine = {
+  /** 行起点，**秒**（parseLrc 里 min*60+sec+frac 的产物） */
   time: number;
   text: string;
   translation?: string;
+  /** 罗马音（按时间戳就近合并进来的第二行副文本，中文歌恒为空串） */
+  romanization?: string;
+  /** 逐字（有则当前行按词从左到右染色的卡拉 OK 效果；没有走整行高亮） */
+  words?: LyricWord[];
 };
 export type Artist = {
   id: string;

@@ -55,6 +55,45 @@ export type EnsurePublicDirPermission = () => boolean;
 export type OpenNotificationSettings = () => boolean;
 
 /**
+ * 是否已加入系统「电池优化」白名单（即被系统判定为「不优化」，允许后台自由运行）。
+ *
+ * Android：API 23+ 查 PowerManager.isIgnoringBatteryOptimizations；API 22- 没有电池优化
+ * 机制，视为已放行；系统服务取不到时**保守返回 true**（宁可少提示，也不要误报未授权）。
+ * iOS / H5：无此概念，恒返回 true（调用方据此不展示引导）。
+ * @returns 是否已放行后台运行
+ */
+export type IsIgnoringBatteryOptimizations = () => boolean;
+
+/**
+ * 打开系统「电池优化」设置页，让用户手动把本应用改成「不优化」。
+ *
+ * Android：API 23+ 走 Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS（列表页，
+ * 无需任何权限；不用 ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 的直达弹窗，
+ * 那个 action 需要在清单里声明 REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 权限，
+ * 且被 Google Play 政策限制，本插件不带清单文件）；失败降级到应用详情页。
+ * iOS / H5：不支持，返回 false。
+ * @returns 是否成功拉起设置页
+ */
+export type OpenBatteryOptimizationSettings = () => boolean;
+
+/**
+ * 打开厂商「自启动 / 后台运行管理」设置页。
+ *
+ * 自启动开关是国产 ROM 的私有能力，没有 AOSP 通用入口：这里按 Build.MANUFACTURER/BRAND
+ * 逐个尝试小米/华为(荣耀)/OPPO(vivo 系)/vivo/魅族/三星/华硕/乐视/诺基亚的私有 Activity，
+ * 全部失败时降级到应用详情页（至少能进「权限」）。iOS / H5：返回 false。
+ * @returns 是否成功拉起某个设置页
+ */
+export type OpenAutoStartSettings = () => boolean;
+
+/**
+ * 打开本应用的系统详情设置页（所有 ROM 都有的通用兜底入口，用户可从这里进权限/电池）。
+ * iOS / H5：返回 false。
+ * @returns 是否成功拉起设置页
+ */
+export type OpenAppDetailsSettings = () => boolean;
+
+/**
  * 本地扫描到的单曲（Android MediaStore 音频库）。
  * uri 为 content:// 媒体地址，可直接交给播放器（ExoPlayer/InnerAudio 均原生支持）。
  */
@@ -143,3 +182,34 @@ export type PickFileResult = {
  * 回调。iOS 恒回调 ok=false（本项目以 Android 为主）。
  */
 export type PickJsFile = (onResult: (result: PickFileResult) => void) => void;
+
+/**
+ * 单条权限的当前授权状态（设置页「权限管理」用）。
+ *
+ * Android 的权限分三类，查询方式完全不同（见 app-android/index.uts 的
+ * queryPermissionStates）：普通权限安装即授予、运行时权限走
+ * checkSystemPermissionGranted、特殊权限（所有文件访问 / 悬浮窗 / 安装未知
+ * 应用）系统不按运行时权限处理，只能走各自 API。iOS 恒 unknown=true。
+ */
+export type PermissionState = {
+	/** 权限标识，与 manifest.json 里声明的串一致（android.permission.XXX） */
+	id: string;
+	/** 当前系统版本上该权限是否适用（如 WRITE_EXTERNAL_STORAGE 在 Android 9+ 已不再申请） */
+	applicable: boolean;
+	/** 是否已授权；applicable 为 false 时无意义 */
+	granted: boolean;
+	/** 查询异常 / 平台不支持时为 true，页面应显示「无法确定」而不是「未授权」 */
+	unknown: boolean;
+};
+
+/**
+ * 查询一批权限的当前授权状态。id 必须与 manifest 声明一致；未识别的 id
+ * 返回 unknown=true 而不是抛错（页面不该因为多列一条权限就整页崩）。
+ */
+export type QueryPermissionStates = (ids: string[]) => PermissionState[];
+
+/**
+ * 跳到某条权限对应的系统设置页（能直达就直达，ROM 不认则退回应用详情页）。
+ * @returns 已成功发起跳转返回 true；平台不支持或 Activity 不可用返回 false
+ */
+export type OpenPermissionSettings = (id: string) => boolean;

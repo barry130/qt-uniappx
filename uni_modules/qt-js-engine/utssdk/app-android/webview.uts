@@ -22,6 +22,10 @@
  *    以 `https://qt.local/qt-bundle.js` 提供给页面，页面用**动态 import()** 加载。
  *    这同时拿到了「compile-only 闸门」：语法错时 import 的 reject 里 e.name === 'SyntaxError'，
  *    且此时**零副作用**（顶层未执行）。
+ *    播放包（1.4MB）走**完全相同的通道**，只是另开一个受拦路径与落地文件
+ *    （`/qt-play-bundle.js` / qt-v8-play-bundle.js，见 V8_PLAY_PATH 的注释）：
+ *    原先它经 meta 的 installPlayPack(code) 过 evaluateJavascript，真机冷启动
+ *    实测 4.9s，是首页加载慢的根因。
  *    ⚠️ import 的说明符必须是**绝对 URL**：本文件里 prelude/bootstrap 都是用
  *    evaluateJavascript 注入的，**注入脚本的 base URL 是 about:blank**，根相对写法
  *    `import('/qt-bundle.js')` 会直接报「Failed to resolve module specifier ...
@@ -69,6 +73,17 @@ const V8_BASE_URL = 'https://qt.local/'
 /** 被拦截的 bundle 路径（shouldInterceptRequest 按它匹配） */
 const V8_BUNDLE_PATH = '/qt-bundle.js'
 /**
+ * 播放包（play-bundle.js）的受拦路径。与 meta 分槽，互不覆盖。
+ *
+ * 为什么播放包也要走「落盘 + 动态 import」（2026-10-07 首页加载慢的根因）：
+ * 原先播放包走 meta 的 installPlayPack(code)，1.4MB 源码要经 quoteAscii 逐字节
+ * 转义成字符串字面量、再塞进一次 evaluateJavascript，真机冷启动实测约 4.9s
+ * （引擎就绪 → meta 装载 72ms → 播放包注入又花 4.93s），把首页首批请求整体
+ * 推迟到冷启动 5s 之后。meta 包走本通道只要约 70ms，共用一套机制后播放包
+ * 注入回到百毫秒级。
+ */
+const V8_PLAY_PATH = '/qt-play-bundle.js'
+/**
  * bundle 的**绝对** URL —— bootstrap 里的 import 必须用它，**不能写根相对的 '/qt-bundle.js'**。
  *
  * 真机踩坑（2026092301 首轮真机验证，2026-09-23）：bootstrap 是用 evaluateJavascript 注入的，
@@ -80,6 +95,16 @@ const V8_BUNDLE_PATH = '/qt-bundle.js'
  * 避免两处路径写歪。
  */
 const V8_BUNDLE_URL = 'https://qt.local' + V8_BUNDLE_PATH
+/**
+ * 播放包的绝对 URL（同上：注入脚本 base URL 是 about:blank，必须绝对）。
+ *
+ * import 时会在后面接 `?v=<包版本标签>` 做模块缓存击穿：meta 一个引擎生命周期
+ * 只装一次，而播放包会随「切换生效包 / 更新」在同一引擎里重复装载，而模块图
+ * **按完整 URL 缓存**——不带查询串会直接命中旧模块（import 成功但不重新执行），
+ * 于是拿到上一个包挂出的工厂。shouldInterceptRequest 只按 `url.getPath()` 匹配，
+ * 查询串不参与拦截判定，所以这里可以自由带版本。
+ */
+const V8_PLAY_URL = 'https://qt.local' + V8_PLAY_PATH
 /** 空白页（prelude/bootstrap 都通过 evaluateJavascript 注入，避免 HTML 转义问题） */
 const V8_HTML =
 	'<!doctype html><html><head><meta charset="utf-8">' +
@@ -210,6 +235,43 @@ const QT_V8_BOOTSTRAP = `
     return globalThis.__qtEnv(function () { return String(globalThis.__qtLoadStatus); });
   };
 
+  // ---------- 播放包模块装载 ----------
+  // 与 meta 共用「落盘 + shouldInterceptRequest + 动态 import」通道，但状态与
+  // 校验对象都分开：meta 数的是 __qtEntries 入口数，播放包认的是 __qtPlayPackFactory。
+  // 两者互不覆盖，所以不能用同一份 __qtLoadStatus（meta 重装会把播放包的状态冲掉）。
+  globalThis.__qtPlayLoadStatus = 'pending';
+
+  globalThis.__qtImportPlay = function (url) {
+    globalThis.__qtPlayLoadStatus = 'pending';
+    // 覆盖式归零：不清掉的话，「旧包的工厂还挂在全局 + 本次 import 只命中模块缓存
+    // 而没有重新执行」会被下面的 typeof 判成装载成功，等于把旧包当新包用。
+    globalThis.__qtPlayPackFactory = undefined;
+    globalThis.__qtPlayFactoryStash = undefined;
+    import(url).then(function () {
+      var f = globalThis.__qtPlayPackFactory;
+      if (typeof f == 'function') {
+        // 另存一份给宿主交接用：meta 的 installPlayPack 在求值传入的 code **之前**
+        // 会先把 __qtPlayPackFactory 置空，之后才读回工厂（见 meta-entries.ts
+        // evalPlayPackFactory）。所以宿主不能直接传「读 __qtPlayPackFactory」的桩，
+        // 那读到的是 undefined；要传「读这份暂存」的桩，把工厂交回 meta 完成装配。
+        globalThis.__qtPlayFactoryStash = f;
+        globalThis.__qtPlayLoadStatus = 'ok';
+      } else {
+        globalThis.__qtPlayLoadStatus = 'err:该文件不是有效的播放音源包（未挂出 __qtPlayPackFactory）';
+      }
+    }, function (err) {
+      var name = (err && err.name) ? String(err.name) : '';
+      var msg = (err && err.message) ? String(err.message) : String(err);
+      // SyntaxError 表示 parse 期就被拦下、顶层一行都没执行
+      globalThis.__qtPlayLoadStatus = 'err:' + (name == 'SyntaxError' ? '语法错误：' : '') + msg;
+    });
+    return 'pending';
+  };
+
+  globalThis.__qtEnvPlayLoadStatus = function () {
+    return globalThis.__qtEnv(function () { return String(globalThis.__qtPlayLoadStatus); });
+  };
+
   // 诊断用：页面真实的 origin / baseURI。装载失败时带进错误信息，一眼分辨
   // 「文档 base URL 没生效」还是「模块抓取被 CORS 拦下」。
   globalThis.__qtEnvDocBase = function () {
@@ -237,6 +299,10 @@ let gLastEvalError = ''
 let gPendingSlot: V8EvalSlot | null = null
 /** bundle 源码落盘路径（由 shouldInterceptRequest 提供给页面） */
 let gBundlePath = ''
+/** 播放包源码落盘路径（与 meta 分文件，互不覆盖） */
+let gPlayPath = ''
+/** 播放包 import 序号：只用于拼出**每次都不同**的模块 URL（见 v8LoadPlayBundle） */
+let gPlaySeq = 0
 
 // ==================== 小工具 ====================
 
@@ -291,22 +357,58 @@ function writeText(path: string, text: string): void {
 }
 
 /**
+ * 播放包源码的落地文件路径。
+ * 与 meta 的 qt-v8-bundle.js **分文件**：两者会被独立重装（meta 装完后
+ * 播放包才注入，换包时也只动其中一个），共用一个槽会互相冲掉对方的内容——
+ * 而 shouldInterceptRequest 是按路径读盘的，读到的就是被冲掉的那份。
+ */
+function playFilePath(): string {
+	if (gPlayPath.length > 0) return gPlayPath
+	const ctx = UTSAndroid.getAppContext()
+	if (ctx == null) return ''
+	const dir = ctx.filesDir
+	if (dir == null) return ''
+	gPlayPath = dir.getAbsolutePath() + '/qt-v8-play-bundle.js'
+	return gPlayPath
+}
+
+/**
  * 解 evaluateJavascript 的返回值。
  *
- * 两层 JSON：JS 里返回的是字符串 `{"ok":1,"v":"..."}`，WebView 回调把它再 JSON 编码一次
- * （字符串带引号、内部引号被转义），所以要 parse 两次。undefined/null 都回调字符串 "null"。
+ * 两种入参形态：
+ * ① 信封（本文件 __qtEnv 系）：JS 返回字符串 `{"ok":1,"v":"..."}`，WebView 回调把它再
+ *    JSON 编码一次（两端带引号、内部引号被转义），要先解一层再解信封；
+ * ② 裸字符串（index.uts 的 evaluate 系与 pack-signature 的分块 ack）：求值结果本身不是
+ *    信封，回调只多包一层引号，解一层后就是个普通字符串。
+ * undefined/null 都回调 `null`（无引号）。
+ *
+ * ⚠️ 绝不对「非对象」的中间结果再调一次 JSON.parse（2026-10-09）：
+ * io.dcloud.uts.JSON.parse 自己吞异常，把 Gson 的 JsonSyntaxException 存进
+ * ObjectKt.getGlobalError()（按 Thread.currentThread().getName() 作键），而 HBuilderX 的
+ * rewriteDebugError 插件会把每个 JSON.parse 包成 UTSAndroid.consoleDebugError(parse(...))，
+ * 该方法在**首参为 null** 时把槽里的异常 console.errorV1 出来——于是失败的那次 parse 会在
+ * 任意后续调用点炸出 `MalformedJsonException: ... at line 1 column 4` 的 error 堆栈
+ * （实机表现为 unwrapEval(index.kt:197)）。裸字符串（`qt:ready`/`qt:0`/`qt:ok`/`pending`/
+ * `ok`）正是这种情况，官pack 验签每块 ack 都会刷一条。所以先判首字符再决定要不要 parse。
  */
 function unwrapEval(raw: string | null): string {
 	if (raw == null) return ''
 	const outer = `${raw}`
 	if (outer.length == 0 || outer == 'null') return ''
-	let inner = ''
-	try {
-		inner = `${JSON.parse(outer)}`
-	} catch (e) {
-		// 不是 JSON（理论上不会发生）：按裸字符串处理，避免把结果吞掉
-		return outer
+	let inner = outer
+	// 形态①：被 JSON 编码过的字符串（两端都是 "）才需要先解一层
+	const n = outer.length
+	if (n >= 2 && outer.charCodeAt(0)! == 34 && outer.charCodeAt(n - 1)! == 34) {
+		try {
+			inner = `${JSON.parse(outer)}`
+		} catch (e) {
+			// 不是 JSON（理论上不会发生）：按裸字符串处理，避免把结果吞掉
+			return outer
+		}
 	}
+	if (inner.length == 0) return ''
+	// 形态②：非对象（裸字符串/数字）——原样返回，不做第二次 parse（见函数头注释）
+	if (inner.charCodeAt(0)! != 123) return inner
 	try {
 		const o = JSON.parse(inner) as UTSJSONObject
 		const okFlag = o.get('ok')
@@ -434,8 +536,17 @@ class V8Client extends WebViewClient {
 			const url = request.getUrl()
 			if (url == null) return blockedResponse()
 			const p = url.getPath()
-			if (p == null || p != V8_BUNDLE_PATH) return blockedResponse()
-			const path = bundleFilePath()
+			if (p == null) return blockedResponse()
+			// 只放行两个本地 bundle 槽（meta / 播放包）；两者必须是不同的路径，
+			// 否则播放包 import 会拿到 meta 的字节
+			let path = ''
+			if (p == V8_BUNDLE_PATH) {
+				path = bundleFilePath()
+			} else if (p == V8_PLAY_PATH) {
+				path = playFilePath()
+			} else {
+				return blockedResponse()
+			}
 			if (path.length == 0) return blockedResponse()
 			const f = new File(path)
 			if (!f.exists()) return blockedResponse()
@@ -771,6 +882,57 @@ export function v8LoadBundle(code: string): string {
 		v8Sleep(V8_POLL_INTERVAL_MS)
 	}
 	return `bundle 模块装载超时（${V8_LOAD_TIMEOUT_MS}ms）`
+}
+
+/**
+ * 装载播放包：落盘 → 触发动态 import → 轮询装载状态。返回空串表示成功。
+ * **引擎线程调用。**
+ *
+ * 与 v8LoadBundle（meta）同一套机制，但三处必须分开：
+ *   · 落地文件分开（playFilePath）——否则 meta/play 互相冲掉内容；
+ *   · 状态分开（__qtPlayLoadStatus）——否则 meta 重装会把播放包状态冲成 pending；
+ *   · 校验对象分开——meta 数 __qtEntries 键数，播放包认 __qtPlayPackFactory。
+ *
+ * 模块 URL 带自增序号：模块图按完整 URL 缓存，而播放包会在同一引擎生命周期里
+ * 被反复装载（切换生效包、更新覆盖）。URL 不变时第二次 import 直接命中缓存、
+ * **不重新执行**，工厂仍是旧包的——必须每次换 URL 才是真的重新装载。
+ */
+export function v8LoadPlayBundle(code: string): string {
+	if (gWebView == null) return '引擎未启动'
+	if (gRenderGone) return 'WebView 渲染进程已崩溃，需重启音源引擎'
+	const path = playFilePath()
+	if (path.length == 0) return '取不到应用私有目录'
+	try {
+		writeText(path, code)
+	} catch (e) {
+		return '播放包落盘失败：' + v8ErrText(e)
+	}
+	gPlaySeq += 1
+	const url = `${V8_PLAY_URL}?v=${gPlaySeq}`
+	// url 只由本文件常量 + 自增整数拼成（https://qt.local/qt-play-bundle.js?v=N），
+	// 字符集里不可能出现引号或反斜杠，直接内嵌双引号字面量即安全；
+	// 不引 UTS 的 JSON.stringify（io.dcloud.uts.JSON 是包装实现，行为不必依赖）。
+	v8EvalSync('__qtImportPlay("' + url + '")')
+	const deadline = Date.now() + V8_LOAD_TIMEOUT_MS
+	while (Date.now() < deadline) {
+		const st = v8EvalSync('__qtEnvPlayLoadStatus()')
+		if (st.length == 0) {
+			const why = gLastEvalError.length > 0 ? gLastEvalError : '装载状态读取失败'
+			if (gRenderGone) return 'WebView 渲染进程已崩溃，需重启音源引擎'
+			if (why.indexOf('超时') >= 0) return '播放包装载阻塞（' + why + '）'
+			return why
+		}
+		if (st == 'ok') {
+			return ''
+		}
+		if (st.indexOf('err:') == 0) {
+			const base = v8EvalSync('__qtEnvDocBase()')
+			const suffix = base.length > 0 ? `（页面 ${base}）` : ''
+			return st.substring(4) + suffix
+		}
+		v8Sleep(V8_POLL_INTERVAL_MS)
+	}
+	return `播放包模块装载超时（${V8_LOAD_TIMEOUT_MS}ms）`
 }
 
 /** __qtEntries 的入口个数（数字，供 v8LoadBundle 校验） */

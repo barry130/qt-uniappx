@@ -1,0 +1,444 @@
+<template>
+  <qt-page-frame :max-width="640">
+  <view class="page">
+    <scroll-view class="list" :class="layout.isWide ? 'list-wide' : ''" direction="vertical" :show-scrollbar="false">
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="info" :size="36" :color="theme.skin.accent" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">共 {{ permCount }} 项权限，已授权 {{ grantedCount() }} 项</text>
+          <view class="cell-right">
+            <text class="cell-chip" :class="layout.isWide ? 'cell-chip-wide' : ''" :style="chipStyle(pendingColor(), pendingBg())">{{ pendingText() }}</text>
+            <!-- 汇总行不给箭头，但同样占位，保证所有行右边缘一条线 -->
+            <view class="cell-arrow" :class="layout.isWide ? 'cell-arrow-wide' : ''"></view>
+          </view>
+        </view>
+      </view>
+
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view
+          v-for="(perm, index) in perms"
+          :key="perm.id"
+          class="cell"
+          :class="[layout.isWide ? 'cell-wide' : '', index == perms.length - 1 ? 'cell-no-border' : '']"
+          :style="cellStyle"
+          @click="onPermTap(perm)"
+        >
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" :name="perm.icon" :size="36" :color="perm.color" />
+          <view class="cell-main">
+            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">{{ perm.label }}</text>
+            <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ perm.desc }}</text>
+          </view>
+          <view class="cell-right">
+            <text class="cell-chip" :class="layout.isWide ? 'cell-chip-wide' : ''" :style="chipStyle(statusColor(perm.id), statusBg(perm.id))">{{ statusText(perm.id) }}</text>
+            <!-- 箭头位固定占宽：有没有箭头右边缘都对齐，不会一行凸一行缩 -->
+            <view class="cell-arrow" :class="layout.isWide ? 'cell-arrow-wide' : ''">
+              <QtIcon v-if="actionableOf(perm.id)" name="chevron-right" :size="layout.isWide ? 16 : 28" :color="theme.skin.iconMuted" />
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 后台保活：不是 manifest 里声明的权限，只能跳系统设置页，所以和上面的运行时权限分开一组 -->
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="openBatteryOptimization">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="rocket" :size="36" color="#4fb186" />
+          <view class="cell-main">
+            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">电池优化白名单</text>
+            <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">加入白名单后，后台播放不易被系统回收</text>
+          </view>
+          <view class="cell-right">
+            <text class="cell-chip" :class="layout.isWide ? 'cell-chip-wide' : ''" :style="chipStyle(batteryColor(), batteryBg())">{{ batteryText() }}</text>
+            <view class="cell-arrow" :class="layout.isWide ? 'cell-arrow-wide' : ''">
+              <QtIcon name="chevron-right" :size="layout.isWide ? 16 : 28" :color="theme.skin.iconMuted" />
+            </view>
+          </view>
+        </view>
+        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="openAutoStart">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="refresh" :size="36" color="#9b82d9" />
+          <view class="cell-main">
+            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">自启动管理</text>
+            <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">允许开机自启，避免系统限制后台运行</text>
+          </view>
+          <view class="cell-right">
+            <text class="cell-chip" :class="layout.isWide ? 'cell-chip-wide' : ''" :style="chipStyle(theme.skin.textMuted, theme.skin.surfaceMuted)">去设置</text>
+            <view class="cell-arrow" :class="layout.isWide ? 'cell-arrow-wide' : ''">
+              <QtIcon name="chevron-right" :size="layout.isWide ? 16 : 28" :color="theme.skin.iconMuted" />
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <view class="hint">
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">带箭头的项点一下可跳到系统里对应的授权页面。部分权限由系统版本决定是否适用，标「系统版本不适用」的项无需处理；标「无法确定」的项本机查不到状态，请到系统设置里确认。</text>
+      </view>
+      <view class="hint">
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">网络访问、前台服务、媒体播放前台服务、唤醒锁定这四项在安装时即已授予，系统不提供开关。电池优化白名单与自启动管理由厂商系统控制，需要手动去系统设置里放行。</text>
+      </view>
+    </scroll-view>
+  </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { computed, ref } from "vue";
+import { onShow } from "@dcloudio/uni-app";
+import { openPermissionSettings, queryPermissionStates, isIgnoringBatteryOptimizations, openBatteryOptimizationSettings, openAutoStartSettings } from "@/services/app-native";
+import { desktopLyric } from "@/services/desktop-lyric";
+import type { PermissionState } from "@/uni_modules/qt-app-native";
+
+/** 一条权限的展示信息。id 必须与 manifest.json 的声明串逐字一致 */
+type PermMeta = {
+  id: string;
+  label: string;
+  desc: string;
+  icon: string;
+  color: string;
+  /** 普通权限：安装即授予，系统不提供开关，点击只做说明 */
+  normal: boolean;
+};
+
+/**
+ * 与 manifest.json 的 app-android.distribute.permissions 一一对应（10 条）。
+ * 顺序按「用户能感知到的功能」排：先在线功能，再本地文件，最后后台保活。
+ */
+const perms: PermMeta[] = [
+  {
+    id: "android.permission.INTERNET",
+    label: "网络访问",
+    desc: "搜索、在线播放、下载与歌词获取",
+    icon: "compass",
+    color: "#6d8fd6",
+    normal: true,
+  },
+  {
+    id: "android.permission.POST_NOTIFICATIONS",
+    label: "通知",
+    desc: "播放控制通知与后台播放状态栏",
+    icon: "bell",
+    color: "#d99b3f",
+    normal: false,
+  },
+  {
+    id: "android.permission.READ_MEDIA_AUDIO",
+    label: "读取音频文件",
+    desc: "扫描并播放本机音乐",
+    icon: "music",
+    color: "#4fb186",
+    normal: false,
+  },
+  {
+    id: "android.permission.MANAGE_EXTERNAL_STORAGE",
+    label: "所有文件访问",
+    desc: "删除由其它应用创建的音频文件",
+    icon: "trash",
+    color: "#d97b66",
+    normal: false,
+  },
+  {
+    id: "android.permission.REQUEST_INSTALL_PACKAGES",
+    label: "安装应用",
+    desc: "应用内下载新版本后拉起安装",
+    icon: "download",
+    color: "#9b82d9",
+    normal: false,
+  },
+  {
+    id: "android.permission.FOREGROUND_SERVICE",
+    label: "前台服务",
+    desc: "后台播放不被系统回收",
+    icon: "rocket",
+    color: "#5f9ea0",
+    normal: true,
+  },
+  {
+    id: "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+    label: "媒体播放前台服务",
+    desc: "Android 14 及以上后台播放必需",
+    icon: "play",
+    color: "#4fb186",
+    normal: true,
+  },
+  {
+    id: "android.permission.WAKE_LOCK",
+    label: "唤醒锁定",
+    desc: "熄屏后继续播放",
+    icon: "lock",
+    color: "#6d8fd6",
+    normal: true,
+  },
+  {
+    id: "android.permission.SYSTEM_ALERT_WINDOW",
+    label: "悬浮窗",
+    desc: "桌面歌词悬浮在其它应用之上",
+    icon: "eye",
+    color: "#d99b3f",
+    normal: false,
+  },
+  {
+    id: "android.permission.WRITE_EXTERNAL_STORAGE",
+    label: "写入外部存储",
+    desc: "Android 9 及以下下载到公共目录",
+    icon: "folder",
+    color: "#5f9ea0",
+    normal: false,
+  },
+];
+
+const layout = useQtLayout();
+const theme = useThemeStore();
+const groupStyle = computed<string>(() => "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";");
+const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
+const permCount = perms.length;
+
+/**
+ * 授权状态。查询失败时保持空数组：所有项会显示「无法确定」，
+ * 而不是误报「未授权」把用户骗去设置页。
+ */
+const states = ref<PermissionState[]>([]);
+
+/** 是否已加入电池优化白名单；查询失败时原生侧保守返回 true（不误报） */
+const batteryOk = ref(true);
+
+function batteryText(): string {
+  return batteryOk.value ? "已放行" : "建议放行";
+}
+function batteryColor(): string {
+  return batteryOk.value ? theme.skin.textMuted : theme.skin.warning;
+}
+/** 电池行的胶囊底色：已放行给中性底（无需动作），建议放行给警告色弱底 */
+function batteryBg(): string {
+  return batteryOk.value ? theme.skin.surfaceMuted : theme.skin.warningSoft;
+}
+
+/** 状态胶囊的内联样式：软底 + 同色文字，全页统一一种形状 */
+function chipStyle(fg: string, bg: string): string {
+  return "background-color:" + bg + ";color:" + fg + ";";
+}
+/** 去系统电池优化列表页；返回后 onShow 会重查状态，无需在这里轮询 */
+function openBatteryOptimization(): void {
+  const ok = openBatteryOptimizationSettings();
+  if (!ok) {
+    uni.showToast({ title: "无法打开系统设置，请手动在 设置→电池 中放行", icon: "none" });
+  }
+}
+/** 去厂商自启动管理页（原生侧逐个 ROM 试，全落空会降级到应用详情页） */
+function openAutoStart(): void {
+  const ok = openAutoStartSettings();
+  if (!ok) {
+    uni.showToast({ title: "当前系统不支持跳转，请在系统设置中手动允许自启动", icon: "none" });
+  }
+}
+
+function refresh(): void {
+  const ids: string[] = [];
+  for (let i = 0; i < perms.length; i++) {
+    ids.push(perms[i].id);
+  }
+  states.value = queryPermissionStates(ids);
+  batteryOk.value = isIgnoringBatteryOptimizations();
+}
+
+function stateOf(id: string): PermissionState | null {
+  const list = states.value;
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].id == id) return list[i];
+  }
+  return null;
+}
+
+function statusText(id: string): string {
+  const st = stateOf(id);
+  if (st == null || st.unknown) return "无法确定";
+  if (!st.applicable) return "系统版本不适用";
+  if (st.granted) return "已授权";
+  return "未授权";
+}
+
+function statusColor(id: string): string {
+  const st = stateOf(id);
+  if (st == null || st.unknown || !st.applicable) return theme.skin.textMuted;
+  if (st.granted) return theme.skin.accent;
+  return theme.skin.danger;
+}
+
+/** 已授权计数：把「不适用」「无法确定」排除在外，避免分母虚高 */
+function grantedCount(): number {
+  let n = 0;
+  for (let i = 0; i < perms.length; i++) {
+    const st = stateOf(perms[i].id);
+    if (st != null && !st.unknown && st.applicable && st.granted) n++;
+  }
+  return n;
+}
+
+/** 待处理项：当前系统适用、能查到、但没授权 */
+function pendingCount(): number {
+  let n = 0;
+  for (let i = 0; i < perms.length; i++) {
+    const st = stateOf(perms[i].id);
+    if (st != null && !st.unknown && st.applicable && !st.granted) n++;
+  }
+  return n;
+}
+
+function pendingText(): string {
+  const n = pendingCount();
+  return n == 0 ? "暂无待处理" : "待处理 " + n + " 项";
+}
+
+function pendingColor(): string {
+  return pendingCount() == 0 ? theme.skin.textMuted : theme.skin.danger;
+}
+/** 汇总胶囊底色：有待处理给危险色弱底，否则中性底 */
+function pendingBg(): string {
+  return pendingCount() == 0 ? theme.skin.surfaceMuted : theme.skin.dangerSoft;
+}
+
+/** 单条权限状态胶囊的底色，与 statusColor 同口径 */
+function statusBg(id: string): string {
+  const st = stateOf(id);
+  if (st == null || st.unknown || !st.applicable) return theme.skin.surfaceMuted;
+  if (st.granted) return theme.skin.accentSoft;
+  return theme.skin.dangerSoft;
+}
+
+/**
+ * 是否显示右侧箭头（= 点进去能到系统设置页）。
+ * 普通权限系统没有开关、版本不适用项在当前系统上不存在、无法确定项点了也只能提示，
+ * 这三种都不给箭头，避免「看起来能点进去，其实进不去」。
+ */
+function actionableOf(id: string): boolean {
+  const st = stateOf(id);
+  if (st == null || st.unknown || !st.applicable) return false;
+  for (let i = 0; i < perms.length; i++) {
+    if (perms[i].id == id) return !perms[i].normal;
+  }
+  return false;
+}
+
+function onPermTap(perm: PermMeta): void {
+  const st = stateOf(perm.id);
+  if (st != null && st.unknown) {
+    uni.showToast({ title: "本机查不到该权限状态，请在系统设置中确认", icon: "none" });
+    return;
+  }
+  if (st != null && !st.applicable) {
+    uni.showToast({ title: "当前系统版本不需要该权限", icon: "none" });
+    return;
+  }
+  if (perm.normal) {
+    uni.showToast({ title: "安装时即已授予，系统不提供开关", icon: "none" });
+    return;
+  }
+  // 悬浮窗是 ROM 差异最大的一个：vivo/小米/OPPO/华为 各把开关藏在自家管家应用里，
+  // 带包名的 AOSP 入口常被无视。desktop-lyric 里已有一条「厂商私有页 → AOSP 页 →
+  // 应用详情页」的逐级降级链，直接复用，避免这里退化成只认 AOSP 的弱版本。
+  if (perm.id == "android.permission.SYSTEM_ALERT_WINDOW") {
+    const okOverlay = desktopLyric.requestPermission();
+    if (!okOverlay) {
+      uni.showToast({ title: "无法打开系统设置，请手动在应用权限页开启悬浮窗", icon: "none" });
+    }
+    return;
+  }
+  const ok = openPermissionSettings(perm.id);
+  if (!ok) {
+    uni.showToast({ title: "无法打开系统设置，请手动在应用权限页开启", icon: "none" });
+  }
+}
+
+onShow(() => {
+  // 从系统设置页返回时状态可能已变，每次进页面都重查
+  refresh();
+});
+</script>
+
+<style>
+.page {
+  flex: 1;
+}
+.list {
+  flex: 1;
+  padding: 16rpx 0 40rpx;
+}
+.list-wide {
+  padding: 12px 0 24px;
+}
+.group {
+  margin-top: 20rpx;
+  margin-left: 24rpx;
+  margin-right: 24rpx;
+  border-radius: 24rpx;
+  overflow: hidden;
+
+  border-width: 1px;
+
+}
+.cell {
+  min-height: 96rpx;
+  padding: 16rpx 32rpx;
+  flex-direction: row;
+  align-items: center;
+  border-bottom-width: 1px;
+}
+.cell-no-border {
+  border-bottom-width: 0;
+}
+.cell-icon {
+  margin-right: 20rpx;
+}
+.cell-main {
+  flex: 1;
+}
+.cell-title {
+  font-size: 28rpx;
+  font-weight: 500;
+}
+.cell-desc {
+  margin-top: 6rpx;
+  font-size: 22rpx;
+  line-height: 30rpx;
+}
+.cell-right {
+  flex-direction: row;
+  align-items: center;
+}
+/* 状态胶囊：软底 + 同色文字，比裸文字更好认；形状全页统一，不随状态变 */
+.cell-chip {
+  padding: 6rpx 18rpx;
+  border-radius: 20rpx;
+  font-size: 22rpx;
+  line-height: 30rpx;
+  text-align: center;
+}
+/* 箭头位固定宽度：没有箭头的行也占位，右边缘与有箭头的行严格对齐。
+   宽度 = 图标 28rpx + 与胶囊的 12rpx 间距，避免胶囊和箭头贴死 */
+.cell-arrow {
+  width: 40rpx;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
+}
+.group-wide { margin-top: 14px; margin-left: 24px; margin-right: 24px; border-radius: 14px; }
+.cell-wide { min-height: 64px; padding-top: 10px; padding-bottom: 10px; padding-left: 24px; padding-right: 24px; }
+.cell-title-wide { font-size: 17px; }
+.cell-desc-wide { margin-top: 4px; font-size: 13px; line-height: 18px; }
+.cell-chip-wide { padding: 3px 10px; border-radius: 12px; font-size: 13px; line-height: 18px; }
+.cell-arrow-wide { width: 24px; }
+.cell-icon-wide { margin-right: 10px; }
+
+.hint {
+  margin-top: 18rpx;
+  padding: 0 40rpx;
+}
+.hint-text {
+  font-size: 22rpx;
+  line-height: 32rpx;
+}
+.hint-text-wide {
+  font-size: 12px;
+  line-height: 18px;
+}
+</style>

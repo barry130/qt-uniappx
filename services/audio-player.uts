@@ -21,6 +21,7 @@ import {
   audioSetCacheLimit,
   audioSetConcurrentMode,
   audioSetSpeed,
+  audioSetVolume,
   audioClearCache,
   audioSetEqualizerBands,
   audioSetEqualizerEnabled,
@@ -42,6 +43,7 @@ import {
   audioOnTrackChanged,
   audioResolveDone,
   audioResolveFail,
+  audioEvictSongCache,
 } from "@/uni_modules/qt-audio-player";
 // #endif
 // #ifdef APP-ANDROID
@@ -56,12 +58,15 @@ type PlayStateListener = (playing: boolean) => void;
 const RATE_KEY = "qt-playback-rate";
 const CACHE_LIMIT_KEY = "qt-audio-cache-limit";
 const CACHE_LIMIT_DEFAULT_MB = 1024;
-const CACHE_LIMIT_MAX_MB = 4096;
 const CONCURRENT_KEY = "qt-concurrent-play-mode";
 const CONCURRENT_DEFAULT = 0;
 /** EQ 设置持久化 key：开关 + 5 段增益（dB，逗号分隔串） */
 const EQ_ENABLED_KEY = "qt-eq-enabled";
 const EQ_BANDS_KEY = "qt-eq-bands";
+/** 用户音量（0–1，字符串存储）与静音开关（"1"/"0"）。静音独立存，不覆盖音量值 */
+const VOLUME_KEY = "qt-playback-volume";
+const MUTED_KEY = "qt-playback-muted";
+const VOLUME_DEFAULT = 1.0;
 
 /**
  * 轻听音乐播放器封装。
@@ -108,6 +113,8 @@ export class AudioPlayer {
     audioSetConcurrentMode(this.getConcurrentMode());
     // 倍速也一起下发：原生播放器首次创建时套用（设置页可能从未打开过）
     audioSetSpeed(this.rate);
+    // 音量/静音一并下发（同上：设置页可能从未打开过）。静音态下这里下发的是 0
+    this.applyVolume();
     // EQ 配置一并下发：原生挂载是惰性的，播放器首个条目 READY 时生效
     this.restoreEqSettings();
     // #endif
@@ -143,24 +150,87 @@ export class AudioPlayer {
     // #endif
   }
 
-  /** 当前音频缓存上限（MB） */
+  /** 当前用户音量（0–1，默认 1）。静音是独立开关，读取本值不受静音影响 */
+  getVolume(): number {
+    try {
+      const raw = uni.getStorageSync(VOLUME_KEY) as string;
+      const value = parseFloat(raw);
+      // NaN 用 !(v >= 0) 拦（NaN 与任何数比较都是 false），与 getConcurrentMode 同法
+      if (!(value >= 0)) return VOLUME_DEFAULT;
+      if (value > 1) return 1;
+      return value;
+    } catch (_) {
+      return VOLUME_DEFAULT;
+    }
+  }
+
+  /** 设置用户音量（0–1），持久化并即时下发原生层 */
+  setVolume(v: number): void {
+    let value = v;
+    if (!(value >= 0)) value = VOLUME_DEFAULT;
+    if (value > 1) value = 1;
+    try {
+      uni.setStorageSync(VOLUME_KEY, value.toString());
+    } catch (_) {}
+    this.applyVolume();
+  }
+
+  /** 是否静音（独立持久化，不覆盖用户音量值） */
+  getMuted(): boolean {
+    try {
+      const raw = uni.getStorageSync(MUTED_KEY) as string;
+      return raw == "1";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * 设置静音。静音只是「实际下发 0」，不改写 storage 里的用户音量：
+   * 若把音量本身写成 0，取消静音时就没有原值可恢复，用户调好的音量被一次静音抹掉。
+   */
+  setMuted(m: boolean): void {
+    try {
+      uni.setStorageSync(MUTED_KEY, m ? "1" : "0");
+    } catch (_) {}
+    this.applyVolume();
+  }
+
+  /**
+   * 把「用户音量 × 静音」折算成实际下发的音量并下发。
+   * 非安卓降级路径若管理器尚未创建则跳过，getManager() 首次创建时会补设一次。
+   */
+  private applyVolume(): void {
+    const effective = this.getMuted() ? 0.0 : this.getVolume();
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    audioSetVolume(effective);
+    // #endif
+    // #ifndef APP-ANDROID
+    const audio = this.manager;
+    if (audio != null) audio.volume = effective;
+    // #endif
+  }
+
+  /** 当前音频缓存上限（MB）。无上限：只校验下界（原生层最小 256MB） */
   getCacheLimitMb(): number {
     try {
       const raw = uni.getStorageSync(CACHE_LIMIT_KEY) as string;
       const value = parseInt(raw);
       if (!(value > 0)) return CACHE_LIMIT_DEFAULT_MB;
-      if (value > CACHE_LIMIT_MAX_MB) return CACHE_LIMIT_MAX_MB;
       return value;
     } catch (_) {
       return CACHE_LIMIT_DEFAULT_MB;
     }
   }
 
-  /** 修改音频缓存上限（MB，最大 4096），持久化并即时下发原生层 */
+  /**
+   * 修改音频缓存上限（MB），持久化并即时下发原生层。
+   * 不设上限：用户可填任意大于 0 的值（原生层只保证不小于 256MB）。
+   */
   setCacheLimitMb(mb: number): void {
     let value = Math.round(mb);
     if (!(value > 0)) value = CACHE_LIMIT_DEFAULT_MB;
-    if (value > CACHE_LIMIT_MAX_MB) value = CACHE_LIMIT_MAX_MB;
     try {
       uni.setStorageSync(CACHE_LIMIT_KEY, value.toString());
     } catch (_) {}
@@ -255,6 +325,9 @@ export class AudioPlayer {
     audio.onStop(() => {
       if (this.onState != null) this.onState(false);
     });
+    // 新建的 InnerAudioContext 音量恒为 1，这里补设一次持久化的音量（含静音态），
+    // 否则「设置页调过音量 → 重启 → 首次播放」会悄悄回到满音量
+    audio.volume = this.getMuted() ? 0.0 : this.getVolume();
     return audio;
   }
 
@@ -598,11 +671,25 @@ export class AudioPlayer {
     // #endif
   }
 
-  /** 注册切歌事件（原生自动切歌/定位跳转都会触发），参数 = 新条目 mediaId */
+  /** 注册切歌事件（原生自动切歌/定位跳转都会触发），参数 = 新条目 mediaId + 是否自然播到头引发 */
   onTrackChanged(callback: AudioTrackChangedCallback): void {
     // #ifdef APP-ANDROID
     this.trackCb = callback;
     audioOnTrackChanged(callback);
+    // #endif
+  }
+
+  /**
+   * 精准清除单首歌的原生磁盘缓存分片（「提前结束」自愈用）：
+   * 流被截断/缓存内容异常导致条目在远离末尾处被 media3 视为播完时，
+   * 重放该歌前调用，避免再次命中同一份坏缓存。无缓存记录返回 false。
+   */
+  evictSongCache(mediaId: string): boolean {
+    // #ifdef APP-ANDROID
+    return audioEvictSongCache(mediaId);
+    // #endif
+    // #ifndef APP-ANDROID
+    return false;
     // #endif
   }
 }

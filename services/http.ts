@@ -16,6 +16,7 @@ export function resolveUrl(path: string): string {
 
 import { getAccessToken, saveTokens, clearTokens, parseTokenResponse, isTokenExpired, shouldRefreshToken } from "./auth";
 import { mergeClientHeaders } from "./client-info";
+import { qtDiag } from "./diag";
 
 /**
  * 是否为本机配置的 astral 网关请求。
@@ -213,7 +214,10 @@ function requestWithRefresh(
     header: headers,
     timeout: REFRESH_TIMEOUT_MS,
     success: (response) => {
-      console.log("[QT Music API]", url, response.statusCode, response.data);
+      // 响应体（含登录态/收藏等用户数据）只进诊断通道，不落常规日志：
+      // 发布版 console 全量打印既是噪音也是信息面
+      console.log("[QT Music API]", url, response.statusCode);
+      qtDiag("[QT Music API] " + url + " → " + response.statusCode);
       if (response.statusCode < 200 || response.statusCode >= 300) {
         // 尝试从响应体提取后端的具体错误信息（如参数校验失败）
         let serverMsg = "";

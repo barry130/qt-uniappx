@@ -15,6 +15,9 @@ import Environment from "android.os.Environment";
 import ContentValues from "android.content.ContentValues";
 import MediaStore from "android.provider.MediaStore";
 import Settings from "android.provider.Settings";
+import PowerManager from "android.os.PowerManager";
+import ComponentName from "android.content.ComponentName";
+import Context from "android.content.Context";
 import FileInputStream from "java.io.FileInputStream";
 import FileOutputStream from "java.io.FileOutputStream";
 import OutputStream from "java.io.OutputStream";
@@ -24,7 +27,8 @@ import WindowCompat from "androidx.core.view.WindowCompat";
 import BufferedReader from "java.io.BufferedReader";
 import InputStreamReader from "java.io.InputStreamReader";
 import OpenableColumns from "android.provider.OpenableColumns";
-import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, PickFileResult, PickJsFile } from "../interface.uts";
+import PackageManager from "android.content.pm.PackageManager";
+import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, IsIgnoringBatteryOptimizations, OpenBatteryOptimizationSettings, OpenAutoStartSettings, OpenAppDetailsSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, PickFileResult, PickJsFile, PermissionState, QueryPermissionStates, OpenPermissionSettings } from "../interface.uts";
 
 /**
  * 强制窗口回归传统布局模式（decorFitsSystemWindows = true）。
@@ -131,6 +135,143 @@ export const openNotificationSettings: OpenNotificationSettings = function (): b
     console.log("[AppNative] openNotificationSettings error", e);
     return false;
   }
+};
+
+// ==================== 后台保活引导（电池优化白名单 / 自启动 / 应用详情） ====================
+
+/**
+ * 是否已加入电池优化白名单。
+ *
+ * 语义边界：查询失败（系统服务取不到）时返回 true。理由——这个值只用于决定
+ * 是否给用户弹「后台可能被限制」的引导，误报未授权会打扰用户，漏报最多是
+ * 少一次提示；而后台取链失败本身还有别的兜底（前台服务、预取）。
+ */
+export const isIgnoringBatteryOptimizations: IsIgnoringBatteryOptimizations = function (): boolean {
+  try {
+    // Android 6.0（API 23）才引入 Doze/电池优化，更低版本不存在这个概念
+    if (Build.VERSION.SDK_INT < 23) return true;
+    const context = UTSAndroid.getAppContext();
+    if (context == null) return true;
+    const pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager;
+    if (pm == null) return true;
+    return pm.isIgnoringBatteryOptimizations(context.getPackageName());
+  } catch (e) {
+    console.log("[AppNative] isIgnoringBatteryOptimizations error " + (e != null ? e.toString() : "unknown"));
+    return true;
+  }
+};
+
+/** 通用兜底：本应用的系统详情设置页（所有 ROM 都有） */
+export const openAppDetailsSettings: OpenAppDetailsSettings = function (): boolean {
+  try {
+    const activity = UTSAndroid.getUniActivity();
+    if (activity == null) return false;
+    const intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + activity.getPackageName()));
+    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+    activity.startActivity(intent);
+    return true;
+  } catch (e) {
+    console.log("[AppNative] openAppDetailsSettings error " + (e != null ? e.toString() : "unknown"));
+    return false;
+  }
+};
+
+/**
+ * 打开系统「电池优化」列表页。
+ *
+ * 用 ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS（列表页）而不是
+ * ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS（直达确认弹窗）：后者要求清单里
+ * 声明 REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 权限，而本插件目录下没有
+ * AndroidManifest.xml（见 qt-audio-player 的对照），且该权限受 Google Play 政策限制。
+ * 列表页零权限，用户在列表里找到本应用改成「不优化」即可。
+ */
+export const openBatteryOptimizationSettings: OpenBatteryOptimizationSettings = function (): boolean {
+  try {
+    const activity = UTSAndroid.getUniActivity();
+    if (activity == null) return false;
+    const pkg = activity.getPackageName();
+    if (Build.VERSION.SDK_INT >= 23) {
+      try {
+        const intent = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        activity.startActivity(intent);
+        return true;
+      } catch (e) {
+        console.log("[AppNative] IGNORE_BATTERY_OPTIMIZATION_SETTINGS unsupported, fallback", e);
+      }
+    }
+    // 低版本 / ROM 不认：退应用详情页
+    return openAppDetailsSettings();
+  } catch (e) {
+    console.log("[AppNative] openBatteryOptimizationSettings error " + (e != null ? e.toString() : "unknown"));
+    return false;
+  }
+};
+
+/**
+ * 打开厂商「自启动 / 后台运行管理」页。
+ *
+ * 自启动是国产 ROM 的私有能力，AOSP 没有通用 action；逐个试各家私有 Activity，
+ * 全部失败时退应用详情页（用户至少能从「权限」里找到后台相关开关）。
+ * 私有 Activity 名来自各 ROM 社区共识，跨版本可能改名，所以每个都单独 try，
+ * 认不到就继续下一个，绝不因为一个 ROM 变了就整个功能失效。
+ */
+export const openAutoStartSettings: OpenAutoStartSettings = function (): boolean {
+  const activity = UTSAndroid.getUniActivity();
+  if (activity == null) return false;
+  const pkg = activity.getPackageName();
+  const brand = (Build.MANUFACTURER + " " + Build.BRAND).toLowerCase();
+
+  // 每个 ROM 的候选页按「越精确越好」排序；命中即返回
+  const targets: string[][] = [];
+  if (brand.indexOf("xiaomi") >= 0 || brand.indexOf("redmi") >= 0) {
+    targets.push(["com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity"]);
+  } else if (brand.indexOf("huawei") >= 0 || brand.indexOf("honor") >= 0) {
+    targets.push(["com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"]);
+    targets.push(["com.huawei.systemmanager", "com.huawei.systemmanager.optimize.process.ProtectActivity"]);
+  } else if (brand.indexOf("oppo") >= 0 || brand.indexOf("realme") >= 0 || brand.indexOf("oneplus") >= 0) {
+    targets.push(["com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity"]);
+    targets.push(["com.coloros.safecenter", "com.coloros.safecenter.startupapp.StartupAppListActivity"]);
+    targets.push(["com.oppo.safe", "com.oppo.safe.permission.startup.StartupAppListActivity"]);
+  } else if (brand.indexOf("vivo") >= 0 || brand.indexOf("iqoo") >= 0) {
+    targets.push(["com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"]);
+    targets.push(["com.iqoo.secure", "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity"]);
+    targets.push(["com.iqoo.secure", "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager"]);
+  } else if (brand.indexOf("meizu") >= 0) {
+    targets.push(["com.meizu.safe", "com.meizu.safe.permission.SmartBGActivity"]);
+    targets.push(["com.meizu.safe", "com.meizu.safe.security.SHOW_APPSEC"]);
+  } else if (brand.indexOf("samsung") >= 0) {
+    targets.push(["com.samsung.android.lool", "com.samsung.android.sm.ui.battery.BatteryActivity"]);
+    targets.push(["com.samsung.android.sm", "com.samsung.android.sm.ui.battery.BatteryActivity"]);
+  } else if (brand.indexOf("asus") >= 0) {
+    targets.push(["com.asus.mobilemanager", "com.asus.mobilemanager.autostart.AutoStartActivity"]);
+    targets.push(["com.asus.mobilemanager", "com.asus.mobilemanager.powersaver.PowerSaverSettings"]);
+  } else if (brand.indexOf("letv") >= 0 || brand.indexOf("leeco") >= 0) {
+    targets.push(["com.letv.android.letvsafe", "com.letv.android.letvsafe.AutobootManageActivity"]);
+  } else if (brand.indexOf("nokia") >= 0) {
+    targets.push(["com.evenwell.powersaving.g3", "com.evenwell.powersaving.g3.exception.PowerSaverExceptionActivity"]);
+  }
+
+  for (let i = 0; i < targets.length; i++) {
+    const t = targets[i];
+    try {
+      const intent = new Intent();
+      intent.setComponent(new ComponentName(t[0], t[1]));
+      // 各家 extra 名不统一，常见的几个都带上（多带不影响，认不到的 ROM 会忽略）
+      intent.putExtra("packagename", pkg);
+      intent.putExtra("pkgname", pkg);
+      intent.putExtra("extra_pkgname", pkg);
+      intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+      activity.startActivity(intent);
+      console.log("[AppNative] openAutoStartSettings hit " + t[0] + "/" + t[1]);
+      return true;
+    } catch (e) {
+      // 该 ROM 没这个 Activity（或改名了）：继续试下一个
+    }
+  }
+  // 全部落空：退应用详情页，至少让用户能进「权限」
+  console.log("[AppNative] openAutoStartSettings 无匹配私有页，退应用详情页");
+  return openAppDetailsSettings();
 };
 
 /** 退出应用（关闭所有 Activity） */
@@ -710,5 +851,191 @@ export const pickJsFile: PickJsFile = function (onResult: (result: PickFileResul
 		pickJsFileCallback = null;
 		console.log("[AppNative] pickJsFile launch error " + (e != null ? e.toString() : "unknown"));
 		onResult({ ok: false, name: "", content: "", message: "无法打开文件选择器" } as PickFileResult);
+	}
+};
+
+// ==================== 权限状态查询（设置页「权限管理」） ====================
+//
+// Android 的权限分三类，查询方式完全不同，页面拿不到统一口径，所以在这里收敛：
+//   1) 普通权限（INTERNET / FOREGROUND_SERVICE* / WAKE_LOCK）：安装即授予，
+//      系统不提供（也不需要）运行时查询，恒 applicable + granted；
+//   2) 运行时权限（POST_NOTIFICATIONS / READ_MEDIA_AUDIO / WRITE_EXTERNAL_STORAGE）：
+//      走 UTSAndroid.checkSystemPermissionGranted，但各自有生效的版本区间
+//      （WRITE_EXTERNAL_STORAGE 只到 Android 9，另外两个从 Android 13 起）；
+//   3) 特殊权限（所有文件访问 / 悬浮窗 / 安装未知应用）：系统不把它们当运行时
+//      权限，checkSystemPermissionGranted 永远返回 false，必须走各自 API
+//      （Environment.isExternalStorageManager / Settings.canDrawOverlays /
+//      PackageManager.canRequestPackageInstalls）。
+
+/** 普通权限：安装即授予，无需也不可运行时查询 */
+const NORMAL_PERMISSIONS: string[] = [
+	"android.permission.INTERNET",
+	"android.permission.FOREGROUND_SERVICE",
+	"android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+	"android.permission.WAKE_LOCK",
+];
+
+/** 运行时权限：走 checkSystemPermissionGranted（生效版本区间另判） */
+const RUNTIME_PERMISSIONS: string[] = [
+	"android.permission.POST_NOTIFICATIONS",
+	"android.permission.READ_MEDIA_AUDIO",
+	"android.permission.WRITE_EXTERNAL_STORAGE",
+];
+
+export const queryPermissionStates: QueryPermissionStates = function (ids: string[]): PermissionState[] {
+	const out: PermissionState[] = [];
+	const sdk = Build.VERSION.SDK_INT;
+	for (let i = 0; i < ids.length; i++) {
+		const id = ids[i];
+		const state: PermissionState = { id: id, applicable: true, granted: false, unknown: false } as PermissionState;
+
+		// 1) 普通权限
+		if (NORMAL_PERMISSIONS.indexOf(id) >= 0) {
+			state.granted = true;
+			out.push(state);
+			continue;
+		}
+
+		// 2) 特殊权限：各自专属 API，查不到时标 unknown（页面显示「无法确定」）
+		if (id == "android.permission.MANAGE_EXTERNAL_STORAGE") {
+			// 「所有文件访问」Android 11+ 才有这个概念
+			state.applicable = sdk >= 30;
+			if (state.applicable) {
+				try {
+					state.granted = Environment.isExternalStorageManager();
+				} catch (e) {
+					state.unknown = true;
+				}
+			}
+			out.push(state);
+			continue;
+		}
+		if (id == "android.permission.SYSTEM_ALERT_WINDOW") {
+			// 悬浮窗 Android 6.0 起才需要用户授权，之前版本安装即授予
+			state.applicable = sdk >= 23;
+			if (state.applicable) {
+				try {
+					const ctx = UTSAndroid.getAppContext();
+					if (ctx == null) {
+						state.unknown = true;
+					} else {
+						state.granted = Settings.canDrawOverlays(ctx);
+					}
+				} catch (e) {
+					state.unknown = true;
+				}
+			}
+			out.push(state);
+			continue;
+		}
+		if (id == "android.permission.REQUEST_INSTALL_PACKAGES") {
+			// 「安装未知应用」按来源应用授权，Android 8.0 起才有
+			state.applicable = sdk >= 26;
+			if (state.applicable) {
+				try {
+					const ctx = UTSAndroid.getAppContext();
+					if (ctx == null) {
+						state.unknown = true;
+					} else {
+						const pm: PackageManager = ctx.getPackageManager();
+						state.granted = pm.canRequestPackageInstalls();
+					}
+				} catch (e) {
+					state.unknown = true;
+				}
+			}
+			out.push(state);
+			continue;
+		}
+
+		// 3) 运行时权限：先判当前系统版本上是否还适用，再查授权
+		if (RUNTIME_PERMISSIONS.indexOf(id) >= 0) {
+			let applicable = true;
+			if (id == "android.permission.POST_NOTIFICATIONS") {
+				applicable = sdk >= 33;
+			} else if (id == "android.permission.READ_MEDIA_AUDIO") {
+				applicable = sdk >= 33;
+			} else if (id == "android.permission.WRITE_EXTERNAL_STORAGE") {
+				// manifest 里声明了 maxSdkVersion=28：Android 10+ 走分区存储，此权限不再申请
+				applicable = sdk <= 28;
+			}
+			state.applicable = applicable;
+			if (!applicable) {
+				out.push(state);
+				continue;
+			}
+			const activity = UTSAndroid.getUniActivity();
+			if (activity == null) {
+				// 窗口未就绪：宁可显示「无法确定」，也不要误报「未授权」引导用户去设置
+				state.unknown = true;
+				out.push(state);
+				continue;
+			}
+			try {
+				const perms: string[] = [id];
+				state.granted = UTSAndroid.checkSystemPermissionGranted(activity, perms);
+			} catch (e) {
+				state.unknown = true;
+			}
+			out.push(state);
+			continue;
+		}
+
+		// 4) 未识别的 id：不猜，交给页面显示「无法确定」
+		state.unknown = true;
+		out.push(state);
+	}
+	return out;
+};
+
+export const openPermissionSettings: OpenPermissionSettings = function (id: string): boolean {
+	const activity = UTSAndroid.getUniActivity();
+	if (activity == null) return false;
+	const pkgUri = Uri.parse("package:" + activity.getPackageName());
+
+	// 1) 特殊权限：能直达就直达（个别 ROM 不认这些入口，落到最后的应用详情页）
+	if (id == "android.permission.MANAGE_EXTERNAL_STORAGE" && Build.VERSION.SDK_INT >= 30) {
+		try {
+			activity.startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+			return true;
+		} catch (e) {
+			// 不认该入口：继续往下试
+		}
+	}
+	if (id == "android.permission.SYSTEM_ALERT_WINDOW") {
+		try {
+			activity.startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, pkgUri));
+			return true;
+		} catch (e) {
+			// 继续往下试
+		}
+	}
+	if (id == "android.permission.REQUEST_INSTALL_PACKAGES" && Build.VERSION.SDK_INT >= 26) {
+		try {
+			activity.startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, pkgUri));
+			return true;
+		} catch (e) {
+			// 继续往下试
+		}
+	}
+	// 通知：与 openNotificationSettings 同口径，先试本应用通知页
+	if (id == "android.permission.POST_NOTIFICATIONS") {
+		try {
+			const intent = new Intent("android.settings.APP_NOTIFICATION_SETTINGS");
+			intent.putExtra("android.provider.extra.APP_PACKAGE", activity.getPackageName());
+			activity.startActivity(intent);
+			return true;
+		} catch (e) {
+			// 继续往下试
+		}
+	}
+
+	// 2) 运行时权限与兜底：应用详情页（权限清单就在里面，用户可逐条开关）
+	try {
+		activity.startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkgUri));
+		return true;
+	} catch (e) {
+		console.log("[AppNative] openPermissionSettings error " + (e != null ? e.toString() : "unknown"));
+		return false;
 	}
 };

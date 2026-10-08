@@ -38,7 +38,17 @@
           <scroll-view class="lyric lyric-wide lyric-viewport" direction="vertical" :scroll-top="lyricScrollTop" :scroll-with-animation="lyricScrollAnimated" :show-scrollbar="false" @scroll="onLyricUserScroll" @touchstart="onLyricScrollTouchStart">
             <view :style="'height:' + lyricPadStyle"></view>
             <view v-for="(line, index) in lyricLines" :key="index" class="lyric-line lyric-line-wide" :style="lineOpacityStyle(index)" @click.stop="onLyricLineTap(line, index)" @longpress.stop="copyLyric(line, index)">
-              <text class="lrc lrc-wide" :style="lrcStyle(index)" :class="index == activeLyric ? 'lrc-active' : ''" >{{ line.text }}</text>
+              <!-- 逐行歌词顺序：词 / 罗马音 / 译文 / 滚动提示条。罗马音更贴近主行（与 PC PlayingPage.tsx:381 同口径） -->
+              <view v-if="isKaraokeLine(line, index)" class="lrc-karaoke lrc-karaoke-wide">
+                <view v-for="(word, wi) in line.words" :key="wi" class="lrc-karaoke-item lrc-karaoke-item-wide">
+                  <text class="lrc-karaoke-word lrc-karaoke-word-wide" :style="karaokeWordStyle(wi)">{{ word.text }}</text>
+                  <view v-if="wi == karaokeWordIndex" class="lrc-karaoke-fill lrc-karaoke-fill-wide" :style="karaokeFillStyle()">
+                    <text class="lrc-karaoke-word lrc-karaoke-word-wide" :style="karaokeLitStyle()">{{ word.text }}</text>
+                  </view>
+                </view>
+              </view>
+              <text v-else class="lrc lrc-wide" :style="lrcStyle(index)" :class="index == activeLyric ? 'lrc-active' : ''" >{{ line.text }}</text>
+              <text v-if="line.romanization != null && line.romanization.length > 0" class="lrc-roma lrc-roma-wide" :style="lrcRomaStyle(index)">{{ line.romanization }}</text>
               <text v-if="line.translation != null && line.translation.length > 0" class="lrc-tr lrc-tr-wide" :style="lrcTrStyle(index)" :class="index == activeLyric ? 'lrc-tr-active' : ''" >{{ line.translation }}</text>
               <view v-if="lyricTimesVisible && index == lyricTargetIndex" class="lrc-scroll-hint lrc-scroll-hint-wide" :style="'background-color:' + theme.skin.mediaControl + ';'">
                 <text class="lrc-hint-time lrc-hint-time-wide" :style="'color:' + theme.skin.mediaText + ';'">{{ format(line.time) }}</text>
@@ -51,6 +61,25 @@
         </view>
         </view>
 
+        <!-- 宽屏没有竖屏那条工具图标行，所以这一行只能落在进度条上方（右侧歌词面板与播放栏之间） -->
+        <view v-if="lyricVisible" class="lyric-tools-row lyric-tools-row-wide">
+          <view class="lyric-tool lyric-tool-wide" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openOffset">
+            <QtIcon name="sliders" :size="13" :color="currentOffsetMs != 0 ? theme.skin.accent : theme.skin.mediaMuted" />
+            <text class="lyric-tool-text lyric-tool-text-wide" :style="'color:' + (currentOffsetMs != 0 ? theme.skin.accent : theme.skin.mediaMuted) + ';'">{{ offsetButtonText() }}</text>
+          </view>
+          <!-- 搜索歌词入口常驻偏移旁边（与 qt-pc LyricSearchButton / PlayingPage.tsx:172-183 同口径）：
+               原来的 v-else-if="noLyricYet" 门控只在「取不到词」时放行，而词挂错版本（有词但不对）
+               时压根没有入口，只能盯着错词。无词时仍用 accent 强调，保留原来的提示强度。 -->
+          <view v-if="lyricPicked" class="lyric-tool lyric-tool-wide" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="resetLyricPick">
+            <QtIcon name="refresh" :size="13" :color="theme.skin.accent" />
+            <text class="lyric-tool-text lyric-tool-text-wide" :style="'color:' + theme.skin.accent + ';'">恢复自动</text>
+          </view>
+          <view class="lyric-tool lyric-tool-wide" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openLyricSearch">
+            <QtIcon name="search" :size="13" :color="noLyricYet ? theme.skin.accent : theme.skin.mediaMuted" />
+            <text class="lyric-tool-text lyric-tool-text-wide" :style="'color:' + (noLyricYet ? theme.skin.accent : theme.skin.mediaMuted) + ';'">搜索歌词</text>
+          </view>
+        </view>
+
         <view class="progress-row progress-row-wide">
           <text class="prog-time prog-time-wide">{{ format(displayProgress) }}</text>
           <view class="prog-range" :class="layout.isWide ? 'prog-range-wide' : ''" @touchstart="onProgTouchStart" @touchmove="onProgTouchMove" @touchend="onProgTouchEnd" @touchcancel="onProgTouchCancel">
@@ -61,17 +90,31 @@
           <text class="prog-time prog-time-wide">{{ format(player.duration) }}</text>
         </view>
 
+          <!-- 横屏：左翼模式 / 中间播放键 / 右翼工具组，两翼等宽（flex:1）
+               才能让播放键落在正中；工具组按设置增减时也不会把播放键带偏 -->
           <view class="controls controls-wide">
-            <view class="control-side" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="cycleMode"><QtIcon :name="modeIconName()" :size="22" :color="theme.skin.mediaMuted" /></view>
-            <view class="control-side" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="player.previous()"><QtIcon name="skip-back" :size="24" :color="theme.skin.mediaMuted" /></view>
-            <view class="icon-main icon-main-wide" :style="'background-color:' + theme.skin.mediaText + ';'" @click="player.toggle()"><QtIcon :name="player.playing ? 'pause' : 'play'" :size="24" :color="theme.skin.mediaSurface" /></view>
-            <view class="control-side" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="player.next()"><QtIcon name="skip-forward" :size="24" :color="theme.skin.mediaMuted" /></view>
-            <view class="control-tools-wide">
-              <view class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openPicker($event)"><QtIcon :name="liked ? 'heart-fill' : 'heart'" :size="17" :color="liked ? theme.skin.danger : theme.skin.mediaMuted" /></view>
-              <view class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="doDownload"><QtIcon name="download" :size="17" :color="theme.skin.mediaMuted" /></view>
-              <view class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openArtistPage"><QtIcon name="user" :size="17" :color="theme.skin.mediaMuted" /></view>
-              <view class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="switchQuality"><QtIcon name="music" :size="17" :color="theme.skin.mediaMuted" /></view>
-              <view class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openQueue"><QtIcon name="list" :size="17" :color="theme.skin.mediaMuted" /></view>
+            <view class="control-wing control-wing-left">
+              <view class="control-side" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="cycleMode"><QtIcon :name="modeIconName()" :size="22" :color="theme.skin.mediaMuted" /></view>
+            </view>
+            <view class="control-center-wide">
+              <view class="control-side" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="player.previous()"><QtIcon name="skip-back" :size="24" :color="theme.skin.mediaMuted" /></view>
+              <view class="icon-main icon-main-wide center-play" :style="'background-color:' + theme.skin.mediaText + ';'" @click="player.toggle()"><QtIcon :name="player.playing ? 'pause' : 'play'" :size="24" :color="theme.skin.mediaSurface" /></view>
+              <view class="control-side" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="player.next()"><QtIcon name="skip-forward" :size="24" :color="theme.skin.mediaMuted" /></view>
+            </view>
+            <view class="control-wing control-wing-right">
+              <view class="control-tools-wide">
+                <view v-if="toolVisible('like')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openPicker($event)"><QtIcon :name="liked ? 'heart-fill' : 'heart'" :size="17" :color="liked ? theme.skin.danger : theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('download')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="doDownload"><QtIcon name="download" :size="17" :color="theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('artist')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openArtistPage"><QtIcon name="user" :size="17" :color="theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('quality')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="switchQuality"><QtIcon name="music" :size="17" :color="theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('dislike')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openDislikeSheet"><QtIcon name="ban" :size="17" :color="dislikedCurrent ? theme.skin.danger : theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('speed')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="cycleRate"><QtIcon name="gauge" :size="17" :color="theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('sleep')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openSleep"><QtIcon name="clock" :size="17" :color="sleepActive ? theme.skin.accent : theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('share')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="shareCurrent"><QtIcon name="share" :size="17" :color="theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('equalizer')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openEqualizer"><QtIcon name="sliders" :size="17" :color="theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('source')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openSourceSwitch()"><QtIcon name="refresh" :size="17" :color="theme.skin.mediaMuted" /></view>
+                <view class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openQueue"><QtIcon name="list" :size="17" :color="theme.skin.mediaMuted" /></view>
+              </view>
             </view>
           </view>
       </view>
@@ -87,7 +130,17 @@
         <scroll-view v-if="showLyric" class="lyric lyric-viewport" :style="portraitLyricStyle" direction="vertical" :scroll-top="lyricScrollTop" :scroll-with-animation="lyricScrollAnimated" :show-scrollbar="false" @click="toggleLyric" @scroll="onLyricUserScroll" @touchstart="onLyricScrollTouchStart">
           <view :style="'height:' + lyricPadStyle"></view>
           <view v-for="(line, index) in lyricLines" :key="index" class="lyric-line" :style="lineOpacityStyle(index)" @click.stop="onLyricLineTap(line, index)" @longpress.stop="copyLyric(line, index)">
-            <text class="lrc"  :style="lrcStyle(index)" :class="index == activeLyric ? 'lrc-active' : ''" >{{ line.text }}</text>
+            <!-- 同上顺序：词 / 罗马音 / 译文 / 滚动提示条 -->
+            <view v-if="isKaraokeLine(line, index)" class="lrc-karaoke">
+              <view v-for="(word, wi) in line.words" :key="wi" class="lrc-karaoke-item">
+                <text class="lrc-karaoke-word" :style="karaokeWordStyle(wi)">{{ word.text }}</text>
+                <view v-if="wi == karaokeWordIndex" class="lrc-karaoke-fill" :style="karaokeFillStyle()">
+                  <text class="lrc-karaoke-word" :style="karaokeLitStyle()">{{ word.text }}</text>
+                </view>
+              </view>
+            </view>
+            <text v-else class="lrc" :style="lrcStyle(index)" :class="index == activeLyric ? 'lrc-active' : ''" >{{ line.text }}</text>
+            <text v-if="line.romanization != null && line.romanization.length > 0" class="lrc-roma" :style="lrcRomaStyle(index)">{{ line.romanization }}</text>
             <text v-if="line.translation != null && line.translation.length > 0" class="lrc-tr" :style="lrcTrStyle(index)" :class="index == activeLyric ? 'lrc-tr-active' : ''" >{{ line.translation }}</text>
             <view v-if="lyricTimesVisible && index == lyricTargetIndex" class="lrc-scroll-hint" :style="'background-color:' + theme.skin.mediaControl + ';'">
               <text class="lrc-hint-time" :style="'color:' + theme.skin.mediaText + ';'">{{ format(line.time) }}</text>
@@ -102,18 +155,42 @@
           <view v-if="lyricContext.length > 0">
             <view v-for="(line, index) in lyricContext" :key="index" class="lyric-preview-line" :style="previewGapStyle">
               <text class="lyric-preview-text" :style="'color:' + (line.isActive ? theme.skin.mediaText : theme.skin.mediaMuted) + ';' + previewFontStyle(line.isActive)" :class="line.isActive ? 'lyric-preview-active' : ''">{{ line.text }}</text>
-              <text v-if="line.translation != null && line.translation.length > 0" class="lyric-preview-tr" :style="'color:' + theme.skin.mediaMuted + ';' + previewTrFontStyle" :class="line.isActive ? 'lyric-preview-tr-active' : ''">{{ line.translation }}</text>
+              <text v-if="(line.romanization != null && line.romanization.length > 0) || (line.translation != null && line.translation.length > 0)" class="lyric-preview-tr" :style="'color:' + theme.skin.mediaMuted + ';' + previewTrFontStyle" :class="line.isActive ? 'lyric-preview-tr-active' : ''">{{ (line.romanization != null && line.romanization.length > 0) ? line.romanization : line.translation }}</text>
             </view>
           </view>
           <view v-else class="lyric-empty"><text class="lrc-empty" :style="'color:' + theme.skin.mediaMuted + ';'">纯音乐，请欣赏</text></view>
         </view>
 
+        <!-- 歌词工具行：切到歌词视图才出现，位于工具图标行上方（原来常驻右上角太挤，
+             放到进度条正上方又太贴近播放栏，所以再往上提一行） -->
+        <view v-if="lyricVisible" class="lyric-tools-row" :class="layout.isWide ? 'lyric-tools-row-wide' : ''">
+          <view class="lyric-tool" :class="layout.isWide ? 'lyric-tool-wide' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openOffset">
+            <QtIcon name="sliders" :size="layout.isWide ? 13 : 24" :color="currentOffsetMs != 0 ? theme.skin.accent : theme.skin.mediaMuted" />
+            <text class="lyric-tool-text" :class="layout.isWide ? 'lyric-tool-text-wide' : ''" :style="'color:' + (currentOffsetMs != 0 ? theme.skin.accent : theme.skin.mediaMuted) + ';'">{{ offsetButtonText() }}</text>
+          </view>
+          <view v-if="lyricPicked" class="lyric-tool" :class="layout.isWide ? 'lyric-tool-wide' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="resetLyricPick">
+            <QtIcon name="refresh" :size="layout.isWide ? 13 : 24" :color="theme.skin.accent" />
+            <text class="lyric-tool-text" :class="layout.isWide ? 'lyric-tool-text-wide' : ''" :style="'color:' + theme.skin.accent + ';'">恢复自动</text>
+          </view>
+          <!-- 同上（宽屏那处）：搜索歌词常驻偏移旁边，不再只在无词时出现 -->
+          <view class="lyric-tool" :class="layout.isWide ? 'lyric-tool-wide' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openLyricSearch">
+            <QtIcon name="search" :size="layout.isWide ? 13 : 24" :color="noLyricYet ? theme.skin.accent : theme.skin.mediaMuted" />
+            <text class="lyric-tool-text" :class="layout.isWide ? 'lyric-tool-text-wide' : ''" :style="'color:' + (noLyricYet ? theme.skin.accent : theme.skin.mediaMuted) + ';'">搜索歌词</text>
+          </view>
+        </view>
+
         <view class="action-row">
-          <QtIcon :name="liked ? 'heart-fill' : 'heart'" :size="38" :color="liked ? theme.skin.danger : theme.skin.mediaMuted" @click="openPicker($event)" />
-          <QtIcon name="download" :size="38" :color="theme.skin.mediaMuted" @click="doDownload" />
-          <QtIcon name="user" :size="38" :color="theme.skin.mediaMuted" @click="openArtistPage" />
-          <QtIcon name="music" :size="38" :color="theme.skin.mediaMuted" @click="switchQuality" />
-          <QtIcon v-if="showPlayUrlEntry" name="copy" :size="38" :color="theme.skin.mediaMuted" @click="showPlayUrl" />
+          <QtIcon v-if="toolVisible('like')" :name="liked ? 'heart-fill' : 'heart'" :size="38" :color="liked ? theme.skin.danger : theme.skin.mediaMuted" @click="openPicker($event)" />
+          <QtIcon v-if="toolVisible('download')" name="download" :size="38" :color="theme.skin.mediaMuted" @click="doDownload" />
+          <QtIcon v-if="toolVisible('artist')" name="user" :size="38" :color="theme.skin.mediaMuted" @click="openArtistPage" />
+          <QtIcon v-if="toolVisible('quality')" name="music" :size="38" :color="theme.skin.mediaMuted" @click="switchQuality" />
+          <QtIcon v-if="toolVisible('dislike')" name="ban" :size="38" :color="dislikedCurrent ? theme.skin.danger : theme.skin.mediaMuted" @click="openDislikeSheet" />
+          <QtIcon v-if="toolVisible('speed')" name="gauge" :size="38" :color="theme.skin.mediaMuted" @click="cycleRate" />
+          <QtIcon v-if="toolVisible('sleep')" name="clock" :size="38" :color="sleepActive ? theme.skin.accent : theme.skin.mediaMuted" @click="openSleep" />
+          <QtIcon v-if="toolVisible('share')" name="share" :size="38" :color="theme.skin.mediaMuted" @click="shareCurrent" />
+          <QtIcon v-if="toolVisible('equalizer')" name="sliders" :size="38" :color="theme.skin.mediaMuted" @click="openEqualizer" />
+          <QtIcon v-if="toolVisible('source')" name="refresh" :size="38" :color="theme.skin.mediaMuted" @click="openSourceSwitch()" />
+          <QtIcon v-if="toolVisible('playUrl')" name="copy" :size="38" :color="theme.skin.mediaMuted" @click="showPlayUrl" />
         </view>
 
         <view class="progress-row">
@@ -172,6 +249,80 @@
         </view>
       </view>
 
+      <!-- 歌词偏移弹层：拖动只改草稿（offsetDraftMs），松手才写存储并通知桌面歌词 -->
+      <view v-if="offsetOpen" class="mask" :style="'background-color:' + theme.skin.scrim + ';'" :class="layout.isWide ? 'mask-wide' : ''" @click="closeOffset">
+        <view class="sheet sheet-narrow" :style="'background-color:' + theme.skin.mediaSurface + ';border-color:' + theme.skin.mediaBorder + ';'" :class="layout.isWide ? 'sheet-wide sheet-narrow-wide' : ''" @click.stop="noop">
+          <view class="sheet-handle" :style="'background-color:' + theme.skin.mediaControl + ';'" :class="layout.isWide ? 'sheet-handle-wide' : ''"></view>
+          <view class="sheet-head" :class="layout.isWide ? 'sheet-head-wide' : ''">
+            <text class="sheet-title" :style="'color:' + theme.skin.mediaText + ';'" :class="layout.isWide ? 'sheet-title-wide' : ''">歌词偏移</text>
+            <text class="sheet-count" :style="'color:' + theme.skin.mediaMuted + ';'" :class="layout.isWide ? 'sheet-count-wide' : ''">{{ offsetScopeText }}</text>
+            <view class="sheet-actions">
+              <QtIcon class="sheet-act" name="close" :size="layout.isWide ? 18 : 34" :color="theme.skin.mediaMuted" @click="closeOffset" />
+            </view>
+          </view>
+          <view class="offset-body" :class="layout.isWide ? 'offset-body-wide' : ''">
+            <text class="offset-value" :style="'color:' + theme.skin.mediaText + ';'" :class="layout.isWide ? 'offset-value-wide' : ''">{{ offsetText(offsetDraftMs) }}</text>
+            <!-- 滑块：圆点用脚本算出的 left（仓内禁用 left:50% 那类写法），轨道高度/圆点
+                 尺寸与 .offset-track / .offset-thumb 严格同步，改样式要一起改 offsetThumbLeft() -->
+            <view class="offset-track" @touchstart="onOffsetTouchStart" @touchmove="onOffsetTouchMove" @touchend="onOffsetTouchEnd" @touchcancel="onOffsetTouchCancel">
+              <view class="offset-rail" :style="'background-color:' + theme.skin.mediaControl + ';'"></view>
+              <view class="offset-thumb" :class="layout.isWide ? 'offset-thumb-wide' : ''" :style="'left:' + offsetThumbLeft() + 'px;background-color:' + theme.skin.mediaText + ';'"></view>
+            </view>
+            <view class="offset-scale">
+              <text class="offset-scale-text" :style="'color:' + theme.skin.mediaMuted + ';'">-10s</text>
+              <text class="offset-scale-text" :style="'color:' + theme.skin.mediaMuted + ';'">0</text>
+              <text class="offset-scale-text" :style="'color:' + theme.skin.mediaMuted + ';'">+10s</text>
+            </view>
+            <view class="offset-steps">
+              <view class="offset-step" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="nudgeOffset(-LYRIC_OFFSET_STEP_MS)">
+                <text class="offset-step-text" :style="'color:' + theme.skin.mediaText + ';'">-100ms</text>
+              </view>
+              <view class="offset-step" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="nudgeOffset(LYRIC_OFFSET_STEP_MS)">
+                <text class="offset-step-text" :style="'color:' + theme.skin.mediaText + ';'">+100ms</text>
+              </view>
+              <view class="offset-step" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="resetOffset">
+                <text class="offset-step-text" :style="'color:' + theme.skin.mediaText + ';'">恢复默认</text>
+              </view>
+            </view>
+            <text class="offset-note" :style="'color:' + theme.skin.mediaMuted + ';'">歌词比声音快时调正（延后）；歌词比声音慢时调负（提前）。</text>
+            <text class="offset-note" :style="'color:' + theme.skin.mediaMuted + ';'">按曲目保存；调 0 即恢复继承全局默认。</text>
+          </view>
+        </view>
+      </view>
+
+      <!-- 「搜索歌词」弹层：候选来自四源聚合搜索，选中后把那首候选的歌词接到当前歌上。
+           入口常驻在偏移旁边（见上面两处工具行），无词和有词但挂错版本都能修 -->
+      <view v-if="lyricSearchOpen" class="mask" :style="'background-color:' + theme.skin.scrim + ';'" :class="layout.isWide ? 'mask-wide' : ''" @click="lyricSearchOpen = false">
+        <view class="sheet" :style="'background-color:' + theme.skin.mediaSurface + ';border-color:' + theme.skin.mediaBorder + ';'" :class="layout.isWide ? 'sheet-wide' : ''" @click.stop="noop">
+          <view class="sheet-handle" :style="'background-color:' + theme.skin.mediaControl + ';'" :class="layout.isWide ? 'sheet-handle-wide' : ''"></view>
+          <view class="sheet-head" :class="layout.isWide ? 'sheet-head-wide' : ''">
+            <text class="sheet-title" :style="'color:' + theme.skin.mediaText + ';'" :class="layout.isWide ? 'sheet-title-wide' : ''">搜索歌词</text>
+            <text class="sheet-count" :style="'color:' + theme.skin.mediaMuted + ';'" :class="layout.isWide ? 'sheet-count-wide' : ''" :max-lines="1">{{ lyricSearchKeyword }}</text>
+            <view class="sheet-actions">
+              <QtIcon class="sheet-act" name="close" :size="layout.isWide ? 18 : 34" :color="theme.skin.mediaMuted" @click="lyricSearchOpen = false" />
+            </view>
+          </view>
+          <view v-if="lyricSearchLoading" class="lyric-empty"><text class="lrc-empty" :style="'color:' + theme.skin.mediaMuted + ';'">正在搜索…</text></view>
+          <scroll-view v-else class="sheet-list" direction="vertical" :show-scrollbar="false">
+            <view
+              v-for="(cand, index) in lyricSearchCandidates"
+              :key="cand.platform + ':' + cand.id + ':' + index"
+              class="cand-row"
+              :class="layout.isWide ? 'cand-row-wide' : ''"
+              :style="'background-color:' + theme.skin.mediaControl + ';'"
+              @click="pickLyricCandidate(cand)"
+            >
+              <view class="cand-info">
+                <text class="cand-name" :style="'color:' + theme.skin.mediaText + ';'" :class="layout.isWide ? 'cand-name-wide' : ''" :max-lines="1">{{ cand.name }}</text>
+                <text class="cand-meta" :style="'color:' + theme.skin.mediaMuted + ';'" :class="layout.isWide ? 'cand-meta-wide' : ''" :max-lines="1">{{ candMeta(cand) }}</text>
+              </view>
+              <text class="cand-badge" :style="'background-color:' + platformColor(cand.platform) + ';color:#ffffff;'">{{ platformShort(cand.platform) }}</text>
+            </view>
+            <view v-if="lyricSearchCandidates.length == 0" class="lyric-empty"><text class="lrc-empty" :style="'color:' + theme.skin.mediaMuted + ';'">没有找到可选的歌曲</text></view>
+          </scroll-view>
+        </view>
+      </view>
+
       <qt-action-sheet v-model:visible="sheetVisible" :title="sheetTitle" :actions="sheetActions" @select="onSheetSelect" />
       <QtPlaylistPicker v-model:visible="showPicker" :song="currentSong" :playlists="player.pickerPlaylists()" :selected-ids="getSelectedPlaylistIds(currentSong)" :anchor-top="pickerAnchorTop" title="加入 / 移出歌单" @confirm="handlePickerConfirm" />
     </view>
@@ -188,25 +339,381 @@ import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtPlaylistPicker from "@/uni_modules/qt-ui/components/qt-playlist-picker/qt-playlist-picker.uvue";
 import { usePlayerStore } from "@/stores/player";
 import { useDownloadsStore } from "@/stores/downloads";
+import { playerBarCounted as playerBarCountedShared, usePlayerBarStore } from "@/stores/player-bar";
+import { useDislikesStore } from "@/stores/dislikes";
 import { useSourceRegistryStore } from "@/stores/source-registry";
 import { useShareCardStore } from "@/stores/share-card";
+import { findSourceCandidates, peekSourceCandidates } from "@/services/source-switch";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { audioPlayer } from "@/services/audio-player";
 import { musicApi, isQtAdmin } from "@/services/music-api";
-import { platformShort, platformColor } from "@/services/platform";
+import { useLyricOffsetStore, LYRIC_OFFSET_MAX_MS, LYRIC_OFFSET_STEP_MS } from "@/stores/lyric-offset";
+import { desktopLyric } from "@/services/desktop-lyric";
+import { platformShort, platformColor, platformTint } from "@/services/platform";
+import { collectDupMessage, type CollectDupConflict } from "@/services/collect-dup";
 import { qtDiag } from "@/services/diag";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
 import type { Song, LyricLine } from "@/types/music";
 
 const player = usePlayerStore();
 const downloads = useDownloadsStore();
+const playerBar = usePlayerBarStore();
+const dislikes = useDislikesStore();
 const sourceRegistry = useSourceRegistryStore();
 const shareCard = useShareCardStore();
 const theme = useThemeStore();
 const showLyric = ref(false);
 const queueOpen = ref(false);
+
+/**
+ * 歌词偏移（页内弹层）。正数 = 歌词延后出现，与 qt-pc / utils/lrc.uts 的
+ * `progress - offsetSec` 同口径；值本身只存在 stores/lyric-offset.ts 里，本页只做编辑。
+ * 拖动过程中只更新 offsetDraftMs 预览，松手（touchend）才提交 —— 与进度条拖动的
+ * 口径一致（pages/desktop-lyric/index.uvue 的拖动条同理），避免每个 move 事件都写一次 KV。
+ */
+const lyricOffset = useLyricOffsetStore();
+const offsetOpen = ref(false);
+const offsetDragging = ref(false);
+const offsetDraftMs = ref(0);
+/** 偏移轨道实测几何（px）：拖动时不能每帧调 uni.getWindowInfo()，测一次缓存起来 */
+let offsetTrackLeft = 0;
+const offsetTrackWidth = ref(0);
+/** 「搜索歌词」弹层：候选来自 musicApi.searchLyricCandidates（四源聚合搜索结果）。
+    入口常驻在偏移按钮旁边，无词、以及「有词但挂错版本」都能进。 */
+const lyricSearchOpen = ref(false);
+const lyricSearchLoading = ref(false);
+const lyricSearchAdopting = ref(false);
+const lyricSearchCandidates = ref<Song[]>([]);
+const lyricSearchKeyword = ref("");
+/**
+ * 手选来源的无响应依赖计数器：hasPickedLyric 读的是 music-api 里的普通对象，
+ * 不是响应式数据，改完（选中 / 恢复自动）必须手动 ++ 才能让模板重算。
+ */
+const lyricPickVersion = ref(0);
+
+/**
+ * 当前播放曲目的生效偏移（秒）。统一在这里取，四处调用点（取行 / 逐字染色 / 点行跳转）
+ * 才不会有谁漏减。取的是 **当前播放的歌** 而不是 lyricOffset.activeKey —— 后者是编辑
+ * 上下文，用户可能在播放页给别的歌设偏移（切歌后 setActive 才跟上）。
+ */
+function lyricOffsetSec(): number {
+  return lyricOffset.offsetSecFor(player.current);
+}
+
+/**
+ * 偏移值的展示文本：正数带 +，零值显示「0」。
+ *
+ * 小数位按实际粒度决定，不能一律 toFixed(1)：滑块吸附 50ms，0.05s 会被四舍五入成
+ * 「0.1s」、0.15s 显示成「0.2s」，用户用 ±100ms 按钮累加时会对不上账。
+ */
+function offsetText(ms: number): string {
+  if (ms == 0) return "0";
+  const sign = ms > 0 ? "+" : "-";
+  const abs = Math.abs(ms);
+  if (abs % 1000 == 0) return sign + (abs / 1000) + "s";
+  if (abs % 100 == 0) return sign + (abs / 1000).toFixed(1) + "s";
+  return sign + (abs / 1000).toFixed(2) + "s";
+}
+
+/** 歌词工具行上偏移按钮的文案：没设过就是入口名，设过就显示当前值 */
+function offsetButtonText(): string {
+  const ms = currentOffsetMs.value;
+  if (ms == 0) return "歌词偏移";
+  return "偏移 " + offsetText(ms);
+}
+
+/**
+ * 歌词是否正在取（切歌瞬间 lyricLines 还是空的，不能把这当成「这首歌没有词」）。
+ * 初值 true：模板首次渲染发生在 onMounted 之前，那时 loadLyric 还没跑、lyricLines 是空的，
+ * 初值 false 会让常驻的「搜索歌词」入口先按「无词」显示强调色、再跳回普通色。
+ * 取词结束（含取不到词）才置 false。
+ */
+const lyricLoading = ref(true);
+
+/** 仅用于 .stop 阻止事件冒泡到遮罩（必须给一个真实处理函数，不能留空） */
+function noop(): void {}
+
+/** 当前播放曲目的生效偏移（毫秒）：入口按钮上显示，用户一眼能看出这首歌是否设过 */
+const currentOffsetMs = computed((): number => lyricOffset.offsetMsFor(player.current));
+/** 偏移弹层副标题：区分「这首歌的覆盖」与「全局默认」 */
+const offsetScopeText = computed((): string => (player.current != null ? "按曲目保存" : "全局默认"));
+/**
+ * 当前歌是否「没有正式歌词」（只剩占位行）。
+ * 不能只看 lyricLines.length == 0：loadLyric 取不到词时会主动落地一行占位文本
+ * （「纯音乐，请欣赏」/「暂无歌词」），长度恒 ≥ 1。取词中也不算「无词」，
+ * 否则每次切歌入口都会闪一下。
+ */
+const noLyricYet = computed((): boolean => {
+  if (lyricLoading.value) return false;
+  const lines = lyricLines.value;
+  if (lines.length == 0) return true;
+  if (lines.length > 1) return false;
+  const text = lines[0].text;
+  return text == "纯音乐，请欣赏" || text == "暂无歌词";
+});
+/** 是否给当前歌手选过歌词来源（hasPickedLyric 读的是普通对象，靠 lyricPickVersion 驱动重算） */
+const lyricPicked = computed((): boolean => {
+  const _ = lyricPickVersion.value;
+  const current = player.current;
+  return current != null && musicApi.hasPickedLyric(current);
+});
+
+/* ---------- 歌词偏移弹层 ---------- */
+
+/** 偏移轨道实测几何（px）；弹层是 v-if 动态创建的，测量必须等 nextTick */
+let offsetLeft = 0;
+let offsetTrackTimer: number | null = null;
+let offsetUnitPx = qtRpx(1);
+/** 量不到时的常量兜底，必须与 .offset-body / .offset-body-wide 的 padding 保持一致 */
+let offsetFallbackWidth = 0;
+let offsetFallbackLeft = 0;
+const OFFSET_BODY_PAD_RPX = 40;
+const OFFSET_BODY_PAD_PX = 28;
+/** 滑块吸附粒度（毫秒）：比 ±100ms 按钮更细，但不足以让手指抖动产生 3ms 这种无意义值 */
+const OFFSET_SNAP_MS = 50;
+
+function refreshOffsetFallback(): void {
+  offsetUnitPx = qtRpx(1);
+  const info = uni.getWindowInfo();
+  if (layout.isWide) {
+    const sheetW = Math.min(520, info.windowWidth);
+    offsetFallbackWidth = Math.max(0, sheetW - OFFSET_BODY_PAD_PX * 2);
+    offsetFallbackLeft = (info.windowWidth - sheetW) / 2 + OFFSET_BODY_PAD_PX;
+  } else {
+    offsetFallbackWidth = Math.max(0, info.windowWidth - OFFSET_BODY_PAD_RPX * 2 * offsetUnitPx);
+    offsetFallbackLeft = OFFSET_BODY_PAD_RPX * offsetUnitPx;
+  }
+}
+/** 轨道宽度（px）：优先用实测值，未测到时按样式常量推算 */
+function offsetTrackWidthPx(): number {
+  if (offsetTrackWidth.value > 0) return offsetTrackWidth.value;
+  if (offsetFallbackWidth <= 0) refreshOffsetFallback();
+  return offsetFallbackWidth;
+}
+/** 轨道左边界（px）：优先用实测值，未测到时按样式常量推算 */
+function offsetTrackLeftPx(): number {
+  if (offsetTrackWidth.value > 0) return offsetLeft;
+  if (offsetFallbackWidth <= 0) refreshOffsetFallback();
+  return offsetFallbackLeft;
+}
+/** 圆点 left（px）：0ms 落在正中，-MAX 在左端、+MAX 在右端（尺寸与 .offset-thumb 同步） */
+function offsetThumbLeft(): number {
+  const width = offsetTrackWidthPx();
+  if (width <= 0) return 0;
+  const frac = (offsetDraftMs.value + LYRIC_OFFSET_MAX_MS) / (LYRIC_OFFSET_MAX_MS * 2);
+  const fill = Math.max(0, Math.min(1, frac)) * width;
+  const size = layout.isWide ? 22 : 36 * offsetUnitPx;
+  return Math.max(0, Math.min(width - size, fill - size / 2));
+}
+/** 手指横坐标 → 偏移毫秒（吸附到 OFFSET_SNAP_MS 档） */
+function offsetFromClientX(clientX: number): number {
+  const width = offsetTrackWidthPx();
+  if (width <= 0) return offsetDraftMs.value;
+  const frac = Math.max(0, Math.min(1, (clientX - offsetTrackLeftPx()) / width));
+  const snapped = Math.round(((frac * 2 - 1) * LYRIC_OFFSET_MAX_MS) / OFFSET_SNAP_MS) * OFFSET_SNAP_MS;
+  return Math.max(-LYRIC_OFFSET_MAX_MS, Math.min(LYRIC_OFFSET_MAX_MS, snapped));
+}
+function measureOffsetTrack(): void {
+  measureOffsetTrackRetry(0);
+}
+/** 同进度条轨道：弹层刚插入时量不到宽度，最多重试 3 次，期间先用常量兜底定位 */
+function measureOffsetTrackRetry(attempt: number): void {
+  if (!pageAlive) return;
+  refreshOffsetFallback();
+  const query = uni.createSelectorQuery();
+  query
+    .select(".offset-track")
+    .boundingClientRect((rect: UniNodeInfo) => {
+      if (rect != null && rect.width > 0) {
+        offsetLeft = rect.left;
+        offsetTrackWidth.value = rect.width;
+        return;
+      }
+      if (attempt < 3) {
+        offsetTrackTimer = setTimeout(() => {
+          measureOffsetTrackRetry(attempt + 1);
+        }, 120) as number;
+      }
+    })
+    .exec();
+}
+/**
+ * 偏移提交后的统一收尾：通知桌面歌词 + 立即重算高亮。
+ *
+ * 桌面歌词只在进度回调里更新，而 services/desktop-lyric.uts 的 onProgress 首行是
+ * 「进度和上次差不到 0.1s 就直接 return」—— 暂停时进度不动，改完偏移悬浮窗不会有
+ * 任何反应，用户会以为功能没生效。必须显式 notifyOffsetChanged 让它作废
+ * lastProgress/lastLineIndex 并立即重推一次当前行。
+ */
+function afterOffsetChange(): void {
+  // 逐字填充的锚点必须先作废：偏移是在 applyKaraokeFill 内部才减掉的，
+  // 而 stepKaraoke 收到的是**原始进度**——改偏移时原始进度并没有动，
+  // 于是「只进不退」的下限会把填充冻在旧位置，直到原始进度爬过它才恢复。
+  // resetKaraoke 把 anchorLine 归 -1，紧跟的 updateLyricScroll(true) 会
+  // 用新偏移重新对表；两步在同一个 tick 内同步完成，不会闪一帧。
+  resetKaraoke();
+  desktopLyric.notifyOffsetChanged();
+  updateLyricScroll(true);
+}
+function commitOffset(ms: number): void {
+  offsetDraftMs.value = ms;
+  lyricOffset.setActiveMs(ms);
+  afterOffsetChange();
+}
+function openOffset(): void {
+  // 编辑上下文切到当前播放曲目：这个入口改的就是「这首歌」的偏移。
+  // 传 null 会退化成编辑全局默认，那不是本入口的语义。
+  lyricOffset.setActive(player.current);
+  offsetDraftMs.value = lyricOffset.activeMs();
+  offsetTrackWidth.value = 0;
+  offsetOpen.value = true;
+  nextTick(() => {
+    measureOffsetTrack();
+  });
+}
+function closeOffset(): void {
+  offsetOpen.value = false;
+}
+function onOffsetTouchStart(event: UniTouchEvent): void {
+  const touch = event.touches[0];
+  if (touch == null) return;
+  measureOffsetTrack();
+  offsetDragging.value = true;
+  // 拖动期间只改草稿，松手才写 KV：每个 move 都落一次存储既慢也没必要
+  offsetDraftMs.value = offsetFromClientX(touch.clientX);
+}
+function onOffsetTouchMove(event: UniTouchEvent): void {
+  if (!offsetDragging.value) return;
+  const touch = event.touches[0];
+  if (touch == null) return;
+  offsetDraftMs.value = offsetFromClientX(touch.clientX);
+}
+function onOffsetTouchEnd(event: UniTouchEvent): void {
+  if (!offsetDragging.value) return;
+  const changed = event.changedTouches;
+  const touch = changed != null && changed.length > 0 ? changed[0] : null;
+  const value = touch != null ? offsetFromClientX(touch.clientX) : offsetDraftMs.value;
+  offsetDragging.value = false;
+  commitOffset(value);
+}
+/** 触摸被系统打断（来电、手势冲突）：不提交半途的值，显示回到已保存值 */
+function onOffsetTouchCancel(): void {
+  if (!offsetDragging.value) return;
+  offsetDragging.value = false;
+  offsetDraftMs.value = lyricOffset.activeMs();
+}
+function nudgeOffset(deltaMs: number): void {
+  offsetDraftMs.value = lyricOffset.nudgeActive(deltaMs);
+  afterOffsetChange();
+}
+function resetOffset(): void {
+  lyricOffset.resetActive();
+  // 归零 = 删掉本曲覆盖 → 重新读出来的是继承的全局值，显示要跟着变
+  offsetDraftMs.value = lyricOffset.activeMs();
+  afterOffsetChange();
+}
+
+/* ---------- 「搜索歌词」弹层（入口常驻偏移旁边） ---------- */
+
+/** 候选行副标题：专辑名可能为空，空的时候不要留一个孤零零的分隔点 */
+function candMeta(cand: Song): string {
+  if (cand.album != null && cand.album.length > 0) return cand.singer + " · " + cand.album;
+  return cand.singer;
+}
+
+async function openLyricSearch(): Promise<void> {
+  const current = player.current;
+  if (current == null) return;
+  if (lyricSearchLoading.value) return;
+  lyricSearchOpen.value = true;
+  lyricSearchLoading.value = true;
+  lyricSearchCandidates.value = [];
+  // 与 music-api 内部的取词口径一致（歌手 歌名），页面上用来展示「搜的是什么」
+  lyricSearchKeyword.value = current.singer.length > 0 ? current.singer + " " + current.name : current.name;
+  try {
+    lyricSearchCandidates.value = await musicApi.searchLyricCandidates(current);
+  } catch (_) {
+    lyricSearchCandidates.value = [];
+  } finally {
+    lyricSearchLoading.value = false;
+  }
+}
+
+/**
+ * 手选来源取词成功后把歌词换到页面上。
+ *
+ * 不能调 ensureLyric()：它第一行是 `if (key == loadedKey) return;`，当前歌早就加载过，
+ * loadedKey 等于当前 key，调了等于什么都没发生。adoptLyricFor 已经把结果写进了
+ * music-api 的歌词缓存，所以这里同步重读四件套重建即可（与 loadLyric() 命中预热缓存
+ * 那条分支同一套写法），不发任何请求。
+ */
+function applyAdoptedLyric(current: Song): void {
+  const parsed = buildLyricLines(
+    musicApi.cachedLyricWordByWord(current),
+    musicApi.cachedLyric(current),
+    musicApi.cachedLyricTranslation(current),
+    musicApi.cachedLyricRomanization(current)
+  );
+  qtDiag("[QT Lyric] 手选来源落地 " + current.name + " → " + parsed.length + " 行");
+  applyLyricLines(parsed.length == 0 ? [{ time: 0, text: "纯音乐，请欣赏" }] : parsed);
+  // 桌面歌词是独立跟随的：它有自己的 loadedKey（同样只看 platform:id），换来源后
+  // 歌没变、key 也没变，不同步通知的话悬浮窗会一直停在旧来源的歌词上
+  desktopLyric.notifyLyricChanged();
+}
+
+async function pickLyricCandidate(cand: Song): Promise<void> {
+  const current = player.current;
+  if (current == null || cand == null) return;
+  if (lyricSearchAdopting.value) return;
+  lyricSearchAdopting.value = true;
+  uni.showLoading({ title: "正在获取歌词…" });
+  try {
+    const text = await musicApi.adoptLyricFor(current, cand);
+    uni.hideLoading();
+    // hasPickedLyric 读的是普通对象，改完必须手动 ++ 才能让入口按钮重算
+    lyricPickVersion.value++;
+    if (text.length == 0) {
+      // 这首候选也没词：保留弹层让用户接着挑，且**不要**用空串覆盖现有歌词
+      uni.showToast({ title: "这首候选也没有歌词", icon: "none" });
+      return;
+    }
+    lyricSearchOpen.value = false;
+    applyAdoptedLyric(current);
+  } catch (_) {
+    uni.hideLoading();
+    uni.showToast({ title: "获取歌词失败，请稍后再试", icon: "none" });
+  } finally {
+    lyricSearchAdopting.value = false;
+  }
+}
+
+/** 取消手选，回到「按原平台自动取词」 */
+function resetLyricPick(): void {
+  const current = player.current;
+  if (current == null) return;
+  musicApi.clearLyricPick(current);
+  lyricPickVersion.value++;
+  // clearLyricPick 已把原歌的四段缓存与「已问过」标记清掉（否则 ensureLyric 会命中
+  // 手选源的词、或在 TTL 内被「问过」标记直接短路）。但 ensureLyric 第一行是
+  // `if (key == loadedKey) return;`，当前歌的页内标记还在，所以必须先清掉它，
+  // 再让它重新走一次完整取词 —— 只清 music-api 那侧，按钮点了会毫无反应。
+  loadedKey = "";
+  ensureLyric();
+  // 同上：恢复自动后桌面歌词也要跟着回到原平台的词
+  desktopLyric.notifyLyricChanged();
+  uni.showToast({ title: "已恢复自动取词", icon: "none" });
+}
+
 /** 仅当账号具备轻听管理权限时，才展示「播放地址」调试入口（权限由 /me 缓存，进入页面时刷新） */
 const showPlayUrlEntry = ref(isQtAdmin());
+/**
+ * 工具按钮开关（设置 → 播放页按钮）：关掉的按钮整行不渲染。
+ * 「播放链接」还额外要求 qt_admin 权限，两者都满足才出现。
+ */
+function toolVisible(id: string): boolean {
+  if (id == "playUrl" && !showPlayUrlEntry.value) return false;
+  return playerBar.isVisible(id);
+}
 /**
  * 播放列表滚动与定位：scroll-view + 自制窗口虚拟化。
  *
@@ -360,22 +867,73 @@ const lyricPadStyle = computed((): string => {
   return layout.isWide ? "120px" : lyricPadRpx.value + "rpx";
 });
 const lyricLines = ref<LyricLine[]>([]);
-const karaokePct = ref(0);
+/**
+ * 逐字填充的当前词下标（-1 = 当前行没有逐字数据）。整词粒度的**阶跃**量：
+ * 只在唱到下一个词时变一次，与旧的 karaokeSungCount 一样廉价。
+ *
+ * 与旧实现的区别：旧实现把颜色做成亮/暗两态、整词一次性变色，观感是「一个字一个字蹦」。
+ * 现在同一时刻只有**正在唱的那一个词**是部分填充的，所以视觉上是一条连续的推进边界。
+ */
+const karaokeWordIndex = ref(-1);
+/**
+ * 正在唱的那个词的填充百分比（0..100，0.1 步进）——**唯一按帧刷新的状态**。
+ *
+ * 量化到 0.1%（与 qt-pc LyricWindow.tsx:495 的 `Math.round(fillRatio * 1000) / 10` 同口径）：
+ * 同一档位不重复写 ref，避免整行重绘。
+ */
+const karaokeFillPct = ref(0);
+/**
+ * 逐字填充的插值基准，与 qt-pc 的 positionAnchorValue / positionAnchorMs 同构
+ * （qt-pc/src/stores/player.ts:242-258 的 interpolatedPositionMs，由
+ *  qt-pc/src/hooks/useInterpolatedPosition.ts 每帧读取）。
+ *
+ * 三条硬规则，缺一条就会出现「当前字前后摆动」：
+ *  ① 锚点**只前进**。进度源允许回退（stores/player.ts:430 的 `t >= this.progress - 0.3`
+ *     就是「真实位置追上来之前允许落后 0.3 秒」），若照单全收，每次 progress 回来都会把
+ *     已经外推到的位置往前拽回，而帧内又继续往前推 —— 一来一回就是肉眼看到的摆动。
+ *     小幅回退一律忽略，只有大幅度回跳（往回拖进度条、单曲循环回跳）才重新对表。
+ *  ② 帧内只用**帧时钟**外推，且锚点时刻也用同一个帧时钟记录。qt-pc 用 performance.now()
+ *     进出同一把单调时钟；这里没有 performance.now，就用 rAF 回调的 timestamp，
+ *     绝不在锚点用 Date.now()、外推用 timestamp（两把时钟混用本身就是抖动的来源）。
+ *  ③ 展示值**只进不退**（karaokeLastShown 兜底），换行/换歌/回跳时显式重置下限。
+ *
+ * 定时器生命周期照抄 uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue:66-91。
+ */
+let karaokeAnchorLine = -1;
+/** 当前锚点进度（秒）与锚点时刻（帧时钟毫秒；-1 = 尚未在帧内打点） */
+let karaokeBaseProgress = 0;
+let karaokeBaseAt = -1;
+/** 上一帧真正展示出去的进度：只进不退的兜底下限 */
+let karaokeLastShown = 0;
+let karaokeRafTimer: number | null = null;
+/**
+ * 同一行内允许忽略的进度回退量（秒）。
+ * 进度源本身允许回退（stores/player.ts:430 用 `t >= this.progress - 0.3` 放行最多 0.3 秒），
+ * 这点回退若照单全收就会把外推位置往回拽。0.5 秒足够盖住抖动，又远小于
+ * 「单曲循环回到行首」「往回拖进度条」这类真实回跳，不会把该重对表的情况误判掉。
+ */
+const KARAOKE_REWIND_TOLERANCE_SEC = 0.5;
 const activeLyric = ref(0);
 const lyricScrollTop = ref(0);
 /** 歌词滚动是否带动画：拖动进度条预览时关掉，避免动画被后续 move 事件反复打断（卡顿来源之一） */
 const lyricScrollAnimated = ref(true);
 
-/** 竖屏封面模式下显示的歌词上下文：当前行 ± 3 行 */
-const lyricContext = computed((): { text: string; isActive: boolean; time: number; translation: string | null }[] => {
+/**
+ * 竖屏封面模式下显示的歌词上下文：当前行 ± 1 行。
+ * 第二行副文本口径与桌面歌词 / PC LyricWindow.tsx 一致：**罗马音 > 译文**
+ * （模板里做「罗马音非空就用罗马音，否则用译文」的二选一，故两个字段都带出来）。
+ * 逐字在这三行预览里不做染色：原生悬浮窗与封面态都没有逐帧刷新通道，
+ * 只取行文本/时间轴（与 desktop-lyric.uts 同口径）。
+ */
+const lyricContext = computed((): { text: string; isActive: boolean; time: number; translation: string | null; romanization: string | null }[] => {
   const lines = lyricLines.value;
   if (lines.length == 0) return [];
   const active = activeLyric.value;
   const start = Math.max(0, active - 1);
   const end = Math.min(lines.length, active + 2);
-  const context: { text: string; isActive: boolean; time: number; translation: string | null }[] = [];
+  const context: { text: string; isActive: boolean; time: number; translation: string | null; romanization: string | null }[] = [];
   for (let i = start; i < end; i++) {
-    context.push({ text: lines[i].text, isActive: i == active, time: lines[i].time, translation: lines[i].translation ?? null });
+    context.push({ text: lines[i].text, isActive: i == active, time: lines[i].time, translation: lines[i].translation ?? null, romanization: lines[i].romanization ?? null });
   }
   return context;
 });
@@ -442,6 +1000,64 @@ function handlePickerConfirm(selectedIds: string[]): void {
   const song = currentSong.value;
   if (song == null) return;
   // 统一由 store 处理：id=local 映射为加入/移出喜欢列表（同步服务器），其余为本地歌单增删
+  applyPickerSelectionWithDupCheck(song, selectedIds);
+}
+
+/**
+ * 收藏前先查「同名不同源」：把要加入的歌单分成「有冲突」和「没冲突」两拨，
+ * 没冲突的那拨直接放行，有冲突的逐个弹确认（用户点「继续收藏」才真的加）。
+ *
+ * 确认是异步的，所以这里先把最终要生效的 id 集合算出来再一次性 apply，
+ * 避免中间态把歌加进去了又撤回来。
+ */
+function applyPickerSelectionWithDupCheck(song: Song, selectedIds: string[]): void {
+  const currentIds = player.pickerSelectedIds(song);
+  const addIds: string[] = [];
+  for (let i = 0; i < selectedIds.length; i++) {
+    if (currentIds.indexOf(selectedIds[i]) < 0) addIds.push(selectedIds[i]);
+  }
+  const check = player.collectDupConflicts(song, addIds);
+  if (check.conflicts.length == 0) {
+    finishPickerSelection(song, selectedIds);
+    return;
+  }
+  const finalIds: string[] = [];
+  for (let i = 0; i < check.passed.length; i++) finalIds.push(check.passed[i]);
+  for (let i = 0; i < selectedIds.length; i++) {
+    const id = selectedIds[i];
+    if (addIds.indexOf(id) < 0 && check.passed.indexOf(id) < 0) finalIds.push(id);
+  }
+  confirmDups(song, check.conflicts, finalIds);
+}
+
+/** 依次弹冲突确认，用户确认的歌单 id 追加进 pendingIds，全部问完才提交 */
+function confirmDups(song: Song, conflicts: CollectDupConflict[], pendingIds: string[]): void {
+  if (conflicts.length == 0) {
+    finishPickerSelection(song, pendingIds);
+    return;
+  }
+  const first = conflicts[0];
+  const rest: CollectDupConflict[] = [];
+  for (let i = 1; i < conflicts.length; i++) rest.push(conflicts[i]);
+  uni.showModal({
+    title: '同名歌曲提示',
+    content: collectDupMessage(first.playlistName, first.dups),
+    confirmText: '继续收藏',
+    cancelText: '取消',
+    success: (res: any) => {
+      const ids: string[] = [];
+      for (let i = 0; i < pendingIds.length; i++) ids.push(pendingIds[i]);
+      const ok = res != null && (res.confirm as boolean);
+      if (ok) ids.push(first.playlistId);
+      confirmDups(song, rest, ids);
+    },
+    fail: () => {
+      confirmDups(song, rest, pendingIds);
+    }
+  });
+}
+
+function finishPickerSelection(song: Song, selectedIds: string[]): void {
   const changed = player.applyPickerSelection(song, selectedIds);
   uni.showToast({
     title: changed ? '已更新收藏' : '未做更改',
@@ -461,8 +1077,16 @@ function onSheetSelect(action: SheetAction, index: number): void {
   sheetSelectHandler = null;
   if (handler != null) handler(action, index);
 }
-const FONT_KEY = "qt-lyric-font-size";
-const lyricFontSize = ref(27);
+/**
+ * 宽屏歌词面板基准字号（实际渲染 = 本值 × 0.7 px，见 lrcStyle / karaokeFontSize）。
+ *
+ * 为什么是常量而不是 ref：这里原先留了半套配置 —— onMounted 从
+ * uni.getStorageSync("qt-lyric-font-size") 回读，但全仓（含 git 历史）从无一处写入该 key，
+ * 读到的永远是空、字号永远是初值。qt-pc 的播放页同样没有字号控制（只有桌面歌词窗口有，
+ * 那是另一个独立开关），两端行为一致，所以直接收敛成固定值。
+ * 日后真要做可调，请连 UI 一起加，不要再留「只读不写」的一半。
+ */
+const WIDE_LYRIC_FONT = 27;
 /** 竖屏歌词页字号；宽屏面板行高固定 44px，维持原字号避免双语行溢出 */
 const PORTRAIT_LYRIC_FONT = 38;
 let lyricCenter = 300;
@@ -491,15 +1115,8 @@ const displayProgress = computed(() =>
   dragging.value ? dragValue.value : player.progress
 );
 
-/** 背景色映射：根据音源平台给暗色遮罩叠加轻微色相，增强封面氛围感 */
-const bgTintColor = computed((): string => {
-  const platform = platformKey();
-  if (platform == "wyy") return "rgba(229, 72, 77, 0.14)";
-  if (platform == "qq") return "rgba(0, 201, 74, 0.14)";
-  if (platform == "kw") return "rgba(124, 108, 242, 0.14)";
-  if (platform == "kg") return "rgba(74, 125, 255, 0.14)";
-  return "rgba(10, 13, 20, 0)";
-});
+/** 背景色映射：根据音源平台给暗色遮罩叠加轻微色相，增强封面氛围感（色值来自数据包注册表） */
+const bgTintColor = computed((): string => platformTint(platformKey(), 0.14));
 
 let loadedKey = "";
 
@@ -566,9 +1183,125 @@ function sleepText(): string {
   return "定时关闭";
 }
 
+/** 定时关闭是否生效（-1=当前曲目后 / >0=剩余时间），生效时按钮染强调色 */
+const sleepActive = computed(() => player.sleepEndTime != 0);
+
+/** 当前歌曲是否命中屏蔽规则（dislikes 是 reactive 单例，规则变化自动重算） */
+const dislikedCurrent = computed(() => {
+  const current = player.current;
+  if (current == null) return false;
+  return dislikes.isDisliked(current);
+});
+
+/** 分享当前歌曲（shareCard.open 内部自处理空曲目） */
+function shareCurrent(): void {
+  const current = player.current;
+  if (current == null) return;
+  shareSong(current);
+}
+
+function openEqualizer(): void {
+  uni.navigateTo({ url: "/pages/equalizer/index" });
+}
+
+/**
+ * 屏蔽当前歌曲 / 歌手（与长按歌单行的屏蔽入口同语义）：
+ * 行文案按当前规则状态切换「屏蔽 / 取消屏蔽」，避免「已屏蔽过」的二义性。
+ */
+function openDislikeSheet(): void {
+  const current = player.current;
+  if (current == null) return;
+  const songBanned = dislikes.hasSongRule(current);
+  const singerBanned = dislikes.hasSingerRule(current.singer);
+  const actions: SheetAction[] = [
+    { name: songBanned ? "取消屏蔽这首歌" : "屏蔽这首歌" },
+    { name: singerBanned ? "取消屏蔽该歌手" : "屏蔽该歌手" },
+  ];
+  openActionSheet(current.name + " - " + current.singer, actions, (_action, index) => {
+    let done = false;
+    if (index == 0) {
+      done = songBanned ? dislikes.unbanSong(current) : dislikes.banSong(current);
+    } else {
+      done = singerBanned ? dislikes.unbanSinger(current.singer) : dislikes.banSinger(current.singer);
+    }
+    uni.showToast({ title: done ? "已更新屏蔽" : "没有变化", icon: "none" });
+  });
+}
+
+/** 换源搜索进行中标记：防止连点并发打多轮聚合搜索 */
+const sourceSwitchLoading = ref(false);
+
+/**
+ * 换源：当前源不支持该歌曲时，聚合搜索其他源里同一首歌并弹层展示。
+ * 选中后原地替换当前曲目字段并重播（与音质切换兜底同款 in-place 先例）。
+ *
+ * 结果有进程内缓存（10 分钟）：同一首歌第二次打开直接弹列表，不再打搜索、
+ * 也不再闪「正在搜索…」（见 services/source-switch.ts）。
+ * force = 忽略缓存重搜（长按/重新搜索入口用）。
+ */
+async function openSourceSwitch(force: boolean = false): Promise<void> {
+  const current = player.current;
+  if (current == null) return;
+  if (sourceSwitchLoading.value) return;
+  // 命中缓存：同步弹列表，连 showLoading 都不弹（弹了会闪一下）
+  if (!force) {
+    const cached = peekSourceCandidates(current);
+    if (cached != null) {
+      if (cached.length == 0) {
+        uni.showToast({ title: "其他音源没有找到匹配的歌曲", icon: "none" });
+        return;
+      }
+      showSourceCandidates(cached);
+      return;
+    }
+  }
+  sourceSwitchLoading.value = true;
+  uni.showLoading({ title: "正在搜索其他音源…" });
+  try {
+    const candidates = await findSourceCandidates(current, 1, 5, force);
+    uni.hideLoading();
+    if (candidates.length == 0) {
+      uni.showToast({ title: "其他音源没有找到匹配的歌曲", icon: "none" });
+      return;
+    }
+    showSourceCandidates(candidates);
+  } catch (_) {
+    uni.hideLoading();
+    uni.showToast({ title: "搜索失败，请稍后再试", icon: "none" });
+  } finally {
+    sourceSwitchLoading.value = false;
+  }
+}
+
+/** 把候选铺成 ActionSheet：名称带歌手与平台短名，选中就地替换当前曲目 */
+function showSourceCandidates(candidates: Song[]): void {
+  const actions: SheetAction[] = candidates.map((c) => ({
+    name: c.name + " - " + c.singer + "（" + platformShort(c.platform) + "）",
+  }));
+  openActionSheet("换源", actions, (_action, index) => {
+    applySourceCandidate(candidates[index]);
+  });
+}
+
+/** 原地替换当前曲目为候选（保留播放位置），url 清空让播放链路重新获取 */
+function applySourceCandidate(candidate: Song): void {
+  const current = player.current;
+  if (current == null || candidate == null) return;
+  current.id = candidate.id;
+  current.name = candidate.name;
+  current.singer = candidate.singer;
+  current.album = candidate.album;
+  current.picUrl = candidate.picUrl;
+  current.platform = candidate.platform;
+  current.url = "";
+  current.musicId = candidate.musicId;
+  if (candidate.duration != null) current.duration = candidate.duration;
+  player.play(current, player.queue, true);
+}
+
 function lrcStyle(index: number): string {
   // 高亮行只加粗变色不放大：放大会让行高随高亮位置漂移，实测行高失效
-  const base = layout.isWide ? lyricFontSize.value : PORTRAIT_LYRIC_FONT;
+  const base = layout.isWide ? WIDE_LYRIC_FONT : PORTRAIT_LYRIC_FONT;
   // 宽屏下 rpx 被放大约 2.7 倍，改用绝对 px（按 750 设计稿折算：1rpx≈0.7px）
   const unit = layout.isWide ? "px" : "rpx";
   const scale = layout.isWide ? 0.7 : 1;
@@ -577,14 +1310,174 @@ function lrcStyle(index: number): string {
 function lrcTrStyle(index: number): string {
   // 翻译行固定用弱色：主句高亮时翻译也不抢眼（双语主/译层级对照目标样式）。
   // 翻译相对主句缩得更多（-12），对齐参考样式的主/译 0.7 比例
-  const base = layout.isWide ? lyricFontSize.value : PORTRAIT_LYRIC_FONT;
+  const base = layout.isWide ? WIDE_LYRIC_FONT : PORTRAIT_LYRIC_FONT;
   const size = base - 12;
   const unit = layout.isWide ? "px" : "rpx";
   const scale = layout.isWide ? 0.7 : 1;
   return "font-size:" + Math.round(size * scale) + unit + ";color:" + theme.skin.mediaMuted + ";";
 }
+/** 罗马音：与译文同字号同色系（都排在主句之下的副文本），不再单独分一档 */
+function lrcRomaStyle(index: number): string {
+  const base = layout.isWide ? WIDE_LYRIC_FONT : PORTRAIT_LYRIC_FONT;
+  const size = base - 12;
+  const unit = layout.isWide ? "px" : "rpx";
+  const scale = layout.isWide ? 0.7 : 1;
+  // 高亮行的罗马音比译文亮一档（mediaText 弱色）：它是跟着主句走的读音提示，层级比译文更近。
+  // 用固定半透明字面值而不是 CSS 变量/alpha() —— uni.scss 变量在页面里不生效（见 qt-uniappx/AGENTS.md）
+  const color = index == activeLyric.value ? "rgba(255,255,255,0.60)" : theme.skin.mediaMuted;
+  return "font-size:" + Math.round(size * scale) + unit + ";color:" + color + ";";
+}
+
+// ===== 逐字卡拉 OK 渲染 =====
+/**
+ * 为什么不是 PC 端那套 `linear-gradient(90deg, currentColor X%, …)` + `background-clip: text`：
+ * 1. `linear-gradient` / `background-image` 属 Web-only CSS，qt-uniappx/AGENTS.md 明令禁止
+ *    （Vapor 编译会整条属性丢掉，染色直接消失而不是降级）；
+ * 2. `background-clip: text` 在 uni-app x 的 <text> 上没有对应实现，且本仓所有 .uvue 里
+ *    也从未出现过 <text> 嵌套 <text>（无法逐字套一层 span 再裁背景）。
+ * 所以采用**逐词 <text> + 按进度切颜色**的方案：每个词一个 <text>，唱过（含正在唱）的词
+ * 用高亮色、未唱的用弱色。粒度是「整词」而非「半字」，但这是当前 Vapor 渲染下唯一确定
+ * 能落地的做法（颜色走内联字面值，不碰任何 Web-only 属性）。
+ *
+ * 另外只给**当前高亮行**渲染逐字：一是非当前行逐字没有意义（永远全弱色，观感与普通行一样，
+ * 却多几十个 <text> 节点，60+ 行整表重绘会拖慢滚动）；二是与 PC PlayingPage.tsx:365 同口径。
+ */
+function isKaraokeLine(line: LyricLine, index: number): boolean {
+  return index == activeLyric.value && line.words != null && line.words!.length > 0;
+}
+/**
+ * 逐字字体（与 lrcStyle / .lrc 完全同口径）：宽屏 WIDE_LYRIC_FONT × 0.7 px、竖屏 PORTRAIT_LYRIC_FONT rpx。
+ *
+ * 为什么必须写在**每个词的 <text>** 上，而不能像原来那样写在行容器 <view> 上：
+ * app-uvue 的样式不继承（官方 CSS 文档「样式不继承」：父子组件属性隔离，父元素样式不影响子元素），
+ * 写在 <view> 上的 font-size 对子 <text> 完全无效 —— 逐字行的每个词因此一直回落到
+ * css reset 的默认 16px，比普通行（.lrc-wide 16px / 竖屏 38rpx）还小，这就是「逐字播放时字体很小」。
+ * 用 computed 缓存：字形串只在 layout/字号变化时重算，不再每次渲染给每个词拼一遍。
+ */
+const karaokeFontSize = computed((): string => {
+  const base = layout.isWide ? WIDE_LYRIC_FONT : PORTRAIT_LYRIC_FONT;
+  const scale = layout.isWide ? 0.7 : 1;
+  return Math.round(base * scale) + (layout.isWide ? "px" : "rpx");
+});
+/**
+ * 单个词的底色样式（未唱部分）：已唱完的词（下标 < karaokeWordIndex）= 高亮色，
+ * 未唱/正在唱的词 = 弱色 —— 正在唱的词由上层填充层盖住它的左半部分，底色仍是弱色。
+ * font-size 必须写在这里（<text> 节点上）；font-weight 由 .lrc-karaoke-word 这个 class 提供。
+ */
+function karaokeWordStyle(wordIndex: number): string {
+  const sung = wordIndex < karaokeWordIndex.value;
+  return "font-size:" + karaokeFontSize.value + ";"
+    + "color:" + (sung ? theme.skin.mediaText : theme.skin.mediaMuted) + ";";
+}
+/** 填充层的高亮字样式：与底色层**同字号同字重**，否则字形宽度不等、裁剪边界会错位 */
+function karaokeLitStyle(): string {
+  return "font-size:" + karaokeFontSize.value + ";color:" + theme.skin.mediaText + ";";
+}
+/**
+ * 填充层宽度：按当前词的已唱比例裁掉右侧。
+ *
+ * 为什么不照抄 PC 的整行渐变：Vapor 不支持 `background-clip: text`（也没有 <text> 嵌套 <text>），
+ * 所以改成「每个词两层同字文本上下叠，上层按宽度裁」——PC 的 LyricWindow.tsx 用
+ * `linear-gradient` + `background-clip:text` 做的事，这里用 overflow:hidden + width 等价实现。
+ *
+ * 宽度用**百分比**：相对当前词外层的 `.lrc-karaoke-item`，而该容器的宽度恰好等于这个词的
+ * 自然宽度（flex 行内收缩到内容宽）。所以不需要任何测量就能精确贴合——换字号、换主题、
+ * 中英文混排都不会错位。AGENTS.md 禁的是 `max-width:100%`，百分比宽度本身无限制
+ * （pages/download/index.uvue:17 的进度条就是 `width:' + progress + '%'`）。
+ * 量化到 0.1%：与 qt-pc 的 `Math.round(fillRatio * 1000) / 10` 同口径，同档位不重复写 ref。
+ */
+function karaokeFillStyle(): string {
+  return "width:" + karaokeFillPct.value + "%;";
+}
+/**
+ * 帧内插值：与 qt-pc 的 interpolatedPositionMs 同构 ——
+ * 位置 = 锚点值 + (帧时钟 - 锚点时刻) × 倍速，每帧都从锚点重算（不是逐帧累加，避免漂移）。
+ *
+ * 帧时钟统一用 rAF 回调的 timestamp，与锚点打点同源；绝不在锚点用 Date.now()、外推用
+ * timestamp —— 两把时钟混用本身就是抖动的来源，qt-pc 全程只用 performance.now()。
+ */
+const karaokeRafStep = (timestamp: number) => {
+  karaokeRafTimer = null;
+  if (!pageAlive || karaokeAnchorLine < 0) return;
+  if (!player.playing) {
+    // 暂停：本帧不再续订（省电），但**必须把帧时钟打点作废**。
+    // 否则恢复播放后的第一帧会拿「上一帧到现在」的整段暂停时长去外推，
+    // elapsed 可能是几十秒，填充会瞬间冲到当前行末尾并锁死在那儿。
+    // 归 -1 表示下一帧重新打点，暂停期间的位置由进度回调本身维持。
+    karaokeBaseAt = -1;
+    if (karaokeLastShown > karaokeBaseProgress) karaokeBaseProgress = karaokeLastShown;
+    return;
+  }
+  // 本锚点还没有帧时钟打点（刚被 stepKaraoke 对过表 / 刚从暂停恢复）：用当前帧打点，elapsed 从 0 起算
+  if (karaokeBaseAt < 0) karaokeBaseAt = timestamp;
+  const elapsed = timestamp - karaokeBaseAt;
+  if (elapsed > 0) {
+    const rate = audioPlayer.rate;
+    let next = karaokeBaseProgress + (elapsed / 1000) * (rate > 0 ? rate : 1);
+    // 只进不退（见字段注释 ③）：进度源允许回退最多 0.3 秒，照单全收就会看到填充往回缩
+    if (next < karaokeLastShown) next = karaokeLastShown;
+    applyKaraokeFill(karaokeAnchorLine, next);
+  }
+  karaokeRafTimer = requestAnimationFrame(karaokeRafStep);
+};
+function startKaraokeRaf(): void {
+  if (karaokeRafTimer != null) return;
+  if (!player.playing) return;
+  // 拖动进度条期间按墙钟外推是错的（音频并没有在走）：预览位置由 applyLyricPreview
+  // 每次 move 直接写入，这里不开外推，免得填充层自己往前爬
+  if (dragging.value) return;
+  karaokeRafTimer = requestAnimationFrame(karaokeRafStep);
+}
+function stopKaraokeRaf(): void {
+  const timer = karaokeRafTimer;
+  if (timer != null) {
+    cancelAnimationFrame(timer);
+  }
+  karaokeRafTimer = null;
+  // 帧时钟打点必须一起作废：停表期间（暂停/拖动/切到封面态）rAF 不再跑，
+  // 若把旧 timestamp 留着，恢复播放后的第一帧会拿「上一帧到现在」的整段间隔
+  // （可能几秒甚至几分钟）去外推，填充瞬间冲到行尾。归 -1 = 下一帧重新打点。
+  karaokeBaseAt = -1;
+}
+/** 按 (行, 进度秒) 重算「正在唱的词」与「该词的已唱比例」，只在值真的变了时写 ref */
+function applyKaraokeFill(lineIndex: number, progressSec: number): void {
+  // 只进不退：进度源本身允许回退最多 0.3 秒（stores/player.ts:430），照单全收会让填充往回缩。
+  // 前进由 rAF 的插值负责，汇报值只用来对表 —— 所以这里一旦落后就贴住上限不动。
+  let shown = progressSec;
+  if (shown < karaokeLastShown) shown = karaokeLastShown;
+  karaokeLastShown = shown;
+  const line = lyricLines.value[lineIndex];
+  if (line == null || line.words == null || line.words!.length == 0) return;
+  const words = line.words!;
+  // 偏移在函数内部统一减一次，调用方传原始进度即可，避免多处各减一遍漏掉一处
+  const elapsedMs = (shown - lyricOffsetSec() - line.time) * 1000;
+  const progress = wordProgressAt(words, elapsedMs);
+  if (progress.index != karaokeWordIndex.value) karaokeWordIndex.value = progress.index;
+  // ratio 就是「当前这个词唱了多少」；行未开唱时 wordProgressAt 给 {index:0, ratio:0}
+  const pct = Math.round(progress.ratio * 1000) / 10;
+  if (pct != karaokeFillPct.value) karaokeFillPct.value = pct;
+}
+/** 清空逐字填充（非逐字行 / 换歌 / 离开歌词视图）：停止外推并撤掉填充层 */
+function resetKaraoke(): void {
+  karaokeAnchorLine = -1;
+  karaokeBaseProgress = 0;
+  karaokeBaseAt = -1;
+  karaokeLastShown = 0;
+  stopKaraokeRaf();
+  if (karaokeWordIndex.value != -1) karaokeWordIndex.value = -1;
+  if (karaokeFillPct.value != 0) karaokeFillPct.value = 0;
+}
 
 let sleepTimer: number | null = null;
+
+// 页面存活标志（onUnmounted 置 false）。
+// 不能只靠清定时器句柄：框架路由（reLaunch/redirectTo/navigateBack）是先 closeWebview
+// 销毁原生页、再 unmountPage 跑 onUnmounted，中间那段窗口原生 UniPage 已反注册而本页
+// 脚本还在；此时 createSelectorQuery().exec() 会走到 $nativePage.waitNativeRender，
+// 桥调用带着已反注册的 instanceId → "UTS instance N is not registered"（真机堆栈：
+// Bridge.onJSTimerFired ← Bridge$scheduleJSTimer$runnable$1.run ← Handler.handleCallback
+// ← Looper.loop ← ActivityThread.main）。所以测量重试的回调进场先判这个标志。
+let pageAlive = true;
 
 /** 歌词视口高度测量重试预算（与行高测量同理：量不到就整首歌都用估算几何） */
 let lyricCenterRetry = 0;
@@ -592,6 +1485,7 @@ let lyricCenterTimer: number | null = null;
 const LYRIC_CENTER_MAX_RETRY = 4;
 
 function measureLyricCenter(): void {
+  if (!pageAlive) return;
   lyricUnit = qtRpx(1);
   const query = uni.createSelectorQuery();
   query
@@ -632,6 +1526,7 @@ const LYRIC_MEASURE_MAX_RETRY = 4;
 
 /** 实测每行高度：selectAll 拿所有 .lyric-line 的 rect，整批有效才采纳 */
 function measureLyricLineHeights(): void {
+  if (!pageAlive) return;
   const seq = ++lyricMeasureSeq;
   const query = uni.createSelectorQuery();
   query
@@ -795,6 +1690,7 @@ function onLyricUserScroll(e: any): void {
   if (lyricTimesTimer != null) clearTimeout(lyricTimesTimer);
   lyricTimesTimer = setTimeout(() => {
     lyricTimesTimer = null;
+    if (!pageAlive) return;
     lyricTimesVisible.value = false;
     lyricTargetIndex.value = -1;
   }, 4000);
@@ -831,6 +1727,65 @@ function setLyricScrollTop(value: number, skipOpacity = false): void {
   }
   lyricScrollTop.value = value;
 }
+/**
+ * 逐字填充推进：把「当前唱到哪个词、这个词唱了多少」写进 karaokeWordIndex / karaokeFillPct。
+ *
+ * 两个 ref 的分工：词下标是**阶跃**量（一首歌只变几十次），填充比例是**连续**量（每帧都可能变）。
+ * 分开存是为了让「跨词」这类结构性变化与「同一词内推进」这类纯数值变化互不牵连——
+ * 后者只重算填充层的 width，不重建任何节点。
+ *
+ * 对表规则（锚点语义与 qt-pc interpolatedPositionMs 一致，但多了抗回退）：
+ * - 换行 → 无条件重锚；
+ * - 同一行内**正常回报** → 只往前对表：新锚点取 `max(报告值, 展示值)`。
+ *   报告值只允许把锚点往前推，绝不允许把锚点往回拽。展示值此刻通常已经
+ *   被帧内插值推到报告值前面（报告 100ms 粒度 + 链路延迟），若照报告值重锚，
+ *   画面就会被往回拽一次、下一帧再往前推 —— 一来一回正是「前后摆动」。
+ *   反过来若直接忽略报告值、只认展示值，则帧内插值与音频之间的缓慢漂移无法校正，
+ *   所以取 max：落后时吃报告值追上去，领先时保持不动。
+ * - 同一行内**大幅回跳**（往回拖进度条 / 单曲循环回跳）→ 重锚并放开只进不退的下限。
+ * 非逐字行一律 resetKaraoke()，保证换歌/换行后不会残留上一行的填充层。
+ */
+function stepKaraoke(lineIndex: number, progressSec: number): void {
+  const line = lyricLines.value[lineIndex];
+  if (line == null || line.words == null || line.words!.length == 0) {
+    resetKaraoke();
+    return;
+  }
+  if (dragging.value) {
+    // 拖动进度条预览：位置完全由手指决定，来回拖是正常操作，绝不能被「只进不退」挡住，
+    // 也不开插值（音频没在走）。无条件重锚并把展示下限压到当前预览位置。
+    karaokeAnchorLine = lineIndex;
+    karaokeBaseProgress = progressSec;
+    karaokeBaseAt = -1;
+    karaokeLastShown = progressSec;
+    applyKaraokeFill(lineIndex, progressSec);
+    return;
+  }
+  if (lineIndex != karaokeAnchorLine) {
+    // 换行：无条件重锚，展示下限也跟着落到新行起点
+    karaokeAnchorLine = lineIndex;
+    karaokeBaseProgress = progressSec;
+    karaokeBaseAt = -1;
+    karaokeLastShown = progressSec;
+  } else if (progressSec < karaokeLastShown - KARAOKE_REWIND_TOLERANCE_SEC) {
+    // 真回跳：重锚并放开下限，让填充能往后走
+    karaokeBaseProgress = progressSec;
+    karaokeBaseAt = -1;
+    karaokeLastShown = progressSec;
+  } else {
+    // 同一行内正常回报：只往前对表（见函数注释），向后一律不动
+    const base = progressSec > karaokeLastShown ? progressSec : karaokeLastShown;
+    if (base > karaokeBaseProgress) {
+      // 值前移 + 时刻作废（下一帧重新打点），两者必须成对更新：
+      // 只改值不改时刻，下一帧算出的 elapsed 会把「上一锚点到现在」的时间再加一遍
+      karaokeBaseProgress = base;
+      karaokeBaseAt = -1;
+    }
+  }
+  applyKaraokeFill(lineIndex, progressSec);
+  startKaraokeRaf();
+}
+
 function updateLyricScroll(force: boolean): void {
   const lines = lyricLines.value;
   if (lines.length == 0) {
@@ -845,12 +1800,24 @@ function updateLyricScroll(force: boolean): void {
   }
   let index = 0;
   const progress = player.progress;
+  // 偏移（正 = 歌词延后出现）在这里体现为「用 progress - offsetSec 去比时间轴」，
+  // 与 utils/lrc.uts 的 activeLyricIndex / desktop-lyric.uts 同口径。
+  // 只改比较对象，不动 lines[i].time（改了会让点行跳转 seek 到错误位置）。
+  const offsetSec = lyricOffsetSec();
   // 不能 break：单行时间异常（乱序/被误解析成很大的值）时 break 会把高亮钉死在前一行
   for (let i = 0; i < lines.length; i++) {
-    if (lines[i].time <= progress) index = i;
+    if (lines[i].time <= progress - offsetSec) index = i;
   }
   if (index != activeLyric.value) activeLyric.value = index;
-  if (!lyricVisible.value) {
+  // 逐字填充推进 + 刷新墙钟锚点，必须在歌词可见时才算：竖屏还没切到歌词视图时，
+  // 算出来的填充只换来一轮无用重绘（也没必要为此开 rAF）。
+  // 拖动期间本函数在上面已 return，预览由 applyLyricPreview 单独推进。
+  // 这里传原始进度：偏移由 stepKaraoke 内部减，重复减会算成两倍偏移。
+  if (lyricVisible.value) {
+    stepKaraoke(index, displayProgress.value);
+  } else {
+    // 歌词不可见（竖屏封面态）：撤掉填充层并停掉 rAF，别让定时器空转
+    resetKaraoke();
     return;
   }
   // 用户刚手动滑过（非 force）时不抢滚动位置；错过的归位记下来，窗口一结束就补上
@@ -908,12 +1875,20 @@ function format(seconds: number): string {
 function applyLyricPreview(seconds: number): void {
   const lines = lyricLines.value;
   let index = 0;
+  // 拖动预览与 updateLyricScroll 同口径：偏移体现为 seconds - offsetSec。
+  // 松手后 player.seek(seconds) 是不加偏移的（用户拖到的位置就是他要听的位置），
+  // 所以预览也必须按 seconds - offsetSec 取行，否则松手瞬间高亮会跳一行。
+  const offsetSec = lyricOffsetSec();
   // 同 updateLyricScroll：不 break，异常时间行不能影响其它行的取用
   for (let i = 0; i < lines.length; i++) {
-    if (lines[i].time <= seconds) index = i;
+    if (lines[i].time <= seconds - offsetSec) index = i;
   }
   activeLyric.value = index;
   if (!lyricVisible.value) return;
+  // 拖动预览也要跟着走逐字染色：拖动时 updateLyricScroll 在上面已 return，
+  // 这里补一次推进，松手前就能看到目标位置的唱词状态
+  // 传原始 seconds：偏移由 stepKaraoke 内部减，重复减会算成两倍偏移
+  stepKaraoke(index, seconds);
   // 预览只挪位置、不重算边缘渐隐：60+ 行整表重算 + 重绘是拖动卡顿的主因
   setLyricScrollTop(lyricScrollValue(index), true);
 }
@@ -981,6 +1956,7 @@ function measureProgTrack(): void {
  * 这里最多重试 3 次；期间圆点先用常量推算的几何定位，不会停在起点。
  */
 function measureProgTrackRetry(attempt: number): void {
+  if (!pageAlive) return;
   refreshProgFallback();
   const query = uni.createSelectorQuery();
   query
@@ -1111,6 +2087,7 @@ function doDownload(): void {
 function openArtistPage(): void {
   const current = player.current;
   if (current == null) return;
+  // 曲目上没有歌手 id，只能走名字搜索闭环（包内没有 id 时自动退回）
   uni.navigateTo({
     url:
       "/pages/artist/index?name=" +
@@ -1165,8 +2142,10 @@ function modeIconName(): string {
 async function switchQuality(): Promise<void> {
   const current = player.current;
   if (current == null) return;
-  // 音质档位来自数据包注册表（未装包为空 → 提示去设置页安装）
-  const qualities = sourceRegistry.qualities;
+  // 音质档位来自数据包注册表，并按当前歌曲的平台收敛（v5 契约：包侧声明了
+  // 该源可用档位，如 B 站无真无损就不展示 flac；未声明 = 全部档位）
+  //（未装包为空 → 提示去设置页安装）
+  const qualities = sourceRegistry.sourceQualities(current.platform);
   if (qualities.length == 0) {
     uni.showToast({ title: "请先在 设置→音源包管理 安装数据包", icon: "none" });
     return;
@@ -1272,7 +2251,11 @@ function onTouchEnd(event: UniTouchEvent): void {
   }
 }
 function seekToLine(line: LyricLine): void {
-  player.seek(line.time);
+  // 点行跳转要跳到「这行歌词真正该出现的那一刻」，所以是 line.time + 偏移
+  // （与 PC 侧 PlayingPage.tsx:196 `seekTo(ms + lyricOffset.offsetMs)` 同口径）。
+  // 注意：这与进度条 seek 的规则相反 —— onProgTouchEnd/seekBy 里绝不能加偏移，
+  // 用户拖到的位置就是他要听的位置。一个加一个不加是设计如此，不是笔误。
+  player.seek(line.time + lyricOffsetSec());
   // 点击行跳转：隐藏时间戳、清除手动滚动抑制，立即居中到该行并恢复自动跟随
   lyricUserScrollAt = 0;
   hideLyricTimes();
@@ -1461,40 +2444,94 @@ function clearQueue(): void {
   queueOpen.value = false;
 }
 
-import { parseLrc } from "@/utils/lrc";
+import { parseLrc, parseWordByWordLrc, mergeRomanization, wordProgressAt } from "@/utils/lrc";
+
+/**
+ * 歌词行构建：有逐字（音源包 wordByWord）就按逐字行渲染（自带时间轴，行文本由词拼出），
+ * 否则解析普通 LRC —— 老包/中文歌没有逐字，走的是后者，行为与改动前完全一致。
+ * 罗马音最后按时间戳就近合并（±500ms，与译文同口径，见 utils/lrc.mergeRomanization）。
+ */
+function buildLyricLines(
+  wordByWord: string,
+  text: string,
+  translation: string,
+  romanization: string
+): LyricLine[] {
+  let lines: LyricLine[] = [];
+  if (wordByWord.length > 0) {
+    lines = parseWordByWordLrc(wordByWord);
+    if (lines.length > 0 && translation.length > 0) {
+      // 逐字行不自带译文（译文是另一条 LRC）：按时间戳就近补挂，口径与 parseLrc 一致
+      const trs = parseLrc(translation, "");
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]!;
+        for (let j = 0; j < trs.length; j++) {
+          const tr = trs[j]!;
+          if (Math.abs(tr.time - line.time) < 0.05) {
+            line.translation = tr.text;
+            break;
+          }
+        }
+      }
+    }
+  }
+  // 逐字解析出 0 行（格式意外/源返回空）：退回普通 LRC，不能让歌词整片消失
+  if (lines.length == 0) lines = parseLrc(text, translation);
+  if (romanization.length > 0) lines = mergeRomanization(lines, romanization);
+  return lines;
+}
 
 async function loadLyric(): Promise<void> {
   const current = player.current;
   if (current == null) return;
-  // 必须与 ensureLyric 里的格式一致（id:platform），否则过期判断永远不成立
+  lyricLoading.value = true;
+  // loadedKey 是播放页自己的「当前已加载哪首歌」标记，格式必须与 ensureLyric() 里一致
+  // （同为 id:platform），否则两处算出的 key 永不相等，切歌过期判断会失效。
+  // 注意这与 services/music-api.ts 的歌词缓存键格式（platform:id）**故意不同**：
+  // 那个键用于查缓存，这个只用于比对「是不是同一首」，两者不需要也无法统一。
   const key = current.id + ":" + current.platform;
   // 取播放地址时已预热过歌词（musicApi.playUrl → prefetchLyric），命中缓存就**同步落地**：
   // 首次打开播放页直接出词，没有「先空一拍再补上」的断续感，也不再多发一次请求。
   const cached = musicApi.cachedLyric(current);
   if (cached.length > 0) {
-    const parsedCached = parseLrc(cached, musicApi.cachedLyricTranslation(current));
+    const parsedCached = buildLyricLines(
+      musicApi.cachedLyricWordByWord(current),
+      cached,
+      musicApi.cachedLyricTranslation(current),
+      musicApi.cachedLyricRomanization(current)
+    );
     qtDiag("[QT Lyric] " + current.name + "（" + key + "）命中预热缓存 " + cached.length
       + " 字符 → " + parsedCached.length + " 行");
     applyLyricLines(parsedCached.length == 0 ? [{ time: 0, text: "纯音乐，请欣赏" }] : parsedCached);
+    // 同步分支也必须复位：noLyricYet 靠它区分「还没取到词」与「这首歌没词」，
+    // 若留 true，会把「无词」强调色一直挂在常驻的「搜索歌词」入口上
+    lyricLoading.value = false;
     return;
   }
   let lines: LyricLine[] | null = null;
   try {
     const text = await musicApi.lyrics(current);
     const translation = await musicApi.lyricTranslation(current);
+    // 新字段（音源包 2026-10 起）：老包没有 → 空串 → buildLyricLines 走普通 LRC 路径
+    const wordByWord = await musicApi.lyricWordByWord(current);
+    const romanization = await musicApi.lyricRomanization(current);
     // 取词期间切了歌：本次结果作废（新歌的加载会自己落地），
     // 否则上一首的歌词会盖到新歌上
     if (key == loadedKey) {
-      const parsed = parseLrc(text, translation);
+      const parsed = buildLyricLines(wordByWord, text, translation, romanization);
       lines = parsed.length == 0 ? [{ time: 0, text: "纯音乐，请欣赏" }] : parsed;
       // 「歌词不跟随进度」全靠这两条日志判定：文本空/解析 0 行 = 数据侧；
       // 文本正常却不跟随 = 行高测量侧（配 measureLyricLineHeights 的失败日志）。
-      qtDiag("[QT Lyric] " + current.name + "（" + key + "）文本 " + text.length + " 字符 / 翻译 " + translation.length + " 字符 → " + lines.length + " 行");
+      qtDiag("[QT Lyric] " + current.name + "（" + key + "）文本 " + text.length + " 字符 / 翻译 "
+        + translation.length + " 字符 / 逐字 " + wordByWord.length + " 字符 / 罗马音 "
+        + romanization.length + " 字符 → " + lines.length + " 行");
     }
   } catch (e) {
     qtDiag("[QT Lyric] 播放页取词异常：" + (e != null ? e.toString() : ""));
     if (key == loadedKey) lines = [{ time: 0, text: "暂无歌词" }];
   }
+  // 无论结果如何都要复位：noLyricYet 只在 loading 为 false 时才可能为真
+  lyricLoading.value = false;
   if (lines == null) return;
   applyLyricLines(lines);
 }
@@ -1510,6 +2547,9 @@ function applyLyricLines(lines: LyricLine[]): void {
   lyricUserScrollAt = 0;
   lyricTouchAt = 0;
   lyricScrollPending = false;
+  // 换歌后上一首的逐字填充必须归零：残留的词下标/填充比例会让新歌词第一行
+  // 立刻带着上一首的填充边界，并且 rAF 还在按旧锚点外推
+  resetKaraoke();
   hideLyricTimes();
   setLyricScrollTop(0);
   // 歌词是异步插入的，等待 scroll-view 完成布局后重新测量并定位当前进度。
@@ -1533,8 +2573,14 @@ function ensureLyric(): void {
 
 onShow(() => {
   qtTrackPage("pages/player/index");
+  // 注册表是氛围底色/音质档位/跨源候选的来源，冷启动直接进播放页时也要拉一次
+  sourceRegistry.ensure();
   // 每次进入刷新调试入口可见性（角色缓存在登录/我的页拉取 /me 时更新）
   showPlayUrlEntry.value = isQtAdmin();
+  // 每次进入重读工具按钮开关（设置页改完返回要立即生效）。
+  // 必须带上名额口径：非管理员的「播放链接」不渲染、不占名额，否则它会把
+  // 刚开的第 5 个按钮从白名单里挤掉（表现为「设置了，返回又没了」）。
+  playerBar.restore((id: string): boolean => playerBarCountedShared(id, showPlayUrlEntry.value));
   // 设置页也能改倍速，返回时对齐本页显示
   syncRateIndex();
   // 返回播放页时立即从底层播放器同步一次进度，避免进度条停在起点后再跳变
@@ -1548,10 +2594,6 @@ onShow(() => {
 
 onMounted(() => {
   syncRateIndex();
-  try {
-    const saved = uni.getStorageSync(FONT_KEY) as number;
-    if (saved != null && saved >= 20 && saved <= 40) lyricFontSize.value = saved;
-  } catch (_) {}
   // 状态栏高度换算为 rpx（750 设计稿）
   const info = uni.getWindowInfo();
   if (info.statusBarHeight > 0) {
@@ -1572,7 +2614,13 @@ onMounted(() => {
       const c = player.current;
       return c != null ? c.id + ":" + c.platform : "";
     },
-    () => ensureLyric()
+    () => {
+      // 切歌后偏移编辑上下文要跟着换：否则用户在新歌上点「歌词偏移」，
+      // 弹层里改的仍是上一首的覆盖值（setActive 只影响编辑目标，
+      // 生效值一直是 offsetSecFor(player.current)，播放本身不会串）
+      lyricOffset.setActive(player.current);
+      ensureLyric();
+    }
   );
   watch(() => player.progress, () => updateLyricScroll(false));
   watch(() => layout.windowWidth + ":" + layout.windowHeight, () => {
@@ -1596,6 +2644,10 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  pageAlive = false;
+  // 逐字填充的 rAF 必须显式取消：虽然回调进场会判 pageAlive 直接返回，但句柄留着会一直
+  // 参加下一帧的回调队列，页面已经销毁还在空转（qt-mini-player.uvue:86-91 同款处理）。
+  stopKaraokeRaf();
   const st = sleepTimer;
   if (st != null) {
     clearInterval(st);
@@ -1621,6 +2673,12 @@ onUnmounted(() => {
     clearTimeout(lt);
   }
   lyricTimesTimer = null;
+  // 偏移弹层的轨道测量重试：离开页面后回调里的桥调用会抛 "UTS instance is not registered"
+  const ot = offsetTrackTimer;
+  if (ot != null) {
+    clearTimeout(ot);
+  }
+  offsetTrackTimer = null;
 });
 </script>
 <style>
@@ -1648,6 +2706,18 @@ onUnmounted(() => {
 .lyric-line { padding: 20rpx 0; align-items: center; justify-content: center; position: relative; }
 .lrc { width: 100%; text-align: center; }
 .lrc-active { font-weight: 700; }
+/* 逐字行：一行 <view> 横向排列若干「词容器」，靠 flex-wrap 换行（不能用 Web-only 的渐变裁字） */
+.lrc-karaoke { width: 100%; flex-direction: row; flex-wrap: wrap; justify-content: center; align-items: center; }
+/* 词容器：宽度恰好等于该词文本的自然宽度，作为填充层的定位基准（width:NN% 就是按它算的）。
+   flex-shrink: 0 + 文本 nowrap：词无论在底层还是填充层都必须保持同一宽度，
+   一旦被压缩或被折行，两层字形宽度就不等，裁剪边界会歪。 */
+.lrc-karaoke-item { position: relative; flex-direction: row; align-items: center; flex-shrink: 0; }
+.lrc-karaoke-word { font-weight: 700; flex-shrink: 0; white-space: nowrap; }
+/* 填充层：与底层同字同宽的高亮文本，按已唱比例裁掉右侧（Vapor 无 background-clip:text 的等价做法）。
+   高度撑满词容器（top/bottom:0），内部文本同样垂直居中，保证与底层文字完全重合。 */
+.lrc-karaoke-fill { position: absolute; left: 0; top: 0; bottom: 0; flex-direction: row; align-items: center; overflow: hidden; }
+/* 罗马音：与译文同字号同色系，排在主句之下的第二行副文本 */
+.lrc-roma { width: 100%; margin-top: 4rpx; text-align: center; }
 .lrc-tr { width: 100%; margin-top: 4rpx; text-align: center; }
 .lrc-tr-active { }
 .lyric-empty { height: 300rpx; align-items: center; justify-content: center; }
@@ -1684,6 +2754,14 @@ onUnmounted(() => {
 .preview-more { height: 28px; flex-direction: row; align-items: center; justify-content: center; }
 .preview-more-text { margin-right: 3px; color: rgba(255,255,255,0.56); font-size: 10px; }
 
+/* 歌词工具行：竖屏时落在工具图标行上方（播放栏的上面的上面），只在歌词视图出现 */
+.lyric-tools-row { height: 60rpx; margin-top: 8rpx; padding: 0 24rpx; flex-direction: row; align-items: center; justify-content: flex-end; }
+.lyric-tools-row-wide { height: 26px; margin-top: 6px; padding: 0 8px; }
+.lyric-tool { height: 52rpx; padding: 0 22rpx; margin-left: 16rpx; flex-direction: row; align-items: center; border-radius: 26rpx; }
+.lyric-tool-wide { height: 24px; padding: 0 10px; margin-left: 8px; border-radius: 12px; }
+.lyric-tool-text { margin-left: 8rpx; font-size: 22rpx; }
+.lyric-tool-text-wide { margin-left: 4px; font-size: 11px; }
+
 .progress-row { height: 58rpx; margin-top: 14rpx; padding: 0 24rpx; flex-direction: row; align-items: center; }
 .prog-time { width: 76rpx; font-size: 18rpx; text-align: center; }
 .prog-range { position: relative; flex: 1; height: 30rpx; margin: 0 12rpx; }
@@ -1714,6 +2792,28 @@ onUnmounted(() => {
 .sheet-actions { margin-left: auto; flex-direction: row; align-items: center; }
 .sheet-act { margin-left: 22rpx; }
 .sheet-list { flex: 1; }
+/* 偏移弹层：比通用 sheet 矮很多（只有一条滑块 + 一排按钮），宽屏下也收窄成对话框宽度 */
+.sheet-narrow { height: 46%; }
+.offset-body { padding: 10rpx 40rpx 40rpx; align-items: center; }
+.offset-value { font-size: 46rpx; font-weight: 700; }
+/* 轨道自身就是测量对象（offsetTrackWidth/offsetThumbLeft 读它），左右不留内边距，
+   这样 boundingClientRect.left 与 offsetFromClientX 的换算基准天然一致 */
+.offset-track { position: relative; width: 100%; height: 30rpx; margin-top: 34rpx; }
+.offset-rail { position: absolute; left: 0; right: 0; top: 10rpx; height: 10rpx; border-radius: 5rpx; }
+/* 圆点尺寸必须与 offsetThumbLeft() 里的 size 一致，改这里要同步改脚本 */
+.offset-thumb { position: absolute; top: 0; width: 36rpx; height: 36rpx; border-radius: 18rpx; }
+.offset-scale { width: 100%; margin-top: 14rpx; flex-direction: row; align-items: center; justify-content: space-between; }
+.offset-scale-text { font-size: 20rpx; }
+.offset-steps { margin-top: 30rpx; flex-direction: row; align-items: center; justify-content: center; }
+.offset-step { height: 64rpx; margin: 0 10rpx; padding: 0 26rpx; align-items: center; justify-content: center; border-radius: 32rpx; }
+.offset-step-text { font-size: 24rpx; }
+.offset-note { margin-top: 20rpx; font-size: 21rpx; text-align: center; line-height: 30rpx; }
+/* 候选行：左侧歌名/歌手，右侧平台角标 */
+.cand-row { height: 112rpx; margin: 0 34rpx 14rpx; padding: 0 24rpx; flex-direction: row; align-items: center; border-radius: 18rpx; }
+.cand-info { flex: 1; min-width: 0; overflow: hidden; }
+.cand-name { font-size: 27rpx; text-overflow: ellipsis; }
+.cand-meta { margin-top: 5rpx; font-size: 21rpx; text-overflow: ellipsis; }
+.cand-badge { margin-left: 14rpx; flex-shrink: 0; padding: 4rpx 12rpx; border-radius: 10rpx; font-size: 18rpx; }
 .queue-spacer { position: relative; width: 100%; }
 .queue-row { position: absolute; left: 0; right: 0; height: 104rpx; padding: 0 34rpx; flex-direction: row; align-items: center; }
 .queue-row-active { }
@@ -1740,6 +2840,11 @@ onUnmounted(() => {
 .lrc-hint-time-wide { font-size: 12px; }
 .lrc-wide { font-size: 16px; }
 .lrc-active-wide { }
+.lrc-karaoke-wide { }
+.lrc-karaoke-word-wide { }
+.lrc-karaoke-item-wide { }
+.lrc-karaoke-fill-wide { }
+.lrc-roma-wide { margin-top: 1px; }
 .lrc-tr-wide { margin-top: 1px; font-size: 12px; }
 .lyric-empty-wide { height: 160px; }
 .lrc-empty-wide { font-size: 15px; }
@@ -1753,9 +2858,22 @@ onUnmounted(() => {
 .prog-thumb-wide { width: 15px; height: 15px; top: 1px; border-radius: 8px; }
 .controls-wide { height: 46px; margin: 8px 8px 0; padding: 0 8px; }
 .control-side { width: 36px; height: 36px; align-items: center; justify-content: center; border-radius: 10px; }
+/* 横屏两翼等宽（flex:1）+ 中间播放键固定宽度 → 播放键恒在正中 */
+.control-wing { flex: 1; flex-direction: row; align-items: center; }
+.control-wing-left { justify-content: flex-start; }
+.control-wing-right { justify-content: flex-end; }
+.control-center-wide { flex-direction: row; align-items: center; }
+.center-play { margin: 0 14px; }
 .icon-main-wide { width: 42px; height: 42px; border-radius: 21px; }
 .mask-wide { justify-content: center; align-items: center; }
 .sheet-wide { width: 560px; height: 76%; border-radius: 16px; }
+.sheet-narrow-wide { width: 520px; height: 300px; }
+.offset-body-wide { padding: 8px 28px 26px; }
+.offset-value-wide { font-size: 28px; }
+.offset-thumb-wide { width: 22px; height: 22px; border-radius: 11px; }
+.cand-row-wide { height: 62px; margin: 0 24px 8px; padding: 0 16px; border-radius: 12px; }
+.cand-name-wide { font-size: 15px; }
+.cand-meta-wide { margin-top: 3px; font-size: 11px; }
 .sheet-handle-wide { width: 56px; height: 5px; margin-top: 10px; margin-bottom: 8px; border-radius: 3px; }
 .sheet-head-wide { height: 56px; padding: 0 24px; }
 .sheet-title-wide { font-size: 17px; }

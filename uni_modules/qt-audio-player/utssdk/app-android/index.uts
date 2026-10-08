@@ -22,6 +22,10 @@ import {
   nativeSetLyricTextColor,
   nativeSetLyricTypeface,
   nativeSetLyricWidth,
+  nativeSetLyricStroke,
+  nativeSetLyricShadow,
+  nativeSetLyricAlign,
+  nativeSetLyricBackground,
   isLyricWindowShowing,
   setLyricWindowChangedHook,
   toggleLyricWindowForNotification
@@ -92,7 +96,6 @@ import NotificationCompat from 'androidx.core.app.NotificationCompat'
 import Equalizer from 'android.media.audiofx.Equalizer'
 import AppWidgetManager from 'android.appwidget.AppWidgetManager'
 import AppWidgetProvider from 'android.appwidget.AppWidgetProvider'
-import ComponentName from 'android.content.ComponentName'
 import PendingIntent from 'android.app.PendingIntent'
 import RemoteViews from 'android.widget.RemoteViews'
 
@@ -109,16 +112,23 @@ let sharedPlayer: QtAudioPlayer | null = null
 let gMediaPlayer: ExoPlayer | null = null
 let gMediaSession3: MediaSession | null = null
 let gMediaController: MediaController | null = null
-let gCoverBitmap: Bitmap | null = null
+// MediaController 建连中标志：ensureMediaController 在首播路径可能被连续调用，
+// 而真正赋值 gMediaController 在后台建连线程里 —— 无标志时两条建连线程并发，
+// 后完成者覆盖先完成者且先者永不 release（泄漏一条到 session 的连接）
+let gControllerConnecting = false
 let gCoverUrl: string = ''
 let gPrepared: boolean = false
 let gLoadedSrc: string = ''
-let gNotifiedReady: boolean = false
+// 队列/单曲推送后等待首个 READY 标记就绪（推送前置位，READY 或 stop 时复位）。
+// 替代旧的 gNotifiedReady「只通知一次」状态机：那套在队列路径会首推即
+// startPlayback（违背 autoPlay=false 语义），且 stop 后永不复位（gPrepared
+// 卡在 false，进度轮询门禁 `mp != null && gPrepared` 整段失效）
+let gAwaitPrepare: boolean = false
 let gSrc: string = ''
 let gTitle: string = ''
 let gSinger: string = ''
 let gAlbum: string = ''
-let gHandler: Handler | null = null
+let gHandler: Handler = new Handler(Looper.getMainLooper())
 // 手动音频焦点：耳机/蓝牙媒体键由系统派发给「持有焦点的活跃会话」，
 // 必须自己申请并在暂停期间保持焦点，否则暂停后媒体键会被派给其他应用/无效。
 let gFocusListener: QtAudioFocusListener | null = null
@@ -134,6 +144,10 @@ let gFocusRequestGainMode: number = -1
 let gDucked: boolean = false
 // 让路时的播放器音量（相对系统音量，非绝对音量）
 const DUCK_VOLUME: number = 0.3
+// 用户音量（0–1，相对系统音量）。ExoPlayer.setVolume 是「覆盖式」而非「乘性」：
+// 每次调用都会把播放器增益整体替换掉，所以 duck/restore 不能各自硬编码 0.3 / 1.0，
+// 否则让路一次就把用户刚调的音量抹平。此处保存用户基准值，压低与还原都相对它算。
+let gUserVolume: number = 1.0
 // 播放倍速（0.5~3.0）。ExoPlayer 用 PlaybackParameters 做变速不变调，设置后跨曲目保持。
 let gPlaybackSpeed: number = 1.0
 const SPEED_MIN: number = 0.5
@@ -141,14 +155,13 @@ const SPEED_MAX: number = 3.0
 // 蓝牙/耳机断开自动暂停：becoming_noisy 广播接收器（与 ExoPlayer 内置处理双保险）
 
 // ==================== 音频磁盘缓存（SimpleCache + LRU） ====================
-// 缓存目录：应用 cacheDir/audio_cache；LRU 淘汰，上限由设置页下发（默认 1G，最大 4G）。
+// 缓存目录：应用 cacheDir/audio_cache；LRU 淘汰，上限由设置页下发（默认 1G，不设上限）。
 // 只挂在 HTTP 数据源链路上，content:// 本地文件不经过缓存。
 // 注意：LeastRecentlyUsedCacheEvictor 的 maxBytes 构造后不可变，
 // 修改上限需要在播放器空闲时释放缓存与播放器，下一次播放时按新上限重建。
 let gAudioCache: SimpleCache | null = null
 let gCacheLimitMb: number = 1024
 const CACHE_LIMIT_MIN_MB: number = 256
-const CACHE_LIMIT_MAX_MB: number = 4096
 
 function getAudioCache(context: Context): SimpleCache | null {
   if (gAudioCache != null) return gAudioCache
@@ -174,16 +187,19 @@ function releaseAudioCache(): void {
   gAudioCache = null
 }
 
-/** 设置音频缓存上限（MB）。播放中修改时待播放器释放后于下次播放生效 */
+/** 设置音频缓存上限（MB），不设上限。播放中修改时待播放器释放后于下次播放生效 */
 function nativeSetCacheLimit(mb: number): void {
   let limit = mb
+  // 只保留下界：LeastRecentlyUsedCacheEvictor 需要一个正的 maxBytes，
+  // 太小的值会让缓存在写入过程中立刻被自己淘汰，等于没有缓存
   if (!(limit > CACHE_LIMIT_MIN_MB)) limit = CACHE_LIMIT_MIN_MB
-  if (limit > CACHE_LIMIT_MAX_MB) limit = CACHE_LIMIT_MAX_MB
   if (limit == gCacheLimitMb) return
   gCacheLimitMb = limit
-  // 播放器空闲时立即重建链路；播放中不动（nativeStop 后下次播放重建）
-  if (gAudioCache != null && !isPlaying() && gMediaPlayer != null) {
-    nativeStop()
+  // 仅在「连播放器都没有」的空闲态立即重建缓存链路。暂停中（gMediaPlayer
+  // 存在、只是没在出声）绝不能走 nativeStop：那会拆掉整个播放会话（释放
+  // session/controller、停前台服务、通知消失），用户暂停听歌时调个设置就
+  // 丢现场。播放中/暂停中都不动，nativeStop 后下次播放自然按新上限重建
+  if (gAudioCache != null && gMediaPlayer == null) {
     releaseAudioCache()
   }
 }
@@ -266,10 +282,9 @@ let lastNextFireAt = 0
 // ==================== 工具 ====================
 
 function getHandler(): Handler {
-  if (gHandler == null) {
-    gHandler = new Handler(Looper.getMainLooper())
-  }
-  return gHandler!!
+  // 饿汉式：QtResolveResolver 在 ExoPlayer loader 线程调用本函数，与主线程并发
+  // 首次调用时懒初始化会各建一个 Handler（多一个闲置实例，还引入可见性竞态）
+  return gHandler
 }
 
 function getContext(): Context | null {
@@ -374,16 +389,37 @@ function resumeFromFocus(): void {
   }
 }
 
+/** 把当前有效音量应用到播放器（让路中则乘上压低倍率，否则就是用户音量） */
+function applyVolume(mp: ExoPlayer): void {
+  const effective = gDucked ? gUserVolume * DUCK_VOLUME : gUserVolume
+  try {
+    mp.setVolume(effective.toFloat())
+  } catch (e) {
+    console.log('[QT Audio] 音量设置失败: ' + (e != null ? e.toString() : 'unknown'))
+  }
+}
+
+/** 设置用户音量（0–1）：播放中立即生效并跨曲目/跨播放器重建保持 */
+function nativeSetVolume(volume: number): void {
+  let v = volume
+  // NaN 用 !(v >= 0) 拦下（NaN 参与任何比较都是 false，写成 v < 0 会漏过）
+  if (!(v >= 0)) v = 1.0
+  if (v > 1.0) v = 1.0
+  gUserVolume = v
+  const mp = gMediaPlayer
+  console.log('[QT Audio] 请求音量: ' + v + ' 播放器=' + (mp != null ? '已创建' : '未创建'))
+  // 让路中调整用户音量：applyVolume 会带上压低倍率，不会顺手把让路状态取消
+  if (mp != null) applyVolume(mp)
+}
+
 /** 部分场景：其他应用要求让路时压低本应用音量（不改系统音量，只调播放器自身增益） */
 function duckVolume(): void {
   const mp = gMediaPlayer
   if (mp == null) return
-  try {
-    mp.setVolume(DUCK_VOLUME.toFloat())
-    gDucked = true
-  } catch (e) {
-    // 忽略
-  }
+  // 压低是相对用户音量算的：setVolume 是覆盖式赋值，写死 0.3 会把用户音量
+  // 一并抹掉，让路结束后就还原不回用户设定值
+  gDucked = true
+  applyVolume(mp)
 }
 
 /** 焦点恢复 / 停止播放时还原音量；未压低过则跳过，避免覆盖用户/其他逻辑设置的音量 */
@@ -392,11 +428,8 @@ function restoreVolume(): void {
   gDucked = false
   const mp = gMediaPlayer
   if (mp == null) return
-  try {
-    mp.setVolume(1.0.toFloat())
-  } catch (e) {
-    // 忽略
-  }
+  // 还原到用户音量而非固定 1.0：让路只影响增益倍率，不改用户设定
+  applyVolume(mp)
 }
 
 /** 同时播放模式下申请焦点用的 gain 类型：全部场景用 MAY_DUCK 让对方共存而非停止 */
@@ -568,49 +601,10 @@ function stopProgressPolling(): void {
 
 // ==================== 封面加载 ====================
 
-class ApplyCoverRunnable implements Runnable {
-  private bitmap: Bitmap
-  constructor(bitmap: Bitmap) {
-    this.bitmap = bitmap
-  }
-  override run(): void {
-    gCoverBitmap = this.bitmap
-  }
-}
-
-class CoverRunnable implements Runnable {
-  private url: string
-  constructor(url: string) {
-    this.url = url
-  }
-  override run(): void {
-    try {
-      const connection = new URL(this.url).openConnection() as HttpURLConnection
-      connection.setConnectTimeout(5000)
-      connection.setReadTimeout(5000)
-      connection.setDoInput(true)
-      connection.connect()
-      const inputStream = connection.getInputStream()
-      const bitmap = BitmapFactory.decodeStream(inputStream)
-      inputStream.close()
-      connection.disconnect()
-      if (bitmap != null) {
-        getHandler().post(new ApplyCoverRunnable(bitmap))
-      }
-    } catch (e) {
-      // 忽略
-    }
-  }
-}
-
-function loadCoverBitmap(url: string): void {
-  if (url.length == 0) {
-    gCoverBitmap = null
-    return
-  }
-  const t = new Thread(new CoverRunnable(url))
-  t.start()
-}
+// 通知栏封面由 setBitmapLoader（coverLoader）按需加载；桌面小部件封面由
+// WidgetCoverRunnable 自持下载。旧的 gCoverBitmap/CoverRunnable 管线是
+// 死代码（位图无处消费却仍每次起线程下载整图、流关闭不在 finally），已移除；
+// audioSetCover / coverImgUrl 只记录 URL（供 AVRCP artworkUri / 元数据用）。
 
 // ==================== 播放队列（media3 时间线）+ 懒解析取链 ====================
 // 队列归 media3：JS 把整条播放队列推给原生时间线，条目 URI 用 qt-resolve:// 占位
@@ -625,6 +619,19 @@ function loadCoverBitmap(url: string): void {
 // 路由，不再需要 ForwardingPlayer 覆写和 KeyEvent 手动解析。
 
 const RESOLVE_SCHEME = 'qt-resolve'
+
+/**
+ * loader 线程等 JS 回填解析结果的上限。
+ *
+ * 不变量（2026-10-03 弱网修复）：必须**大于** JS 侧
+ * `stores/player.ts` 的 `URL_FETCH_BUDGET_MS`（现 10s）。JS 先超时并回
+ * `resolveFail`，这里只是「JS 回调链路本身卡住」的兜底；反过来（这里
+ * 先到）会出现「原生抛 IOException，JS 才刚拿到地址」的错配，
+ * 于是取链成功却被当成失败 → 白白触发重取与自动切歌。
+ *
+ * 15s = 10s + 5s 余量，与 `services/source-engine.uts` 的
+ * `PLAY_TIMEOUT_MS = 12s` 同口径。改那边必须同步复核这里。
+ */
 const RESOLVE_TIMEOUT_SECONDS: Long = 15
 
 /** 一次解析请求：loader 线程持有 latch 等待，JS 回填后放行 */
@@ -642,7 +649,13 @@ const gPendingResolves = new ConcurrentHashMap<string, PendingResolve>()
 // 已解析地址记忆：seek/缓存空洞会对同一条目反复 open，直接复用上次结果，
 // 不再过 JS 桥（消除重入竞态与等待）。只在成功解析时写入，整条重推时清空
 // （refetch 流程要拿新地址，靠 setPlaylist 清）。
-const gResolvedUrls = new HashMap<string, string>()
+// 同样三线程并发（loader get/put、JS 桥 put/remove、主线程 clear），必须
+// ConcurrentHashMap：普通 HashMap 并发扩容会坏表
+const gResolvedUrls = new ConcurrentHashMap<string, string>()
+// mediaId → 该条目的磁盘缓存 key（= qt-resolve 占位地址串，CacheDataSource 用它作 key）。
+// 解析器建连时记录；「提前结束」自愈时据此精准清除单首歌的缓存分片（清整盘要停播放，太重）。
+// 与 gResolvedUrls 同线程组（loader put / 主线程读），沿用 ConcurrentHashMap
+const gCacheKeyByMid = new ConcurrentHashMap<string, string>()
 let cbResolveRequest: AudioResolveRequestCallback | null = null
 let cbTrackChanged: AudioTrackChangedCallback | null = null
 
@@ -672,6 +685,8 @@ class QtResolveResolver implements ResolvingDataSource.Resolver {
     if (mediaId == null || mediaId.length == 0) {
       throw new IOException('qt-resolve 地址缺少 mid 参数: ' + uri.toString())
     }
+    // 记录本条目的缓存 key（CacheDataSource 的 key = 占位地址串），供提前结束自愈精准清除
+    gCacheKeyByMid.put(mediaId, dataSpec.uri.toString())
     // seek/断点续传等重开场景：直接复用上次的解析结果，零等待零竞态
     const memo = gResolvedUrls.get(mediaId)
     if (memo != null && memo.length > 0) {
@@ -736,13 +751,33 @@ export function audioResolveFail(mediaId: string): void {
   req.latch.countDown()
 }
 
-/** JS 注册切歌事件：原生自动切歌 / seekTo 定位都会触发，参数 = 新条目 mediaId */
+/** JS 注册切歌事件：原生自动切歌 / seekTo 定位都会触发，参数 = 新条目 mediaId + 是否自然播到头引发 */
 export function audioOnTrackChanged(callback: AudioTrackChangedCallback | null): void {
   cbTrackChanged = callback
 }
 
-function fireTrackChanged(mediaId: string): void {
-  cbTrackChanged?.invoke(mediaId)
+/**
+ * 精准清除单首歌的磁盘缓存分片（「提前结束」自愈用）：流被截断/缓存内容异常导致条目
+ * 在远离末尾的位置就被视为播完时，JS 侧重放该歌前调用，避免重放再次命中同一份坏缓存。
+ * key 在解析器建连时已记录；从未建连（纯在线/无缓存）返回 false。
+ */
+export function audioEvictSongCache(mediaId: string): boolean {
+  const cache = gAudioCache
+  if (cache == null || mediaId.length == 0) return false
+  const key = gCacheKeyByMid.get(mediaId)
+  if (key == null || key.length == 0) return false
+  try {
+    cache.removeResource(key)
+    console.log('[QT Audio] 已清除缓存分片: ' + mediaId)
+    return true
+  } catch (e) {
+    console.log('[QT Audio] 清除缓存分片失败: ' + (e != null ? e.toString() : 'unknown'))
+    return false
+  }
+}
+
+function fireTrackChanged(mediaId: string, naturalEnd: boolean): void {
+  cbTrackChanged?.invoke(mediaId, naturalEnd)
 }
 
 /** 队列条目 → MediaItem（mediaId/元数据随条目走：通知栏、车机蓝牙 AVRCP 都用它） */
@@ -792,6 +827,7 @@ export function audioSetPlaylist(items: AudioPlaylistItem[], startIndex: number,
     const posSec = startPositionSec > 0 ? startPositionSec : 0
     const posMs: Long = (posSec * 1000).toLong()
     mp.setMediaItems(list, start, posMs)
+    gAwaitPrepare = true
     mp.prepare()
     if (autoPlay) {
       // 音频焦点（已持有则跳过）：与旧 nativePlay 一致，播放意图出现时申请
@@ -801,6 +837,8 @@ export function audioSetPlaylist(items: AudioPlaylistItem[], startIndex: number,
       firePlay()
     }
   } catch (e) {
+    // 推送失败时清掉等待标志：否则下一次无关的 READY 会被误记为已就绪
+    gAwaitPrepare = false
     fireError('推送播放队列失败: ' + (e != null ? e.toString() : 'unknown'))
   }
 }
@@ -866,9 +904,20 @@ export function audioSyncTimeline(items: AudioPlaylistItem[], expectedCurrentMid
   try {
     const curItem = mp.getCurrentMediaItem()
     if (curItem == null || curItem.mediaId != expectedCurrentMid) return
+    // 期望列表必须包含当前曲目：否则下面的差量删除会把正在播的条目删掉，
+    // media3 自动跳条目造成一次计划外的 trackChanged，「无损同步」被打破。
+    // JS 侧 syncTimeline 已兜底追加当前曲，这里是原生侧的最后防线
+    let containsCurrent = false
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].mediaId == expectedCurrentMid) {
+        containsCurrent = true
+        break
+      }
+    }
+    if (!containsCurrent) return
     // 1) 删除：从后往前删掉「期望列表里不存在」的条目（倒序删不影响未处理下标）
     for (let i = mp.getMediaItemCount() - 1; i >= 0; i--) {
-      const it = mp.getMediaItemAt(i)
+      const it = mp.getMediaItemAt(i.toInt())
       let wanted = false
       for (let j = 0; j < items.length; j++) {
         if (items[j].mediaId == it.mediaId) {
@@ -876,7 +925,7 @@ export function audioSyncTimeline(items: AudioPlaylistItem[], expectedCurrentMid
           break
         }
       }
-      if (!wanted) mp.removeMediaItem(i)
+      if (!wanted) mp.removeMediaItem(i.toInt())
     }
     // 2) 增/移：把期望顺序逐位对齐 —— 期望位 want 的条目在原生时间线 want 之后
     //    找不到就在该位插入，找到但不在该位就移动过去
@@ -913,9 +962,17 @@ class QtPlayerListener extends Player.Listener {
     if (state == Player.STATE_READY) {
       // 首个条目就绪 = 音频会话 id 已可用，这里惰性补挂 EQ
       attachEqualizerIfNeeded()
-      if (!gNotifiedReady) {
-        gNotifiedReady = true
-        onPrepared()
+      if (gAwaitPrepare) {
+        gAwaitPrepare = false
+        gPrepared = true
+        if (gSrc.length > 0) {
+          // 旧单曲 API（gSrc 驱动）保留原 onPrepared 语义：canplay + 起播兜底
+          onPrepared()
+        } else {
+          // 队列路径：就绪只发 canplay，播放意图由 audioSetPlaylist 的
+          // autoPlay 显式表达，这里不再代为 startPlayback
+          fireCanplay()
+        }
       } else {
         fireCanplay()
       }
@@ -929,7 +986,11 @@ class QtPlayerListener extends Player.Listener {
     // 队列切换的事实来源：原生自动切歌（reason=AUTO，播完衔接）、JS 定位跳转（SEEK）、
     // 重推队列（PLAYLIST_CHANGED）都汇到这里，JS 侧按 mediaId 对账更新当前曲目/封面/UI
     const mid = mediaItem != null ? mediaItem.mediaId : ''
-    fireTrackChanged(mid)
+    // naturalEnd = 播到头自然引发的切换（AUTO=衔接下一首 / REPEAT=循环重启本条目）。
+    // JS 靠它识别「内容提前结束」：截断流/坏缓存时 media3 视为正常播完，无错误事件
+    const naturalEnd = reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO
+      || reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
+    fireTrackChanged(mid, naturalEnd)
     // 桌面小部件跟随切歌刷新标题/歌手/封面
     updateWidgetFromPlayer()
   }
@@ -974,8 +1035,6 @@ class QtPlayerListener extends Player.Listener {
   }
 }
 
-// ==================== 媒体会话 + 系统媒体通知（MediaSessionService） ====================
-// 用 Android 13+ 系统媒体控件：由一个 active 的媒体3 MediaSession 驱动，通知由 MediaSessionService 自动
 // ==================== 媒体会话 + 系统媒体通知（MediaSessionService） ====================
 // 用 Android 13+ 系统媒体控件：由一个 active 的媒体3 MediaSession 驱动，通知由 MediaSessionService 自动
 // 按会话状态填充（标题/歌手/封面/播放状态/上一首-播放暂停-下一首）。
@@ -1131,11 +1190,8 @@ function ensureMediaNotifChannel(context: Context): void {
 }
 
 
-// 会话回调：自行解析媒体键并派发上一首/下一首。
-// 实测（Android 13+ / 自定义基座 / Redmi）通知栏与耳机键的「下一首」会到达本回调
-// （日志能打出「收到媒体键」），但 super 的默认实现不会把 KEYCODE_MEDIA_NEXT 落到
-// 被重写的 ForwardingPlayer.seekToNext 上，事件被静默吞掉 —— 表现就是
-// 「通知栏点下一首经常不切歌」。这里显式解析 KeyEvent 并直接派发，不再依赖 super。
+// 会话回调：媒体键由 media3 按 timeline 原生路由（旧版曾在这里覆写
+// onMediaButtonEvent 手动解析 KeyEvent 派发上一首/下一首，1.11 起不再需要）。
 class QtSessionCallback extends MediaSession.Callback {
   // 控制器（系统媒体控件/通知 provider）必须在 onConnect 里声明「可用命令」，
   // 才拿得到自定义命令——否则「桌面歌词」按钮不会出现在通知栏。
@@ -1246,17 +1302,21 @@ class ControllerConnectRunnable implements Runnable {
       // 连接失败不影响播放（仅通知栏可能不显示），记录日志便于排查
       console.log('[QT Audio] MediaController 连接失败: ' + (e != null ? e.toString() : 'unknown'))
     }
+    // 无论成败都清建连中标志：失败时下次播放还能重试建连
+    gControllerConnecting = false
   }
 }
 
 function ensureMediaController(): void {
-  if (gMediaController != null) return
+  if (gMediaController != null || gControllerConnecting) return
   const appContext = UTSAndroid.getAppContext()
   if (appContext == null) return
+  gControllerConnecting = true
   try {
     const t = new Thread(new ControllerConnectRunnable(appContext))
     t.start()
   } catch (e) {
+    gControllerConnecting = false
     fireError('控制器创建失败: ' + (e != null ? e.toString() : 'unknown'))
   }
 }
@@ -1324,6 +1384,9 @@ function buildPlayerOnce(): void {
   attachPlayerListener(exo)
   // 播放器新建时套用当前倍速（设置页可能早于首次播放已经设过倍速）
   applySpeed(exo)
+  // 音量同理：ExoPlayer 新建后增益回到 1.0，用户设定值存在模块级 gUserVolume 里，
+  // 不重新下发的话「停止后再播」就会把用户音量悄悄重置成满音量
+  applyVolume(exo)
   // 队列迁移后播放器直接进会话（无 ForwardingPlayer 包装），媒体键由 media3 原生路由
   ensureMediaSession()
 }
@@ -1334,7 +1397,7 @@ function loadAndPlay(url: string): void {
   try {
     gLoadedSrc = url
     gPrepared = false
-    gNotifiedReady = false
+    gAwaitPrepare = true
     stopProgressPolling()
     // 前一曲结束(ENDED)时先复位，避免从结束态加载新曲失败
     if (mp.getPlaybackState() == Player.STATE_ENDED) {
@@ -1441,6 +1504,8 @@ function nativeStop(): void {
     }
     gMediaPlayer = null
   }
+  // EQ 随播放器销毁：释放原生音效资源并复位挂载标志（下次建播放器重挂新 session）
+  releaseEqualizer()
   // 注销 becoming_noisy 接收器，避免泄漏；下次播放重建
   // 释放 ForwardingPlayer、MediaController 与 MediaSession（下次播放时 buildPlayerOnce 重建）
   const ctrl = gMediaController
@@ -1459,12 +1524,21 @@ function nativeStop(): void {
   }
   gMediaSession3 = null
   gPrepared = false
+  gAwaitPrepare = false
+  gControllerConnecting = false
   gLoadedSrc = ''
-  gCoverBitmap = null
   gCoverUrl = ''
   gTitle = ''
   gSinger = ''
   gAlbum = ''
+  // 小部件回到空态：否则停止播放后仍显示上一首歌与最后的播放图标
+  // （updateWidgetFromPlayer 对 mp==null 早退，这里直接刷新视图）
+  gWidgetTitle = '轻听音乐'
+  gWidgetArtist = '轻听音乐，想听就听'
+  gWidgetPlaying = false
+  gWidgetCoverUrl = ''
+  gWidgetBitmap = null
+  refreshWidgetViews()
   // 停止时还原让路音量并释放音频焦点
   restoreVolume()
   abandonAudioFocus()
@@ -1515,9 +1589,13 @@ function startMediaService(context: Context): void {
   }
 }
 
-// ==================== 对外暴露的播放器（前端使用） ====================
+// ==================== 播放器实现（前端经下方模块级函数使用；本类不导出） ====================
+// 不导出 `class QtAudioPlayer` 的原因见 utssdk/index.uts 中同类声明的说明：
+// 导出类会让 UTS 编译器生成 `UTSBridge.registerJavaScriptClassInstance` 桥，
+// 从而注入 INVISIBLE_REFERENCE 抑制警告。前端从不 new 本类，故去掉 export
+// 不影响运行时行为（本文件内 sharedPlayer 只是单例留痕，无读取方）。
 
-export class QtAudioPlayer {
+class QtAudioPlayer {
   private coverUrl: string = ''
 
   onPlay(callback: AudioPlayerVoidCallback | null): void { cbPlay = callback }
@@ -1552,7 +1630,6 @@ export class QtAudioPlayer {
   set coverImgUrl(value: string) {
     this.coverUrl = value
     gCoverUrl = value
-    loadCoverBitmap(value)
   }
 
   get currentTime(): number {
@@ -1586,7 +1663,7 @@ export class QtAudioPlayer {
   stop(): void { nativeStop() }
   seek(seconds: number): void { nativeSeek(seconds) }
 
-  /** 设置音频磁盘缓存上限（MB），默认 1024，范围 256~4096 */
+  /** 设置音频磁盘缓存上限（MB），默认 1024，不设上限（最小 256） */
   setCacheLimit(mb: number): void { nativeSetCacheLimit(mb) }
 
   /** 同时播放模式：0 不允许（默认）/ 1 部分场景 / 2 全部场景。立即生效并保持到下次设置 */
@@ -1691,6 +1768,8 @@ class QtAudioService extends MediaSessionService {
       }
       gMediaPlayer = null
     }
+    // EQ 随会话销毁：兜底释放（正常停止路径已在 nativeStop 释放并复位标志）
+    releaseEqualizer()
     super.onDestroy()
   }
 }
@@ -1791,10 +1870,9 @@ export function audioSetTitle(title: string): void { gTitle = title }
 export function audioSetSinger(singer: string): void { gSinger = singer }
 /** 设置专辑名（AVRCP 元数据 album/albumArtist，车载屏第二行） */
 export function audioSetAlbum(album: string): void { gAlbum = album }
-/** 设置通知栏封面地址并加载位图 */
+/** 设置通知栏封面地址（仅记录 URL 供元数据/artworkUri 使用；位图由 setBitmapLoader 按需加载） */
 export function audioSetCover(url: string): void {
   gCoverUrl = url
-  loadCoverBitmap(url)
 }
 
 /** 当前播放位置（秒）；播放器未创建时返回 0 */
@@ -1857,6 +1935,30 @@ function attachEqualizerIfNeeded(): void {
   } catch (e) {
     console.log('[QT Audio] EQ 挂载失败: ' + (e != null ? e.toString() : 'unknown'))
   }
+}
+
+/**
+ * 释放当前 EQ 并复位挂载标志。播放器销毁后音频会话 id 作废：
+ * 不释放会泄漏原生音效资源；gEqAttached 不复位的话，新播放器的新
+ * session id 永远挂不上 EQ（attachEqualizerIfNeeded 恒早退），EQ 静默
+ * 失效直到进程重启。nativeStop / 服务 onDestroy 都要调用。
+ */
+function releaseEqualizer(): void {
+  const eq = gEqualizer
+  if (eq != null) {
+    try {
+      eq.setEnabled(false)
+    } catch (e) {
+      // 忽略
+    }
+    try {
+      eq.release()
+    } catch (e) {
+      // 忽略
+    }
+  }
+  gEqualizer = null
+  gEqAttached = false
 }
 
 
@@ -2073,8 +2175,11 @@ function widgetHandleAction(action: string | null): void {
   }
 }
 
-/** 桌面小部件提供器：系统绑定/更新时铺一次当前状态；按钮广播直接驱动播放器 */
-export class QtWidgetProvider extends AppWidgetProvider {
+/** 桌面小部件提供器：系统绑定/更新时铺一次当前状态；按钮广播直接驱动播放器
+ * 不导出：原因同上（导出类会引入 INVISIBLE_REFERENCE 抑制警告）。
+ * 类名与 FQN 不变，AndroidManifest 仍以 `uts.sdk.modules.qtAudioPlayer.QtWidgetProvider`
+ * 引用；文件末尾的 `_forceWidgetProvider` 实例保证其不被摇树裁掉。 */
+class QtWidgetProvider extends AppWidgetProvider {
   // 继承平台类必须显式构造并 super()（同 QtAudioService），否则 Kotlin 报
   // 「This type has a constructor, so it must be initialized here」
   constructor() {
@@ -2222,6 +2327,28 @@ export function audioSetEqualizerEnabled(on: boolean): void {
     console.log('[QT Audio] EQ 开关失败: ' + (e != null ? e.toString() : 'unknown'))
   }
 }
+
+// ==================== 用户音量 ====================
+// 追加在文件末尾（而非与 audioSetSpeed 并列）：UTS 插件的 JS 代理 methodId 按导出
+// 声明顺序生成，插在中间会让后面所有导出整体错位，与旧基座方法表对不上。
+/**
+ * 设置用户音量（0–1，相对系统音量）。静音由 JS 侧下发 0 实现，原生不单独维护静音态：
+ * 静音只是「音量值下发为 0」，用户原音量仍保存在 JS storage 里，取消静音时原样回传，
+ * 原生侧无需区分「静音」与「音量调到 0」这两种语义。
+ */
+export function audioSetVolume(volume: number): void { nativeSetVolume(volume) }
+
+// ==================== 桌面歌词样式扩展（描边 / 阴影 / 对齐 / 背景） ====================
+// 同 audioSetVolume：必须追加在文件末尾，不能插进 :2217-2226 的 audioLyric* 组里，
+// 否则 methodId 错位。
+/** 文字描边（开关 + 宽度 dp 0.5–4.0） */
+export function audioLyricSetStroke(enabled: boolean, width: number): void { nativeSetLyricStroke(enabled, width) }
+/** 阴影开关（主行 + 翻译行） */
+export function audioLyricSetShadow(enabled: boolean): void { nativeSetLyricShadow(enabled) }
+/** 静止对齐 "left" | "center" | "right" */
+export function audioLyricSetAlign(align: string): void { nativeSetLyricAlign(align) }
+/** 背景（模式 "none" | "solid" + ARGB 有符号 Int32 + 不透明度 0–1） */
+export function audioLyricSetBackground(mode: string, colorArgb: number, opacity: number): void { nativeSetLyricBackground(mode, colorArgb, opacity) }
 
 // ==================== 桌面小部件类强制生成 ====================
 // uni-app-x 只编译「被 new 实例化」的 UTS 类：三个 QtWidget*Provider 仅被 manifest 字符串

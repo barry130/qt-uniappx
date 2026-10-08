@@ -4,7 +4,7 @@
  * 本项目以 Android 为主，此处保证接口可编译；实际调用方对返回值做降级处理。
  */
 
-import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, PickFileResult, PickJsFile } from "../interface.uts";
+import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, IsIgnoringBatteryOptimizations, OpenBatteryOptimizationSettings, OpenAutoStartSettings, OpenAppDetailsSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, PickFileResult, PickJsFile, PermissionState, QueryPermissionStates, OpenPermissionSettings } from "../interface.uts";
 
 export const openExternalUrl: OpenExternalUrl = (url: string): boolean => {
   if (url == null || url.length == 0) return false;
@@ -46,6 +46,27 @@ export const openNotificationSettings: OpenNotificationSettings = function (): b
   return false;
 };
 
+// iOS 没有 Android 那套 Doze/电池优化白名单概念，恒视为已放行（true），
+// 这样调用方在 iOS 上不会弹「后台可能被限制」的引导。
+export const isIgnoringBatteryOptimizations: IsIgnoringBatteryOptimizations = function (): boolean {
+	return true;
+};
+
+// iOS 无对应系统设置页（电池/自启动管理由系统按后台刷新策略自行决定），恒返回 false 由调用方降级。
+export const openBatteryOptimizationSettings: OpenBatteryOptimizationSettings = function (): boolean {
+	return false;
+};
+
+export const openAutoStartSettings: OpenAutoStartSettings = function (): boolean {
+	return false;
+};
+
+// iOS 可用 UIApplicationOpenSettingsURLString 打开本应用设置页，但本项目以 Android 为主，
+// 保持占位返回 false，由调用方按返回值降级为文字提示。
+export const openAppDetailsSettings: OpenAppDetailsSettings = function (): boolean {
+	return false;
+};
+
 // 本地音频扫描仅 Android 提供（MediaStore）；iOS 以沙盒为主，返回空数组由调用方提示。
 export const scanLocalAudio: ScanLocalAudio = function (onResult: (items: LocalAudioItem[]) => void): void {
 	onResult([]);
@@ -71,4 +92,21 @@ export const deleteLocalMedia: DeleteLocalMedia = function (items: LocalAudioIte
 // 为主，恒回调失败，由调用方隐藏「本地文件安装」入口/降级提示。
 export const pickJsFile: PickJsFile = function (onResult: (result: PickFileResult) => void): void {
 	onResult({ ok: false, name: "", content: "", message: "当前平台不支持本地文件安装" } as PickFileResult);
+};
+
+// iOS 的授权模型与 Android 的 android.permission.* 不是一套（通知/相册/麦克风
+// 各自独立 API，且没有「所有文件访问」「悬浮窗」这类概念），用 Android 的 id
+// 去查只会得到错误的结论。此处一律标 unknown=true，让页面显示「无法确定」
+// 而不是误报「未授权」——本项目以 Android 为主，权限页在 iOS 上退化为说明性列表。
+export const queryPermissionStates: QueryPermissionStates = function (ids: string[]): PermissionState[] {
+	const out: PermissionState[] = [];
+	for (let i = 0; i < ids.length; i++) {
+		out.push({ id: ids[i], applicable: true, granted: false, unknown: true } as PermissionState);
+	}
+	return out;
+};
+
+// iOS 没有与 Android 权限条目一一对应的设置页入口，恒返回 false 由调用方降级提示。
+export const openPermissionSettings: OpenPermissionSettings = function (id: string): boolean {
+	return false;
 };

@@ -59,6 +59,8 @@ import { computed } from "vue";
 import { useQtLayout, qtStatusBarPx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useSourceStore } from "@/stores/source";
+import { useSourceRegistryStore } from "@/stores/source-registry";
 
 const props = defineProps<{
   /** 当前 tab 页路由，用于高亮（如 /pages/home/index） */
@@ -81,13 +83,29 @@ const tabs: NavItem[] = [
   { page: "/pages/home/index", label: "发现", icon: "compass" },
   { page: "/pages/profile/index", label: "我的", icon: "user" },
 ];
-const tools: NavItem[] = [
+// 工具区：每日推荐/歌单广场/排行榜按数据包声明的**功能面**过滤（v4 契约）：
+// 所有源都没有该功能时入口整行消失，不留死入口；未声明（旧包）按支持处理。
+// 榜单页本身有各源标签且会落到第一个有榜单的源，因此「排行榜」按聚合判断；
+// 每日推荐/歌单广场按当前源判断（页面数据取自当前源）。
+const ALL_TOOLS: NavItem[] = [
   { page: "/pages/search/index", label: "搜索", icon: "search" },
   { page: "/pages/daily/index", label: "每日推荐", icon: "calendar" },
   { page: "/pages/playlists/index", label: "歌单广场", icon: "disc" },
   { page: "/pages/chart/index", label: "排行榜", icon: "trending" },
   { page: "/pages/settings/index", label: "设置", icon: "settings" },
 ];
+const sourceRegistry = useSourceRegistryStore();
+const sourceStore = useSourceStore();
+const tools = computed<NavItem[]>(() => {
+  const out: NavItem[] = [];
+  for (const tool of ALL_TOOLS) {
+    if (tool.page == "/pages/daily/index" && !sourceRegistry.supports(sourceStore.current, "latest")) continue;
+    if (tool.page == "/pages/playlists/index" && !sourceRegistry.supports(sourceStore.current, "playlists")) continue;
+    if (tool.page == "/pages/chart/index" && !sourceRegistry.anySupports("charts")) continue;
+    out.push(tool);
+  }
+  return out;
+});
 
 function itemActive(page: string): boolean {
   return props.current == page;

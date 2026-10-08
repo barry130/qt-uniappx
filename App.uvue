@@ -1,7 +1,11 @@
 <script setup lang="uts">
 import { usePlayerStore } from '@/stores/player'
 import { useDownloadsStore } from '@/stores/downloads'
+import { useDislikesStore } from '@/stores/dislikes'
+import { useLyricOffsetStore } from '@/stores/lyric-offset'
 import { useSourceStore } from '@/stores/source'
+import { playerBarCounted, usePlayerBarStore } from '@/stores/player-bar'
+import { isQtAdmin } from '@/services/music-api'
 import { useThemeStore } from '@/uni_modules/qt-ui/stores/theme'
 import { useNoticeStore } from '@/stores/notice'
 import { audioPlayer } from '@/services/audio-player'
@@ -19,7 +23,7 @@ import {
   offerLabel,
 } from '@/services/source-update'
 import type { PackUpdateOffer } from '@/services/source-update'
-import { exitApp, ensureNotificationPermission, openNotificationSettings, applyLegacyInsets } from '@/services/app-native'
+import { exitApp, ensureNotificationPermission, openNotificationSettings, applyLegacyInsets, isIgnoringBatteryOptimizations, openBatteryOptimizationSettings } from '@/services/app-native'
 import { refreshQtLayout, pauseQtLayoutWatcher, resumeQtLayoutWatcher } from '@/uni_modules/qt-ui/composables/use-qt-layout'
 import { installBootGuard } from '@/services/boot-guard'
 import { refreshMe } from '@/services/user-cache'
@@ -50,7 +54,17 @@ onLaunch(() => {
   desktopLyric.restore()
   usePlayerStore().restore()
   useDownloadsStore().restore()
+  // 不喜欢列表：放在 player 之后（player restore 只加载数据不推时间线），
+  // 但必须在用户任何播放动作之前就绪——启动后首次 play/pushTimeline 就要按它过滤
+  useDislikesStore().restore()
+  // 歌词偏移（全局默认 + 按曲目覆盖）：纯本地偏好，播放页取当前行时按它换算，
+  // 所以必须在首次渲染歌词之前就绪
+  useLyricOffsetStore().restore()
   useSourceStore().restore()
+  // 播放页工具按钮开关（设置 → 播放页按钮）：纯本地展示偏好。
+  // 必须带名额口径：非管理员的「播放链接」不渲染、不占名额，否则恢复时会把
+  // 白名单里的第 5 个按钮当成超额项截掉（表现为「设置了，返回又没了」）。
+  usePlayerBarStore().restore((id: string): boolean => playerBarCounted(id, isQtAdmin()))
   useThemeStore().init()
   // 酷我 Cookie 鉴权随音源包走（bundle 内惰性初始化），启动无需本端预热
   // 启动时检查/请求通知栏权限（Android 13+ 弹系统授权框，并说明用途）
@@ -227,6 +241,45 @@ function checkNotificationPermission(): void {
   })
 }
 
+/**
+ * 后台保活引导（一次性）。
+ *
+ * 背景：锁屏 / 切后台后系统进入 Doze 会掐掉后台网络，此时「下一首」取链会失败，
+ * 用户看到的是「播放突然断了」而不是「系统限制了后台」。播放本身有前台服务
+ * （QtAudioService，mediaPlayback 类型）保活，但部分国产 ROM 的省电策略更激进，
+ * 必须由用户手动把本应用加进电池优化白名单 / 允许自启动。
+ *
+ * 只提示一次（storage 记住），且启动后延迟 6s——不打断冷启动的官方校验/更新检查。
+ * 查询失败时原生侧返回 true（视为已放行），所以不会误报。
+ */
+const BATTERY_GUIDE_KEY = 'qt-battery-guide-shown'
+
+function guideBatteryOptimization(): void {
+  if (isIgnoringBatteryOptimizations()) return
+  try {
+    if (uni.getStorageSync(BATTERY_GUIDE_KEY) == '1') return
+  } catch (_) {}
+  // 标记先写：用户中途杀进程也不该重复打扰（设置页里随时能手动改）
+  try {
+    uni.setStorageSync(BATTERY_GUIDE_KEY, '1')
+  } catch (_) {}
+  uni.showModal({
+    title: '让后台播放更稳定',
+    content:
+      '检测到本应用未加入电池优化白名单，锁屏或切到后台后系统可能限制网络，导致自动播放下一首失败。\n建议在系统设置中允许后台运行。',
+    confirmText: '去设置',
+    cancelText: '暂不',
+    confirmColor: themeStore.skin.accent,
+    success: (res) => {
+      if (!res.confirm) return
+      const ok = openBatteryOptimizationSettings()
+      if (!ok) {
+        uni.showToast({ title: '无法打开设置页，请手动在 设置→电池 中放行', icon: 'none' })
+      }
+    },
+  })
+}
+
 /** 启动主流程（顺序执行） */
 async function runStartup(): Promise<void> {
   // 1. 校验是否为官方 APP：非官方则提示并 3S 后自动退出
@@ -258,6 +311,10 @@ async function runStartup(): Promise<void> {
 
   // 3. 加载 APP 公告
   useNoticeStore().load().catch(() => {})
+  // 4. 后台保活引导：延迟到冷启动流程之后，避免和官方校验/更新弹窗抢焦点
+  setTimeout(() => {
+    guideBatteryOptimization()
+  }, 6000)
 }
 </script>
 

@@ -21,9 +21,10 @@
  */
 
 import { usePlayerStore } from "@/stores/player";
+import { useLyricOffsetStore } from "@/stores/lyric-offset";
 import { musicApi } from "@/services/music-api";
 import { qtDiag } from "@/services/diag";
-import { parseLrc, activeLyricIndex } from "@/utils/lrc";
+import { parseLrc, activeLyricIndex, parseWordByWordLrc, mergeRomanization } from "@/utils/lrc";
 import type { LyricLine, Song } from "@/types/music";
 // #ifdef APP-ANDROID
 // 歌词窗接口直接走模块级函数（无实例桥接，见 services/audio-player.uts 头部说明），
@@ -40,6 +41,10 @@ import {
   audioLyricSetTextColor,
   audioLyricSetTypeface,
   audioLyricSetWidth,
+  audioLyricSetStroke,
+  audioLyricSetShadow,
+  audioLyricSetAlign,
+  audioLyricSetBackground,
   audioOnLyricWindowChanged,
 } from "@/uni_modules/qt-audio-player";
 // #endif
@@ -49,6 +54,14 @@ const KEY_FONT = "qt-desktop-lyric-font";
 const KEY_COLOR = "qt-desktop-lyric-color";
 const KEY_TF = "qt-desktop-lyric-tf";
 const KEY_WIDTH = "qt-desktop-lyric-width";
+/** 样式扩展（描边 / 阴影 / 对齐 / 背景）：一个设置项一个 key，与既有风格一致 */
+const KEY_STROKE_ON = "qt-desktop-lyric-stroke-on";
+const KEY_STROKE_W = "qt-desktop-lyric-stroke-w";
+const KEY_SHADOW = "qt-desktop-lyric-shadow";
+const KEY_ALIGN = "qt-desktop-lyric-align";
+const KEY_BG_MODE = "qt-desktop-lyric-bg-mode";
+const KEY_BG_COLOR = "qt-desktop-lyric-bg-color";
+const KEY_BG_OPACITY = "qt-desktop-lyric-bg-opacity";
 
 const FONT_MIN = 6;
 const FONT_MAX = 60;
@@ -56,6 +69,26 @@ const FONT_DEFAULT = 18;
 const WIDTH_MIN = 50;
 const WIDTH_MAX = 95;
 const WIDTH_DEFAULT = 80;
+/** 描边宽度 dp（0.5–4.0），与 PC 端 LyricWindowState.stroke_width 的 clamp 区间一致 */
+const STROKE_MIN = 0.5;
+const STROKE_MAX = 4.0;
+const STROKE_DEFAULT = 1.0;
+const BG_OPACITY_DEFAULT = 0.6;
+const ALIGN_DEFAULT = "center";
+const BG_MODE_DEFAULT = "none";
+const BG_COLOR_DEFAULT = "#000000";
+
+/**
+ * 字符串枚举校验：非法值回落默认（同原生 normalizeEnum）。
+ * 用显式 for 循环而不是 Array.some：UTS 侧 some 在本仓库没有先例，回调跨语言
+ * 传递未经验证，indexOf/for 是既有代码里唯一用过的写法。
+ */
+function normalizeEnum(raw: string, allowed: string[], fallback: string): string {
+  for (let i = 0; i < allowed.length; i++) {
+    if (raw == allowed[i]) return raw;
+  }
+  return fallback;
+}
 
 /** 简单延时（毫秒）：空歌词重试前稍等，避免对真·纯音乐歌曲连打两次请求 */
 function delay(ms: number): Promise<void> {
@@ -76,6 +109,14 @@ class DesktopLyricService {
   private lastLineIndex: number = -2;
   private lastProgress: number = -1;
   private fetching: boolean = false;
+  /**
+   * 取词世代号：每次「歌词来源变了」（手选换来源 / 恢复自动）自增。
+   * 在途取词回来时世代号对不上就丢弃结果 —— 光靠 currentSongKey 判断不够，
+   * 换来源时歌没变、key 也没变，旧来源的歌词会被当成新结果推上悬浮窗。
+   */
+  private lyricEpoch: number = 0;
+  /** 取词在途时又来了新需求（换来源/切歌），回来后再拉一次，别把请求吞掉 */
+  private pendingReload: boolean = false;
   /**
    * 上一次「显式」变更显隐的时间戳（应用内开关 / 原生回调）。
    * 原生显隐是 post 到主线程异步执行的：enable() 返回时窗口还没真的加进去，
@@ -264,6 +305,15 @@ class DesktopLyricService {
   /** 开关不持久化，启动后始终是关闭状态；原生悬浮窗可能仍在（上次运行留下的），启动先对一次账 */
   restore(): void {
     this.refreshFromNative()
+    // 样式扩展下发：这些值在原生侧也有一份 SharedPreferences，正常是自洽的；
+    // 但用户清过应用数据、或 JS 侧 key 与原生 prefs 不同步时，以 JS storage 为准重推一次，
+    // 保证设置页显示什么、悬浮窗就是什么
+    // #ifdef APP-ANDROID
+    audioLyricSetStroke(this.getStrokeEnabled(), this.getStrokeWidth())
+    audioLyricSetShadow(this.getShadowEnabled())
+    audioLyricSetAlign(this.getAlign())
+    this.pushBackground()
+    // #endif
   }
 
   // ---------- 配置 ----------
@@ -339,6 +389,189 @@ class DesktopLyricService {
     // #endif
   }
 
+  // ---------- 样式扩展：描边 / 阴影 / 对齐 / 背景 ----------
+
+  getStrokeEnabled(): boolean {
+    try {
+      const raw = uni.getStorageSync(KEY_STROKE_ON) as string;
+      return raw == "1";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /** 描边宽度（dp，0.5–4.0，默认 1.0）。步进 0.1 由 UI 侧保证，这里只做区间兜底 */
+  getStrokeWidth(): number {
+    try {
+      const raw = uni.getStorageSync(KEY_STROKE_W) as string;
+      const v = parseFloat(raw);
+      // NaN 与任何值比较都是 false，!(v >= MIN) 同时挡住 NaN 与下越界
+      if (!(v >= STROKE_MIN)) return STROKE_DEFAULT;
+      if (v > STROKE_MAX) return STROKE_MAX;
+      return v;
+    } catch (_) {
+      return STROKE_DEFAULT;
+    }
+  }
+
+  /** 设置描边（开关 + 宽度）。一次下发两个字段：原生导出本身就是成对的 */
+  setStrokeEnabled(on: boolean): void {
+    try {
+      uni.setStorageSync(KEY_STROKE_ON, on ? "1" : "0");
+    } catch (_) {}
+    this.pushStroke();
+  }
+
+  setStrokeWidth(w: number): void {
+    let value = w;
+    if (!(value >= STROKE_MIN)) value = STROKE_MIN;
+    if (value > STROKE_MAX) value = STROKE_MAX;
+    try {
+      uni.setStorageSync(KEY_STROKE_W, value.toString());
+    } catch (_) {}
+    this.pushStroke();
+  }
+
+  getShadowEnabled(): boolean {
+    try {
+      const raw = uni.getStorageSync(KEY_SHADOW) as string;
+      // 默认开：未设置过时返回 true（与 PC 端 LyricWindowState.shadow 默认一致）
+      if (raw.length == 0) return true;
+      return raw == "1";
+    } catch (_) {
+      return true;
+    }
+  }
+
+  setShadowEnabled(on: boolean): void {
+    try {
+      uni.setStorageSync(KEY_SHADOW, on ? "1" : "0");
+    } catch (_) {}
+    // #ifdef APP-ANDROID
+    audioLyricSetShadow(on);
+    // #endif
+  }
+
+  /** 静止对齐："left" | "center" | "right"，默认 "center" */
+  getAlign(): string {
+    try {
+      const raw = uni.getStorageSync(KEY_ALIGN) as string;
+      return normalizeEnum(raw, ["left", "center", "right"], ALIGN_DEFAULT);
+    } catch (_) {
+      return ALIGN_DEFAULT;
+    }
+  }
+
+  setAlign(v: string): void {
+    const value = normalizeEnum(v, ["left", "center", "right"], ALIGN_DEFAULT);
+    try {
+      uni.setStorageSync(KEY_ALIGN, value);
+    } catch (_) {}
+    // #ifdef APP-ANDROID
+    audioLyricSetAlign(value);
+    // #endif
+  }
+
+  /** 背景模式："none" | "solid"，默认 "none" */
+  getBackgroundMode(): string {
+    try {
+      const raw = uni.getStorageSync(KEY_BG_MODE) as string;
+      return normalizeEnum(raw, ["none", "solid"], BG_MODE_DEFAULT);
+    } catch (_) {
+      return BG_MODE_DEFAULT;
+    }
+  }
+
+  setBackgroundMode(v: string): void {
+    const value = normalizeEnum(v, ["none", "solid"], BG_MODE_DEFAULT);
+    try {
+      uni.setStorageSync(KEY_BG_MODE, value);
+    } catch (_) {}
+    this.pushBackground();
+  }
+
+  /** 背景色（hex 字符串，如 "#000000"） */
+  getBackgroundColor(): string {
+    try {
+      const raw = uni.getStorageSync(KEY_BG_COLOR) as string;
+      if (raw.length == 7 && raw.charAt(0) == "#") return raw;
+      return BG_COLOR_DEFAULT;
+    } catch (_) {
+      return BG_COLOR_DEFAULT;
+    }
+  }
+
+  setBackgroundColor(hex: string): void {
+    try {
+      uni.setStorageSync(KEY_BG_COLOR, hex);
+    } catch (_) {}
+    this.pushBackground();
+  }
+
+  /** 背景不透明度（0–1，默认 0.6） */
+  getBackgroundOpacity(): number {
+    try {
+      const raw = uni.getStorageSync(KEY_BG_OPACITY) as string;
+      const v = parseFloat(raw);
+      if (!(v >= 0)) return BG_OPACITY_DEFAULT;
+      if (v > 1) return 1;
+      return v;
+    } catch (_) {
+      return BG_OPACITY_DEFAULT;
+    }
+  }
+
+  setBackgroundOpacity(v: number): void {
+    let value = v;
+    if (!(value >= 0)) value = 0;
+    if (value > 1) value = 1;
+    try {
+      uni.setStorageSync(KEY_BG_OPACITY, value.toString());
+    } catch (_) {}
+    this.pushBackground();
+  }
+
+  /**
+   * 把「背景模式 + 颜色 + 不透明度」折算成一次原生调用。
+   * 三个设置项共用一个原生导出（nativeSetLyricBackground 同时收三参），
+   * 所以任何一个变化都要把另外两个当前值一起带上，否则原生侧会用到过期值。
+   */
+  private pushBackground(): void {
+    // #ifdef APP-ANDROID
+    audioLyricSetBackground(this.getBackgroundMode(), this.hexToArgb(this.getBackgroundColor()), this.getBackgroundOpacity());
+    // #endif
+  }
+
+  /** 描边开关与宽度同理成对下发 */
+  private pushStroke(): void {
+    // #ifdef APP-ANDROID
+    audioLyricSetStroke(this.getStrokeEnabled(), this.getStrokeWidth());
+    // #endif
+  }
+
+  /**
+   * "#RRGGBB" → 有符号 Int32 形态的 ARGB（Alpha 置满）。
+   *
+   * 与 setColor 完全同一套换算：整串 parseInt 超过 Int32 上限会溢出，所以逐通道解析后
+   * 拼值；原生侧 Double.toInt() 超出 Int 范围是「饱和」不是「回绕」，必须先在这里转成
+   * 有符号 Int32（≥ 2^31 时减 2^32）再下发，否则颜色全变 0x7FFFFFFF 半透明白。
+   * 解析失败（长度/字符非法）时回落默认黑，而不是把 NaN 发下去。
+   */
+  private hexToArgb(hex: string): number {
+    if (hex.length < 7 || hex.charAt(0) != "#") {
+      return -16777216.0; // 0xFF000000
+    }
+    const r = parseInt(hex.substring(1, 3), 16);
+    const g = parseInt(hex.substring(3, 5), 16);
+    const b = parseInt(hex.substring(5, 7), 16);
+    if (r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255) {
+      let value = 4278190080.0 + r * 65536.0 + g * 256.0 + b;
+      if (value >= 2147483648.0) value = value - 4294967296.0;
+      return value;
+    }
+    return -16777216.0;
+  }
+
   // ---------- 跟随播放 ----------
 
   private startFollowing(): void {
@@ -358,6 +591,7 @@ class DesktopLyricService {
     this.lines = [];
     this.loadedKey = "";
     this.lastLineIndex = -2;
+    this.pendingReload = false;
     const player = usePlayerStore();
     player.removeDesktopLyricHook();
   }
@@ -371,6 +605,28 @@ class DesktopLyricService {
     this.loadLyricForCurrent();
   }
 
+  /**
+   * 歌词来源变了（播放页手选换来源 / 恢复自动取词）：作废已装载的歌词并重拉。
+   *
+   * 不能指望 notifySongChanged：那个入口认的是 platform:id，换来源时歌没变、
+   * key 也没变，loadLyricForCurrent 第一行的 `key == loadedKey` 直接短路返回，
+   * 悬浮窗就永远停在旧来源的歌词上（用户反馈「搜索歌词换了，桌面歌词没更新」）。
+   */
+  notifyLyricChanged(): void {
+    // 世代号自增：在途取词回来时对不上就丢弃，否则旧来源的歌词会覆盖新结果
+    this.lyricEpoch++;
+    this.loadedKey = "";
+    this.lastLineIndex = -2;
+    if (!this.active) return;
+    if (this.fetching) {
+      // 正取着词：请求已被世代号作废，但不能在这里直接返回 ——
+      // 那个在途请求结束时不会再有人触发重拉，必须留个标记让它收尾时补
+      this.pendingReload = true;
+      return;
+    }
+    this.loadLyricForCurrent();
+  }
+
   private onProgress(progress: number): void {
     if (!this.active) return;
     // 原生 onTime 200ms 回调一次；暂停/拖动时进度不动，用变化量粗筛避免无谓遍历
@@ -381,7 +637,14 @@ class DesktopLyricService {
 
   private pushActiveLine(progress: number): void {
     if (this.lines.length == 0) return;
-    const index = activeLyricIndex(this.lines, progress);
+    // 歌词偏移与播放页同口径：判定用「进度 - 偏移」，正偏移 = 歌词延后出现
+    // （见 stores/lyric-offset.ts 头部与 qt-pc PlayingPage.tsx:106 的
+    // findActiveIndex(lines, position - lyricOffset.offsetMs)）。
+    // 绝不能改歌词行的 time 字段 —— 那会让拖动进度条时的高亮对不上。
+    // 取当前歌算偏移而不是读 store 的 activeKey：桌面歌词是独立跟随的，
+    // 用户可能在播放页给「别的歌」设过偏移（activeKey 是编辑上下文，不是正在播的歌）。
+    const offsetSec = useLyricOffsetStore().offsetSecFor(usePlayerStore().current);
+    const index = activeLyricIndex(this.lines, progress - offsetSec);
     if (index == this.lastLineIndex) return;
     this.lastLineIndex = index;
     const line = index >= 0 ? this.lines[index] : null;
@@ -389,8 +652,13 @@ class DesktopLyricService {
     if (line == null || line.text.length == 0) {
       audioLyricUpdate(" · · · ", "");
     } else {
-      const tr = line.translation != null ? line.translation! : "";
-      audioLyricUpdate(line.text, tr);
+      // 第二行副文本优先级：罗马音 > 译文（与 PC 端 LyricWindow.tsx:435 同口径）。
+      // 「下一句预览」在原生窗里做不了：audioLyricUpdate 只有 (主行, 副行) 两个参数，
+      // 且悬浮窗只有两行 TextView，故这里只到译文为止。
+      const second = line.romanization != null && line.romanization!.length > 0
+        ? line.romanization!
+        : (line.translation != null ? line.translation! : "");
+      audioLyricUpdate(line.text, second);
     }
     // #endif
   }
@@ -423,6 +691,8 @@ class DesktopLyricService {
     if (this.fetching) return;
     this.fetching = true;
     this.loadedKey = key;
+    // 本轮的世代号：在途期间用户换歌词来源（notifyLyricChanged 会 ++）就作废本次结果
+    const epoch = this.lyricEpoch;
     try {
       let text = await musicApi.lyrics(current);
       if (text.length == 0) {
@@ -437,11 +707,50 @@ class DesktopLyricService {
       } catch (_) {
         translation = "";
       }
-      // 取词期间切了歌：本次结果作废，不能把上一首的歌词推给悬浮窗
-      if (this.active && this.currentSongKey() == key) {
-        const lines = parseLrc(text, translation);
+      // 起手先同步读一次缓存：musicApi.lyrics() 内部可能已把新字段写进缓存，
+      // 晚一步读能多命中一次；读不到就空串，走普通 LRC 路径（老包/中文歌即如此）
+      let wordByWord = musicApi.cachedLyricWordByWord(current);
+      if (wordByWord.length == 0) {
+        try {
+          wordByWord = await musicApi.lyricWordByWord(current);
+        } catch (_) {
+          wordByWord = "";
+        }
+      }
+      let romanization = musicApi.cachedLyricRomanization(current);
+      if (romanization.length == 0) {
+        try {
+          romanization = await musicApi.lyricRomanization(current);
+        } catch (_) {
+          romanization = "";
+        }
+      }
+      // 取词期间切了歌或换了歌词来源：本次结果作废，不能把上一首/上一来源的歌词推给悬浮窗
+      if (this.active && this.currentSongKey() == key && this.lyricEpoch == epoch) {
+        // 有逐字就按逐字行渲染（自带时间轴、行文本由词拼出），没有就解析普通 LRC ——
+        // 与播放页同口径。逐字在这里不做逐词染色：原生窗只有一个 TextView 且是按行推的
+        // （行变化才推一次，见 pushActiveLine），没有逐帧刷新的通道，染色无从落地。
+        let lines = wordByWord.length > 0
+          ? parseWordByWordLrc(wordByWord)
+          : parseLrc(text, translation);
+        if (wordByWord.length > 0 && translation.length > 0) {
+          // 逐字行没有译文（译文是另一条 LRC），按时间戳就近补挂，口径与 parseLrc 一致
+          const trs = parseLrc(translation, "");
+          for (let i = 0; i < lines.length; i++) {
+            const line = lines[i] as LyricLine;
+            for (let j = 0; j < trs.length; j++) {
+              const tr = trs[j] as LyricLine;
+              if (Math.abs(tr.time - line.time) < 0.05) {
+                line.translation = tr.text;
+                break;
+              }
+            }
+          }
+        }
+        if (romanization.length > 0) lines = mergeRomanization(lines, romanization);
         qtDiag("[QT Lyric] 桌面歌词 " + key + " 文本 " + text.length + " 字符 / 翻译 "
-          + translation.length + " 字符 → " + lines.length + " 行");
+          + translation.length + " 字符 / 逐字 " + wordByWord.length + " 字符 / 罗马音 "
+          + romanization.length + " 字符 → " + lines.length + " 行");
         if (lines.length == 0) {
           this.lines = [];
           this.lastLineIndex = -2;
@@ -456,7 +765,7 @@ class DesktopLyricService {
       }
     } catch (e) {
       qtDiag("[QT Lyric] 桌面歌词取词异常：" + (e != null ? e.toString() : ""));
-      if (this.active && this.currentSongKey() == key) {
+      if (this.active && this.currentSongKey() == key && this.lyricEpoch == epoch) {
         this.lines = [];
         this.lastLineIndex = -2;
         // #ifdef APP-ANDROID
@@ -471,6 +780,11 @@ class DesktopLyricService {
     // 取词途中切了歌：立刻补拉当前歌，否则要等到下一次切歌才恢复
     const curKey = this.currentSongKey();
     if (this.active && curKey.length > 0 && curKey != key) this.loadLyricForCurrent();
+    // 取词途中换了歌词来源：本次结果已被世代号作废，这里补拉新来源
+    else if (this.pendingReload) {
+      this.pendingReload = false;
+      if (this.active) this.loadLyricForCurrent();
+    }
   }
 
   /** 歌词加载完成或切歌后，立即按当前进度推一次 */
@@ -478,6 +792,21 @@ class DesktopLyricService {
     const player = usePlayerStore();
     this.lastProgress = -1;
     this.onProgress(player.progress);
+  }
+
+  /**
+   * 偏移改动后立即重算当前行。
+   *
+   * 不能只依赖下一次进度回调：暂停时进度不变，onProgress 会被
+   * `Math.abs(progress - lastProgress) < 0.1` 挡住，用户改完偏移看不到任何反应；
+   * 而且 lastLineIndex 未变时 pushActiveLine 也会提前 return。
+   * 这里把两者都清掉再推一次（播放页改完偏移后调）。
+   */
+  notifyOffsetChanged(): void {
+    if (!this.active) return;
+    this.lastProgress = -1;
+    this.lastLineIndex = -2;
+    this.pushActiveLine(usePlayerStore().progress);
   }
 }
 

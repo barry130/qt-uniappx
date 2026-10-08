@@ -35,6 +35,14 @@
           <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
         </view>
       </view>
+      <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="goDislikes">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="ban" :size="36" color="#d97b66" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">不喜欢列表</text>
+        <view class="cell-right">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ dislikesCountText() }}</text>
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+      </view>
     </view>
 
     <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
@@ -63,13 +71,15 @@
         </view>
       </view>
       <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="showConcurrent">
-        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="volume" :size="36" color="#4fb186" />
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="sliders" :size="36" color="#4fb186" />
         <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">同时播放</text>
         <view class="cell-right">
           <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ concurrentText() }}</text>
           <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
         </view>
       </view>
+      <!-- 播放音量已移除：音量条与系统媒体音量重复，日常都是按音量键，
+           这里留着反而占一整块（用户要求删除）。静音/音量键仍可由系统侧控制。 -->
     </view>
 
     <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
@@ -97,6 +107,14 @@
           <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
         </view>
       </view>
+      <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="showDownloadConcurrency">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="download" :size="36" color="#6d8fd6" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">同时下载数</text>
+        <view class="cell-right">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ downloadConcurrencyText() }}</text>
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+      </view>
       <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="showCacheLimit">
         <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="download" :size="36" color="#4fb186" />
         <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">音乐缓存上限</text>
@@ -114,12 +132,36 @@
       </view>
     </view>
 
+    <!-- 播放页展示设置已拆成独立页面（原来这一组 11 行占满设置页，用户要求分开） -->
+    <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="goPlayerBar">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="sliders" :size="36" color="#5f9ea0" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">播放页展示</text>
+        <view class="cell-right">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">已展示 {{ barToolCounted }}/{{ maxVisible }}</text>
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+      </view>
+    </view>
+
     <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
       <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="goDesktopLyric">
         <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="music" :size="36" color="#4fb186" />
         <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">桌面歌词</text>
         <view class="cell-right">
           <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ lyricOn ? "已开启" : "已关闭" }}</text>
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+      </view>
+    </view>
+
+    <!-- 电池优化白名单 / 自启动管理已并入「权限管理」页（与其它授权项同一处查看与跳转） -->
+    <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="goPermissions">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="lock" :size="36" color="#6d8fd6" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">权限管理</text>
+        <view class="cell-right">
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">查看授权状态</text>
           <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
         </view>
       </view>
@@ -149,6 +191,31 @@
       :actions="sheetActions"
       @select="onSheetSelect"
     />
+
+    <!-- 自定义缓存上限：页内输入弹层（uni.showModal 的 editable 输入框在 App 端不渲染） -->
+    <view v-if="cacheSheetVisible" class="cache-mask" @click="closeCacheSheet">
+      <view class="cache-card" :class="layout.isWide ? 'cache-card-wide' : ''" :style="layout.isWide ? cacheCardStyleWide : cacheCardStyle" @click.stop>
+        <text class="cache-title" :class="layout.isWide ? 'cache-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">自定义缓存上限</text>
+        <text class="cache-desc" :class="layout.isWide ? 'cache-desc-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">输入缓存大小（MB，≥ {{ cacheLimitMinMb }}，不设上限）</text>
+        <input
+          class="cache-input"
+          :class="layout.isWide ? 'cache-input-wide' : ''"
+          :style="layout.isWide ? cacheInputStyleWide : cacheInputStyle"
+          type="number"
+          :value="cacheSheetValue"
+          @input="onCacheSheetInput"
+          placeholder="1024"
+          :placeholder-class="layout.isWide ? 'cache-ph-wide' : 'cache-ph'"
+          :maxlength="6"
+          :focus="cacheSheetVisible"
+        />
+        <text v-if="cacheSheetError.length > 0" class="cache-error" :class="layout.isWide ? 'cache-error-wide' : ''" :style="'color:' + theme.skin.danger + ';'">{{ cacheSheetError }}</text>
+        <view class="cache-btn-row" :class="layout.isWide ? 'cache-btn-row-wide' : ''">
+          <qt-button class="cache-btn" label="取消" variant="ghost" size="sm" @click="closeCacheSheet" />
+          <qt-button class="cache-btn" label="确定" variant="secondary" size="sm" @click="submitCacheSheet" />
+        </view>
+      </view>
+    </view>
     </scroll-view>
   </view>
   </qt-page-frame>
@@ -157,25 +224,45 @@
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { computed, ref, onUnmounted } from "vue";
+import { computed, onUnmounted, ref } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import { audioPlayer } from "@/services/audio-player";
 import { desktopLyric } from "@/services/desktop-lyric";
 import { usePlayerStore } from "@/stores/player";
-import { useDownloadsStore } from "@/stores/downloads";
+import {
+  useDownloadsStore,
+  DOWNLOAD_CONCURRENCY_MIN,
+  DOWNLOAD_CONCURRENCY_MAX,
+  DOWNLOAD_CONCURRENCY_WARN_ABOVE,
+  DOWNLOAD_CONCURRENCY_DEFAULT,
+} from "@/stores/downloads";
+import { useLyricOffsetStore } from "@/stores/lyric-offset";
+import { useDislikesStore } from "@/stores/dislikes";
 import { useSourceStore } from "@/stores/source";
 import { useSourceRegistryStore } from "@/stores/source-registry";
+import {
+  PLAYER_BAR_MAX_VISIBLE,
+  playerBarCounted,
+  usePlayerBarStore,
+} from "@/stores/player-bar";
+import { isQtAdmin } from "@/services/music-api";
 import { platformLabel } from "@/services/platform";
 import { useSourceUpdateStore } from "@/stores/source-update";
 import { clearCachedMe } from "@/services/user-cache";
 
 const player = usePlayerStore();
 const downloads = useDownloadsStore();
+const dislikes = useDislikesStore();
+const lyricOffset = useLyricOffsetStore();
 const sourceStore = useSourceStore();
 const registry = useSourceRegistryStore();
+const playerBar = usePlayerBarStore();
+/** playUrl 开关只对 qt_admin 展示（与播放页的入口可见性同一权限来源） */
+const qtAdmin = ref(isQtAdmin());
 const layout = useQtLayout();
 const theme = useThemeStore();
 const groupStyle = computed<string>(() => "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";");
@@ -208,11 +295,24 @@ function onSheetSelect(_action: SheetAction, index: number): void {
   if (cb) cb(index);
 }
 
+/**
+ * 播放页展示设置已拆成独立页面（pages/player-bar/index）。
+ * 设置页只留一行入口，右侧显示「已展示 N/5」，所以这里仍需保留计数口径。
+ */
+const maxVisible = PLAYER_BAR_MAX_VISIBLE;
+/** 计数口径：把当前不可能出现的项（非管理员的播放链接）排除 */
+const countedTool = (id: string): boolean => playerBarCounted(id, qtAdmin.value);
+const barToolCounted = computed<number>(() => playerBar.countVisible(countedTool));
+
 onShow(() => {
   downloads.restore();
   currentRate.value = audioPlayer.rate;
   concurrentMode.value = audioPlayer.getConcurrentMode();
   sourceStore.restore();
+  // 权限缓存可能在「我的」页刷新过；工具按钮开关也可能被两端共用存储改过。
+  // restore 必须带名额口径，否则非管理员恢复时会把不渲染的「播放链接」当占位截断。
+  qtAdmin.value = isQtAdmin();
+  playerBar.restore(countedTool);
   registry.ensure();
   sourceUpdateStore.refresh();
   // 从系统授权页返回时刷新开关状态（去授权前开关先记为开，返回后真实生效状态以权限为准）
@@ -226,9 +326,35 @@ function goEq(): void {
   uni.navigateTo({ url: "/pages/equalizer/index" });
 }
 
+/** 打开「播放页展示」设置页（原来这一组就在设置页里，现在独立） */
+function goPlayerBar(): void {
+  uni.navigateTo({ url: "/pages/player-bar/index" });
+}
+
+/** 打开权限管理页（列出本应用声明的权限与当前授权状态） */
+function goPermissions(): void {
+  uni.navigateTo({ url: "/pages/permissions/index" });
+}
+
 function goTheme(): void {
   uni.navigateTo({ url: "/pages/theme/index" });
 }
+
+/** 打开不喜欢列表管理页 */
+function goDislikes(): void {
+  uni.navigateTo({ url: "/pages/dislikes/index" });
+}
+
+function dislikesCountText(): string {
+  const n = dislikes.rules.length;
+  if (n == 0) return "屏蔽歌曲 / 歌手";
+  return n + " 条规则";
+}
+
+// ==================== 后台保活（电池优化白名单 / 自启动） ====================
+// 后台取链被系统冻结时的兜底引导：播放本身有前台服务保活，但部分 ROM 仍会在
+// Doze / 省电策略下掐掉后台网络，导致锁屏后下一首取链失败。这里只做「状态展示 +
+// 跳系统设置页」，不申请任何权限（详见 uni_modules/qt-app-native 的实现注释）。
 
 function sourceText(): string {
   return platformLabel(sourceStore.current);
@@ -328,9 +454,16 @@ function showConcurrent(): void {
   });
 }
 
-// 音质档位来自数据包注册表（未装包为空 → 打开时提示安装）
+// ==================== 播放音量（已移除） ====================
+// 原来这里自绘音量拖拽条 + 静音开关。音量与系统媒体音量重复，用户要求删除。
+// 静音态仍由系统音量键控制；services/audio-player.uts 的 setVolume/setMuted 保留不动，
+// 播放页/通知栏若有需要仍可调用。
+
+// 音质档位来自数据包注册表，并按**当前选中的音源**收敛（v5 契约：包侧声明了
+// 该源可用档位，如 B 站无真无损就不展示 flac；未声明 = 全部档位）
+//（未装包为空 → 打开时提示安装）。computed 依赖 sourceStore.current，切源自动重算
 const qualityOptions = computed<{ value: string; name: string }[]>(() =>
-  registry.qualities.map((q) => ({ value: q.id, name: q.name }))
+  registry.sourceQualities(sourceStore.current).map((q) => ({ value: q.id, name: q.name }))
 );
 function qualityLabel(q: string): string {
   return registry.qualityLabel(q);
@@ -391,7 +524,47 @@ function showDownloadNameFormat(): void {
   });
 }
 
-const cacheLimitOptions: number[] = [512, 1024, 2048, 3072, 4096];
+// ==================== 同时下载数 ====================
+// 音源 CDN 普遍按 IP 限流：并发越高越容易被判成爬虫，一次封禁会连累所有在线功能，
+// 所以超过 3 时先弹一次确认（LX Music 的默认上限同样是 3）
+function downloadConcurrencyText(): string {
+  return downloads.concurrencyText();
+}
+function showDownloadConcurrency(): void {
+  const actions: SheetAction[] = [];
+  for (let n = DOWNLOAD_CONCURRENCY_MIN; n <= DOWNLOAD_CONCURRENCY_MAX; n++) {
+    actions.push({
+      name: n + " 个" + (n > DOWNLOAD_CONCURRENCY_WARN_ABOVE ? "（较高）" : ""),
+      color: n == downloads.concurrency ? theme.skin.accent : undefined,
+    });
+  }
+  openSheet("同时下载数", actions, (index) => {
+    const value = DOWNLOAD_CONCURRENCY_MIN + index;
+    if (value > DOWNLOAD_CONCURRENCY_WARN_ABOVE) {
+      uni.showModal({
+        title: "并发偏高",
+        content: "同时下载 " + value + " 个文件会显著增加被音源限流甚至临时封 IP 的概率，"
+          + "被封后搜索、播放、歌词等所有在线功能都会一起失败。确认继续？",
+        confirmText: "仍然使用",
+        cancelText: "取消",
+        confirmColor: theme.skin.danger,
+        success: (res) => {
+          if (res.confirm) applyDownloadConcurrency(value);
+        },
+      });
+      return;
+    }
+    applyDownloadConcurrency(value);
+  });
+}
+function applyDownloadConcurrency(value: number): void {
+  downloads.setConcurrency(value);
+  uni.showToast({ title: "同时下载数：" + downloads.concurrencyText(), icon: "none" });
+}
+
+const cacheLimitOptions: number[] = [512, 1024, 2048, 3072, 4096, 8192, 16384];// 手工输入档只校验下界（与原生层 CACHE_LIMIT_MIN_MB 一致，越界原生会静默夹回），
+// 上界已取消：用户要多大给多大，原生按新上限在下次播放时重建缓存
+const cacheLimitMinMb = 256;
 // 模板需要响应式：audioPlayer 是非响应式单例，直接在模板里读不会触发重渲染
 const cacheLimitMb = ref(audioPlayer.getCacheLimitMb());
 function cacheLimitLabel(mb: number): string {
@@ -403,15 +576,61 @@ function cacheLimitText(): string {
 }
 function showCacheLimit(): void {
   cacheLimitMb.value = audioPlayer.getCacheLimitMb();
-  openSheet("音乐缓存上限", cacheLimitOptions.map((mb) => ({
+  const inPresets = cacheLimitOptions.indexOf(cacheLimitMb.value) >= 0;
+  // 档位 + 「自定义…」：当前值不在档位里时高亮自定义项提示已手工设置
+  const actions: SheetAction[] = cacheLimitOptions.map((mb) => ({
     name: cacheLimitLabel(mb),
     color: mb == cacheLimitMb.value ? theme.skin.accent : undefined,
-  })), (index) => {
+  }));
+  actions.push({ name: "自定义…", color: inPresets ? undefined : theme.skin.accent });
+  openSheet("音乐缓存上限", actions, (index) => {
+    if (index >= cacheLimitOptions.length) {
+      openCacheSheet();
+      return;
+    }
     const mb = cacheLimitOptions[index];
     audioPlayer.setCacheLimitMb(mb);
     cacheLimitMb.value = mb;
     uni.showToast({ title: "音乐缓存上限：" + cacheLimitLabel(mb), icon: "none" });
   });
+}
+
+// ==================== 自定义缓存上限弹层 ====================
+// uni.showModal 的 editable 在 App 端不出输入框，照 source-pack 的做法用页内弹层
+
+const cacheSheetVisible = ref(false);
+const cacheSheetValue = ref("");
+const cacheSheetError = ref("");
+/** 弹层卡片底色与圆角（主题切换随 skin 重算；宽窄屏圆角基准不同） */
+const cacheCardStyle = computed<string>(() => "background-color:" + theme.skin.surfaceStrong + ";border-radius:24rpx;");
+const cacheCardStyleWide = computed<string>(() => "background-color:" + theme.skin.surfaceStrong + ";border-radius:14px;");
+/** 输入框填充底色 + 文字色 */
+const cacheInputStyle = computed<string>(() => "background-color:" + theme.skin.surfaceInset + ";color:" + theme.skin.text + ";border-radius:14rpx;");
+const cacheInputStyleWide = computed<string>(() => "background-color:" + theme.skin.surfaceInset + ";color:" + theme.skin.text + ";border-radius:8px;");
+
+function openCacheSheet(): void {
+  cacheSheetValue.value = "";
+  cacheSheetError.value = "";
+  cacheSheetVisible.value = true;
+}
+function closeCacheSheet(): void {
+  cacheSheetVisible.value = false;
+}
+function onCacheSheetInput(e: InputEvent): void {
+  cacheSheetValue.value = e.detail.value;
+  if (cacheSheetError.value.length > 0) cacheSheetError.value = "";
+}
+/** 提交：非法值红字提示留在弹层里；过了就落库下发，以服务层回读值为准显示 */
+function submitCacheSheet(): void {
+  const mb = parseInt(cacheSheetValue.value);
+  if (!(mb >= cacheLimitMinMb)) {
+    cacheSheetError.value = "请输入不小于 " + cacheLimitMinMb + " 的数值（MB）";
+    return;
+  }
+  cacheSheetVisible.value = false;
+  audioPlayer.setCacheLimitMb(mb);
+  cacheLimitMb.value = audioPlayer.getCacheLimitMb();
+  uni.showToast({ title: "音乐缓存上限：" + cacheLimitLabel(cacheLimitMb.value), icon: "none" });
 }
 
 // ==================== 桌面歌词 ====================
@@ -456,13 +675,26 @@ function clearAll(): void {
         } catch (_) {}
         // /me 缓存随登录态一起清（内存副本也要清，否则本进程内还能读到旧账号信息）
         clearCachedMe();
-        // 内存态复位：播放器（含同步游标/待同步队列）、下载列表、音源、主题
+        // 内存态复位：播放器（含同步游标/待同步队列）、下载列表、音源、主题、
+        // 不喜欢列表（其存储键 qt-dislikes 不在白名单里，上面循环已删，这里清内存态）
         player.resetLocalData();
+        dislikes.reset();
+        lyricOffset.reset();
         downloads.items = [];
         sourceStore.setSource("wyy");
         // 同时播放模式也回到默认（不允许），并即时下发原生层
         audioPlayer.setConcurrentMode(0);
         concurrentMode.value = 0;
+        // 同时下载数同样回到默认：直接改字段而不是走 setConcurrency，
+        // 否则会把刚删掉的 qt-download-concurrency 键又写回存储（重启后行为一致，但键不该复活）
+        downloads.concurrency = DOWNLOAD_CONCURRENCY_DEFAULT;
+        // 音量与静音同样回到默认。这里与上面「同时下载数」不同：下载并发是内存字段，
+        // 而音量存在 storage 里、每次 getVolume() 现读，且原生层还留着旧增益。
+        // 只清内存不会把原生音量改回去（reLaunch 不重跑 App.onLaunch），
+        // 于是实际还是旧音量 —— 必须显式下发一次默认值。
+        // 代价是这两个键被重新写回，但值就是默认值，与「清除后重启」结果一致。
+        audioPlayer.setMuted(false);
+        audioPlayer.setVolume(1.0);
         theme.setMode("system");
         theme.setSkin("linen");
         theme.setBackgroundImage("");
@@ -549,4 +781,80 @@ onUnmounted(() => {
 .cell-title-wide { font-size: 17px; }
 .cell-value-wide { font-size: 14px; }
 .cell-icon-wide { margin-right: 10px; }
+
+/* 自定义缓存上限：页内输入弹层（遮罩 + 居中卡片），宽窄两套尺寸（同 source-pack 的 url 弹层） */
+.cache-mask {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background-color: rgba(0, 0, 0, 0.45);
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+}
+.cache-card {
+  width: 560rpx;
+  padding: 32rpx 28rpx 24rpx;
+}
+.cache-card-wide {
+  width: 480px;
+  padding: 22px 24px 18px;
+}
+.cache-title {
+  font-size: 30rpx;
+  font-weight: 600;
+}
+.cache-title-wide {
+  font-size: 17px;
+}
+.cache-desc {
+  margin-top: 8rpx;
+  font-size: 23rpx;
+}
+.cache-desc-wide {
+  margin-top: 4px;
+  font-size: 13px;
+}
+.cache-input {
+  margin-top: 22rpx;
+  height: 78rpx;
+  padding: 0 20rpx;
+  font-size: 26rpx;
+}
+.cache-input-wide {
+  margin-top: 12px;
+  height: 40px;
+  padding: 0 12px;
+  font-size: 14px;
+}
+.cache-ph {
+  font-size: 24rpx;
+  color: #9aa1b0;
+}
+.cache-ph-wide {
+  font-size: 13px;
+  color: #9aa1b0;
+}
+.cache-error {
+  margin-top: 10rpx;
+  font-size: 22rpx;
+  line-height: 1.5;
+}
+.cache-error-wide {
+  margin-top: 6px;
+  font-size: 12px;
+}
+.cache-btn-row {
+  flex-direction: row;
+  justify-content: flex-end;
+  margin-top: 26rpx;
+}
+.cache-btn-row-wide {
+  margin-top: 16px;
+}
+.cache-btn {
+  margin-left: 16rpx;
+}
 </style>

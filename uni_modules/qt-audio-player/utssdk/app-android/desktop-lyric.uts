@@ -26,6 +26,7 @@ import View from 'android.view.View'
 import MotionEvent from 'android.view.MotionEvent'
 import Gravity from 'android.view.Gravity'
 import Color from 'android.graphics.Color'
+import Paint from 'android.graphics.Paint'
 import TextPaint from 'android.text.TextPaint'
 import Canvas from 'android.graphics.Canvas'
 import LinearGradient from 'android.graphics.LinearGradient'
@@ -48,8 +49,12 @@ import Runnable from 'java.lang.Runnable'
 let gLyricWindow: FrameLayout | null = null
 let gLyricText: QtLyricMarqueeView | null = null
 let gLyricTr: TextView | null = null
+// 承载两行的垂直 LinearLayout：背景色画在它身上（含既有 padding 区域），
+// 需要单独持有引用才能在运行期改背景而不用重建整窗
+let gLyricBox: LinearLayout | null = null
 let gWindowManager: WindowManager | null = null
-let gLyricHandler: Handler | null = null
+// 饿汉式主线程 Handler：懒初始化在主线程与拖动线程并发首调时会各建一个实例
+let gLyricHandler: Handler = new Handler(Looper.getMainLooper())
 let gLocked: boolean = false
 let gFontSizeSp: number = 18
 let gTrFontSizeSp: number = 14
@@ -67,13 +72,42 @@ let gWinX: number = 0
 let gWinY: number = 0
 let gHasSavedPos: boolean = false
 
+// ---- 样式扩展（描边 / 阴影 / 对齐 / 背景），字段与 PC 端 LyricWindowState 对齐 ----
+// 描边：先按 STROKE 画一遍轮廓再按 FILL 画一遍填充，深色描边让白字在浅色壁纸上也能读清
+let gStrokeEnabled: boolean = false
+// 描边宽度（dp，0.5–4.0）：与 PC 端 clamp 区间一致，过粗会糊住笔画
+let gStrokeWidth: number = 1.0
+// 阴影：主行与翻译行共用开关
+let gShadowEnabled: boolean = true
+// 静止对齐："left" | "center" | "right"（仅影响放得下时；溢出仍走跑马灯）
+let gAlign: string = 'center'
+// 背景模式："none" | "solid"
+let gBgMode: string = 'none'
+// 背景颜色（有符号 Int32 形态的 ARGB，同 gTextColor 的理由：无符号值会被饱和成 0x7FFFFFFF）
+let gBgColor: number = -16777216.0 // 0xFF000000 不透明黑
+// 背景不透明度（0–1）：折进 ARGB 的 alpha 通道，颜色本身保持用户选择
+let gBgOpacity: number = 0.6
+
+const ALIGN_LEFT = 'left'
+const ALIGN_CENTER = 'center'
+const ALIGN_RIGHT = 'right'
+const BG_NONE = 'none'
+const BG_SOLID = 'solid'
+const STROKE_MIN: number = 0.5
+const STROKE_MAX: number = 4.0
+
 const LYRIC_PREFS = 'qt-desktop-lyric'
 
-function lyricHandler(): Handler {
-  if (gLyricHandler == null) {
-    gLyricHandler = new Handler(Looper.getMainLooper())
+/** 字符串枚举兜底：非法值一律回落默认，避免 prefs 里残留的脏值让 UI 处于无匹配态 */
+function normalizeEnum(raw: string, allowed: string[], fallback: string): string {
+  for (let i = 0; i < allowed.length; i++) {
+    if (raw == allowed[i]) return raw
   }
-  return gLyricHandler!!
+  return fallback
+}
+
+function lyricHandler(): Handler {
+  return gLyricHandler
 }
 
 function lyricPrefs(): SharedPreferences | null {
@@ -106,6 +140,20 @@ function loadSavedState(): void {
   if (gHasSavedPos && !prefs.getBoolean('center_x', false)) {
     gWinX = 0
   }
+  // ---- 样式扩展读回 ----
+  gStrokeEnabled = prefs.getBoolean('stroke_on', false)
+  gStrokeWidth = prefs.getInt('stroke_w', 1).toDouble()
+  if (!(gStrokeWidth >= STROKE_MIN)) gStrokeWidth = 1.0
+  if (gStrokeWidth > STROKE_MAX) gStrokeWidth = STROKE_MAX
+  gShadowEnabled = prefs.getBoolean('shadow_on', true)
+  gAlign = normalizeEnum(prefs.getString('align', ALIGN_CENTER) ?? ALIGN_CENTER, [ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT], ALIGN_CENTER)
+  gBgMode = normalizeEnum(prefs.getString('bg_mode', BG_NONE) ?? BG_NONE, [BG_NONE, BG_SOLID], BG_NONE)
+  gBgColor = prefs.getInt('bg_color', -16777216)
+  // 同 gTextColor：旧版/异常写入的饱和值恢复为默认黑
+  if (gBgColor == 2147483647.0) gBgColor = -16777216.0
+  gBgOpacity = prefs.getInt('bg_alpha_pct', 60).toDouble() / 100.0
+  if (!(gBgOpacity >= 0)) gBgOpacity = 0.0
+  if (gBgOpacity > 1.0) gBgOpacity = 1.0
 }
 
 function savePos(): void {
@@ -155,6 +203,25 @@ function saveWidth(): void {
     prefs.edit().putInt('width_pct', gWidthPct.toInt()).apply()
   } catch (e) {
     // 忽略
+  }
+}
+
+/** 持久化描边/阴影/对齐/背景（一组样式项写一次，同 saveFonts 的多键写法） */
+function saveStyle(): void {
+  const prefs = lyricPrefs()
+  if (prefs == null) return
+  try {
+    prefs.edit()
+      .putBoolean('stroke_on', gStrokeEnabled)
+      .putInt('stroke_w', Math.round(gStrokeWidth * 10.0).toInt())
+      .putBoolean('shadow_on', gShadowEnabled)
+      .putString('align', gAlign)
+      .putString('bg_mode', gBgMode)
+      .putInt('bg_color', gBgColor.toInt())
+      .putInt('bg_alpha_pct', Math.round(gBgOpacity * 100.0).toInt())
+      .apply()
+  } catch (e) {
+    // 忽略持久化失败
   }
 }
 
@@ -343,6 +410,60 @@ function windowFlags(isLocked: boolean): number {
   return flags
 }
 
+/**
+ * 背景色（有符号 Int32 ARGB，已把 gBgOpacity 折进 alpha 通道）。
+ *
+ * 逐通道拆装而不用位运算：本仓库 UTS 侧没有任何位运算先例（未经验证），且
+ * 无符号值直接 toInt() 会被 Double.toInt() 饱和成 0x7FFFFFFF（半透明白），
+ * 与 services 层 setColor 的换算思路保持一致。
+ */
+function backgroundArgb(): number {
+  let u = gBgColor
+  if (u < 0) u = u + 4294967296.0
+  const r = Math.floor(u / 65536.0) % 256.0
+  const g = Math.floor(u / 256.0) % 256.0
+  const b = u % 256.0
+  let alpha = gBgOpacity
+  if (!(alpha >= 0)) alpha = 0.0
+  if (alpha > 1.0) alpha = 1.0
+  let value = Math.round(alpha * 255.0) * 16777216.0 + r * 65536.0 + g * 256.0 + b
+  if (value >= 2147483648.0) value = value - 4294967296.0
+  return value.toInt()
+}
+
+/**
+ * 主容器背景。'none' 设全透明而不是不动背景：窗口 format 是 TRANSLUCENT，
+ * 透明即「无背景」，同时也能把上一次的纯色擦掉（只判断不设置会留下残影）。
+ * 背景画在 box 上而非 root 上，box 自带 padding，颜色区域正好覆盖文字四周留白。
+ */
+function applyBoxBackground(box: LinearLayout): void {
+  if (gBgMode == BG_SOLID) {
+    box.setBackgroundColor(backgroundArgb().toInt())
+  } else {
+    box.setBackgroundColor(Color.TRANSPARENT)
+  }
+}
+
+/**
+ * 翻译行阴影：与主行共用 gShadowEnabled 开关。
+ * TextView 没有 clearShadowLayer，关闭时用「半径 0 + 全透明色」等效清掉；
+ * 只把颜色设透明而留着半径，部分 ROM 上仍会参与测量/绘制。
+ */
+function applyTrShadow(tr: TextView): void {
+  if (!gShadowEnabled) {
+    tr.setShadowLayer(0.0.toFloat(), 0.0.toFloat(), 0.0.toFloat(), Color.TRANSPARENT)
+    return
+  }
+  tr.setShadowLayer(3.0.toFloat(), 0.0.toFloat(), 1.0.toFloat(), Color.BLACK)
+}
+
+/** 对齐 → 翻译行 gravity（主行的对齐由自绘 offsetX 实现，见 staticOffsetX） */
+function gravityForAlign(): number {
+  if (gAlign == ALIGN_LEFT) return Gravity.LEFT
+  if (gAlign == ALIGN_RIGHT) return Gravity.RIGHT
+  return Gravity.CENTER_HORIZONTAL
+}
+
 function buildLyricView(context: Context): FrameLayout {
   const root = new FrameLayout(context)
   root.setOnTouchListener(new QtLyricDragListener())
@@ -358,7 +479,7 @@ function buildLyricView(context: Context): FrameLayout {
   const tr = new TextView(context)
   tr.setTextColor(gTextColor.toInt())
   tr.setTypeface(typefaceForIndex(gTypefaceIndex))
-  tr.setShadowLayer(3.0.toFloat(), 0.0.toFloat(), 1.0.toFloat(), Color.BLACK)
+  applyTrShadow(tr)
   tr.setTextSize(TypedValue.COMPLEX_UNIT_DIP.toInt(), gTrFontSizeSp.toFloat())
   tr.setMaxLines(1)
   // 翻译行必须自己居中：垂直 LinearLayout 的默认 LayoutParams 宽度是 MATCH_PARENT
@@ -366,16 +487,18 @@ function buildLyricView(context: Context): FrameLayout {
   // 子 View 宽度已顶满可用宽度时 layoutVertical 的居中偏移恒为 0，父容器的
   // setGravity(CENTER_HORIZONTAL) 对它就失效；而 TextView 默认文本左对齐，
   // 于是翻译行贴左内边距、和居中的主行（QtLyricMarqueeView 自绘算 offsetX 居中）错位。
-  tr.setGravity(Gravity.CENTER_HORIZONTAL)
+  tr.setGravity(gravityForAlign().toInt())
   tr.setVisibility(View.GONE)
   box.addView(tr)
 
   const pad = (gFontSizeSp * 1.2).toInt()
   box.setPadding(pad, (pad * 0.3).toInt(), pad, (pad * 0.3).toInt())
+  applyBoxBackground(box)
   root.addView(box)
 
   gLyricText = text
   gLyricTr = tr
+  gLyricBox = box
   return root
 }
 
@@ -424,6 +547,8 @@ class QtLyricMarqueeView extends View {
   private holdMs: number = 1000
   private totalMs: number = 0
   private marginPx: number = 8.0
+  // 文字填充色单独存一份：开描边时 paint 会被临时改成描边色，填充层要还原回它
+  private textColor: number = -1
 
   constructor(context: Context) {
     super(context)
@@ -432,6 +557,48 @@ class QtLyricMarqueeView extends View {
     this.paint.setSubpixelText(true)
     this.paint.setColor(-1)
     this.marginPx = dpToPx(8).toDouble()
+    this.applyLayerType()
+  }
+
+  /**
+   * 阴影开关 → 图层类型。
+   *
+   * 取舍：硬件加速下 setShadowLayer 对 canvas.drawText 常常不生效（Android 只在
+   * 软件渲染路径实现文字阴影）。开启阴影时把本 View 切到 LAYER_TYPE_SOFTWARE 才能
+   * 真正画出阴影，代价是这一层走 CPU 光栅化：本 View 只有一行文字、且静止时不重绘
+   * （跑马灯期间才逐帧 invalidate），实测影响可忽略；关闭阴影时切回 LAYER_TYPE_NONE
+   * 恢复硬件加速，不让不想要阴影的用户白付性能。
+   */
+  private applyLayerType(): void {
+    if (gShadowEnabled) {
+      this.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+    } else {
+      this.setLayerType(View.LAYER_TYPE_NONE, null)
+    }
+  }
+
+  /** 描边/阴影变化后刷新绘制参数并重绘（对齐变化走 reflow） */
+  applyDecor(): void {
+    this.applyLayerType()
+    this.invalidate()
+  }
+
+  /** 阴影的模糊半径与偏移（dp → px）：随字号缩放，大字号配大阴影才不显脏 */
+  private applyShadow(): void {
+    if (!gShadowEnabled) {
+      this.paint.clearShadowLayer()
+      return
+    }
+    const radius = dpToPx(gFontSizeSp * 0.15).toDouble()
+    const dy = dpToPx(1).toDouble()
+    this.paint.setShadowLayer(radius.toFloat(), 0.0.toFloat(), dy.toFloat(), Color.BLACK)
+  }
+
+  /** 描边宽度（dp → px）：用 applyDimension 保留小数，dpToPx 会先 toInt 丢掉 0.5 这类细描边 */
+  private strokeWidthPx(): number {
+    const ctx = UTSAndroid.getAppContext()
+    if (ctx == null || ctx.getResources() == null) return gStrokeWidth
+    return TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP.toInt(), gStrokeWidth.toFloat(), ctx.getResources().getDisplayMetrics()).toDouble()
   }
 
   /** 推送当前行文本：先停旧动画，再按新文本重判 居中/滚动 */
@@ -443,12 +610,14 @@ class QtLyricMarqueeView extends View {
 
   /** 字号 / 颜色 / 字体变化后刷新绘制参数并重新判定 */
   applyStyle(mainSp: number, color: number, tf: number): void {
+    this.textColor = color
     this.paint.setColor(color.toInt())
     const ctx = UTSAndroid.getAppContext()
     if (ctx != null && ctx.getResources() != null) {
       this.paint.setTextSize(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP.toInt(), mainSp.toFloat(), ctx.getResources().getDisplayMetrics()))
     }
     this.paint.setTypeface(typefaceForIndex(tf))
+    this.applyShadow()
     this.requestLayout()
     this.stopAnim()
     this.reflow()
@@ -462,14 +631,17 @@ class QtLyricMarqueeView extends View {
     const textW = this.paint.measureText(this.text).toDouble()
     const availW = width
     if (textW + 2 <= availW) {
-      // 放得下：取消滚动，水平居中静止
+      // 放得下：取消滚动，按 gAlign 静止对齐（left 贴左 / center 居中 / right 贴右）
       this.stopAnim()
       this.travelPx = 0.0
-      this.offsetX = (availW - textW) / 2.0
+      this.offsetX = this.staticOffsetX(availW, textW)
       this.invalidate()
       return
     }
-    // 溢出：单程滚动到最右端停住（网易云式），不再往返
+    // 溢出：单程滚动到最右端停住（网易云式），不再往返。
+    // 注意：溢出时忽略 gAlign —— 左/右对齐会让文字一开始就被裁掉一半，
+    // 而跑马灯从 0 开始滚恰好等价于「left 起步」，所以只有 center 语义需要
+    // 靠静止对齐体现，溢出场景一律滚动（跑马灯逻辑不因对齐设置而改变）。
     this.travelPx = textW - availW + this.marginPx
     if (this.travelPx <= 0) return
     const speedPxPerMs = dpToPx(40).toDouble() / 1000.0
@@ -482,6 +654,13 @@ class QtLyricMarqueeView extends View {
     this.startAnim()
   }
 
+  /** 静止时的水平起点：left = 0，center = 居中，right = 贴右边缘 */
+  private staticOffsetX(availW: number, textW: number): number {
+    if (gAlign == ALIGN_LEFT) return 0.0
+    if (gAlign == ALIGN_RIGHT) return availW - textW
+    return (availW - textW) / 2.0
+  }
+
   private startAnim(): void {
     this.stopAnim()
     this.animRunning = true
@@ -490,7 +669,9 @@ class QtLyricMarqueeView extends View {
     lyricHandler().postDelayed(this.tick!!, 16)
   }
 
-  private stopAnim(): void {
+  /** 停止跑马灯轮询（移窗/隐藏时也要停：已 post 的 tick 会空转到 totalMs）。
+      公开：hideNow 是模块级函数，private 在 UTS→Kotlin 编译后跨类不可见 */
+  stopAnim(): void {
     this.animRunning = false
     if (this.tick != null) {
       lyricHandler().removeCallbacks(this.tick!!)
@@ -531,7 +712,43 @@ class QtLyricMarqueeView extends View {
     if (width <= 0) return
     const fm = this.paint.getFontMetrics()
     const baseline = (getHeight().toDouble() - fm.ascent - fm.descent) / 2.0
-    canvas.drawText(this.text, this.offsetX.toFloat(), baseline.toFloat(), this.paint)
+    const x = this.offsetX.toFloat()
+    const y = baseline.toFloat()
+    if (gStrokeEnabled) {
+      // 描边层：同一位置先用 STROKE 画一遍轮廓，再用 FILL 画一遍填充（描边只从
+      // 笔画外侧露出来）。描边层必须清掉阴影：轮廓的阴影会和填充层的阴影叠加，
+      // 边缘糊成一团，且 STROKE 下的阴影本来就是多余的。
+      this.paint.setStyle(Paint.Style.STROKE)
+      this.paint.setStrokeWidth(this.strokeWidthPx().toFloat())
+      this.paint.setColor(this.strokeColor().toInt())
+      this.paint.clearShadowLayer()
+      canvas.drawText(this.text, x, y, this.paint)
+      // 填充层：恢复文字颜色与 FILL 默认态，再把阴影装回去。
+      // TextPaint 默认就是 FILL，这里显式恢复是为了不把 STROKE 状态污染给
+      // 后续绘制（换行重绘、以及下次不开描边时的绘制路径）
+      this.paint.setStyle(Paint.Style.FILL)
+      this.paint.setColor(this.textColor.toInt())
+      this.applyShadow()
+    }
+    canvas.drawText(this.text, x, y, this.paint)
+  }
+
+  /**
+   * 描边色：按文字亮度取对比色（浅色字配黑描边，深色字配白描边）。
+   * 固定黑色在用户把歌词设成深色（如深灰/黑）时等于没有描边，取对比色才能
+   * 保证「任意壁纸 + 任意字色」都可读。
+   */
+  private strokeColor(): number {
+    // 有符号 Int32 → 无符号：UTS 侧位运算未经验证，用加法还原（同 services 层 ARGB 换算的思路）
+    let u = this.textColor
+    if (u < 0) u = u + 4294967296.0
+    const r = Math.floor(u / 65536.0) % 256.0
+    const g = Math.floor(u / 256.0) % 256.0
+    const b = u % 256.0
+    // 感知亮度（ITU-R BT.601）：>128 视为浅色字，配黑描边
+    const luma = (r * 299.0 + g * 587.0 + b * 114.0) / 1000.0
+    if (luma > 128.0) return Color.BLACK
+    return Color.WHITE
   }
 }
 
@@ -728,6 +945,54 @@ class QtLyricSetWidth implements Runnable {
   }
 }
 
+class QtLyricStroke implements Runnable {
+  constructor() {
+    super()
+  }
+  override run(): void {
+    const text = gLyricText
+    // 描边是绘制态（onDraw 里按 gStrokeEnabled 分支），刷新绘制参数重绘即可；
+    // 描边加粗不改变文字宽度，不需要 reflow
+    if (text != null) text.applyDecor()
+  }
+}
+
+class QtLyricShadow implements Runnable {
+  constructor() {
+    super()
+  }
+  override run(): void {
+    const text = gLyricText
+    const trView = gLyricTr
+    // 主行：阴影开关同时决定图层类型（软件渲染才画得出阴影，见 applyLayerType）
+    if (text != null) text.applyDecor()
+    if (trView != null) applyTrShadow(trView)
+  }
+}
+
+class QtLyricAlign implements Runnable {
+  constructor() {
+    super()
+  }
+  override run(): void {
+    const text = gLyricText
+    const trView = gLyricTr
+    // 主行对齐只影响静止时的 offsetX，重判一次即可（溢出仍走跑马灯）
+    if (text != null) text.reflow()
+    if (trView != null) trView.setGravity(gravityForAlign().toInt())
+  }
+}
+
+class QtLyricBackground implements Runnable {
+  constructor() {
+    super()
+  }
+  override run(): void {
+    const box = gLyricBox
+    if (box != null) applyBoxBackground(box)
+  }
+}
+
 function hideNow(): void {
   const view = gLyricWindow
   const wm = gWindowManager
@@ -740,9 +1005,14 @@ function hideNow(): void {
       }
     }
   }
+  // 移窗后停掉跑马灯动画：已 post 的 QtLyricTick 否则会继续空转至
+  // totalMs 自终止（有界但无意义的轮询）
+  const text = gLyricText
+  if (text != null) text.stopAnim()
   gLyricWindow = null
   gLyricText = null
   gLyricTr = null
+  gLyricBox = null
   gWindowManager = null
   // 原本有窗才通知：重复 hide / 尚未显示就 hide 不打扰（重复显示路径会先走到这里，
   // 随后 showNow 成功再 fire 一次 true，钩子按最终状态收敛）
@@ -803,6 +1073,54 @@ export function nativeSetLyricWidth(pct: number): void {
   gWidthPct = v
   saveWidth()
   lyricHandler().post(new QtLyricSetWidth())
+}
+
+/**
+ * 设置文字描边（开关 + 宽度 dp，0.5–4.0，默认关 / 1.0）。
+ * 宽度非法（NaN / 越界）一律夹回区间而不是回落默认：用户开着描边拖到 4.0 后
+ * 再传一个脏值，落回 1.0 会让观感突变。即时生效并持久化。
+ */
+export function nativeSetLyricStroke(enabled: boolean, width: number): void {
+  let w = width
+  if (!(w >= STROKE_MIN)) w = STROKE_MIN
+  if (w > STROKE_MAX) w = STROKE_MAX
+  gStrokeEnabled = enabled
+  gStrokeWidth = w
+  saveStyle()
+  lyricHandler().post(new QtLyricStroke())
+}
+
+/** 设置阴影开关（主行 + 翻译行共用）。即时生效并持久化 */
+export function nativeSetLyricShadow(enabled: boolean): void {
+  gShadowEnabled = enabled
+  saveStyle()
+  lyricHandler().post(new QtLyricShadow())
+}
+
+/** 设置静止对齐（"left" | "center" | "right"，非法值回落 center）。即时生效并持久化 */
+export function nativeSetLyricAlign(align: string): void {
+  gAlign = normalizeEnum(align, [ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT], ALIGN_CENTER)
+  saveStyle()
+  lyricHandler().post(new QtLyricAlign())
+}
+
+/**
+ * 设置背景（模式 + 颜色 ARGB 有符号 Int32 + 不透明度 0–1）。
+ * 模式非法回落 "none"；opacity 越界夹回 0–1（折进 alpha 通道，颜色本身不改）。
+ * 即时生效并持久化。
+ */
+export function nativeSetLyricBackground(mode: string, colorArgb: number, opacity: number): void {
+  let alpha = opacity
+  if (!(alpha >= 0)) alpha = 0.0
+  if (alpha > 1.0) alpha = 1.0
+  gBgMode = normalizeEnum(mode, [BG_NONE, BG_SOLID], BG_NONE)
+  gBgColor = colorArgb
+  // 同 gTextColor：饱和值（0x7FFFFFFF）说明上游传了无符号值被 toInt 夹爆，
+  // 恢复成默认不透明黑，而不是让背景变成半透明白
+  if (gBgColor == 2147483647.0) gBgColor = -16777216.0
+  gBgOpacity = alpha
+  saveStyle()
+  lyricHandler().post(new QtLyricBackground())
 }
 
 // ==================== 供 index.uts 内部转发使用 ====================

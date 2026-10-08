@@ -2,7 +2,7 @@ import { reactive } from "vue";
 import { audioPlayer } from "@/services/audio-player";
 import { desktopLyric } from "@/services/desktop-lyric";
 import { exitApp } from "@/services/app-native";
-import { musicApi } from "@/services/music-api";
+import { isContentFailError, musicApi } from "@/services/music-api";
 import type { AudioPlaylistItem } from "@/uni_modules/qt-audio-player";
 import { likeBatch, fetchChanges, fetchAllLikes } from "@/services/like";
 import { parseJsonToUtso } from "@/services/http";
@@ -10,10 +10,14 @@ import type { Song, Playlist, LikeChange, PendingLikeOp } from "@/types/music";
 import { getAccessToken } from "@/services/auth";
 import { DEFAULT_PLAYLIST_COVER_ASSET } from "@/services/media";
 import { qtDiag } from "@/services/diag";
+import { useDislikesStore, DISLIKES_CHANGED_EVENT } from "@/stores/dislikes";
+import { findCrossSourceDup, collectDupMessage, type CollectDupConflict } from "@/services/collect-dup";
 
 const LIKED_KEY = "qt-liked-songs";
 const HISTORY_KEY = "qt-history-songs";
 const STATE_KEY = "qt-player-state";
+/** 轻量进度键：进度时钟每 ~5 秒只写当前曲+进度，不拖着整条队列做全量序列化 */
+const PROGRESS_KEY = "qt-player-progress";
 const PLAYLIST_KEY = "qt-saved-playlists";
 const LOCAL_PLAYLIST_KEY = "qt-local-playlists";
 /** 收藏同步游标（LIKE_SYNC_DESIGN.md：多端增量拉取 since） */
@@ -22,8 +26,31 @@ const LIKE_CURSOR_KEY = "qt-like-cursor";
 const LIKE_OPS_KEY = "qt-like-pending-ops";
 /** 收藏批量推送的单批上限（与后端 /like/batch 的 200 对齐，qt-stat 分片同款先例） */
 const LIKE_BATCH_LIMIT = 200;
-/** 切歌时等待播放地址解析的上限（毫秒）：多音源回退链最坏几十秒，超时按失败处理 */
-const URL_FETCH_BUDGET_MS = 6000;
+/** 切歌时等待播放地址解析的上限（毫秒）：多音源回退链最坏几十秒，超时按失败处理。
+ *
+ *  取链链的真实预算是 `CHAIN_BUDGET_MS = 9s` + 整链宽限 250ms = 9250ms
+ *  （qt-sources/src/budget.ts，用户要求「原源搜索 5s + 换源兜底 4s」），
+ *  引擎侧 invoke 上限 `PLAY_TIMEOUT_MS = 12s`。这里取 **10s**：9250ms 链预算
+ *  + 750ms 调度余量，既覆盖最坏情况，又不会在外层白等到 12s。
+ *
+ *  为什么收紧（2026-10-03 弱网修复）：链跑满说明档内和跨源都试过了，多等的
+ *  每一秒都是纯白等——用户看到「每首卡十几秒才失败」，连挂 5 首就凑满熔断。
+ *  失败快落地 + 「超时不计熔断、原地重试」才是正确组合。
+ */
+const URL_FETCH_BUDGET_MS = 10000;
+
+/** 弱网原地重试：首次失败后等这么久再试**同一首**（指数退避） */
+const STALLED_RETRY_BASE_MS = 3000;
+/** 弱网连续重试上限（超过就停手等用户，不再空转） */
+const STALLED_RETRY_LIMIT = 3;
+/** 弱网重试退避封顶 */
+const STALLED_RETRY_MAX_MS = 20000;
+
+/** 熔断恢复探测：首次探测前的等待，之后指数退避 */
+const RECOVERY_PROBE_BASE_MS = 15000;
+const RECOVERY_PROBE_MAX_MS = 120000;
+/** 恢复探测尝试上限：超过就彻底交给用户（避免长期不可用时反复取链） */
+const RECOVERY_PROBE_LIMIT = 8;
 
 
 /**
@@ -195,8 +222,28 @@ class PlayerStore {
   /** 已因链接失效重取过地址的歌曲（platform:id）与重取时刻，避免「失败→重取」死循环 */
   private urlRetryKey = "";
   private urlRetryAt = 0;
+  /** 「提前结束」自愈已重试过的歌曲（platform:id）：流被截断/缓存内容异常时
+   *  media3 会把条目当成正常播完并无缝切下一首（全程无错误事件）。每首只
+   *  自愈重试一次，防止试听片段类内容反复拉回原地；重放仍提前结束就放行衔接 */
+  private earlyEosKey = "";
   /** 上次进度持久化时间点（用于节流 saveState，避免每帧写存储） */
   private lastPersistAt = 0;
+  /**
+   * 三个「重键」的脏标记：收藏总表 / 收藏歌单 / 自建歌单。
+   *
+   * 这三张表的整表序列化（逐条 songToJson/playlistToJson + 跨桥 setStorageSync）
+   * 是 persist() 里最贵的部分，而播放热路径（play/pause/toggle/进度时钟/通知栏
+   * 状态同步…）只动 history 与播放态，这三张表根本没变。用脏标记把它们从
+   * persist() 里摘掉，热路径就只剩两个小键的写入。
+   *
+   * 默认 true（首次 persist 必全量写一次）；标记只在对应键**写成功后**清除，
+   * 写失败保持脏、下次重试 —— 出错方向永远是「多写一次」，绝不漏写。
+   * 任何改动这三张表的地方（整体赋值 / push / splice / 原地改 pids|likeSeq|picUrl）
+   * 都必须把对应标记置 true。
+   */
+  private likedDirty = true;
+  private playlistsDirty = true;
+  private localPlaylistsDirty = true;
   /** 进度时钟：播放期间每 100ms 直接向播放器要一次真实进度（见 startProgressClock） */
   private progressTimer: number | null = null;
   /** 上一次进度时钟 tick 的时刻（真实位置读不到时按墙钟外推用） */
@@ -241,6 +288,25 @@ class PlayerStore {
   private autoNext = true;
   /** 连续播放失败计数（切歌成功或手动播放时清零） */
   private failStreak = 0;
+  /** 每个 mediaId 上次取链失败是否只是「网络慢/引擎卡」（2026-10-03 弱网修复）。
+      true = 环境问题（等网络就好），false = 引擎明确说没地址（内容问题）。
+      handlePlaybackError 读它决定是原地重试还是换下一首。 */
+  private stalledMap = new Map<string, boolean>();
+  /** 弱网连续重试同一首的次数（成功播放/换歌/手动播放时清零）。
+      与 failStreak 分开：前者是「网络还没好，再等等」，后者是「歌有问题，换下一首」。 */
+  private stallRetry = 0;
+  /** 熔断自愈的探测计时器（null = 没有在探测） */
+  private recoverTimer: number | null = null;
+  /** 最近一次「用户主动暂停」的时间戳（0 = 没有未消化的暂停意图）。
+      弱网退避重试与熔断自愈靠它区分「系统自动停下」与「用户明确不想听」：
+      用户暂停后到点不强行拉起播放。恢复播放（play/ensurePlayback/toggle）时清零。
+      通知栏暂停走原生状态同步回调，无法与本方暂停区分，不在此记（已知边界）。 */
+  private pauseIntentAt = 0;
+  /** 恢复探测开始的时间戳：probeDone 用它判断探测期间用户是否又按了暂停 */
+  private probeStartedAt = 0;
+  /** 最近一次用户手动点歌/切歌的时间戳：onNativeTrackChanged 用它丢弃
+      紧随其后迟到的旧时间线对账事件（见该处注释） */
+  private explicitPlayAt = 0;
   /** 收藏同步游标（服务器 updated_seq 最大值，LIKE_SYNC_DESIGN.md D3） */
   private likeCursor = 0;
   /** 待推送收藏操作队列（断网暂存，联网后按序重放） */
@@ -264,6 +330,23 @@ class PlayerStore {
    * 读不到位置（播放器未就绪）或刚 seek 完时按时间外推，上限 0.5 秒，
    * 宁可少走一点，也不让显示跑到音频前面。
    */
+  /**
+   * 停掉进度时钟。
+   * 原来只有 start 没有 stop：100ms 的 setInterval 一旦起来就永不停止，而它的回调每 tick
+   * 都要过桥去问原生播放器（currentMediaId/currentTime/isNativeIntendingToPlay）。真机上
+   * 这条是「迟到的定时器回调打在已反注册的 UTS 实例上」的高频路径之一（报错形如
+   * `java.lang.IllegalStateException: UTS instance 65 is not registered`，堆栈
+   * Bridge.onJSTimerFired ← Bridge$scheduleJSTimer$runnable$1.run ← Handler.handleCallback）。
+   * 所以这里补上停止入口，生命周期/退出流程能真正把它关掉。
+   */
+  private stopProgressClock(): void {
+    const timer = this.progressTimer;
+    if (timer != null) {
+      clearInterval(timer);
+      this.progressTimer = null;
+    }
+  }
+
   private startProgressClock(): void {
     if (this.progressTimer != null) return;
     this.lastTickAt = Date.now();
@@ -349,9 +432,12 @@ class PlayerStore {
             this.markAt = now;
             if (this.desktopLyricHook != null) this.desktopLyricHook(t);
             // 节流持久化进度（约每 5 秒一次），原生回调不送达时也能记住位置
+            // 与原生 onTime 分支同口径：只写轻量进度键。这里原来写全量 saveState，
+            // 大队列下每 5 秒一次 O(N) 逐首 songToJson + 整体 stringify 跨桥，
+            // 而这一支正是原生回调不送达时的兜底，反倒成了最热的那条路径。
             if (t >= this.lastPersistAt + 5) {
               this.lastPersistAt = t;
-              this.saveState();
+              this.saveProgressLight();
             }
             // 播完兜底：原生 ENDED 偶尔不送达（ExoPlayer 卡在末尾 / 缓存片段截断），
             // 位置冻在末尾 2.5 秒就补一次自动切歌，否则会停在那儿一动不动
@@ -445,6 +531,12 @@ class PlayerStore {
     }
     if (migrated) this.saveLocalPlaylistList();
     this.loadState();
+    // 不喜欢列表变化 → 无损重推原生时间线（syncTimeline 内部会按新规则过滤）：
+    // 屏蔽必须立即对 media3 自动衔接生效——自动衔接走的是时间线，
+    // 只改 JS 侧队列的话原生层还会把被屏蔽的歌带回来
+    uni.$on(DISLIKES_CHANGED_EVENT, () => {
+      this.syncTimeline();
+    });
     audioPlayer.bind(
       (time: number, duration: number) => {
         // 回调与时钟轮询交错时可能带回略旧的值：小幅倒退直接忽略（外推基准也不动），
@@ -477,12 +569,19 @@ class PlayerStore {
           this.healthyRun = 0;
           this.failStreak = 0;
           this.autoNext = true;
+          // 播起来了：网络已恢复，清掉弱网重试计数与失败性质记录
+          // （否则弱网恢复后仍会沿用超时攒下的次数，很快又打满）
+          this.stallRetry = 0;
+          this.stalledMap.clear();
           if (this.urlRetryKey.length > 0) this.urlRetryKey = "";
+          this.earlyEosKey = "";
         }
-        // 节流持久化进度（约每 5 秒一次），确保重启后能定位到上次位置
+        // 节流持久化进度（约每 5 秒一次），确保重启后能定位到上次位置。
+        // 只写轻量进度键：全量 saveState 要把整条队列逐首 songToJson 再整体
+        // stringify，大队列下每 5 秒一次 O(N) 跨桥序列化，只为存进度不值
         if (time >= this.lastPersistAt + 5) {
           this.lastPersistAt = time;
-          this.saveState();
+          this.saveProgressLight();
         }
       },
       () => {
@@ -530,27 +629,33 @@ class PlayerStore {
         return;
       }
       this.fetchUrlWithTimeout(song, URL_FETCH_BUDGET_MS)
-        .then((url: string) => {
-          if (url.length > 0) {
+        .then((res: { url: string; stalled: boolean }) => {
+          // 记下本次失败性质，handlePlaybackError 据此区分「网络慢」与「没地址」
+          this.stalledMap.set(mediaId, res.stalled);
+          if (res.url.length > 0) {
             // 留一份展示副本（管理端「当前播放地址」用，见 resolvedUrlMap），
             // 并把当前播放曲的 url 字段回填：展示入口读 current.url 时才不是空
-            this.resolvedUrlMap.set(mediaId, url);
+            this.resolvedUrlMap.set(mediaId, res.url);
             const cur = this.current;
             if (cur != null && cur.platform + ":" + cur.id == mediaId) {
-              cur.url = url;
+              cur.url = res.url;
             }
-            audioPlayer.resolveDone(mediaId, url);
+            audioPlayer.resolveDone(mediaId, res.url);
           } else {
             audioPlayer.resolveFail(mediaId);
           }
         })
-        .catch(() => audioPlayer.resolveFail(mediaId));
+        .catch(() => {
+          this.stalledMap.set(mediaId, true);
+          audioPlayer.resolveFail(mediaId);
+        });
     });
     // 原生自动衔接下一首（时间线顺序）/媒体键切歌后对账：换 current、记历史、
     // 刷新歌词与封面。睡眠定时「当前歌播完停止」也在这里落地 —— 懒解析窗口里
     // 原生切歌无声，这里立即停播退出，听感就是「这首歌放完就停」。
-    audioPlayer.onTrackChanged((mediaId: string) => {
-      this.onNativeTrackChanged(mediaId);
+    // 回调第二参 naturalEnd = 切换由「条目自然播到头」引发，用于提前结束自愈。
+    audioPlayer.onTrackChanged((mediaId: string, naturalEnd: boolean) => {
+      this.onNativeTrackChanged(mediaId, naturalEnd);
     });
     // 进度时钟不依赖原生回调，应用启动即开（播放中每 100ms 自己取一次真实进度）
     this.startProgressClock();
@@ -634,13 +739,16 @@ class PlayerStore {
     }
   }
 
-  private saveSongList(key: string, songs: Song[]): void {
+  private saveSongList(key: string, songs: Song[]): boolean {
     try {
       const arr: string[] = [];
       for (let index = 0; index < songs.length; index++)
         arr.push(songToJson(songs[index]));
       uni.setStorageSync(key, JSON.stringify(arr));
-    } catch (_) {}
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   private loadPlaylistList(): Playlist[] {
@@ -665,6 +773,7 @@ class PlayerStore {
       for (let index = 0; index < this.savedPlaylists.length; index++)
         arr.push(playlistToJson(this.savedPlaylists[index]));
       uni.setStorageSync(PLAYLIST_KEY, JSON.stringify(arr));
+      this.playlistsDirty = false;
     } catch (_) {}
   }
 
@@ -750,6 +859,7 @@ class PlayerStore {
       for (let index = 0; index < this.localPlaylists.length; index++)
         arr.push(playlistToJson(this.localPlaylists[index]));
       uni.setStorageSync(LOCAL_PLAYLIST_KEY, JSON.stringify(arr));
+      this.localPlaylistsDirty = false;
     } catch (_) {}
   }
 
@@ -788,6 +898,39 @@ class PlayerStore {
       const duration = obj.get("duration") as number | null;
       this.progress = progress != null ? progress : 0;
       this.duration = duration != null ? duration : 0;
+      // 轻量进度键比全量态新鲜（进度时钟只写它）：当前曲对得上且进度更靠前
+      // 才采信 —— 正常退出时 persist() 会写全量态（含 seek 后的进度），轻量键
+      // 只在崩溃/被杀没来得及全量落盘的场景兜底
+      try {
+        const lightRaw = uni.getStorageSync(PROGRESS_KEY) as string;
+        if (lightRaw.length > 0 && this.current != null) {
+          const light = parseJsonToUtso(lightRaw);
+          const key = light.get("key") as string | null;
+          if (key != null && key == this.mediaIdOf(this.current)) {
+            const lightProgress = light.get("progress") as number | null;
+            const lightDuration = light.get("duration") as number | null;
+            if (lightProgress != null && lightProgress > this.progress) {
+              this.progress = lightProgress;
+            }
+            if (lightDuration != null && lightDuration > 0) {
+              this.duration = lightDuration;
+            }
+          }
+        }
+      } catch (_) {}
+    } catch (_) {}
+  }
+
+  /** 轻量进度持久化：几十字节的当前曲+进度，进度时钟专用（见 PROGRESS_KEY） */
+  private saveProgressLight(): void {
+    try {
+      const cur = this.current;
+      if (cur == null) return;
+      const obj = new UTSJSONObject();
+      obj.set("key", this.mediaIdOf(cur));
+      obj.set("progress", this.progress);
+      obj.set("duration", this.duration);
+      uni.setStorageSync(PROGRESS_KEY, JSON.stringify(obj));
     } catch (_) {}
   }
 
@@ -823,11 +966,18 @@ class PlayerStore {
     this.desktopLyricHook = null;
   }
 
+  /**
+   * 全量持久化。HISTORY_KEY 与 STATE_KEY 每次都写（历史与播放态是热路径数据，
+   * 且 STATE_KEY 是唯一记录当前曲/队列/进度的键，App 退后台被杀前必须落盘）；
+   * 三张重表只在脏时写（见 likedDirty 等标记）。
+   */
   persist(): void {
-    this.saveSongList(LIKED_KEY, this.likedSongs);
+    if (this.likedDirty && this.saveSongList(LIKED_KEY, this.likedSongs)) {
+      this.likedDirty = false;
+    }
     this.saveSongList(HISTORY_KEY, this.history);
-    this.savePlaylistList();
-    this.saveLocalPlaylistList();
+    if (this.playlistsDirty) this.savePlaylistList();
+    if (this.localPlaylistsDirty) this.saveLocalPlaylistList();
     this.saveState();
   }
 
@@ -836,8 +986,16 @@ class PlayerStore {
     if (!auto) {
       this.autoNext = true;
       this.failStreak = 0;
+      this.stallRetry = 0;
+      this.stalledMap.clear();
+      this.pauseIntentAt = 0;
+      this.explicitPlayAt = Date.now();
     }
-    if (queue.length > 0) this.queue = queue;
+    // 播放全部/外部队列：先剔除被屏蔽的歌（点播的 song 永远保留——
+    // 屏蔽语义是「别自动出现」，不是「禁止聆听」）。无规则时原样返回不复制
+    if (queue.length > 0) {
+      this.queue = useDislikesStore().filterQueue(queue, song);
+    }
     const resumeAt = restorePosition && this.progress > 0 ? this.progress : 0;
     const prev = this.current;
     const switched =
@@ -855,6 +1013,9 @@ class PlayerStore {
     }
     this.current = song;
     this.playing = true;
+    // 进度时钟可能已被 stop()/stopForExit() 关掉（清空队列/退出登录后不再重开），
+    // 这里幂等补开，保证进度/UI 持续走字；时钟本身开着时 start 是空操作
+    this.startProgressClock();
     // 换了歌就丢掉上一首的地址展示副本：它是纯展示用的内存数据，留着只占内存
     //（管理端只看当前播放地址）；同一首重播/重取不清，保证弹窗还能看到地址
     if (switched && this.resolvedUrlMap.size > 0) {
@@ -967,10 +1128,14 @@ class PlayerStore {
     // 抑制窗口内一律不计入 healthyRun（否则重取地址会被误判成播放成功，见 onTime）
     this.healthyRun = 0;
     this.healthyIgnoreUntil = Date.now() + 3000;
-    let source = this.queue;
+    // 不喜欢列表：时间线剔除被屏蔽的歌，song（点播曲）永远保留。
+    // 必须先过滤再找 curIdx——过滤会让索引前移，先找后滤会定位到错的歌
+    const dislikes = useDislikesStore();
+    let source =
+      dislikes.hasRules() ? dislikes.filterQueue(this.queue, song) : this.queue;
     let curIdx = -1;
-    for (let i = 0; i < this.queue.length; i++) {
-      const item = this.queue[i];
+    for (let i = 0; i < source.length; i++) {
+      const item = source[i];
       if (item != null && item.id == song.id && item.platform == song.platform) {
         curIdx = i;
         break;
@@ -1031,7 +1196,7 @@ class PlayerStore {
   syncTimeline(): void {
     if (this.current == null) return;
     if (this.timelineIds.length == 0) return;
-    const expected: Song[] = [];
+    let expected: Song[] = [];
     if (this.mode == "random") {
       // 旧时间线里仍在队列的按原顺序保留（随机序列不重排），不在的（已删）自然剔除
       for (let i = 0; i < this.timelineIds.length; i++) {
@@ -1043,6 +1208,9 @@ class PlayerStore {
         const s = this.queue[i];
         if (s != null && this.timelineIndexOf(s) < 0) expected.push(s);
       }
+      // 兜底与顺序分支同口径：当前曲不在组装结果里（异常态/绕过页面守卫的
+      // 编辑路径）也要留在时间线上，否则原生衔接丢锚
+      if (this.timelineIndexOf(this.current) < 0) expected.push(this.current);
     } else {
       for (let i = 0; i < this.queue.length; i++) {
         const s = this.queue[i];
@@ -1050,6 +1218,23 @@ class PlayerStore {
       }
       // 兜底：当前曲不在队列（异常态）也要留在时间线上，否则原生衔接丢锚
       if (this.timelineIndexOf(this.current) < 0) expected.push(this.current);
+    }
+    // 不喜欢列表：规则变化触发的重推走这里（restore 里的 DISLIKES_CHANGED_EVENT
+    // 订阅），剔除新命中屏蔽的歌——包括上面「队列新增追加」分支可能带回来的。
+    // 当前曲永远保留：屏蔽的是「自动出现」，正在播的不掐断
+    const dislikes = useDislikesStore();
+    if (dislikes.hasRules()) {
+      const cur = this.current!;
+      const kept: Song[] = [];
+      for (let i = 0; i < expected.length; i++) {
+        const s = expected[i];
+        if (s.id == cur.id && s.platform == cur.platform) {
+          kept.push(s);
+          continue;
+        }
+        if (!dislikes.isDisliked(s)) kept.push(s);
+      }
+      expected = kept;
     }
     if (expected.length == 0) return;
     this.timelineIds = [];
@@ -1067,14 +1252,24 @@ class PlayerStore {
    * 取播放地址并限时：超时按空地址返回。
    * 超时后原始请求仍在跑，成功时 URL 会落进 musicApi 的地址缓存，
    * 下一次（自动切歌到这首、或用户重播）能直接命中，不算白跑。
+   *
+   * `stalled` 区分两种「拿不到地址」（2026-10-03 弱网修复）：
+   * - true  = **限时到了**（网络慢/引擎卡）→ 环境问题，不该记为「这首歌坏了」；
+   * - false = 引擎在预算内明确回了「没有地址」→ 内容问题。
+   * 过去两者都返回空串，于是弱网时每首都被当成坏歌、连挂5 首打满熔断，
+   * 自动切歌一关就再也回不来（用户反馈「网络质量差一点就疯狂不可用」）。
    */
-  private fetchUrlWithTimeout(song: Song, ms: number): Promise<string> {
-    return new Promise<string>((resolve) => {
+  private fetchUrlWithTimeout(
+    song: Song,
+    ms: number,
+  ): Promise<{ url: string; stalled: boolean }> {
+    return new Promise<{ url: string; stalled: boolean }>((resolve) => {
       let settled = false;
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
-        resolve("");
+        // 超时 = 环境问题
+        resolve({ url: "", stalled: true });
       }, ms) as number;
       musicApi
         .playUrl(song, this.quality)
@@ -1082,13 +1277,20 @@ class PlayerStore {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
-          resolve(url);
+          // 拿到地址 = 内容没问题（music-api 对失败只会抛错，不会再返回空串）
+          resolve({ url: url, stalled: false });
         })
-        .catch(() => {
+        .catch((e: any) => {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
-          resolve("");
+          // 抛错分流（与 music-api resolvePlayUrl 的弱网修复对齐，2026-10-03）：
+          // 弱网/引擎卡抛「网络较慢」→ stalled:true（环境问题，原地退避重试、
+          // 不计熔断）；内容失败抛「该歌曲暂时无法播放」→ stalled:false（坏歌，
+          // 走重取/自动切歌路径）。性质由异常对象本身携带，不读全局标记——
+          // 取链是并发的（换音质重取/恢复探测/下载会同时跑），全局标记会被
+          // 别的调用的结果串味，把弱网误判成坏歌而消耗熔断额度。
+          resolve({ url: "", stalled: !isContentFailError(e) });
         });
     });
   }
@@ -1142,6 +1344,9 @@ class PlayerStore {
             }
           }
         }
+        // song 可能是收藏总表里那条记录本身，封面回填后同样要落盘；
+        // 这条路径每首歌至多走一次（首次播放且缺封面），多写一次的代价可忽略
+        this.likedDirty = true;
         this.persist();
       })
       .catch(() => {});
@@ -1178,9 +1383,12 @@ class PlayerStore {
 
   private async ensurePlayback(): Promise<void> {
     if (this.current == null) return;
-    // 手动按播放 = 明确意图：重开自动切歌熔断
+    // 手动按播放 = 明确意图：重开自动切歌熔断，消化掉之前的暂停意图
     this.autoNext = true;
     this.failStreak = 0;
+    this.stallRetry = 0;
+    this.stalledMap.clear();
+    this.pauseIntentAt = 0;
     // 时间线在 media3 上，地址加载那一刻才懒解析 —— 不存在「URL 过期续播失败」，
     // 不用再预取地址。底层当前条目就是这首歌：直接恢复播放意图；没有时间线或
     // 当前条目对不上（热退出/进程重建后点播放、切歌失败停在别曲）按当前曲重推，
@@ -1195,13 +1403,27 @@ class PlayerStore {
   toggle(): void {
     if (this.current == null) return;
     this.playing = !this.playing;
-    if (this.playing) this.ensurePlayback();
-    else audioPlayer.pause();
+    if (this.playing) {
+      this.pauseIntentAt = 0;
+      this.ensurePlayback();
+    } else {
+      this.pauseIntentAt = Date.now();
+      audioPlayer.pause();
+    }
     this.persist();
   }
 
   pause(): void {
     if (this.current == null) return;
+    this.playing = false;
+    this.pauseIntentAt = Date.now();
+    audioPlayer.pause();
+    this.persist();
+  }
+
+  /** 系统自动暂停（弱网重试打满/熔断停住）：与用户暂停区分，不记暂停意图，
+      否则恢复探测会误判「用户不想听」而不自动重放 */
+  private autoPause(): void {
     this.playing = false;
     audioPlayer.pause();
     this.persist();
@@ -1215,6 +1437,7 @@ class PlayerStore {
   }
 
   stop(): void {
+    this.stopProgressClock();
     this.current = null;
     this.queue = [];
     this.playing = false;
@@ -1231,6 +1454,7 @@ class PlayerStore {
    * 那会清空播放状态并持久化空态，重启后悬浮球和续播就都没了（后台退出进程不死所以无感）。
    */
   stopForExit(): void {
+    this.stopProgressClock();
     this.playing = false;
     audioPlayer.stop();
     this.persist();
@@ -1245,6 +1469,9 @@ class PlayerStore {
     this.history = [];
     this.savedPlaylists = [];
     this.localPlaylists = [];
+    this.likedDirty = true;
+    this.playlistsDirty = true;
+    this.localPlaylistsDirty = true;
     this.playCounts = new Map<string, number>();
     this.likeCursor = 0;
     this.pendingOps = [];
@@ -1279,13 +1506,38 @@ class PlayerStore {
         item.id == this.current!.id && item.platform == this.current!.platform
     );
     if (index < 0) index = 0;
+    // 不喜欢列表：手动切歌跳过被屏蔽的歌。自动衔接不走这里（原生按已过滤的
+    // 时间线走），这段只管「下一首」按钮；全被屏蔽时退回当前曲（play 同曲
+    // 分支重播，绝不空转）
+    const dislikes = useDislikesStore();
     if (this.mode == "random") {
       if (this.queue.length == 1) index = 0;
-      else {
+      else if (dislikes.hasRules()) {
+        const playable: number[] = [];
+        for (let i = 0; i < this.queue.length; i++) {
+          if (i == index) continue;
+          if (!dislikes.isDisliked(this.queue[i])) playable.push(i);
+        }
+        // 除当前曲外全被屏蔽时保留 index（当前曲重播），不空转
+        if (playable.length > 0) {
+          index = playable[Math.floor(Math.random() * playable.length)];
+        }
+      } else {
         let random = Math.floor(Math.random() * this.queue.length);
         if (random == index) random = (random + 1) % this.queue.length;
         index = random;
       }
+    } else if (dislikes.hasRules()) {
+      // 顺序模式：循环扫描下一个未屏蔽的；扫完一轮全屏蔽则停在当前曲（重播）
+      let target = index;
+      for (let step = 1; step < this.queue.length; step++) {
+        const cand = (index + step) % this.queue.length;
+        if (!dislikes.isDisliked(this.queue[cand])) {
+          target = cand;
+          break;
+        }
+      }
+      index = target;
     } else {
       index = (index + 1) % this.queue.length;
     }
@@ -1307,11 +1559,33 @@ class PlayerStore {
    * 睡眠定时「当前歌播完停止」也在这里落地：懒解析窗口里原生切歌无声，
    * 立即停播退出，听感就是「这首歌放完就停」。
    */
-  private onNativeTrackChanged(mediaId: string): void {
+  private onNativeTrackChanged(mediaId: string, naturalEnd: boolean): void {
     const song = this.findSongByMediaId(mediaId);
     if (song == null) return;
     const cur = this.current;
-    if (cur != null && cur.id == song.id && cur.platform == song.platform) return;
+    // 同曲事件（单曲循环/环绕重启条目）不做簿记；但若这轮是「自然播到头」而
+    // 位置离末尾还远 = 内容提前结束，先自愈重放（见 tryRecoverEarlyEnd）
+    if (cur != null && cur.id == song.id && cur.platform == song.platform) {
+      if (naturalEnd && this.endedTooEarly(cur)) {
+        if (this.tryRecoverEarlyEnd(cur)) return;
+      }
+      return;
+    }
+    // 手动点歌后原生仍可能送达旧时间线在途的 trackChanged（A≠B 即采信会把
+    // current 短暂拉回旧歌，多记一条历史/播放次数）：点歌后短窗口内与当前
+    // 选曲不符的事件一律丢弃；窗口之外的同名事件是正常的原生自动衔接。
+    // 跨桥在途事件毫秒级送达，2.5s 窗口绰绰有余；正常自动衔接最快也在
+    // 一首歌时长之后，不会误伤。
+    if (cur != null && Date.now() - this.explicitPlayAt < 2500) {
+      console.log("[QT Media] 忽略迟到的原生切歌事件 → " + mediaId);
+      return;
+    }
+    // 原生自动衔接（naturalEnd）但上一首的位置离末尾还远 = 上一首内容提前
+    // 结束（流被截断/缓存投毒，media3 视为正常播完，无停顿无错误事件），
+    // 先清缓存从原位置重放上一首；重放仍提前结束就放行正常衔接
+    if (cur != null && naturalEnd && this.endedTooEarly(cur)) {
+      if (this.tryRecoverEarlyEnd(cur)) return;
+    }
     console.log("[QT Media] 原生切歌 → " + mediaId);
     this.current = song;
     this.playing = true;
@@ -1343,14 +1617,64 @@ class PlayerStore {
     }
   }
 
+  /** 「自然播到头」但位置离歌曲元数据时长还差 10s 以上 = 内容提前结束
+   *（截断流/坏缓存被 media3 视为正常播完；用元数据时长判定而非 this.duration，
+   *  后者可能已被原生实际流时长污染）。刚点歌（pos=0）不算。 */
+  private endedTooEarly(song: Song): boolean {
+    const meta = song.duration != null ? song.duration : 0;
+    return meta > 30 && this.progress > 0 && this.progress < meta - 10;
+  }
+
+  /**
+   * 提前结束自愈：清掉该曲的磁盘缓存分片并作废地址缓存，从最后位置重放
+   * （refetchAndReplay 会重推时间线并强制懒解析重新取址）。每曲仅自愈一次：
+   * 重放仍提前结束（试听片段/源本身被截断）就放行正常衔接，返回 false 由
+   * 调用方走原流程，避免无限拉锯。
+   */
+  private tryRecoverEarlyEnd(song: Song): boolean {
+    const key = song.platform + ":" + song.id;
+    if (this.earlyEosKey == key) {
+      console.log(
+        "[QT Player] 重放后仍提前结束（疑似试听片段/截断源），放行正常衔接: " +
+          key
+      );
+      return false;
+    }
+    this.earlyEosKey = key;
+    const meta = song.duration != null ? song.duration : 0;
+    console.log(
+      "[QT Player] 检测到提前结束（播到 " +
+        Math.floor(this.progress) +
+        "s / 共 " +
+        meta +
+        "s），清缓存后从原位置重放: " +
+        key
+    );
+    // 先停掉在途读取（循环重启时原生可能正在重读坏缓存），再精准清这一首的
+    // 缓存分片；refetchAndReplay 内部会作废地址缓存（invalidatePlayUrl）
+    audioPlayer.pause();
+    audioPlayer.evictSongCache(this.mediaIdOf(song));
+    this.refetchAndReplay(song);
+    return true;
+  }
+
   /**
    * 通知栏/自动播放出错时的处理。
-   * 播放失败最常见的原因是链接已过期（平台播放地址带时效签名，第二次播放同一首歌
-   * 复用旧链接会 403/404），所以先作废该歌曲的地址缓存并重取一次新地址重播；
-   * 同一首歌只重试一次，仍失败才按原逻辑有限次自动切歌，避免「错误→切歌」死循环。
+   *
+   * 三条分支（2026-10-03 弱网修复后）：
+   * 1. **弱网**（上次取链是超时/引擎不可用）：不换歌、不计熔断，等一下重试**同一首**。
+   *    换歌在弱网下几乎必然同样超时，过去正是「连挂 5 首 → 打满熔断 → 自动切歌
+   *    关闭」把网络波动放大成「疯狂不可用」。
+   * 2. 内容失败且该曲还没重取过：作废地址重取一次（签名 URL 过期是常见原因）。
+   * 3. 仍失败：进失败处理（自动下一首标识开着就切下一首，连续 5 首熔断 + 通知栏）。
    */
   private handlePlaybackError(): void {
     const song = this.current;
+    // ① 弱网：原地重试，不动熔断计数
+    if (song != null && this.isStalled(song)) {
+      this.retryStalled(song);
+      return;
+    }
     if (song != null && song.platform != "local") {
       const key = song.platform + ":" + song.id;
       // 同一首歌只重取一次；换歌或超过一分钟后重新允许，覆盖长时间播放后再次失效的情况
@@ -1365,6 +1689,163 @@ class PlayerStore {
     // 该曲已重取过仍失败：统一进失败处理（自动下一首标识开着就切下一首，
     // 连续 5 首失败熔断+通知栏提示，防止死歌队列无限空转）
     this.skipAfterFailure();
+  }
+
+  /** 本曲上次取链失败是否只是环境问题（弱网/引擎卡） */
+  private isStalled(song: Song): boolean {
+    if (song == null) return false;
+    return this.stalledMap.get(song.platform + ":" + song.id) === true;
+  }
+
+  /**
+   * 弱网原地重试同一首：等STALLED_RETRY_BASE_MS 起指数退避再重推时间线。
+   *
+   * 退避且限次（STALLED_RETRY_LIMIT）：网络长时间不可用时不会无限空转；
+   * 到上限后停在错误态等用户操作，且**不把这首拉黑**（用户手动播即可再试）。
+   */
+  private retryStalled(song: Song): void {
+    if (this.stallRetry >= STALLED_RETRY_LIMIT) {
+      if (!this.autoNext) {
+        // 熔断已开且网络仍未恢复：交给恢复探测，别再自己试
+        return;
+      }
+      console.log(
+        "[QT Player] 连续" +
+          STALLED_RETRY_LIMIT +
+          "次因网络超时，停止自动重试，等待用户操作"
+      );
+      this.autoPause();
+      uni.showToast({ title: "网络较慢，请稍后重试", icon: "none" });
+      // 走到这里时 autoNext 仍是 true（弱网超时不计熔断，熔断没被打开），
+      // 若不再挂恢复探测，这次退避打满就真的停在这儿了 —— 用户不手动点一下
+      // 永远不会再试，正是「熔断单向门」的另一种形态。挂上探测，网络一恢复
+      // 就自动重放（探测会真的取一次链来判恢复，不是空转计时器）。
+      this.scheduleRecoveryProbe();
+      return;
+    }
+    const delay = Math.min(
+      STALLED_RETRY_BASE_MS * Math.pow(2, this.stallRetry),
+      STALLED_RETRY_MAX_MS
+    );
+    this.stallRetry += 1;
+    console.log(
+      "[QT Player] 网络较慢，" +
+        delay +
+        "ms 后重试同一首（" +
+        this.stallRetry +
+        "/" +
+        STALLED_RETRY_LIMIT +
+        "）"
+    );
+    const scheduledAt = Date.now();
+    setTimeout(() => {
+      // 期间用户可能已切歌：只在仍是当前曲时才重推
+      const cur = this.current;
+      if (cur == null || cur.id != song.id || cur.platform != song.platform) return;
+      // 退避窗内用户按了暂停：那是明确的「先别放」，到点也不强行拉起
+      if (this.pauseIntentAt > scheduledAt) {
+        console.log("[QT Player] 退避期间用户已暂停，放弃自动重试");
+        return;
+      }
+      // 起播点在到点那一刻取：退避窗内的 seek 不丢（此前在排队时就取定，
+      // 等待期拖动进度条会被重试拉回旧位置）
+      const resumeAt = this.progress;
+      this.playing = true;
+      this.markProgress(resumeAt);
+      this.seekFreezeUntil = Date.now() + 800;
+      this.pushTimeline(song, resumeAt);
+      this.persist();
+    }, delay);
+  }
+
+  /**
+   * 熔断后的恢复探测（2026-10-03 弱网修复）。
+   *
+   * 过去熔断是单向门：只有用户手动播歌才重开。网络在 20:24 恢复，但20:16
+   * 已经熔断，没人操作就整晚放不回来——这正是用户反馈的现象。这里挂一个
+   * 指数退避的后台探测：**真的取一次链**来判恢复（不是空转计时器），
+   * 成功就重开自动切歌并重放当前曲。
+   */
+  private scheduleRecoveryProbe(): void {
+    if (this.recoverTimer != null) return;
+    const song = this.current;
+    if (song == null) return;
+    // 挂探测的那一刻熔断是否真的开着。两种调用场景的判定不同：
+    // - 熔断开（skipAfterFailure）：autoNext 变 true 说明期间用户手动播了或
+    //   别处已成功，直接收工重放，不必再探；
+    // - 弱网退避打满（retryStalled）：autoNext 本来就是 true，此时**必须真的
+    //   取一次链**才能知道网络恢复没有，不能顺手重放又白等一轮。
+    const wasBreakerOpen = !this.autoNext;
+    this.probeStartedAt = Date.now();
+    let delay = RECOVERY_PROBE_BASE_MS;
+    let attempt = 0;
+    const probe = (): void => {
+      attempt += 1;
+      this.recoverTimer = setTimeout(() => {
+        this.recoverTimer = null;
+        const cur = this.current;
+        // 用户已经手动播了 / 换了歌：不介入
+        if (cur == null || cur.id != song.id || cur.platform != song.platform) return;
+        if (wasBreakerOpen && this.autoNext) {
+          this.probeDone(attempt);
+          return;
+        }
+        this.fetchUrlWithTimeout(song, URL_FETCH_BUDGET_MS)
+          .then((res: { url: string; stalled: boolean }) => {
+            if (res.url.length > 0) {
+              console.log("[QT Player] 第" + attempt + "次恢复探测成功，重开自动切歌");
+              this.probeDone(attempt);
+              return;
+            }
+            this.scheduleProbeNext(probe, attempt, delay);
+          })
+          .catch(() => this.scheduleProbeNext(probe, attempt, delay));
+      }, delay) as number;
+      delay = Math.min(delay * 2, RECOVERY_PROBE_MAX_MS);
+    };
+    probe();
+  }
+
+  /** 继续安排下一次探测（超过上限就交给用户） */
+  private scheduleProbeNext(
+    probe: () => void,
+    attempt: number,
+    _lastDelay: number,
+  ): void {
+    if (attempt >= RECOVERY_PROBE_LIMIT) {
+      console.log(
+        "[QT Player] 恢复探测" + attempt + "次仍未成功，等待用户手动播放"
+      );
+      return;
+    }
+    this.recoverTimer = null;
+    probe();
+  }
+
+  /** 探测判定为已恢复：重开自动切歌并重放当前曲 */
+  private probeDone(attempt: number): void {
+    if (attempt <= 0) return;
+    const song = this.current;
+    if (song == null) return;
+    this.autoNext = true;
+    this.failStreak = 0;
+    this.stallRetry = 0;
+    this.urlRetryKey = "";
+    // 熔断期间用户明确暂停过：只重开熔断状态，不强行拉起播放
+    if (this.pauseIntentAt > 0 && this.pauseIntentAt > this.probeStartedAt) {
+      console.log("[QT Player] 网络已恢复，但用户已暂停，不自动重放");
+      this.persist();
+      return;
+    }
+    // 探测期间已手动续上同一首：只复位计数，不再重推时间线造成二次缓冲
+    if (this.playing && audioPlayer.currentMediaId() == this.mediaIdOf(song)) {
+      this.persist();
+      return;
+    }
+    this.playing = true;
+    this.markProgress(this.progress);
+    this.pushTimeline(song, this.progress);
+    this.persist();
   }
 
   /** 作废旧地址并重新解析当前歌曲（保留当前进度）；失败则按错误流程继续 */
@@ -1386,16 +1867,18 @@ class PlayerStore {
   }
 
   /**
-   * 播放失败（取链失败 / 重取仍失败 / 底层播放错误）后的统一处理：
+   * 播放失败（**内容问题**：取链明确无地址 / 重取仍失败 / 底层播放错误）后的处理：
    * 自动下一首标识开着 → 切到下一首继续播；连续失败满 5 首 → 关闭标识熔断，
    * 通知栏提示「自动播放失败」，不再一首接一首白等取链空转。
    * 标识在任一成功播放（进度>3 秒）或用户手动发起播放时重新打开。
+   *
+   * 弱网超时**不会**走到这里（见 `handlePlaybackError` 的分支①）：
+   * 那是环境问题，原地重试即可，不该消耗熔断额度。
    */
   private skipAfterFailure(): void {
     if (!this.autoNext) {
       // 熔断已打开：停住提示，等用户手动选一首能播的（播放成功后自动恢复）
-      this.pause();
-      this.persist();
+      this.autoPause();
       uni.showToast({ title: "该歌曲暂时无法播放", icon: "none" });
       return;
     }
@@ -1403,11 +1886,14 @@ class PlayerStore {
     if (this.failStreak >= 5) {
       this.autoNext = false;
       this.failStreak = 0;
-      this.pause();
+      this.autoPause();
       this.persist();
       // 后台自动切歌时 toast 看不见，走通知栏
       audioPlayer.postNotice("轻听", "连续5首播放失败，已停止自动切歌");
       uni.showToast({ title: "自动播放失败，已停止自动切歌", icon: "none" });
+      // 熔断是单向门的问题（2026-10-03）：挂恢复探测，网络/音源一恢复就自动
+      // 重开自动切歌并重放当前曲，不要求用户手动操作
+      this.scheduleRecoveryProbe();
       return;
     }
     console.log(
@@ -1416,6 +1902,15 @@ class PlayerStore {
     this.next(true);
   }
 
+  /**
+ * 上一首。
+ *
+ * **刻意不过滤屏蔽**（与 `next()` 不对称，不是漏写）：屏蔽语义是「别让它自动出现」，
+ * 不是「禁止聆听」。`next()` 需要过滤是因为自动切歌必须躲开屏蔽项；
+ * 而 `previous()` 只会由用户的「上一首」按钮触发 —— 用户主动点的那首歌，
+ * 屏蔽规则不跟他争。如果这里也过滤，全被屏蔽时按钮会变成死键（点不动），
+ * 用户反而拿不回控制权。qt-pc 的引擎侧 `previous` 同口径。
+ */
   previous(): void {
     console.log("[QT Media] previous() called");
     if (this.current == null) return;
@@ -1472,6 +1967,11 @@ class PlayerStore {
   }
 
   addToQueue(song: Song): void {
+    // 不喜欢列表：被屏蔽的歌不进队列（用户明确表达过「别自动出现」）
+    if (useDislikesStore().isDisliked(song)) {
+      uni.showToast({ title: "该歌曲已屏蔽", icon: "none" });
+      return;
+    }
     for (let index = 0; index < this.queue.length; index++) {
       const item = this.queue[index];
       if (item.id == song.id && item.platform == song.platform) return;
@@ -1485,9 +1985,15 @@ class PlayerStore {
 
   enqueueMany(songs: Song[]): void {
     let added = 0;
+    let blocked = 0;
     let next = this.queue;
     for (let i = 0; i < songs.length; i++) {
       const song = songs[i];
+      // 不喜欢列表：批量入队跳过被屏蔽的歌
+      if (useDislikesStore().isDisliked(song)) {
+        blocked++;
+        continue;
+      }
       let dup = false;
       for (let j = 0; j < next.length; j++) {
         const item = next[j];
@@ -1507,10 +2013,15 @@ class PlayerStore {
       this.syncTimeline();
       this.persist();
     }
-    uni.showToast({
-      title: added > 0 ? "已加入" + added + " 首到播放队列" : "队列已包含这些歌曲",
-      icon: "none",
-    });
+    let title = "队列已包含这些歌曲";
+    if (added > 0 && blocked > 0) {
+      title = "已加入" + added + " 首，跳过 " + blocked + " 首已屏蔽";
+    } else if (added > 0) {
+      title = "已加入" + added + " 首到播放队列";
+    } else if (blocked > 0) {
+      title = "这些歌曲都已屏蔽";
+    }
+    uni.showToast({ title, icon: "none" });
   }
 
   /**
@@ -1606,6 +2117,8 @@ class PlayerStore {
     if (sidx !== -1) {
       const removed = this.savedPlaylists[sidx];
       this.savedPlaylists.splice(sidx, 1);
+      // 这条路径没有紧跟整表写（成员清理只在真的摘到歌时才写），必须自己置脏
+      this.playlistsDirty = true;
       if (removed != null) {
         this.removeSongsOfPlaylistLocal(removed);
         this.enqueueLikeOp({ type: "playlist", action: "remove", dataJson: this.likePlaylistPayloadJson(removed) });
@@ -1643,6 +2156,7 @@ class PlayerStore {
       const localSeq = sp.likeSeq != null ? sp.likeSeq! : 0;
       if (localSeq > seq) continue;
       this.savedPlaylists.splice(i, 1);
+      this.playlistsDirty = true;
       this.removeSongsOfPlaylistLocal(sp);
       savedTouched = true;
     }
@@ -1663,6 +2177,7 @@ class PlayerStore {
       if (s.pids.indexOf(pid) < 0) continue;
       this.removePidFromSong(s, pid);
       if (s.pids == null || s.pids.length == 0) this.likedSongs.splice(i, 1);
+      this.likedDirty = true;
       touched = true;
     }
     if (touched) this.persist();
@@ -1718,6 +2233,7 @@ class PlayerStore {
         };
         this.likedSongs.push(entry);
         added++;
+        this.likedDirty = true;
         this.pendingOps.push({
           type: "song",
           action: "add",
@@ -1774,6 +2290,7 @@ class PlayerStore {
     this.pushSongPid(entry, pid, "remove");
     if (entry.pids == null || entry.pids.length == 0) {
       this.likedSongs.splice(idx, 1);
+      this.likedDirty = true;
       this.persist();
     }
   }
@@ -1848,6 +2365,9 @@ class PlayerStore {
       if (song.pids[i] == pid) return false;
     }
     song.pids.push(pid);
+    // 收藏总表条目是原地改的（pids 不在「重赋值/增删条目」的范畴内），
+    // 不在这里置脏，纯补 pid 的路径就会漏落盘
+    this.likedDirty = true;
     return true;
   }
 
@@ -1864,6 +2384,7 @@ class PlayerStore {
       next.push(song.pids[i]);
     }
     song.pids = next;
+    if (removed) this.likedDirty = true;
     return removed;
   }
 
@@ -1912,6 +2433,7 @@ class PlayerStore {
       pids: [pid],
     };
     this.likedSongs.push(entry);
+    this.likedDirty = true;
     this.persist();
   }
 
@@ -1987,6 +2509,60 @@ class PlayerStore {
     const containing = this.getPlaylistsContainingSong(song);
     for (let i = 0; i < containing.length; i++) ids.push(containing[i].id);
     return ids;
+  }
+
+  /**
+   * 把这首歌加进这个歌单前，先查「同名不同源」：歌单里已经有别的音源的
+   * 同一首歌时返回冲突列表，UI 拿它弹一次确认再决定要不要真的加。
+   *
+   * 与 qt-pc 的 lib/collect-dup 同口径（人工保持同步）：只按歌名+歌手判定，
+   * 不联网。取不到歌单 pid（不是自建歌单）时返回空数组——那种歌单的曲目
+   * 归音源管，本地收藏总表里根本没有可比的数据。
+   */
+  collectDupIn(song: Song, playlistId: string): Song[] {
+    if (song == null) return [];
+    const pid = this.playlistPidOf(playlistId);
+    if (pid.length == 0) return [];
+    return findCrossSourceDup(song, this.songsOfPid(pid));
+  }
+
+  /**
+   * 对一整批「要加入的歌单」查重：把每个有冲突的歌单凑成一条
+   * CollectDupConflict，UI 依次弹确认。**没有冲突的歌单**会先被直接放行
+   * （返回 `passed`），这样用户点掉冲突那几下之后，剩下的歌单不必再问一遍。
+   */
+  collectDupConflicts(song: Song, addIds: string[]): {
+    conflicts: CollectDupConflict[];
+    passed: string[];
+  } {
+    const conflicts: CollectDupConflict[] = [];
+    const passed: string[] = [];
+    if (song == null) return { conflicts: conflicts, passed: passed };
+    for (let i = 0; i < addIds.length; i++) {
+      const id = addIds[i];
+      const dups = this.collectDupIn(song, id);
+      if (dups.length == 0) {
+        passed.push(id);
+        continue;
+      }
+      conflicts.push({
+        playlistId: id,
+        playlistName: this.playlistNameOf(id),
+        dups: dups,
+      });
+    }
+    return { conflicts: conflicts, passed: passed };
+  }
+
+  /** 歌单 id → 展示名（查重提示文案用；找不到就显示 id 本身，不至于空白） */
+  playlistNameOf(playlistId: string): string {
+    for (let i = 0; i < this.localPlaylists.length; i++) {
+      if (this.localPlaylists[i].id == playlistId) return this.localPlaylists[i].name;
+    }
+    for (let i = 0; i < this.savedPlaylists.length; i++) {
+      if (this.savedPlaylists[i].id == playlistId) return this.savedPlaylists[i].name;
+    }
+    return playlistId;
   }
 
   /** 统一处理「加入/移出歌单」选择结果，返回是否有变更 */
@@ -2167,8 +2743,13 @@ class PlayerStore {
     if (op.type == "song") {
       const sid = obj["sid"] as string | null;
       const songPlatform = obj["platform"] as string | null;
-      // 无平台信息（如本地歌曲）无法在服务器建模，返回 null 由调用方丢弃
+      // 本地歌与无平台信息的歌都无法在服务器建模（本地歌 platform 非空，
+      // 是 "local"：推上云端后其他设备既无文件也无对应音源，取链必败），
+      // 返回 null 由调用方丢弃
       if (sid == null || sid.length == 0 || songPlatform == null || songPlatform.length == 0) {
+        return null;
+      }
+      if (songPlatform == "local") {
         return null;
       }
       body["sid"] = sid;
@@ -2300,6 +2881,8 @@ class PlayerStore {
         const song = this.likedSongs[i];
         if (song.id == sid && song.platform == platform) {
           song.likeSeq = seq;
+          // 推送成功后回写 seq：这里没有跟着 persist()，靠脏标记留给下一次落盘
+          this.likedDirty = true;
           return;
         }
       }
@@ -2316,6 +2899,7 @@ class PlayerStore {
         const pl = this.savedPlaylists[i];
         if (pl.id == pid && pl.platform == platform) {
           pl.likeSeq = seq;
+          this.playlistsDirty = true;
           return;
         }
       }
@@ -2409,6 +2993,7 @@ class PlayerStore {
         this.removePidFromSong(entry, change.pid);
         if (entry.pids != null && entry.pids.length > 0) {
           entry.likeSeq = change.updatedSeq;
+          this.likedDirty = true;
           this.persist();
           return;
         }
@@ -2418,6 +3003,7 @@ class PlayerStore {
         if (i != idx) next.push(this.likedSongs[i]);
       }
       this.likedSongs = next;
+      this.likedDirty = true;
       this.persist();
       return;
     }
@@ -2433,6 +3019,7 @@ class PlayerStore {
       if (change.picUrl != null && change.picUrl.length > 0) entry.picUrl = change.picUrl;
       if (change.pid != null && change.pid.length > 0) this.addPidToSong(entry, change.pid);
       entry.likeSeq = change.updatedSeq;
+      this.likedDirty = true;
       this.persist();
       return;
     }
@@ -2450,6 +3037,7 @@ class PlayerStore {
     if (change.pid != null && change.pid.length > 0) song.pids = [change.pid];
     if (change.hash.length > 0 && change.hash.toLowerCase() != "nohash") song.musicId = change.hash;
     this.likedSongs.push(song);
+    this.likedDirty = true;
     this.persist();
   }
 
@@ -2481,6 +3069,9 @@ class PlayerStore {
         if (i != idx) next.push(this.savedPlaylists[i]);
       }
       this.savedPlaylists = next;
+      // 这里刻意不 persist()（增量拉取的循环外统一落盘），只置脏；
+      // 若调用方中途异常退出，脏标记会留给下一次 persist() 兜底
+      this.playlistsDirty = true;
       return;
     }
     if (idx >= 0) {
@@ -2494,6 +3085,7 @@ class PlayerStore {
       if (change.picUrl.length > 0) local.picUrl = change.picUrl;
       local.likeSeq = change.updatedSeq;
       this.savedPlaylists[idx] = local;
+      this.playlistsDirty = true;
       return;
     }
     // 本机自建歌单：服务器的这条变更只回写元数据，不再另建一条 savedPlaylists 记录 ——
@@ -2524,6 +3116,7 @@ class PlayerStore {
       likeSeq: change.updatedSeq,
       pid: incomingPid,
     });
+    this.playlistsDirty = true;
   }
 
   /** 全量分页拉取（首次登录 / 游标丢失兜底，LIKE_SYNC_DESIGN.md §2.4/§5.6） */
@@ -2586,6 +3179,7 @@ class PlayerStore {
       }
     }
     this.likedSongs = mergedSongs;
+    this.likedDirty = true;
     const mergedPlaylists: Playlist[] = [];
     for (let i = 0; i < serverPlaylists.length; i++) {
       const pl = serverPlaylists[i];
@@ -2619,6 +3213,7 @@ class PlayerStore {
       }
     }
     this.savedPlaylists = mergedPlaylists;
+    this.playlistsDirty = true;
     if (maxSeq > this.likeCursor) this.likeCursor = maxSeq;
     this.saveLikeSync();
     this.persist();
@@ -2735,6 +3330,7 @@ class PlayerStore {
         // 云端确认过、现在没了 → 他端取消收藏/删除，本地跟随
         removedCount++;
         this.savedPlaylists.splice(i, 1);
+        this.playlistsDirty = true;
         if (pl.platform === 'local') this.removeSongsOfPlaylistLocal(pl);
         continue;
       }
@@ -2824,6 +3420,9 @@ class PlayerStore {
     this.likedSongs = [];
     this.savedPlaylists = [];
     this.localPlaylists = [];
+    this.likedDirty = true;
+    this.playlistsDirty = true;
+    this.localPlaylistsDirty = true;
     this.persist();
     this.resetLikeSync();
     console.log("[Player] 检测到切换账号，已清空本地收藏缓存");
@@ -2870,6 +3469,22 @@ class PlayerStore {
           for (let i = 0; i < ids.length; i++) next.push(ids[i]);
           next.push(targetId);
         }
+        // 加进来之前查一次「同名不同源」：这个歌单里已经有别的音源的同一首歌
+        // 时先弹确认，用户点了「继续收藏」才真的加
+        const dups = this.collectDupIn(song, targetId);
+        if (dups.length > 0) {
+          uni.showModal({
+            title: "同名歌曲提示",
+            content: collectDupMessage(this.playlistNameOf(targetId), dups),
+            confirmText: "继续收藏",
+            cancelText: "取消",
+            success: (m: any) => {
+              const ok = m != null && (m.confirm as boolean);
+              if (ok) this.applyPickerSelection(song, next);
+            },
+          });
+          return;
+        }
         this.applyPickerSelection(song, next);
       },
     });
@@ -2888,6 +3503,30 @@ class PlayerStore {
 
   clearHistory(): void {
     this.history = [];
+    this.persist();
+  }
+
+  /**
+   * 批量移除播放记录（历史页多选删除）。
+   * 逐条调 removeHistory 会 persist 同等次数（每条都全量重写存储键），
+   * 选几十首时明显卡顿，所以这里合并成一次落盘。
+   */
+  removeHistoryMany(songs: Song[]): void {
+    if (songs.length == 0) return;
+    const next: Song[] = [];
+    for (let index = 0; index < this.history.length; index++) {
+      const item = this.history[index];
+      let hit = false;
+      for (let k = 0; k < songs.length; k++) {
+        if (item.id == songs[k].id && item.platform == songs[k].platform) {
+          hit = true;
+          break;
+        }
+      }
+      if (!hit) next.push(item);
+    }
+    if (next.length == this.history.length) return;
+    this.history = next;
     this.persist();
   }
 
@@ -2944,6 +3583,7 @@ class PlayerStore {
       };
       this.savedPlaylists = [meta, ...this.savedPlaylists];
     }
+    this.playlistsDirty = true;
     this.persist();
     // 增量推送：单条收藏/取消（断网时进队列，联网自动补推，不再全量上传）
     const action: "add" | "remove" = removing ? "remove" : "add";
