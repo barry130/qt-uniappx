@@ -86,9 +86,30 @@ import {
   engineUsable,
 } from "@/services/source-engine";
 
-/** 平台常量（与 astral 的 qt_app_update.type 同源） */
+/**
+ * 平台常量（与 astral 的 `QtAppUpdate.type` / `QtSourceRelease.platform` 严格同源）。
+ * 号段已满：1101 安卓 / 1102 iOS / 1103 Windows / 1104 Linux / 1105 macOS / 1106 鸿蒙。
+ * 鸿蒙只能取 1106 —— 1104 早在 V20261008001__platform_linux_macos.sql 里给了 Linux。
+ */
 export const PLATFORM_ANDROID = 1101;
+export const PLATFORM_IOS = 1102;
 export const PLATFORM_WINDOWS = 1103;
+export const PLATFORM_LINUX = 1104;
+export const PLATFORM_MACOS = 1105;
+export const PLATFORM_HARMONY = 1106;
+
+/**
+ * 本机平台号。manifest 准入过滤（platforms 白名单）与更新结果上报都用它。
+ * 鸿蒙必须显式分支：否则会被当成 Android（1101）去要包、去上报，
+ * 后端按 1106 发布的鸿蒙产物永远下发不到，上报数据也会污染安卓统计。
+ * 其余平台保持原有取值不变（历史上这里一律发 1101）。
+ */
+export function currentPlatform(): number {
+  // #ifdef APP-HARMONY
+  return PLATFORM_HARMONY;
+  // #endif
+  return PLATFORM_ANDROID;
+}
 /** 本机支持的宿主契约版本（与 source-engine 里的一致） */
 const HOST_API_VERSION = 1;
 const MANIFEST_TIMEOUT_MS = 10000;
@@ -245,8 +266,8 @@ export async function discoverUpdates(force: boolean): Promise<PackUpdateOffer[]
   if (manifest != null && manifest.release != null) {
     const release = manifest.release;
     // platforms 留空 = 不限平台（与 qt-pc source_install 的准入口径一致）；
-    // 显式列出时必须包含 Android（1101）
-    const platformOk = release.platforms.length == 0 || containsNum(release.platforms, PLATFORM_ANDROID);
+    // 显式列出时必须包含本机平台号（鸿蒙 1106 / 安卓 1101）
+    const platformOk = release.platforms.length == 0 || containsNum(release.platforms, currentPlatform());
     if (release.published && !release.bad && release.rollbackTo <= 0 && platformOk && release.hostApiVersion <= HOST_API_VERSION) {
       // play 产物：release 版本号即产物版本（**不是** artifact.version —— 那是后端
       // mergeArtifacts 维护的单文件小计数器，首次上传=1，url 变了才 +1；拿它比
@@ -902,7 +923,7 @@ export async function fetchManifest(): Promise<SourceManifest | null> {
   // channel 入参已随后端接口删除（测试人群识别改走 satoken 请求头，见 requestJson）
   let path =
     "app/source/manifest?platform=" +
-    PLATFORM_ANDROID +
+    currentPlatform() +
     "&hostApiVersion=" +
     HOST_API_VERSION;
   // 版本号取不到时（0）不带该参数：服务端对「未提供」应视为不限制，
@@ -924,7 +945,7 @@ export async function reportResult(
   detail: string
 ): Promise<void> {
   const data = new UTSJSONObject();
-  data.set("platform", PLATFORM_ANDROID);
+  data.set("platform", currentPlatform());
   data.set("appVersionCode", getCurrentVersionCode());
   data.set("appVersionName", getCurrentVersionName());
   data.set("sourceVersionCode", sourceVersionCode);

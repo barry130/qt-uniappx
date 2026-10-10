@@ -1,0 +1,164 @@
+// qt-app-native —— 鸿蒙端兜底实现（第一轮：能安全实现的实现，其余全部降级）
+//
+// 为什么必须有这个文件：安卓能力集中在 utssdk/app-android，鸿蒙端若没有 app-harmony，
+// uni-app x 编译鸿蒙时会回退到 utssdk/index.uts（本插件没有该文件），导致
+// services/app-native.uts 的**顶层无门禁 import** 解析失败，整个鸿蒙工程编译不过。
+// 故补齐同名同签名的实现，返回类型严格对齐 interface.uts。
+//
+// 本轮策略：
+//   - 打开浏览器：用官方 uts-openSchema 同款写法（getAbilityContext().openLink）真实现；
+//   - 其余能力：返回「不支持/无法确定」，由 JS 侧既有降级分支接管
+//     （安装 APK → 提示到文件管理、本地音频 → 空列表、权限 → 无法确定…）。
+// 这些都不是本轮鸿蒙播放链路的前置依赖，先把编译打通，能力逐轮补。
+
+import { common } from '@kit.AbilityKit';
+import OpenLinkOptions from '@ohos.app.ability.OpenLinkOptions';
+import { BusinessError } from '@kit.BasicServicesKit';
+import type {
+  LocalAudioItem,
+  DeleteLocalMediaResult,
+  PickFileResult,
+  PermissionState,
+} from '../interface.uts';
+
+// ==================== 系统交互 ====================
+
+/**
+ * 打开系统浏览器（http/https）。
+ * 与官方 uts-openSchema 同款：openLink + appLinkingOnly=false，非应用链接交给系统浏览器。
+ * 取 context 统一走 `UTSHarmony.getUIAbilityContext()`：它是 d.ts 可验证的全局对象
+ * （builtin-dts/uts-types/app-harmony/UTSHarmony.d.ts 声明、index.d.ts 挂到全局，无需 import），
+ * 而 `@dcloudio/uni-runtime` 的 getAbilityContext 在任何本地 .d.ts 里都查不到
+ * （运行时隐式注入），类型检查与升级都会踩空。两个插件已统一到前者。
+ * @returns 已成功发起跳转返回 true；异常或 context 不可用返回 false（调用方降级为复制链接）
+ */
+export function openExternalUrl(url: string): boolean {
+  if (url.length == 0) return false;
+  try {
+    const ctx = UTSHarmony.getUIAbilityContext() as common.UIAbilityContext;
+    if (ctx == null) return false;
+    ctx.openLink(url, { appLinkingOnly: false } as OpenLinkOptions);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * 退出应用。
+ *
+ * 鸿蒙**没有**「杀掉自己进程」的公开 API（应用不能自我终止进程），唯一的合法自退路径是
+ * `UIAbilityContext.terminateSelf()`：销毁当前 UIAbility，系统把任务切回桌面/上一个应用。
+ * 对「检测到非官方版本 → 自动退出」这个场景语义完全够用——用户看到的就是应用被关掉。
+ * 附带要把 module.json5 的 `removeMissionAfterTerminate` 设为 true，否则任务中心里
+ * 还会残留一张卡片（terminateSelf 默认不清任务）。
+ *
+ * 返回 true 表示「已受理并已发起退出」，调用方不要再弹「已退出」提示：
+ * terminateSelf 是异步的，这里拿不到同步成败，用乐观返回（与 openExternalUrl 一致）。
+ * 若 context 不可用或调用抛异常，返回 false 让 JS 侧走降级提示。
+ */
+export function exitAppNative(): boolean {
+  try {
+    const ctx = UTSHarmony.getUIAbilityContext() as common.UIAbilityContext;
+    if (ctx == null) return false;
+    ctx.terminateSelf().catch((err: BusinessError) => {
+      console.log('[AppNative] terminateSelf 失败', err.message);
+    });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/** 安装 APK：鸿蒙不是 APK 体系，恒 false（JS 提示到文件管理安装） */
+export function installApkNative(filePath: string): boolean {
+  return false;
+}
+
+// ==================== 媒体库 ====================
+
+/** 保存到公共媒体库：鸿蒙第一轮不实现，返回空串表示失败 */
+export function saveToPublicMedia(tempPath: string, dirType: string, fileName: string, subDir: string = ''): string {
+  return '';
+}
+
+/** 申请公共目录权限：鸿蒙沙箱模型不同，无需此权限，返回 false（调用方据此走降级） */
+export function ensurePublicDirPermission(): boolean {
+  return false;
+}
+
+// ==================== 设置页跳转 ====================
+
+/** 打开系统通知设置：鸿蒙第一轮不实现（播放器用 notificationManager 自行申请） */
+export function openNotificationSettings(): boolean {
+  return false;
+}
+
+/** 是否忽略电池优化：鸿蒙无此概念，恒 true（避免 JS 反复提示用户去设置里放行后台） */
+export function isIgnoringBatteryOptimizations(): boolean {
+  return true;
+}
+
+/** 打开电池优化设置：鸿蒙无此页面 */
+export function openBatteryOptimizationSettings(): boolean {
+  return false;
+}
+
+/** 打开自启动设置：鸿蒙无此页面 */
+export function openAutoStartSettings(): boolean {
+  return false;
+}
+
+/** 打开应用详情设置：鸿蒙第一轮不实现 */
+export function openAppDetailsSettings(): boolean {
+  return false;
+}
+
+// ==================== 本地音频 ====================
+
+/** 扫描本地音频：鸿蒙第一轮不实现，回调空列表（调用方据此显示「无本地音乐」） */
+export function scanLocalAudio(onResult: (items: LocalAudioItem[]) => void): void {
+  onResult([] as LocalAudioItem[]);
+}
+
+/** 删除本地媒体：恒全部失败（无本地库可删） */
+export function deleteLocalMedia(items: LocalAudioItem[]): DeleteLocalMediaResult {
+  return { deleted: 0, pending: 0, failed: items.length } as DeleteLocalMediaResult;
+}
+
+// ==================== 窗口/权限 ====================
+
+/**
+ * 兼容旧版系统栏内边距：鸿蒙的窗口安全区由系统与 uvue 布局处理，
+ * 返回 false 表示「无需额外处理」，不会触发调用方的兜底重排。
+ */
+export function applyLegacyInsets(): boolean {
+  return false;
+}
+
+/** 重建 Activity：鸿蒙对应 ability 重建，不主动做，返回 false */
+export function recreateActivity(): boolean {
+  return false;
+}
+
+/** 选择 JS 文件：鸿蒙第一轮不实现（音源包安装入口在安卓端） */
+export function pickJsFile(onResult: (result: PickFileResult) => void): void {
+  onResult({ ok: false, name: '', content: '', message: '鸿蒙端暂不支持选择本地 JS 文件' } as PickFileResult);
+}
+
+/**
+ * 查询权限状态：鸿蒙第一轮不实现，统一返回 unknown=true。
+ * 页面据此显示「无法确定」而不是「未授权」——不谎报未授权，避免误导用户去系统里找。
+ */
+export function queryPermissionStates(ids: string[]): PermissionState[] {
+  const out: PermissionState[] = [];
+  for (let i = 0; i < ids.length; i++) {
+    out.push({ id: ids[i], applicable: false, granted: false, unknown: true } as PermissionState);
+  }
+  return out;
+}
+
+/** 打开权限设置页：鸿蒙第一轮不实现 */
+export function openPermissionSettings(id: string): boolean {
+  return false;
+}

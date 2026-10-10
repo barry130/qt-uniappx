@@ -1,6 +1,6 @@
 # qt-js-engine
 
-在**安卓端本地执行音源包脚本**（`source-bundle.js`）的 UTS 插件，让「第三方音源接口失效」
+在**安卓 / 鸿蒙端本地执行音源包脚本**（`source-bundle.js`）的 UTS 插件，让「第三方音源接口失效」
 这类问题不发版就能修复。iOS 侧计划走系统 JavaScriptCore（阶段二）。
 
 > 本仓库**不内置音源包**：脚本由用户在应用内安装（官方清单下发或粘贴直链），
@@ -10,8 +10,9 @@
 
 | 项 | 值 |
 | --- | --- |
-| 实现文件 | `utssdk/app-android/webview.uts`（WebView 宿主桥）/ `index.uts`（pump、HTTP、定时器、文件 IO、对外 API） |
-| 内核 | 系统 WebView 内置的 V8/JIT |
+| 实现文件（安卓） | `utssdk/app-android/webview.uts`（WebView 宿主桥）/ `index.uts`（pump、HTTP、定时器、文件 IO、对外 API） |
+| 实现文件（鸿蒙） | `utssdk/app-harmony/builder.ets`（ArkWeb 宿主桥）/ `index.uts`（同上）/ `prelude.uts`（注入源码） |
+| 内核 | 系统 WebView / ArkWeb 内置的 V8/JIT |
 | 混淆脚本 init | 实测 **200-350ms**（混淆后的音源包脚本 141-242ms）——内嵌解释器上是 6-9s |
 | 失败语义 | 系统 WebView 不可用（de-Googled ROM）或启动失败时 `start()` 直接报错，由服务层决定后续 |
 
@@ -41,13 +42,28 @@ qt-js-engine/
 ├─ README.md
 └─ utssdk/
    ├─ interface.uts            跨端类型（全部回调式，避免 Promise 跨语言转换）
-   ├─ index.uts                非安卓平台占位（返回「不支持」，由调用方降级）
-   └─ app-android/
-      ├─ config.json           空（无原生库，不再限制 abis / minSdk）
-      ├─ prelude.uts           宿主注入的 JS 源码（QT_JS_PRELUDE，hostApiVersion=1 的一部分）
-      ├─ webview.uts           WebView(V8) 宿主桥（创建 / 求值 / 装载 bundle）
-      └─ index.uts             对外 API（引擎线程 / pump / HTTP / 定时器 / 文件 IO）
+   ├─ index.uts                未实现平台占位（返回「不支持」，由调用方降级）
+   ├─ app-android/
+   │  ├─ config.json           空（无原生库，不再限制 abis / minSdk）
+   │  ├─ prelude.uts           宿主注入的 JS 源码（QT_JS_PRELUDE，hostApiVersion=1 的一部分）
+   │  ├─ webview.uts           WebView(V8) 宿主桥（创建 / 求值 / 装载 bundle）
+   │  └─ index.uts             对外 API（引擎线程 / pump / HTTP / 定时器 / 文件 IO）
+   └─ app-harmony/
+      ├─ config.json           空（无 ohpm 依赖）
+      ├─ module.json5          har 模块声明（含 ohos.permission.INTERNET）
+      ├─ prelude.uts           宿主注入的 JS 源码（QT_JS_PRELUDE，与安卓同源，平台号 1106）
+      ├─ builder.ets           ArkWeb 宿主桥（1×1 隐藏 Web + onInterceptRequest 内存供源码）
+      └─ index.uts             对外 API（两条串行队列 / pump / HTTP / 定时器 / 文件 IO）
 ```
+
+> 鸿蒙实现（`app-harmony/`）与安卓**同一套架构的第二份平台实现**，上层与音源包零改动。
+> 三处无法照抄的差异：① 没有引擎线程 → 换成「求值队列 + 操作队列」两条显式串行队列
+> （阻塞等待变回调续接，超时改用看门狗定时器）；② 没有 headless JS 运行时 → 必须给
+> 1×1 的 `Web` 找挂载点（**三级回落**：覆盖层 `OverlayManager` → 页面节点
+> `qt-js-engine-host` → 根节点约定 id `root`；**应用侧不必提供那个 view**，
+> 三级全失败才报错并列出每级原因）；
+> ③ 模块源码不落盘 → `onInterceptRequest` 用 `WebResourceResponse` 直接从内存回填。
+> 定时器仍归原生管（免疫 ArkWeb 对不可见页面的定时器节流）。
 
 ## 桥接：pump 协议（JS ↔ 原生）
 
@@ -168,6 +184,33 @@ stop((r) => {})                // 正常关停；对已 poison 的引擎放弃�
 - HTTP 走 `HttpURLConnection`（超时/重定向/gzip/限流 `MAX_RESPONSE_BYTES` 8MB/错误流读取都有护栏）；
 - waiter 带超时（`expireWaiters` 统一过期），回调不丢；
 - 文件 IO 在引擎线程之外的独立线程执行，避免与 evaluate 争抢。
+
+实现约定（`app-harmony/index.uts`，与上面逐条对应）：
+
+- 没有引擎线程：`gEvalQueue`（一次只发一条 `runJavaScript`，回来才发下一条）+ `gOpQueue`
+  （start/stop/求值/装载/invoke 互不交错）两条串行队列，等价于「都 post 到同一条线程」；
+  单次求值超时由看门狗定时器结算（`EVAL_TIMEOUT_MS`），不是阻塞等待；
+- HTTP 走 `@kit.NetworkKit` 的 `http.createHttp()`（每请求配一次 `destroy()`；
+  包自带的 `Accept-Encoding` 被主动丢弃——NetworkKit 自己协商并透明解压）；
+- 文件 IO 走 `@kit.CoreFileKit` 的 `fileIo`，语义与安卓 java.io 版逐条对齐
+  （`exists` 的 value 是字符串 `"1"`/`"0"`；`remove` 对不存在的路径算成功；`listDir` 目录不存在返回 `[]`）；
+- 回调一律经 `onMain`（`setTimeout(fn, 0)`）投递一拍，与安卓 `Handler.post` 的时序对齐。
+
+> 鸿蒙侧编译前需确认：本机当前**没有 DevEco Studio / HarmonyOS SDK**，
+> 但 `index.uts` / `builder.ets` 里的原生签名已用 HBuilderX 自带的鸿蒙 SDK 类型定义
+> （`.../uni-uts-v1/lib/uts/types/uni-x/app-harmony/ohos/`）逐条核对过一轮，
+> 核对结论写在 `index.uts` 文件头的 `[A1]~[A9]` 清单里，分「已核对通过」与「仍待验证」两类。
+>
+> 仍待验证的只剩两类：
+> ① **ArkUI 组件层**（`Web` 组件及其属性、`wrapBuilder`、`WebResourceResponse`、
+>    `WebResourceRequest`）——这些声明属 DevEco SDK 的 `component/` 目录，本机没有，
+>    在 `app-harmony` 类型树里各出现 0 次。其中已发现并修正一个真错：
+>    `WebResourceResponse` **不属于 `webview` 命名空间**，它是与 `Web`/`Color` 同层的
+>    组件全局声明类，必须写裸名（builder.ets 是原生 `.ets`，ambient 全局可见）。
+>    `wrapBuilder` 同理是全局函数——DCloud 官方混编示例在 `.uts` 里直接调用而**不 import**。
+> ② `setTimeout` / `clearTimeout` 全局函数（UTS 注入，不在 SDK 类型树里）。
+>
+> 也就是说：真正的编译风险已收敛到 ArkUI 组件属性名这一小块，其余全是已核对签名。
 
 ## app 侧怎么用（数据流）
 

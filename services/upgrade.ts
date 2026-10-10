@@ -29,13 +29,21 @@ export type AppUpdateInfo = {
   md5: string;
 };
 
-/** 获取平台类型：1101 安卓 / 1102 iOS / 0 其他 */
+/**
+ * 获取平台类型：1101 安卓 / 1102 iOS / 1106 鸿蒙 / 0 其他。
+ * 平台号与 astral `QtAppUpdate.type`、`QtSourceRelease.platform` 严格同源：
+ * 1101 安卓 / 1102 iOS / 1103 Windows / 1104 Linux / 1105 macOS / 1106 鸿蒙
+ * （1101–1105 已被占用，鸿蒙只能取 1106）。
+ */
 export function getPlatformType(): number {
   // #ifdef APP-ANDROID
   return 1101;
   // #endif
   // #ifdef APP-IOS
   return 1102;
+  // #endif
+  // #ifdef APP-HARMONY
+  return 1106;
   // #endif
   return 0;
 }

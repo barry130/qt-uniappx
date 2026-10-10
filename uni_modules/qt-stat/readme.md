@@ -107,10 +107,13 @@ uni_modules/qt-stat/
     ├── interface.uts                 # 跨端类型（QtStatOptions / QtStatEventType）
     ├── index.uts                     # 未实现平台的兜底空实现（静默降级）
     ├── app-android/
-    │   ├── index.uts                 # 采集实现（本项目当前唯一打包端）
+    │   ├── index.uts                 # 采集实现（安卓端）
     │   └── config.json               # 声明原生依赖（当前为空；采集仅用跨端 uni.* API）
     ├── app-ios/
     │   └── index.uts                 # 采集实现（随 iOS 打包开启后联调）
+    ├── app-harmony/
+    │   ├── index.uts                 # 采集实现（与安卓端逐函数同源，仅 utName 不同）
+    │   └── module.json5              # 鸿蒙模块名 + ohos.permission.INTERNET
     └── web/
         └── index.uts                 # 本期预留空实现（ut='web'）
 ```

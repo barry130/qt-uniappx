@@ -1,14 +1,27 @@
 /**
- * qt-audio-player 统一入口
- * 本插件仅支持安卓端 APP，其他平台调用时抛出错误
- * 安卓端实现见 utssdk/app-android/index.uts
+ * qt-audio-player 统一入口兜底（安卓 / 鸿蒙之外的平台走此文件）
+ *
+ * 平台实现：
+ * - 安卓端：utssdk/app-android/index.uts
+ * - 鸿蒙端：utssdk/app-harmony/index.uts（自研 AVPlayer + AVSession + 长时任务，不用 uni 内置后台音频管理器）
+ *
+ * 注意：各平台优先取自己的 utssdk/<平台>/index.uts，本文件只在没有对应平台实现时生效；
+ * 这里的存根一律抛错，表示「该平台不支持」。
  */
 
-import type { AudioPlayerVoidCallback, AudioPlayerTimeCallback, AudioPlayerErrorCallback } from './interface.uts'
+import type {
+	AudioPlayerVoidCallback,
+	AudioPlayerTimeCallback,
+	AudioPlayerErrorCallback,
+	AudioPlayerStateCallback,
+	AudioPlaylistItem,
+	AudioResolveRequestCallback,
+	AudioTrackChangedCallback,
+} from './interface.uts'
 
 /**
- * 安卓端原生通知栏音乐播放器（前台服务保活）— 内部实现类，**不导出**
- * 仅支持安卓端 APP，其他平台调用会抛出错误
+ * 原生通知栏音乐播放器（前台服务保活）— 内部实现类，**不导出**
+ * 安卓 / 鸿蒙端均有各自的原生实现，其他平台调用会抛出错误
  *
  * 为何去掉 export：UTS 编译器会为「导出给 JS 的类」生成
  * `UTSBridge.registerJavaScriptClassInstance(...)` 构造函数桥；该 Kotlin API 是 internal
@@ -20,62 +33,86 @@ import type { AudioPlayerVoidCallback, AudioPlayerTimeCallback, AudioPlayerError
  */
 class QtAudioPlayer {
 	constructor() {
-		throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP')
+		throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）')
 	}
 }
 
 /**
- * 检查/请求通知栏权限（仅安卓端 APP 生效）
+ * 检查/请求通知栏权限（安卓端 APP 生效；鸿蒙端见 app-harmony 的 ensureNotificationPermission）
  * 其他平台直接回调 true（视为已授权），由调用方按平台降级。
  */
 export function ensureNotificationPermission(onGranted: (granted: boolean) => void): void {
 	if (onGranted != null) onGranted(true)
 }
 
-// ==================== 模块级门面（与 app-android 同名导出） ====================
+// ==================== 模块级门面（与 app-android / app-harmony 同名导出） ====================
 // JS 侧统一走这些无实例函数（见 app-android/index.uts 的说明）；
-// 这里给非安卓平台提供同签名的抛错存根，保证跨平台类型检查通过。
+// 这里给未实现平台提供同签名的抛错存根，保证跨平台类型检查通过。
 
-export function audioPlay(): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioPause(): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioStop(): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioSeek(seconds: number): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioSetSrc(url: string): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioSetTitle(title: string): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioSetSinger(singer: string): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioSetCover(url: string): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioGetCurrentTime(): number { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioSetCacheLimit(mb: number): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioSetConcurrentMode(mode: number): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioSetSpeed(speed: number): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioSetVolume(volume: number): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioClearCache(): boolean { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioSetEqualizerEnabled(on: boolean): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioSetEqualizerBands(levelsDb: number[]): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioPostNotice(title: string, body: string): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
+export function audioPlay(): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioPause(): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioStop(): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioSeek(seconds: number): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioSetSrc(url: string): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioSetTitle(title: string): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioSetSinger(singer: string): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioSetAlbum(album: string): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioSetCover(url: string): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioGetCurrentTime(): number { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioSetCacheLimit(mb: number): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioSetConcurrentMode(mode: number): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioSetSpeed(speed: number): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioSetVolume(volume: number): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioClearCache(): boolean { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioSetEqualizerEnabled(on: boolean): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioSetEqualizerBands(levelsDb: number[]): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioPostNotice(title: string, body: string): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
 
-export function audioOnPlay(callback: AudioPlayerVoidCallback | null): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioOnPause(callback: AudioPlayerVoidCallback | null): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioOnStop(callback: AudioPlayerVoidCallback | null): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioOnEnded(callback: AudioPlayerVoidCallback | null): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioOnCanplay(callback: AudioPlayerVoidCallback | null): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioOnWaiting(callback: AudioPlayerVoidCallback | null): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioOnTimeUpdate(callback: AudioPlayerTimeCallback | null): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioOnError(callback: AudioPlayerErrorCallback | null): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioOnPrev(callback: AudioPlayerVoidCallback | null): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioOnNext(callback: AudioPlayerVoidCallback | null): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
+export function audioOnPlay(callback: AudioPlayerVoidCallback | null): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioOnPause(callback: AudioPlayerVoidCallback | null): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioOnStop(callback: AudioPlayerVoidCallback | null): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioOnEnded(callback: AudioPlayerVoidCallback | null): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioOnCanplay(callback: AudioPlayerVoidCallback | null): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioOnWaiting(callback: AudioPlayerVoidCallback | null): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioOnTimeUpdate(callback: AudioPlayerTimeCallback | null): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioOnError(callback: AudioPlayerErrorCallback | null): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioOnPrev(callback: AudioPlayerVoidCallback | null): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioOnNext(callback: AudioPlayerVoidCallback | null): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
 
-export function audioLyricHasOverlayPermission(): boolean { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioLyricRequestOverlayPermission(): boolean { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioLyricShow(): boolean { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioLyricHide(): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioLyricUpdate(line: string, translation: string): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioLyricSetLocked(locked: boolean): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioLyricSetFontSp(main: number, tr: number): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioLyricSetTextColor(color: number): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioLyricSetTypeface(index: number): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioLyricSetWidth(pct: number): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioLyricSetStroke(enabled: boolean, width: number): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioLyricSetShadow(enabled: boolean): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioLyricSetAlign(align: string): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
-export function audioLyricSetBackground(mode: string, colorArgb: number, opacity: number): void { throw new Error('[qt-audio-player] 本插件仅支持安卓端 APP') }
+export function audioLyricHasOverlayPermission(): boolean { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioLyricRequestOverlayPermission(): boolean { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioLyricShow(): boolean { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioLyricHide(): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioLyricUpdate(line: string, translation: string): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioLyricSetLocked(locked: boolean): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioLyricSetFontSp(main: number, tr: number): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioLyricSetTextColor(color: number): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioLyricSetTypeface(index: number): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioLyricSetWidth(pct: number): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioLyricSetStroke(enabled: boolean, width: number): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioLyricSetShadow(enabled: boolean): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioLyricSetAlign(align: string): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioLyricSetBackground(mode: string, colorArgb: number, opacity: number): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+
+// ---- 播放队列 / 时间线（队列由原生侧持有：安卓 media3 时间线、鸿蒙插件内 gItems） ----
+export function audioSetPlaylist(items: AudioPlaylistItem[], startIndex: number, autoPlay: boolean, startPositionSec: number): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioPlayTimelineIndex(index: number): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioSetRepeatMode(mode: number): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioCurrentMediaId(): string { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioTimelineSize(): number { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioSyncTimeline(items: AudioPlaylistItem[], expectedCurrentMid: string): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioEvictSongCache(mediaId: string): boolean { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+
+// ---- 懒解析握手（qt-resolve:// → 真实地址）与切曲事件 ----
+export function audioOnResolveRequest(callback: AudioResolveRequestCallback | null): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioResolveDone(mediaId: string, url: string): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioResolveFail(mediaId: string): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioOnTrackChanged(callback: AudioTrackChangedCallback | null): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+
+// ---- 播放状态 ----
+export function audioResume(): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioIsIntendingToPlay(): boolean { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+
+// ---- 桌面歌词悬浮窗显隐事件（鸿蒙结构性不可用：SYSTEM_FLOAT_WINDOW 仅系统应用可申请） ----
+export function audioOnLyricWindowChanged(callback: AudioPlayerStateCallback | null): void { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }
+export function audioLyricIsShowing(): boolean { throw new Error('[qt-audio-player] 本平台未实现（仅支持安卓端 / 鸿蒙端 APP）') }

@@ -15,9 +15,15 @@ import { ensureNotificationPermission as ensureNotificationPermissionNative } fr
 
 export type DownloadProgress = (received: number, total: number, percent: number) => void;
 
-/** 退出应用（Android 关闭所有 Activity；H5 尝试关闭窗口） */
+/**
+ * 退出应用（Android 关闭所有 Activity；鸿蒙 terminateSelf 回到桌面；H5 尝试关闭窗口）
+ *
+ * ⚠️ 鸿蒙必须一起放进来：原实现只门禁了 APP-ANDROID，鸿蒙上 `exitAppNative()` 根本
+ * 不会被调用，于是「检测到非官方版本 → 3 秒后自动退出」在鸿蒙上只会弹个 toast 就没了。
+ * 这是「非官方 APP 也没有自动退出」的第一层原因（第二层是 exitAppNative 自身恒返回 false）。
+ */
 export function exitApp(): void {
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-HARMONY
   if (exitAppNative()) return;
   // #endif
   // #ifdef H5
@@ -38,7 +44,7 @@ export function openInBrowser(url: string): void {
     uni.showToast({ title: "下载地址为空", icon: "none" });
     return;
   }
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-HARMONY
   if (openExternalUrl(url)) return;
   // #endif
   // #ifdef H5
@@ -111,7 +117,7 @@ export function installApk(filePath: string): boolean {
  * 经 uni_modules 原生插件实现，此处只做 Promise 包装与平台降级。
  */
 export function ensureNotificationPermission(): Promise<boolean> {
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-HARMONY
   return new Promise((resolve) => {
     try {
       ensureNotificationPermissionNative((granted: boolean) => {
@@ -123,7 +129,7 @@ export function ensureNotificationPermission(): Promise<boolean> {
     }
   });
   // #endif
-  // #ifndef APP-ANDROID
+  // #ifndef APP-ANDROID || APP-HARMONY
   return Promise.resolve(true);
   // #endif
 }

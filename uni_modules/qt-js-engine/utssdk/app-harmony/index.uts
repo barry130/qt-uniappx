@@ -1,0 +1,2707 @@
+/**
+ * qt-js-engine · 鸿蒙（app-harmony）实现
+ * ============================================================================
+ * 与 app-android 是**同一套架构**的第二份平台实现：
+ *
+ *   原生（本文件）
+ *     └─ ArkWeb 里的一个 1×1 隐藏 Web 页（builder.ets 负责挂载）
+ *          ├─ prelude.uts 注入：__qtHost / __qtCall / __qtPump / __qtResolveHttp ...
+ *          └─ bootstrap 注入：__qtEnv* 信封 + 模块装载（import 受拦 URL）
+ *
+ * 上层（services/source-engine.uts）与音源包（meta-bundle.js / play-bundle.js）
+ * 对平台完全无感：**函数名、签名、返回值、错误文本、泵协议一字不改**。
+ *
+ * ---------------------------------------------------------------------------
+ * 为什么鸿蒙不能照抄安卓的三件事（照抄会直接编不过或跑不对）
+ * ---------------------------------------------------------------------------
+ * ① 没有「引擎线程」。
+ *    安卓有 HandlerThread + CountDownLatch 把「原生 → JS 求值」写成同步调用
+ *    （v8EvalSync 阻塞等 evaluateJavascript 回调）。鸿蒙的 runJavaScript 只有
+ *    异步回调，UTS 侧也没有能安全阻塞主线程的等待原语（阻塞 UI 线程 = 死锁）。
+ *    所以这里把「引擎线程串行」换成**两条显式串行队列**：
+ *      · 求值队列（gEvalQueue）：一次只发一条 runJavaScript，回来才发下一条；
+ *      · 操作队列（gOpQueue）  ：start/stop/求值/装载/invoke 互不交错，
+ *                                与安卓「都 post 到同一条引擎线程」的时序等价。
+ *    差别只在「阻塞等待」变成「回调续接」，对外语义（含超时、阻塞判定、
+ *    回调时序）保持一致。
+ *
+ * ② 没有 headless JS 运行时。
+ *    ArkWeb 的 Web 是 ArkUI 组件，WebviewController 必须先绑定到「已进入 UI 树」
+ *    的 Web 才能用（绑定瞬间是 onControllerAttached）。taskpool/worker 跑的是
+ *    ArkTS 而不是 bundle 的 ESM 语义，替代不了。因此必须给这个 1×1 的 Web
+ *    找一个挂载点——见 builder.ets 的两种策略（页面节点 id / 根节点）。
+ *
+ * ③ 模块源码不再落盘。
+ *    安卓走「写进 filesDir + shouldInterceptRequest 读盘」，是当年被
+ *    evaluateJavascript 传大字符串（Binder 1MB 上限 + 4.9s 冷启动）逼出来的。
+ *    鸿蒙的 onInterceptRequest 用 WebResourceResponse.setResponseData(string)，
+ *    源码放内存直接回填，省掉落盘与路径管理（也因此本文件里没有任何
+ *    「bundle 文件路径」概念）。
+ *
+ * ---------------------------------------------------------------------------
+ * 另外两处刻意的行为对齐（不是抄 API，是抄语义）
+ * ---------------------------------------------------------------------------
+ * · 定时器归原生管：prelude 把 setTimeout/setInterval 换成打 {k:'T'} 给原生，
+ *   到点由原生求值 __qtEnvFireTimer(id) 回来。页面被后台/不可见时节流
+ *   （ArkWeb 会把不可见页面的定时器降到 1s 级）伤不到音源包的定时逻辑。
+ * · 回调一律「投递」而非同步调用：安卓用 Handler.post 保证回调不在调用栈里同步
+ *   触发；鸿蒙主线程本身就是回调线程，所以这里用 setTimeout(fn, 0) 显式让出
+ *   一拍（onMain）。不这么做的话，P Promise 包装层会遇到「先回调后置状态」。
+ *
+ * ---------------------------------------------------------------------------
+ * 本文件的三段职责（改动时对号入座，别串）
+ * ---------------------------------------------------------------------------
+ *   1) 适配层（下面紧接的区块）：**所有**拿不准签名的鸿蒙原生调用只出现在这里。
+ *      核对状态见文件头 [A1]~[A9] 清单：已核对的标 `[Ax 已核对]`，仍待真机
+ *      验证的才保留 TODO(harmony-verify)。DevEco/SDK 可用后只改这一段。
+ *   2) 语义层（常量 → 泵 → 装载 → HTTP/定时器 → 文件）：与 app-android 逐函数
+ *      对齐，注释写「为什么」而不是「做什么」。
+ *   3) 对外 API（文件末尾）：18 个导出，签名与 interface.uts 完全一致。
+ *
+ * TODO(harmony-verify) 清单 —— 已用本机 HBuilderX 自带的鸿蒙 SDK 类型定义
+ * （`E:\HBuilderX\plugins\uniapp-uts-v1\node_modules\@dcloudio\uni-uts-v1\lib\uts\
+ *   types\uni-x\app-harmony\ohos\`，359 个 api 文件 + kits 聚合包）逐条核对过一轮，
+ * 结果分两类：
+ *
+ * 【已核对通过，不再是猜测】（源码里对应注释已改标 `[Ax 已核对]`）
+ *   [A1] UTSHarmony.getUIAbilityContext().filesDir / .resourceManager
+ *        → Context.filesDir: string（application/Context.d.ts:196）、
+ *          Context.resourceManager: resmgr.ResourceManager（:84）
+ *   [A2] resourceManager.getRawFileContentSync(path): Uint8Array
+ *        → @ohos.resourceManager.d.ts:4012（ResourceManager 接口 :826）
+ *        + util.TextDecoder.create / decodeToString（@ohos.util.d.ts:636 / :732）
+ *   [A3] UTSHarmony.getResourcePath(rel) → UTSHarmony.d.ts:331
+ *   [A4] fileIo 全套 → readTextSync:4160 / openSync:3555 / writeSync:5715 /
+ *        closeSync:738（收 File 对象）/ accessSync:603（**返回 boolean**，故
+ *        fsExists 已改为直接 return，不再恒真）/ listFileSync:2221 /
+ *        statSync:4811（Stat.isDirectory 确实存在，故 fsIsDir 已改用它，
+ *        不再用「能否列目录」的探测法）/ rmdirSync:4610（只删空目录）/
+ *        unlinkSync:5408 / mkdirSync:2578+2603 / OpenMode:148 / File.fd:5858
+ *   [A5] http.createHttp:81 / request(url,options,cb):987 / destroy:1253
+ *        → HttpRequestOptions.header 确为 `Object`(:238)；RequestMethod 恰好
+ *          8 个取值，与 httpMethodOf 的分支一一对应；HttpDataType.STRING:2426；
+ *          HttpResponse.responseCode: `ResponseCode | number`(:2506)
+ *   [A7] UTSHarmony.getUserAgent / getAppId / getUniRuntimeVersion → 均在
+ *        UTSHarmony.d.ts:604 的导出清单里
+ *   [A8] runJavaScript(script, callback: AsyncCallback<string>): void
+ *        → @ohos.web.webview.d.ts:3499（另有 Promise 形态 :3473）；
+ *          loadData(data,mime,encoding,baseUrl?,historyUrl?): void → :2840
+ *        （builder.ets 的 evalAsync / onControllerAttached 两个签名均成立）
+ *
+ * 【仍然待验证，是真正的风险点】
+ *   [A6] setTimeout / clearTimeout 全局函数（返回句柄类型）—— UTS 全局注入，
+ *        不在 SDK 类型树里，只能等真机编译。
+ *   [A9] **ArkUI 组件层声明在本机完全不存在**：`Web` 组件及其属性
+ *        （.javaScriptAccess / .fileAccess / .onControllerAttached / .onPageEnd /
+ *        .onRenderExited / .onErrorReceive / .onInterceptRequest）、`wrapBuilder`、
+ *        `WebResourceResponse`、`WebResourceRequest` —— 在 `app-harmony` 类型树里
+ *        各出现 **0 次**（ArkUI 组件声明属 DevEco SDK 的 `component/` 目录，未安装）。
+ *        已据此修掉一个**真错**：`WebResourceResponse` **不属于 webview 命名空间**，
+ *        它是与 `Web`/`Color` 同层的组件全局声明类，builder.ets 里原先写的
+ *        `webview.WebResourceResponse` 会报「命名空间上不存在该成员」，已全部改为
+ *        裸名 `WebResourceResponse`（builder.ets 是原生 .ets，ambient 全局可用）。
+ *        `wrapBuilder` 同理是全局函数：DCloud 官方混编示例
+ *        （knowledges/uni-app-x/docs/plugin/uts-component-vue.md:520 起）
+ *        在 .uts 里直接 `wrapBuilder<[T]>(buildXxx)` 而**没有 import**，本文件照此办理。
+ *
+ * 未实现能力一律「返回失败」，绝不 throw（见各 API 的 try/catch）。
+ */
+
+// ==================== import 区（统一收敛） ====================
+// 说明：鸿蒙插件源码只能 import @kit.* 聚合包（@ohos.* 是底层别名，官方插件示例
+// 一律走 @kit.*）。这里 import 的每一个都对应适配层里的一处或多处调用。
+import { http } from '@kit.NetworkKit' // [A5]
+import { fileIo as fs } from '@kit.CoreFileKit' // [A4]
+import { util } from '@kit.ArkTS' // [A2] Uint8Array → string
+import { BusinessError } from '@kit.BasicServicesKit' // [A5] 回调错误参数类型
+import { QtJsArkWebHost } from './builder.ets' // 唯一允许的 uts → ets 方向
+import { QT_JS_PRELUDE } from './prelude.uts'
+import type {
+	QtJsStart,
+	QtJsStop,
+	QtJsEvaluate,
+	QtJsIsRunning,
+	QtJsLoadBundle,
+	QtJsLoadPlayBundle,
+	QtJsInvoke,
+	QtJsDropOp,
+	QtJsIsHealthy,
+	QtJsDataDir,
+	QtJsReadTextFile,
+	QtJsWriteTextFile,
+	QtJsExists,
+	QtJsRemove,
+	QtJsMkdirs,
+	QtJsListDir,
+	QtJsReadAssetText,
+	QtJsSpikeNativeTimer,
+	QtJsStartOptions,
+	QtJsStartCallback,
+	QtJsEvalCallback,
+	QtJsEvalResult,
+	QtJsVoidResult,
+	QtJsVoidCallback,
+	QtJsFileCallback,
+	QtJsSpikeTimerCallback,
+	QtJsEngineInfo
+} from '../interface.uts'
+
+// ============================================================================
+// 适配层（一）：宿主上下文与内置资源
+// 这一段的函数**只做「把鸿蒙 API 变成一个纯值」**，不含任何业务判断。
+// ============================================================================
+
+/**
+ * 应用私有文件根目录（对应安卓的 `ctx.filesDir`），**不带结尾斜杠**。
+ * 取不到返回空串，由调用方（dataDir / 各文件 API）转成失败或错误文本。
+ *
+ * [A1 已核对] `declare function getUIAbilityContext(): common.UIAbilityContext;`
+ * （UTSHarmony.d.ts:244，UTSHarmony 全局对象，官方 uni-usercapturescreen 插件即用此写法）。
+ * `.filesDir` 来自 UIAbilityContext 的基类 Context：
+ * `application/Context.d.ts:196 filesDir: string`，同文件 :84 还有
+ * `resourceManager: resmgr.ResourceManager`（rawFileTry 用的就是它）。
+ * 备选路线（若某版本没收这个 getter）：windowStage 路线
+ *   `UTSHarmony.getWindowStage().getMainWindowSync()
+ *   .getUIContext().getHostContext()` 后转 common.UIAbilityContext。
+ * 不用 `@dcloudio/uni-runtime` 的 `getAbilityContext`：它在本地全部 .d.ts 里
+ * 零命中（运行时注入的隐式全局），而 `UTSHarmony.getUIAbilityContext()` 有声明可查。
+ * 全项目（本文件 + qt-app-native）统一走 UTSHarmony 这条，不再混用两种取法。
+ */
+function filesDirPath(): string {
+	try {
+		return UTSHarmony.getUIAbilityContext().filesDir
+	} catch (e) {
+		return ''
+	}
+}
+
+/** 「文本探测」结果：ok 区分「不存在」与「存在但内容为空」——readAssetText 必须分清这两种 */
+class TextProbe {
+	ok: boolean
+	text: string
+
+	constructor(ok: boolean, text: string) {
+		this.ok = ok
+		this.text = text
+	}
+}
+
+/**
+ * 读内置 rawfile（`resources/rawfile/<rel>`）并解成 UTF-8 文本。
+ *
+ * [A2 已核对] `resourceManager.getRawFileContentSync(path: string): Uint8Array`
+ * （@ohos.resourceManager.d.ts:4012，ResourceManager 接口在 :826），
+ * `util.TextDecoder.create(encoding?, options?)`（@ohos.util.d.ts:636）
+ * + `decodeToString(input, options?)`（:732，API 12+）。
+ * 备选：`getRawFileContent(path)` 异步形态（需要改成回调链）；
+ * `decodeWithStream(input, { stream: false })`（API 9 起，12 起标记废弃）。
+ */
+function rawFileTry(relPath: string): TextProbe {
+	try {
+		const bytes = UTSHarmony.getUIAbilityContext().resourceManager.getRawFileContentSync(relPath)
+		if (bytes == null) {
+			return new TextProbe(false, '')
+		}
+		const decoder = util.TextDecoder.create('utf-8')
+		return new TextProbe(true, decoder.decodeToString(bytes))
+	} catch (e) {
+		// rawfile 不存在时该接口抛异常，这里把它折算成「不存在」
+		return new TextProbe(false, '')
+	}
+}
+
+/**
+ * 内置资源在「真实文件系统」上的绝对路径（内置资源的第二条路）。
+ *
+ * [A3 已核对] `declare function getResourcePath(filePath: string): string;`
+ * （UTSHarmony.d.ts:331，返回空串表示找不到）。走它等于「拿到真路径再用 fileIo 读」，
+ * 避开 [A2] 的 Uint8Array/TextDecoder 两个签名不确定性，所以两条路都留着。
+ */
+function resourcePathTry(relPath: string): TextProbe {
+	try {
+		const abs = UTSHarmony.getResourcePath(relPath)
+		if (abs.length == 0) {
+			return new TextProbe(false, '')
+		}
+		if (!fsExists(abs)) {
+			return new TextProbe(false, '')
+		}
+		return new TextProbe(true, fsReadText(abs))
+	} catch (e) {
+		return new TextProbe(false, '')
+	}
+}
+
+// ============================================================================
+// 适配层（二）：文件系统
+// 语义对齐安卓端 index.uts 的 readTextFile/writeTextFile/... ：
+// 这些薄封装**允许抛异常**，由文件末尾的对外 API 统一兜成 ok=false + error，
+// 保证「绝不向外抛」这条约束只有一个地方要守。
+// ============================================================================
+
+/**
+ * 读文本（UTF-8）。
+ * [A4 已核对] `readTextSync(filePath: string, options?: ReadTextOptions): string`，
+ * `ReadTextOptions.encoding?: string`。不传 options 时默认按 utf-8 解。
+ */
+function fsReadText(path: string): string {
+	return fs.readTextSync(path)
+}
+
+/**
+ * 写文本（UTF-8，覆盖写）。
+ * [A4 已核对] `openSync(path: string, mode?: number): File`（`File.fd: number`）、
+ * `writeSync(fd: number, buffer: ArrayBuffer | string, options?: WriteOptions): number`、
+ * `closeSync(file: number | File): void`，OpenMode 的 READ_WRITE/CREATE/TRUNC 三个常量
+ * 也都在 SDK 里（0o2 / 0o100 / 0o1000）。
+ * 字符串重载的默认编码就是 utf-8，所以不需要自己转 ArrayBuffer（也就不用碰
+ * Uint8Array → ArrayBuffer 这层不确定的转换）。closeSync 收 File 对象，直接传 file。
+ */
+function fsWriteText(path: string, text: string): void {
+	const file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC)
+	try {
+		fs.writeSync(file.fd, text)
+	} finally {
+		fs.closeSync(file)
+	}
+}
+
+/**
+ * 是否存在（文件或目录都算）。
+ * [A4 已核对] `accessSync(path: string, mode?): boolean`——SDK 声明为
+ * 「Returns the file is accessible or not」，但同一份声明的 @throws 里也列了
+ * 13900002 No such file or directory。两种行为都可能出现，所以返回值与异常
+ * 两条路都要接：拿到布尔就用，抛异常就当 false。
+ */
+function fsExists(path: string): boolean {
+	try {
+		return fs.accessSync(path)
+	} catch (e) {
+		return false
+	}
+}
+
+/**
+ * 是不是目录。
+ * [A4 已核对] `statSync(file: string | number): Stat` + `Stat.isDirectory(): boolean`
+ * 都在 SDK 里，直接用；statSync 会跟随符号链接，正是这里想要的语义。
+ * 异常（不存在 / 无权限）折算成「不是目录」。
+ */
+function fsIsDir(path: string): boolean {
+	try {
+		return fs.statSync(path).isDirectory()
+	} catch (e) {
+		return false
+	}
+}
+
+/**
+ * 列目录下的名字（不含路径）。
+ * [A4 已核对] `listFileSync(path: string, options?: ListFileOptions): string[]`，
+ * `ListFileOptions.recursive?: boolean` 默认 false，正是 listDir 需要的「只列一层」。
+ */
+function fsListNames(dir: string): string[] {
+	return fs.listFileSync(dir)
+}
+
+/**
+ * 条目字节大小。取不到按 0 处理：listDir 的 size 只是给上层显示用，
+ * 不能因为它失败就让整个列目录失败。
+ * [A4 已核对] `Stat.size: number`（字节）。
+ */
+function fsEntrySize(path: string): number {
+	try {
+		return fs.statSync(path).size
+	} catch (e) {
+		return 0
+	}
+}
+
+/**
+ * 删除路径（文件或目录，目录递归删）。
+ * [A4 已核对] `unlinkSync(path: string): void` 删文件、
+ * `rmdirSync(path: string): void` 删空目录（所以递归必须自己走）。
+ */
+function fsRemovePath(path: string): void {
+	if (fsIsDir(path)) {
+		const names = fsListNames(path)
+		for (let i = 0; i < names.length; i++) {
+			fsRemovePath(joinPath(path, names[i]))
+		}
+		fs.rmdirSync(path)
+		return
+	}
+	fs.unlinkSync(path)
+}
+
+/**
+ * 逐级创建目录（等价 mkdirs）。已存在直接返回。
+ * [A4 已核对] `mkdirSync(path: string): void` 与 `mkdirSync(path: string, recursion: boolean): void`
+ * 都在 SDK 里。这里刻意**不用** recursion 重载，自己往上递归：
+ * 递归重载在「路径中间有一段是文件」时抛的错更难分辨，而逐级 mkdir 能让
+ * 每一层的失败点都对得上，和安卓 `File.mkdirs()` 的语义也更接近。
+ */
+function fsMkdirs(path: string): void {
+	if (path.length == 0) {
+		return
+	}
+	if (fsExists(path)) {
+		return
+	}
+	const parent = parentDirOf(path)
+	if (parent.length > 0 && parent != path) {
+		fsMkdirs(parent)
+	}
+	fs.mkdirSync(path)
+}
+
+// ============================================================================
+// 适配层（三）：定时器与「投递一拍」
+// ============================================================================
+
+/**
+ * 起一个原生定时器（毫秒级），返回句柄。
+ * TODO(harmony-verify) [A6]：ArkTS 全局 `setTimeout(handler, delay?, ...args): number`。
+ * 这是 UTS 注入的全局函数，**不在鸿蒙 SDK 类型定义里**，所以是本文件少数
+ * 真正无法离线核对的签名之一（另一个是 ArkUI 组件层，见文件头 [A9]）。
+ * 备选：若返回的不是 number（某些实现给对象句柄），把 timerSet/timerClear 的
+ * 句柄类型换成 `number | Object` 即可——两处函数签名 + `timerClear` 的 `<= 0` 判断，
+ * 影响面被刻意收在这两个函数里。
+ * 鸿蒙侧没有安卓 Handler 那种 Looper 归属问题：本插件的调用点都在主线程，
+ * 回调也就落在主线程（与「回调必须在主线程」的契约一致）。
+ */
+function timerSet(fn: () => void, delayMs: number): number {
+	let delay = delayMs
+	if (delay < 0) {
+		delay = 0
+	}
+	return setTimeout(fn, delay)
+}
+
+/**
+ * 取消定时器。
+ * TODO(harmony-verify) [A6]：全局 `clearTimeout(handle?: number)`。
+ */
+function timerClear(handle: number): void {
+	if (handle <= 0) {
+		return
+	}
+	clearTimeout(handle)
+}
+
+/**
+ * 把回调投到「下一拍主线程」——安卓对应 Handler.post，鸿蒙对应 setTimeout(0)。
+ *
+ * 为什么必须让出一拍而不是直接调用：所有 callback 都可能在「API 调用自己的
+ * 栈里」被触发（例如 stop 的同步路径、dataDir 的立即返回）。安卓的 Handler.post
+ * 从不允许回调在调用栈内重入，上层（services/source-engine.uts）是按这个前提写的；
+ * 直接同步回调会改变 Promise 包装层的时序，甚至让「先回调、后写状态」的代码读到旧值。
+ */
+function onMain(fn: () => void): void {
+	try {
+		timerSet(fn, 0)
+	} catch (e) {
+		// 连定时器都起不来时只能就地执行，宁可时序差一点也不能把回调丢掉
+		try {
+			fn()
+		} catch (e2) {
+			console.error('[qt-js-engine] 回调投递失败:', e2)
+		}
+	}
+}
+
+// ============================================================================
+// 适配层（四）：HTTP
+// ============================================================================
+
+/**
+ * 建一个 http 请求对象。
+ * [A5 已核对] `function createHttp(): HttpRequest;`（@ohos.net.http.d.ts:81）。
+ */
+function newHttpRequest(): http.HttpRequest {
+	return http.createHttp()
+}
+
+/**
+ * 解析来自 prelude 的 `headers` 字段。
+ *
+ * 协议约定（见 README「泵协议」）：headers 是**多行文本** `"Name: value\n"`，
+ * 不是 JSON——因为 HTTP 头允许重复键，JSON 表达不了「同名多值」，
+ * 而安卓侧是逐行 split(':') 处理的。这里保持同一格式。
+ *
+ * 两个细节与安卓对齐：
+ *   · User-Agent：包没给就补一个（部分音源站点会对空 UA 直接 403）；
+ *   · Accept-Encoding：**主动丢弃**。安卓是自己强制 gzip 再手动解压，
+ *     鸿蒙这边由 @kit.NetworkKit 自动协商并透明解压，包自己塞的
+ *     Accept-Encoding 反而可能拿到「声明 gzip 但没人解」的字节。
+ *
+ * 用 UTSJSONObject 而不是 `Record<string, string>`：官方文档明确 `Record` 写法
+ * **仅 web 端支持**（见 docs/uts/data-type.md），而 UTSJSONObject 才是 UTS 里
+ * 表达「动态键名字典」的跨端类型。键名是运行时算出来的，所以走 `set(k, v)`
+ * 而不是下标赋值（下标只保证字面量键名可用）。
+ *
+ * [A5 部分核对] `http.HttpRequestOptions.header?: Object` 已确认（@ohos.net.http.d.ts:238），
+ * 所以传 UTSJSONObject 在**类型上**成立。剩下的不确定性是运行期：若 NetworkKit 在
+ * ArkTS 侧按「自有可枚举属性」遍历，而 UTSJSONObject 内部是 Map 导致取不到头，
+ * 备选写法是先 `JSON.stringify(headers)` 再 `JSON.parse(...) as Object`
+ * （得到的是普通 ArkTS 对象），改一行即可。
+ */
+function httpHeadersOf(raw: string): UTSJSONObject {
+	const out: UTSJSONObject = new UTSJSONObject()
+	let sawUa = false
+	if (raw.length > 0) {
+		const lines = raw.split('\n')
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i].trim()
+			if (line.length == 0) {
+				continue
+			}
+			const at = line.indexOf(':')
+			if (at <= 0) {
+				continue
+			}
+			const name = line.substring(0, at).trim()
+			const value = line.substring(at + 1).trim()
+			if (name.length == 0) {
+				continue
+			}
+			if (name.toLowerCase() == 'accept-encoding') {
+				continue
+			}
+			out.set(name, value)
+			if (name.toLowerCase() == 'user-agent') {
+				sawUa = true
+			}
+		}
+	}
+	if (!sawUa) {
+		out.set('User-Agent', defaultUserAgent())
+	}
+	return out
+}
+
+/**
+ * 默认 UA：优先用当前运行时的真实 UA（ArkWeb 自己的），拿不到才退回一个
+ * Chrome 形态的兜底串。
+ *
+ * 安卓端硬编码了一个 Android 12 + Chrome/120 的串；鸿蒙没有必要假装自己是
+ * 安卓——真实 UA 更不容易被风控判成伪造，而且 UA 里的 ArkWeb/Chrome 版本
+ * 正好也是 engineVersion 的来源（见 engineVersionText）。
+ *
+ * [A7 已核对] `declare function getUserAgent(): string;`（UTSHarmony 全局，
+ * UTSHarmony.d.ts:604 的导出清单里有它）。
+ */
+function defaultUserAgent(): string {
+	try {
+		const ua = UTSHarmony.getUserAgent()
+		if (ua.length > 0) {
+			return ua
+		}
+	} catch (e) {
+	}
+	return 'Mozilla/5.0 (Phone; OpenHarmony) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
+}
+
+/**
+ * 组装 HttpRequestOptions。
+ * [A5 已核对] `HttpRequestOptions` 的字段名与枚举取值全部核对通过
+ * （@ohos.net.http.d.ts:103 起）：method(:125) / header(:238) / extraData(:150) /
+ * connectTimeout(:282) / readTimeout(:260) / expectDataType(:172) / usingCache(:194)；
+ * `HttpDataType.STRING` 在 :2426；`RequestMethod` 恰好 8 个取值，与 httpMethodOf
+ * 的分支一一对应，没有漏项。
+ * 两个刻意选择：
+ *   · 空 body 时**不带 extraData 字段**（GET 带 extraData 在部分实现里会被忽略或报错），
+ *     所以这里写了两个字面量分支；
+ *   · `expectDataType: STRING`：本引擎的整条链路（信封 → unwrapEval → 上层）都按
+ *     字符串设计，让模块直接把结果字符串化，省掉 ArrayBuffer → string 的转换。
+ *
+ * `header` 的类型跟 httpHeadersOf 一起用 UTSJSONObject（不用仅 web 端支持的 Record）。
+ */
+function httpOptionsOf(method: string, headers: UTSJSONObject, body: string, timeoutMs: number): http.HttpRequestOptions {
+	const verb = httpMethodOf(method)
+	if (body.length > 0) {
+		return {
+			method: verb,
+			header: headers,
+			extraData: body,
+			connectTimeout: timeoutMs,
+			readTimeout: timeoutMs,
+			expectDataType: http.HttpDataType.STRING,
+			usingCache: false
+		}
+	}
+	return {
+		method: verb,
+		header: headers,
+		connectTimeout: timeoutMs,
+		readTimeout: timeoutMs,
+		expectDataType: http.HttpDataType.STRING,
+		usingCache: false
+	}
+}
+
+/** 无名动词一律当 GET（与安卓 RequestMethod.valueOf 的兜底一致），但留一行日志便于排查 */
+function httpMethodOf(method: string): http.RequestMethod {
+	const m = method.toUpperCase()
+	if (m == 'POST') return http.RequestMethod.POST
+	if (m == 'PUT') return http.RequestMethod.PUT
+	if (m == 'DELETE') return http.RequestMethod.DELETE
+	if (m == 'HEAD') return http.RequestMethod.HEAD
+	if (m == 'OPTIONS') return http.RequestMethod.OPTIONS
+	if (m == 'TRACE') return http.RequestMethod.TRACE
+	if (m == 'CONNECT') return http.RequestMethod.CONNECT
+	if (m.length > 0 && m != 'GET') {
+		console.warn('[qt-js-engine] 未支持的 HTTP 动词，按 GET 发送:', method)
+	}
+	return http.RequestMethod.GET
+}
+
+/**
+ * 状态码。
+ * [A5 已核对] `HttpResponse.responseCode: ResponseCode | number`（@ohos.net.http.d.ts:2506，
+ * `ResponseCode` 是数值枚举，OK = 200）。
+ * 这里显式接成 number：`ResponseCode` 是数值枚举，赋给 number 在 ArkTS 里成立；
+ * 万一某版本把它改成字符串枚举，只需在这里补一次 `Number(code)`——出口只有这一处。
+ */
+function statusOf(resp: http.HttpResponse): number {
+	const code = resp.responseCode
+	return code
+}
+
+/**
+ * 响应体文本。
+ * expectDataType=STRING 时 `result` 就是 string；但为了不把「实现变脸」变成
+ * 「拿到 [object Object]」，这里按 resultType 分派一次，并给非字符串形态
+ * 明确的可读错误（宁可报「拿到的不是文本」也不要往上层塞垃圾）。
+ */
+function bodyTextOf(resp: http.HttpResponse): TextProbe {
+	const result = resp.result
+	if (result == null) {
+		return new TextProbe(true, '')
+	}
+	if (resp.resultType == http.HttpDataType.STRING) {
+		return new TextProbe(true, `${result}`)
+	}
+	if (resp.resultType == http.HttpDataType.OBJECT) {
+		try {
+			const json = JSON.stringify(result)
+			return new TextProbe(true, json == null ? '' : json)
+		} catch (e) {
+			return new TextProbe(false, '')
+		}
+	}
+	return new TextProbe(true, `${result}`)
+}
+
+/**
+ * 响应头 → 小写键名 JSON 文本。
+ *
+ * 为什么要这么绕：`HttpResponse.header` 的静态类型是**不透明 Object**，
+ * uts 侧没有「枚举一个 Object 的键」的可靠 API（Object.keys 在 ArkTS 上要
+ * Record 类型才收）。而包代码（verifyPlayable 等）是按**小写头名**读的——
+ * 这正是安卓端 collectHeaders 建立的契约（`key.toLowerCase()`，末次覆盖）。
+ * 于是这里用 JSON.stringify 拿到文本，再做一次「只对键名做 ASCII 小写」的
+ * 文本重写：不需要枚举 API，也不会动到值里的任何字符。
+ */
+function headersJsonOf(resp: http.HttpResponse): string {
+	const raw = resp.header
+	if (raw == null) {
+		return '{}'
+	}
+	let text = ''
+	try {
+		const json = JSON.stringify(raw)
+		text = json == null ? '' : json
+	} catch (e) {
+		return '{}'
+	}
+	if (text.length == 0 || text.charCodeAt(0)! != 123) {
+		return '{}'
+	}
+	return lowerJsonKeys(text)
+}
+
+/** 发一次请求。回调形态（而非 Promise）以便把「总时长看门狗」也挂在同一条收敛路径上 */
+function httpRequestSend(req: http.HttpRequest, url: string, options: http.HttpRequestOptions, cb: (err: BusinessError, resp: http.HttpResponse) => void): void {
+	req.request(url, options, cb)
+}
+
+/**
+ * 释放请求对象。
+ * [A5 已核对] `HttpRequest.destroy(): void`（@ohos.net.http.d.ts:1253）。
+ * 每个 createHttp 都必须配一次 destroy，否则底层连接池会随请求数增长——
+ * 安卓端是靠 disconnect 做的同一件事，但安卓成功路径刻意不断开以复用 keep-alive，
+ * 鸿蒙这边没有等价的「交还连接池」原语，所以成功/失败都统一 destroy。
+ */
+function httpDestroy(req: http.HttpRequest): void {
+	try {
+		req.destroy()
+	} catch (e) {
+	}
+}
+
+// ============================================================================
+// 适配层（五）：由原生 API 值推导的纯函数（无 API 依赖，但属于「适配层的地基」）
+// ============================================================================
+
+/** 路径拼接：容忍 base 已经带斜杠、也容忍 Windows 风格的反斜杠（上层可能传进来） */
+function joinPath(base: string, name: string): string {
+	if (base.length == 0) {
+		return name
+	}
+	const last = base.charAt(base.length - 1)
+	if (last == '/' || last == '\\') {
+		return base + name
+	}
+	return base + '/' + name
+}
+
+/** 取父目录（没有分隔符时返回自身，交给 mkdirs 的递归终止条件处理） */
+function parentDirOf(path: string): string {
+	let at = -1
+	for (let i = path.length - 1; i >= 0; i--) {
+		const c = path.charAt(i)
+		if (c == '/' || c == '\\') {
+			at = i
+			break
+		}
+	}
+	if (at <= 0) {
+		return ''
+	}
+	return path.substring(0, at)
+}
+
+/** 取 URL 里的 host 部分（只用于日志，绝不参与判定） */
+function hostPartOf(url: string): string {
+	const schemeAt = url.indexOf('://')
+	let start = 0
+	if (schemeAt >= 0) {
+		start = schemeAt + 3
+	}
+	let end = url.length
+	const slashAt = url.indexOf('/', start)
+	if (slashAt >= 0 && slashAt < end) {
+		end = slashAt
+	}
+	return url.substring(start, end)
+}
+
+/** 取 `prefix` 之后到下一个分隔符为止的一段（用于从 UA 里抠版本号） */
+function tokenAfter(text: string, prefix: string): string {
+	const at = text.indexOf(prefix)
+	if (at < 0) {
+		return ''
+	}
+	let i = at + prefix.length
+	let out = ''
+	while (i < text.length) {
+		const c = text.charCodeAt(i)!
+		// 版本号字符集：数字、点、字母、下划线、连字符
+		if ((c >= 48 && c <= 57) || c == 46 || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 || c == 45) {
+			out += text.charAt(i)
+			i++
+			continue
+		}
+		break
+	}
+	return out
+}
+
+/**
+ * 只对 JSON **对象键名**做 ASCII 小写（值一律原样）。
+ *
+ * 状态机比想象的简单：JSON 的键一定是字符串，所以「读到字符串时它是不是键」
+ * 只取决于「上一个有效字符是不是 `{` 或 `,` 且深度为 1」。值里的引号、转义、
+ * 嵌套对象都由字符串扫描与 depth 计数兜住。
+ */
+function lowerJsonKeys(json: string): string {
+	let out = ''
+	let i = 0
+	let depth = 0
+	let expectKey = false
+	while (i < json.length) {
+		const ch = json.charAt(i)
+		if (ch == '"') {
+			let j = i + 1
+			let body = ''
+			while (j < json.length) {
+				const c = json.charAt(j)
+				if (c == '\\') {
+					body += c
+					if (j + 1 < json.length) {
+						body += json.charAt(j + 1)
+					}
+					j += 2
+					continue
+				}
+				if (c == '"') {
+					break
+				}
+				body += c
+				j++
+			}
+			if (expectKey && depth == 1) {
+				out += '"' + lowerAscii(body) + '"'
+			} else {
+				out += '"' + body + '"'
+			}
+			expectKey = false
+			i = j + 1
+			continue
+		}
+		if (ch == '{' || ch == '[') {
+			depth++
+			expectKey = ch == '{' && depth == 1
+			out += ch
+			i++
+			continue
+		}
+		if (ch == '}' || ch == ']') {
+			depth--
+			expectKey = false
+			out += ch
+			i++
+			continue
+		}
+		if (ch == ',') {
+			expectKey = depth == 1
+			out += ch
+			i++
+			continue
+		}
+		out += ch
+		i++
+	}
+	return out
+}
+
+/** ASCII 大写转小写（其它字符（含非 ASCII）原样） */
+function lowerAscii(s: string): string {
+	let out = ''
+	for (let i = 0; i < s.length; i++) {
+		const c = s.charCodeAt(i)!
+		if (c >= 65 && c <= 90) {
+			out += String.fromCharCode(c + 32)
+		} else {
+			out += s.charAt(i)
+		}
+	}
+	return out
+}
+
+// ============================================================================
+// 语义层（一）：常量
+// 与 app-android/index.uts 同名同值——两平台对不上的数字迟早会变成「安卓能过
+// 鸿蒙过不去」的玄学，改一边必须改另一边。
+// ============================================================================
+
+/** 宿主 API 版本：services/source-engine.uts 会严格比对，不一致直接判引擎不可用 */
+const HOST_API_VERSION = 1
+/**
+ * 引擎名。**只用于日志**（source-engine.uts 只把 info.engine 打进日志，
+ * 不做平台分支），保持 'webview-v8' 可以让「音源引擎就绪」的日志在两端一致。
+ */
+const ENGINE_NAME = 'webview-v8'
+/** 泵间隔：与安卓一致，20ms 一次（一次求值 = 一次 runJavaScript 往返） */
+const PUMP_INTERVAL_MS = 20
+/** invoke 未指定超时时的默认值 */
+const DEFAULT_INVOKE_TIMEOUT_MS = 20000
+/** 单次脚本执行的「阻塞」判定：超过它认为脚本卡死，引擎停用 */
+const STALL_MS = 15000
+/** HTTP 未指定超时时的默认值 */
+const DEFAULT_HTTP_TIMEOUT_MS = 15000
+/** 响应体上限（与安卓同为 8MiB）：防止一个坏 URL 把整块内存拉爆 */
+const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+/**
+ * 页面基地址：必须是 https 且是「自己的域」。
+ * 它同时决定三件事：文档 origin、模块 import 的绝对 URL 前缀、
+ * onInterceptRequest 的拦截判定（builder.ets 按 path 匹配）。
+ */
+const BASE_URL = 'https://qt.local/'
+/** meta bundle 的受拦路径 */
+const BUNDLE_PATH = '/qt-bundle.js'
+/** play bundle 的受拦路径（与 meta 分槽，互不覆盖） */
+const PLAY_PATH = '/qt-play-bundle.js'
+/**
+ * bundle 的**绝对** URL。
+ * 与安卓同一个坑：bootstrap 是被注入的脚本，注入脚本的 base URL 是 about:blank，
+ * 根相对写法 `'/qt-bundle.js'` 解析不了（"The base URL is about:blank because
+ * import() is called from a CORS-cross-origin script"）。绝对 URL 不依赖 base。
+ */
+const BUNDLE_URL = 'https://qt.local' + BUNDLE_PATH
+const PLAY_URL = 'https://qt.local' + PLAY_PATH
+/** 空白文档：prelude 与 bootstrap 都靠注入，HTML 里不放任何脚本 */
+const BLANK_HTML =
+	'<!doctype html><html><head><meta charset="utf-8">' +
+	'<meta name="viewport" content="width=device-width,initial-scale=1">' +
+	'</head><body></body></html>'
+/** 页面就绪超时（onControllerAttached + onPageEnd 都到齐） */
+const PAGE_TIMEOUT_MS = 10000
+/** bundle 模块装载总超时（含 ArkWeb 编译 1.7MB + 顶层执行） */
+const LOAD_TIMEOUT_MS = 15000
+/**
+ * 单次求值超时。
+ * 安卓用 CountDownLatch.await(15000) 实现；鸿蒙没有可阻塞的等待原语，
+ * 改成「看门狗定时器」：到点把这次求值按失败结算，让队列能继续走。
+ * 与 STALL_MS 同为 15000：先触发看门狗，再由 cost>STALL_MS 的判定把引擎停用。
+ */
+const EVAL_TIMEOUT_MS = 15000
+/** 装载状态轮询间隔 */
+const POLL_INTERVAL_MS = 25
+/** 注入后探测失败时的重试次数（页面可能在我们注入后才被 loadData 替换掉） */
+const PROBE_TRIES = 3
+/** 探测重试间隔 */
+const PROBE_RETRY_DELAY_MS = 150
+/** HTTP 总时长看门狗的额外宽限：connectTimeout/readTimeout 只覆盖建连与单次读 */
+const HTTP_WATCHDOG_EXTRA_MS = 5000
+/** 十六进制查表（quoteAscii 用；比算术取位更省事也更快） */
+const HEX = '0123456789abcdef'
+/**
+ * 引擎宿主 Web 组件**可选**的页面节点 id。
+ *
+ * 自 v1.0.x 起挂载是**三级回落**（见 builder.ets 文件头「挂载策略」）：
+ *   1. 覆盖层（OverlayManager + ComponentContent）——不需要 app 侧做任何事，**首选**；
+ *   2. 本 id 对应的节点（若 app 愿意提供一个
+ *      `<view id="qt-js-engine-host"></view>`，语义最明确，会优先于覆盖层之外的兜底）；
+ *   3. 页面根节点约定 id 'root'。
+ *
+ * 因此**应用侧不再必须**提供这个 view：不给也能启动（走策略 1）。
+ * 只有三级全部失败时 start() 才会明确失败，并把每一级的失败原因拼进错误文本，
+ * 而不是像旧实现那样在策略 2 找不到节点时就直接报「未找到宿主节点」。
+ *
+ * 为什么不放进 QtJsStartOptions：interface.uts 是上层（services/）共用的契约，
+ * 改契约要动上层调用点；这里靠「约定 + 三级回落」就够了。
+ */
+const HOST_NODE_ID = 'qt-js-engine-host'
+
+// ============================================================================
+// 语义层（二）：模块级状态
+// ============================================================================
+
+/** ArkWeb 宿主（builder.ets）。null = 没有引擎 */
+let gHost: QtJsArkWebHost | null = null
+/** 引擎是否已就绪（prelude + bootstrap 注入完成、探针通过） */
+let gStarted = false
+/** 引擎是否已停用（脚本阻塞等致命问题）——需要 stop + start 才能恢复 */
+let gPoisoned = false
+/** 渲染进程是否已退出（ArkWeb 的 onRenderExited）：引擎不可能自愈 */
+let gRenderGone = false
+/** 正在启动中（start 是多步异步流程，期间再进来不能并发建第二个 Web） */
+let gStarting = false
+/** 启动代次：stop 或再次 start 会让在飞的启动流程作废（回调不再投递） */
+let gStartSeq = 0
+/** 启动期间进来的回调：等这一次启动有结果后一起答复 */
+let gStartWaiters: QtJsStartCallback[] = []
+/** 引擎名/版本（只用于日志与 info 上报） */
+let gEngineName = ''
+let gEngineVersion = ''
+/** 在等的 invoke（opId → 回调 + 截止时间） */
+let gWaiters: Waiter[] = []
+/** 泵是否已排期（防止重复排期把泵打成高频空转） */
+let gPumpScheduled = false
+/** 播放包模块 URL 的自增序号（模块图按完整 URL 缓存，见 loadPlay 注释） */
+let gPlaySeq = 0
+/** 最近一次求值的错误（空串表示无错）；安卓侧同名字段同语义 */
+let gLastEvalError = ''
+
+// ============================================================================
+// 语义层（三）：通用小工具（与安卓逐函数对齐）
+// ============================================================================
+
+/** 异常 → 文本。catch 到的变量在 UTS 里是 any，统一从这里过 */
+function errText(e: any): string {
+	if (e == null) {
+		return 'unknown error'
+	}
+	return `${e}`
+}
+
+/** 任意值 → 文本（null → 空串）。UTSJSONObject.get 的返回值都走这里 */
+function anyText(v: any): string {
+	if (v == null) {
+		return ''
+	}
+	return `${v}`
+}
+
+/** 单个码位的 4 位十六进制（不用位运算：UTS 的 number 语义下算术版最省心） */
+function hex4(code: number): string {
+	const a = Math.floor(code / 4096) % 16
+	const b = Math.floor(code / 256) % 16
+	const c = Math.floor(code / 16) % 16
+	const d = code % 16
+	return HEX.charAt(a) + HEX.charAt(b) + HEX.charAt(c) + HEX.charAt(d)
+}
+
+/**
+ * 把文本包成「全 ASCII 的双引号 JS 字面量」。
+ *
+ * 用于**组装 JSON 文本**（响应头 JSON、listDir JSON）：这些串要经
+ * prelude 的 JSON.parse，任何非 ASCII/控制字符都必须先转义成 \uXXXX，
+ * 否则会在「原生 → JS」的字符串边界上被二次解释。
+ * 求值表达式（exprCall 等）不走这里，走 quoteJs。
+ *
+ * 为什么不用 `+=`：安卓端用 StringBuilder 是因为 Kotlin 的字符串拼接会进
+ * StringBuilder 链；ArkTS 侧字符串是 JS 语义，`+=` 由引擎做 rope 优化，
+ * 直接拼反而更省（也躲开「UTS 在 ArkTS 上是否提供 StringBuilder」的不确定性）。
+ */
+function quoteAscii(s: string): string {
+	let out = '"'
+	for (let i = 0; i < s.length; i++) {
+		const code = s.charCodeAt(i)!
+		if (code == 34) {
+			out += '\\"'
+		} else if (code == 92) {
+			out += '\\\\'
+		} else if (code >= 32 && code <= 126) {
+			out += s.charAt(i)
+		} else {
+			out += '\\u' + hex4(code)
+		}
+	}
+	return out + '"'
+}
+
+/**
+ * 把文本包成「单引号 JS 字面量」，供**求值表达式**内嵌。
+ *
+ * 单引号是刻意的：音源包的 JSON 文本里全是双引号，用单引号当定界符可以让绝大多数
+ * 字符免转义（下面先扫一遍，干净就直接包，脏才逐字符转义）。
+ * 需要转义的集合与安卓的 QT_JS_ESC_PATTERN 一致：
+ *   控制字符（<0x20）、单引号、反斜杠、代理区码位（\ud800-\udfff）、U+2028/U+2029。
+ * 代理区与 U+2028/2029 必须转义的理由：它们出现在 JS 字符串字面量里会被
+ * 「行长分割/编码」环节弄坏（U+2028/2029 在旧语义里是换行符），
+ * 而音源包产物是压缩过的，里面完全可能有这些码位。
+ */
+function quoteJs(s: string): string {
+	if (!jsNeedsEscape(s)) {
+		return "'" + s + "'"
+	}
+	let out = "'"
+	for (let i = 0; i < s.length; i++) {
+		const code = s.charCodeAt(i)!
+		if (code == 39) {
+			out += "\\'"
+		} else if (code == 92) {
+			out += '\\\\'
+		} else if (code < 32 || code == 8232 || code == 8233 || (code >= 55296 && code <= 57343)) {
+			out += '\\u' + hex4(code)
+		} else {
+			out += s.charAt(i)
+		}
+	}
+	return out + "'"
+}
+
+/** quoteJs 的快路径判定：是否含有任何一个必须转义的码位 */
+function jsNeedsEscape(s: string): boolean {
+	for (let i = 0; i < s.length; i++) {
+		const code = s.charCodeAt(i)!
+		if (code < 32 || code == 39 || code == 92 || code == 8232 || code == 8233 || (code >= 55296 && code <= 57343)) {
+			return true
+		}
+	}
+	return false
+}
+
+/** 读 UTSJSONObject 的字符串字段（缺省/类型不符 → 空串） */
+function fieldStr(o: UTSJSONObject, key: string): string {
+	return anyText(o.get(key))
+}
+
+/**
+ * 读 UTSJSONObject 的整数字段。
+ * 逐字符累加而不是 parseInt：泵/协议里的数字都是「纯十进制」，而 parseInt
+ * 在不同实现上对前导空白、正负号、小数、进制的处理各不相同；这里只认
+ * `0-9`，遇到 `.` 就停，遇到其它非数字字符（且已读过数字）也停。
+ */
+function fieldInt(o: UTSJSONObject, key: string): number {
+	const s = anyText(o.get(key))
+	let out = 0
+	for (let i = 0; i < s.length; i++) {
+		const c = s.charCodeAt(i)!
+		if (c >= 48 && c < 58) {
+			out = out * 10 + (c - 48)
+			continue
+		}
+		if (c == 46) {
+			break
+		}
+		if (i > 0) {
+			break
+		}
+	}
+	return out
+}
+
+/** 毫秒数 → 定时器需要的形式；负数归 0（安卓端同名的 toLongMs 就是这个作用） */
+function toDelayMs(ms: number): number {
+	let v = Math.round(ms)
+	if (v < 0) {
+		v = 0
+	}
+	return v
+}
+
+/** 解析一行 JSON 对象；失败返回 null（调用方打日志并跳过，绝不让一行坏数据炸掉整轮泵） */
+function parseJsonObject(text: string): UTSJSONObject | null {
+	try {
+		if (text.length == 0 || text.charCodeAt(0)! != 123) {
+			return null
+		}
+		return JSON.parse(text) as UTSJSONObject
+	} catch (e) {
+		return null
+	}
+}
+
+/** 引擎版本：UA 里的 ArkWeb/Chrome 版本（只用于日志），取不到退回 uni 运行时版本 */
+function engineVersionText(): string {
+	try {
+		const ua = UTSHarmony.getUserAgent()
+		const ark = tokenAfter(ua, 'ArkWeb/')
+		if (ark.length > 0) {
+			return ark
+		}
+		const chrome = tokenAfter(ua, 'Chrome/')
+		if (chrome.length > 0) {
+			return 'chromium-' + chrome
+		}
+	} catch (e) {
+	}
+	try {
+		return UTSHarmony.getUniRuntimeVersion()
+	} catch (e) {
+		return 'unknown'
+	}
+}
+
+/** 引擎能否求值：启动过、没停用、宿主还在 */
+function engineEvalReady(): boolean {
+	return gStarted && !gPoisoned && gHost != null
+}
+
+/** 引擎信息上报体（probe 由调用方传：已启动时重复 start 固定给空串，与安卓一致） */
+function buildInfo(probe: string): QtJsEngineInfo {
+	return {
+		engine: ENGINE_NAME,
+		version: gEngineVersion,
+		hostApiVersion: HOST_API_VERSION,
+		probe: probe
+	} as QtJsEngineInfo
+}
+
+// ============================================================================
+// 语义层（四）：回调派发
+// 所有 callback 只经这里出去，且一律经 onMain 让出一拍（见 onMain 的注释）。
+// ============================================================================
+
+function deliverStart(callback: QtJsStartCallback, info: QtJsEngineInfo | null, error: string | null): void {
+	onMain(() => {
+		try {
+			callback(info, error)
+		} catch (e) {
+			console.error('[qt-js-engine] start 回调异常:', e)
+		}
+	})
+}
+
+function deliverVoid(callback: QtJsVoidCallback, ok: boolean, error: string): void {
+	onMain(() => {
+		try {
+			callback({ ok: ok, error: error } as QtJsVoidResult)
+		} catch (e) {
+			console.error('[qt-js-engine] void 回调异常:', e)
+		}
+	})
+}
+
+function deliverEval(callback: QtJsEvalCallback, ok: boolean, value: string, error: string): void {
+	onMain(() => {
+		try {
+			callback({ ok: ok, value: value, error: error } as QtJsEvalResult)
+		} catch (e) {
+			console.error('[qt-js-engine] eval 回调异常:', e)
+		}
+	})
+}
+
+function deliverFile(callback: QtJsFileCallback, ok: boolean, value: string, error: string): void {
+	onMain(() => {
+		try {
+			callback(ok, value, error)
+		} catch (e) {
+			console.error('[qt-js-engine] file 回调异常:', e)
+		}
+	})
+}
+
+/**
+ * 注意参数类型：契约里 QtJsSpikeTimerCallback 是 `(fired: string, error: string)`，
+ * fired 是**字符串**（安卓侧也是 String.valueOf(...) 出来的），不是 boolean。
+ */
+function deliverSpike(callback: QtJsSpikeTimerCallback, fired: string, error: string): void {
+	onMain(() => {
+		try {
+			callback(fired, error)
+		} catch (e) {
+			console.error('[qt-js-engine] spike 回调异常:', e)
+		}
+	})
+}
+
+// ============================================================================
+// 语义层（五）：两条串行队列（本文件与安卓最大的结构差异，见文件头 ①）
+// ============================================================================
+
+/** 一次待求值的脚本 + 它完成后要做的事 */
+class EvalRequest {
+	code: string
+	done: (value: string) => void
+	/** 实际发出去的时刻（不含排队等待），用于 STALL 判定 */
+	startedAt: number
+
+	constructor(code: string, done: (value: string) => void) {
+		this.code = code
+		this.done = done
+		this.startedAt = 0
+	}
+}
+
+/** 一个待执行的操作；done() 由操作自己在结束时调用（且只会被认一次） */
+class OpEntry {
+	fn: (done: () => void) => void
+
+	constructor(fn: (done: () => void) => void) {
+		this.fn = fn
+	}
+}
+
+let gEvalQueue: EvalRequest[] = []
+let gEvalBusy = false
+let gOpQueue: OpEntry[] = []
+let gOpBusy = false
+
+/**
+ * 排一次脚本求值。回调在求值完成后（主线程）触发；失败时 value='' 并把原因写进
+ * gLastEvalError——与安卓 `v8EvalSync` 的「返回值 + gLastEvalError」双通道一致。
+ */
+function evalSerial(code: string, done: (value: string) => void): void {
+	gEvalQueue.push(new EvalRequest(code, done))
+	pumpEvalQueue()
+}
+
+/** 求值前清空上次的错误，求值后把本次的错误交给回调（对齐安卓 v8EvalSync 的开头） */
+function evalStep(code: string, cb: (value: string, error: string) => void): void {
+	gLastEvalError = ''
+	evalSerial(code, (value: string) => {
+		cb(value, gLastEvalError)
+	})
+}
+
+/** 从队首摘掉一个（用重建数组的写法，与安卓 removeWaiter 同款，不依赖 splice/shift 的签名） */
+function removeEvalHead(): void {
+	const keep: EvalRequest[] = []
+	for (let i = 0; i < gEvalQueue.length; i++) {
+		if (i > 0) {
+			keep.push(gEvalQueue[i])
+		}
+	}
+	gEvalQueue = keep
+}
+
+/** 求值队列全军失败（宿主没了等硬失败）：让每个等待者都收到一次空结果 + 原因 */
+function failEvalQueue(reason: string): void {
+	gLastEvalError = reason
+	const list = gEvalQueue
+	gEvalQueue = []
+	gEvalBusy = false
+	for (let i = 0; i < list.length; i++) {
+		list[i].done('')
+	}
+}
+
+/**
+ * 串行泵（求值）。
+ *
+ * 三条与安卓对齐的语义：
+ *   · 一次只有一条 runJavaScript 在飞（安卓靠引擎线程串行，这里靠这个标志）；
+ *   · 单次求值超时按失败结算（安卓靠 CountDownLatch.await 超时）；
+ *   · 单次求值耗时 > STALL_MS 直接停用引擎（安卓 evalString 里的同款判定）。
+ */
+function pumpEvalQueue(): void {
+	if (gEvalBusy) {
+		return
+	}
+	if (gEvalQueue.length == 0) {
+		return
+	}
+	const host = gHost
+	if (host == null) {
+		failEvalQueue('引擎未启动')
+		return
+	}
+	const req = gEvalQueue[0]
+	gEvalBusy = true
+	let settled = false
+	let timedOut = false
+	const finish = (value: string): void => {
+		if (settled) {
+			return
+		}
+		settled = true
+		gEvalBusy = false
+		removeEvalHead()
+		if (!timedOut) {
+			const cost = Date.now() - req.startedAt
+			if (cost > STALL_MS) {
+				poison(`单次脚本执行阻塞 ${cost}ms`)
+			}
+		}
+		req.done(value)
+		pumpEvalQueue()
+	}
+	const watchdog = timerSet(() => {
+		if (settled) {
+			return
+		}
+		// 看门狗与「runJavaScript 永不回调」是同一类故障（页面被销毁、渲染进程卡住），
+		// 必须把这次结算掉，否则整条队列会永久堵住。
+		timedOut = true
+		gLastEvalError = `evaluate 超时（${EVAL_TIMEOUT_MS}ms）`
+		finish('')
+	}, EVAL_TIMEOUT_MS)
+	req.startedAt = Date.now()
+	host.evalAsync(req.code, (value: string) => {
+		timerClear(watchdog)
+		// 安卓侧由 webview.uts 的 unwrapEval 负责解信封，这里同一职责放在本函数出口，
+		// 让 evalStep/evalSerial 的使用者一律只看到「信封里的值 + gLastEvalError」。
+		finish(unwrapEval(value))
+	})
+}
+
+/**
+ * 排一个「操作」。操作之间互不交错，等价于安卓「所有 Task 都 post 到同一条
+ * 引擎线程」的时序（start/stop/求值/装载/invoke 不会互相看到中间状态）。
+ */
+function runSerialOp(fn: (done: () => void) => void): void {
+	gOpQueue.push(new OpEntry(fn))
+	pumpOps()
+}
+
+function pumpOps(): void {
+	if (gOpBusy) {
+		return
+	}
+	if (gOpQueue.length == 0) {
+		return
+	}
+	const entry = gOpQueue[0]
+	gOpBusy = true
+	let doneCalled = false
+	const done = (): void => {
+		if (doneCalled) {
+			return
+		}
+		doneCalled = true
+		const keep: OpEntry[] = []
+		for (let i = 0; i < gOpQueue.length; i++) {
+			if (i > 0) {
+				keep.push(gOpQueue[i])
+			}
+		}
+		gOpQueue = keep
+		gOpBusy = false
+		pumpOps()
+	}
+	entry.fn(done)
+}
+
+/** 释放引擎状态（stop / 启动失败 / 重建时调用）：与安卓 releaseEngineState 同义 */
+function releaseEngineState(): void {
+	gStarted = false
+	gPoisoned = false
+	gWaiters = []
+	gPumpScheduled = false
+	gEvalQueue = []
+	gOpQueue = []
+}
+
+// ============================================================================
+// 语义层（六）：WebView 侧 bootstrap（prelude 之后注入）
+// 内容与 app-android/webview.uts 的 QT_V8_BOOTSTRAP **逐行同源**，只把注释里的
+// 平台名换掉：信封协议、装载闸门、状态机都是两端共用的约定，任何一边改了
+// 另一边必须同步，否则包产物会在某个平台上「装载成功但不注册入口」。
+//
+// 注意：本字符串会被 UTS 当模板串处理，所以 JS 里**不写反斜杠转义、不写 ${、
+// 不写反引号**。需要换行时用字符串拼接，不写字面量转义。
+// ============================================================================
+
+const QT_HARMONY_BOOTSTRAP = `
+(function () {
+  if (globalThis.__qtV8Ready) { return; }
+  globalThis.__qtV8Ready = true;
+
+  // ---------- 网络能力收缴（内容安全的运行时硬闸，与安装期静态扫描互为冗余） ----------
+  // 包代码与本页共享上下文：ArkWeb 原生的 fetch/XHR/WebSocket 可以绕过
+  // __qtHost.request 的统一管控自由外联（含把数据编码进 URL 的 GET 上报）。
+  // 宿主自身不用这些 API（bundle 装载走 import + onInterceptRequest 内存直供，
+  // HTTP 走原生 http 任务），直接收缴；包代码唯一的网络出口是 __qtHost.request。
+  // official 包产物已核对：backend.fetch 是对象方法、'XMLHttpRequest' 只出现在
+  // 请求头字符串里——收缴不影响官方线路。
+  var __qtDenyApi = function (name) {
+    return function () { throw new Error('音源包环境禁止使用 ' + name); };
+  };
+  try { delete globalThis.fetch; } catch (e) {}
+  try { globalThis.XMLHttpRequest = __qtDenyApi('XMLHttpRequest'); } catch (e) {}
+  try { delete globalThis.WebSocket; } catch (e) {}
+  try { delete globalThis.EventSource; } catch (e) {}
+  try { delete globalThis.Worker; } catch (e) {}
+  try { delete globalThis.SharedWorker; } catch (e) {}
+  try { if (navigator && navigator.sendBeacon) { navigator.sendBeacon = __qtDenyApi('sendBeacon'); } } catch (e) {}
+
+  // 信封：runJavaScript 不把异常回传（回调只拿到空串/无值），
+  // 所以每一次求值都包一层 try/catch + JSON.stringify，原生侧解两层 JSON 后能看到真实错误。
+  globalThis.__qtEnv = function (fn) {
+    try {
+      var v = fn();
+      return JSON.stringify({ ok: 1, v: v == null ? '' : String(v) });
+    } catch (e) {
+      var msg = (e && e.stack) ? String(e.stack) : String(e);
+      return JSON.stringify({ ok: 0, e: msg });
+    }
+  };
+
+  globalThis.__qtEnvProbe = function () {
+    return globalThis.__qtEnv(function () { return String(1 + 1); });
+  };
+  globalThis.__qtEnvPump = function () {
+    return globalThis.__qtEnv(function () { return globalThis.__qtPump(); });
+  };
+  globalThis.__qtEnvCall = function (name, argsJson) {
+    return globalThis.__qtEnv(function () { return globalThis.__qtCall(name, argsJson); });
+  };
+  globalThis.__qtEnvResolveHttp = function (id, statusCode, headersJson, body, error) {
+    return globalThis.__qtEnv(function () {
+      globalThis.__qtResolveHttp(id, statusCode, headersJson, body, error);
+      return '';
+    });
+  };
+  globalThis.__qtEnvFireTimer = function (id) {
+    return globalThis.__qtEnv(function () { globalThis.__qtFireTimer(id); return ''; });
+  };
+  globalThis.__qtEnvDropOp = function (id) {
+    return globalThis.__qtEnv(function () {
+      if (globalThis.__qtDropOp) { globalThis.__qtDropOp(id); }
+      return '';
+    });
+  };
+  globalThis.__qtEnvEntries = function () {
+    return globalThis.__qtEnv(function () {
+      var n = 0, k, e = globalThis.__qtEntries || {};
+      for (k in e) { if (Object.prototype.hasOwnProperty.call(e, k)) { n++; } }
+      return String(n);
+    });
+  };
+  globalThis.__qtEnvBusy = function () {
+    return globalThis.__qtEnv(function () {
+      return String(globalThis.__qtBusy ? globalThis.__qtBusy() : 0);
+    });
+  };
+
+  // ---------- bundle 模块装载 ----------
+  // bundle 是真正的 ESM（顶层 export），不能当普通脚本求值；源码放在原生内存里，
+  // 由 onInterceptRequest 以 https://qt.local/qt-bundle.js 直接回填，这里动态 import。
+  // 说明符必须是**绝对 URL**（占位符在原生侧替换成 BUNDLE_URL）：本脚本由
+  // runJavaScript 注入，base URL 是 about:blank，根相对写法解析不了。
+  globalThis.__qtLoadStatus = 'pending';
+
+  globalThis.__qtImportBundle = function () {
+    globalThis.__qtLoadStatus = 'pending';
+    import('__QT_V8_BUNDLE_URL__').then(function () {
+      var n = 0, k, e = globalThis.__qtEntries || {};
+      for (k in e) { if (Object.prototype.hasOwnProperty.call(e, k)) { n++; } }
+      globalThis.__qtLoadStatus = n > 0 ? ('ok:' + n) : 'err:未注册任何入口（__qtEntries 为空）';
+    }, function (err) {
+      var name = (err && err.name) ? String(err.name) : '';
+      var msg = (err && err.message) ? String(err.message) : String(err);
+      // SyntaxError 表示 parse 期就被拦下、顶层一行都没执行 —— 与 QuickJS compileModule 同语义
+      globalThis.__qtLoadStatus = 'err:' + (name == 'SyntaxError' ? '语法错误：' : '') + msg;
+    });
+    return 'pending';
+  };
+
+  globalThis.__qtEnvLoadStatus = function () {
+    return globalThis.__qtEnv(function () { return String(globalThis.__qtLoadStatus); });
+  };
+
+  // ---------- 播放包模块装载 ----------
+  // 与 meta 共用「内存直供 + 动态 import」通道，但状态与校验对象都分开：
+  // meta 数的是 __qtEntries 入口数，播放包认的是 __qtPlayPackFactory。
+  // 两者互不覆盖，所以不能用同一份 __qtLoadStatus（meta 重装会把播放包的状态冲掉）。
+  globalThis.__qtPlayLoadStatus = 'pending';
+
+  globalThis.__qtImportPlay = function (url) {
+    globalThis.__qtPlayLoadStatus = 'pending';
+    // 覆盖式归零：不清掉的话，「旧包的工厂还挂在全局 + 本次 import 只命中模块缓存
+    // 而没有重新执行」会被下面的 typeof 判成装载成功，等于把旧包当新包用。
+    globalThis.__qtPlayPackFactory = undefined;
+    globalThis.__qtPlayFactoryStash = undefined;
+    import(url).then(function () {
+      var f = globalThis.__qtPlayPackFactory;
+      if (typeof f == 'function') {
+        // 另存一份给宿主交接用：meta 的 installPlayPack 在求值传入的 code **之前**
+        // 会先把 __qtPlayPackFactory 置空，之后才读回工厂（见 meta-entries.ts
+        // evalPlayPackFactory）。所以宿主不能直接传「读 __qtPlayPackFactory」的桩，
+        // 那读到的是 undefined；要传「读这份暂存」的桩，把工厂交回 meta 完成装配。
+        globalThis.__qtPlayFactoryStash = f;
+        globalThis.__qtPlayLoadStatus = 'ok';
+      } else {
+        globalThis.__qtPlayLoadStatus = 'err:该文件不是有效的播放音源包（未挂出 __qtPlayPackFactory）';
+      }
+    }, function (err) {
+      var name = (err && err.name) ? String(err.name) : '';
+      var msg = (err && err.message) ? String(err.message) : String(err);
+      // SyntaxError 表示 parse 期就被拦下、顶层一行都没执行
+      globalThis.__qtPlayLoadStatus = 'err:' + (name == 'SyntaxError' ? '语法错误：' : '') + msg;
+    });
+    return 'pending';
+  };
+
+  globalThis.__qtEnvPlayLoadStatus = function () {
+    return globalThis.__qtEnv(function () { return String(globalThis.__qtPlayLoadStatus); });
+  };
+
+  // 诊断用：页面真实的 origin / baseURI。装载失败时带进错误信息，一眼分辨
+  // 「文档 base URL 没生效」还是「模块抓取被 CORS 拦下」。
+  // 鸿蒙侧格外关键：loadData 的 baseUrl 是否真的决定了 origin，就靠这行输出判断。
+  globalThis.__qtEnvDocBase = function () {
+    return globalThis.__qtEnv(function () {
+      return String(location.origin) + ' | ' + String(document.baseURI);
+    });
+  };
+})();
+`.replace('__QT_V8_BUNDLE_URL__', BUNDLE_URL)
+
+// ============================================================================
+// 语义层（七）：启动 / 停止
+// ============================================================================
+
+/** 把一次 start 的结论答复给所有等待者（含启动期间又进来的那几次） */
+function replyStart(waiters: QtJsStartCallback[], info: QtJsEngineInfo | null, error: string | null): void {
+	gStarting = false
+	for (let i = 0; i < waiters.length; i++) {
+		deliverStart(waiters[i], info, error)
+	}
+}
+
+/** 启动失败/被作废时的收摊：把宿主拆掉，别留一个半死的 Web 在 UI 树里 */
+function teardownStart(): void {
+	const host = gHost
+	gHost = null
+	gStarting = false
+	releaseEngineState()
+	if (host != null) {
+		host.detach()
+	}
+}
+
+/**
+ * 启动操作。
+ *
+ * 安卓的 StartTask 之所以能写成「创建 → loadData → 轮询 onPageFinished → 注入 →
+ * 探测」一条直线，是因为它跑在引擎线程上可以 sleep。鸿蒙没有可阻塞的线程，
+ * 于是同一条直线被拆成三个回调阶段：opStart → waitPageReady → injectEngine。
+ * 阶段之间用「启动代次 gStartSeq」校验：期间只要有人 stop 或重新 start，
+ * 在飞的阶段就会自行作废，绝不往一个已经作废的宿主上继续注入。
+ */
+function opStart(first: QtJsStartCallback, done: () => void): void {
+	// 启动期间又进来的 start：不排队等下一轮，而是等这一次有结论后一起答复
+	const waiters: QtJsStartCallback[] = [first]
+	const extra = gStartWaiters
+	gStartWaiters = []
+	for (let i = 0; i < extra.length; i++) {
+		waiters.push(extra[i])
+	}
+	// 幂等：已启动且没停用 → 立刻回现有 info（probe 固定空串，与安卓一致）
+	if (gStarted && !gPoisoned) {
+		replyStart(waiters, buildInfo(''), null)
+		done()
+		return
+	}
+	gStarting = true
+	const epoch = gStartSeq
+	const host = new QtJsArkWebHost(BUNDLE_PATH, PLAY_PATH, BASE_URL, BLANK_HTML, HOST_NODE_ID)
+	gHost = host
+	gRenderGone = false
+	host.onRenderGone(() => {
+		gRenderGone = true
+	})
+	const attachErr = host.attach()
+	if (attachErr.length > 0) {
+		// 挂载失败是**同步**能知道的（builder.ets 刻意这么设计）：直接失败，不超时等待
+		teardownStart()
+		replyStart(waiters, null, attachErr)
+		done()
+		return
+	}
+	waitPageReady(epoch, waiters, Date.now(), done)
+}
+
+/** 阶段二：等「控制器已绑定 + 页面已结束」*/
+function waitPageReady(epoch: number, waiters: QtJsStartCallback[], t0: number, done: () => void): void {
+	if (epoch != gStartSeq) {
+		// 这次启动已被 stop/新 start 作废：什么都不做，也别调 waiters
+		done()
+		return
+	}
+	const host = gHost
+	if (host == null) {
+		replyStart(waiters, null, 'ArkWeb 宿主已释放')
+		done()
+		return
+	}
+	if (host.isRenderGone()) {
+		// 渲染进程在页面就绪前就退了：安卓端同样是「启动即崩溃」这一条
+		teardownStart()
+		replyStart(waiters, null, 'WebView 渲染进程启动即崩溃')
+		done()
+		return
+	}
+	if (host.isControllerAttached() && host.isPageReady()) {
+		injectEngine(epoch, waiters, 0, done)
+		return
+	}
+	if (Date.now() - t0 > PAGE_TIMEOUT_MS) {
+		const why = host.lastLoadError()
+		// 把生效的挂载策略一起报出去：真机上「页面没就绪」有两种完全不同的成因——
+		// (1) 挂载策略生效了但 Web 没渲染（策略名会打出来）；
+		// (2) 压根没挂上（那种情况 attach() 已同步失败，走不到这里）。
+		// 带策略名可以让日志一眼区分，省掉一轮猜测。
+		const via = host.mountStrategy()
+		const msg = `ArkWeb 页面加载超时（${PAGE_TIMEOUT_MS}ms）`
+			+ (via.length > 0 ? `（挂载策略：${via}）` : '')
+			+ (why.length > 0 ? `：${why}` : '')
+		teardownStart()
+		replyStart(waiters, null, msg)
+		done()
+		return
+	}
+	timerSet(() => waitPageReady(epoch, waiters, t0, done), POLL_INTERVAL_MS)
+}
+
+/**
+ * 阶段三：注入 prelude → 注入 bootstrap → 探针。
+ *
+ * 为什么要重试：注入落在「当前文档」上，而 onPageEnd 与 loadData 的落地时序
+ * 在 ArkWeb 上不保证（我们是在 onControllerAttached 里才 loadData 的）。
+ * 如果注入正好落在被替换掉的旧文档上，探针会取不到值——这时重来一轮即可：
+ * prelude 是纯赋值、bootstrap 有 __qtV8Ready 守卫，重复注入不会产生副作用。
+ */
+function injectEngine(epoch: number, waiters: QtJsStartCallback[], attempt: number, done: () => void): void {
+	evalStep(QT_JS_PRELUDE, (v1: string, e1: string) => {
+		if (epoch != gStartSeq) {
+			done()
+			return
+		}
+		if (e1.length > 0) {
+			finishStartFail(waiters, 'ArkWeb 注入 prelude 失败：' + e1, done)
+			return
+		}
+		evalStep(QT_HARMONY_BOOTSTRAP, (v2: string, e2: string) => {
+			if (epoch != gStartSeq) {
+				done()
+				return
+			}
+			if (e2.length > 0) {
+				finishStartFail(waiters, 'ArkWeb 注入 bootstrap 失败：' + e2, done)
+				return
+			}
+			evalStep('__qtEnvProbe()', (probe: string, e3: string) => {
+				if (epoch != gStartSeq) {
+					done()
+					return
+				}
+				if (probe == '2') {
+					gStarted = true
+					gPoisoned = false
+					gEngineName = ENGINE_NAME
+					gEngineVersion = engineVersionText()
+					replyStart(waiters, buildInfo('2'), null)
+					done()
+					return
+				}
+				if (attempt + 1 < PROBE_TRIES) {
+					timerSet(() => injectEngine(epoch, waiters, attempt + 1, done), PROBE_RETRY_DELAY_MS)
+					return
+				}
+				const why = e3.length > 0 ? e3 : '探测值 ' + (probe.length > 0 ? probe : '（空）')
+				finishStartFail(waiters, 'ArkWeb 探针失败：' + why, done)
+			})
+		})
+	})
+}
+
+function finishStartFail(waiters: QtJsStartCallback[], message: string, done: () => void): void {
+	teardownStart()
+	replyStart(waiters, null, message)
+	done()
+}
+
+/**
+ * 停止并销毁引擎。
+ *
+ * 与安卓的差别：安卓的 stop 也要 post 到引擎线程（所以要等最多 3s），
+ * 鸿蒙这边「卸载」就是节点 dispose，同步完成。对外结论一致（ok=true），
+ * 但会额外做一件安卓没做的事：把还在等 start 的回调失败掉——否则那些调用方
+ * 会永远等一个不会发生的回调（安卓侧因为都在引擎线程排队，天然不会出现）。
+ */
+function opStop(callback: QtJsVoidCallback, done: () => void): void {
+	gStartSeq += 1
+	const host = gHost
+	gHost = null
+	gStarting = false
+	gRenderGone = false
+	releaseEngineState()
+	const pending = gStartWaiters
+	gStartWaiters = []
+	for (let i = 0; i < pending.length; i++) {
+		deliverStart(pending[i], null, '引擎已停止')
+	}
+	if (host != null) {
+		host.detach()
+	}
+	deliverVoid(callback, true, '')
+	done()
+}
+
+// ============================================================================
+// 语义层（八）：bundle 装载（meta / play 同一套通道，三个槽必须分开）
+//   · 源码分开：meta 与 play 各自一份内存源码（builder.ets 分槽持有）；
+//   · 状态分开：__qtLoadStatus / __qtPlayLoadStatus（meta 重装不能冲掉播放包状态）；
+//   · 校验分开：meta 数 __qtEntries 入口数，播放包认 __qtPlayPackFactory。
+// ============================================================================
+
+/** 文本里的十进制数字（与安卓 v8EntriesCount 同款：只认 0-9，遇 `.` 或其它字符停） */
+function countOfText(s: string): number {
+	let out = 0
+	for (let i = 0; i < s.length; i++) {
+		const c = s.charCodeAt(i)!
+		if (c >= 48 && c < 58) {
+			out = out * 10 + (c - 48)
+			continue
+		}
+		if (c == 46) {
+			break
+		}
+		if (i > 0) {
+			break
+		}
+	}
+	return out
+}
+
+/**
+ * 装载 bundle / 播放包。
+ *
+ * 装载闸门三步（与安卓、与 PC 侧 QuickJS 完全一致）：
+ *   ① 语法校验 → import 的 reject（e.name === 'SyntaxError'，此时顶层零执行）
+ *   ② 执行     → import 的 resolve
+ *   ③ 校验入口 → meta 数 __qtEntries 键数；播放包认 __qtPlayPackFactory
+ *
+ * 源码不经 quoteJs 进求值串（那是 1.7MB 的字符串字面量，安卓为此专门改道落盘+import）：
+ * 鸿蒙这边源码放在原生内存里，由 onInterceptRequest 按 URL 直供，只把 URL 交给 JS。
+ */
+function opLoadBundle(code: string, play: boolean, callback: QtJsVoidCallback, done: () => void): void {
+	if (gPoisoned) {
+		deliverVoid(callback, false, '引擎已停用，需重启音源引擎')
+		done()
+		return
+	}
+	if (!engineEvalReady()) {
+		deliverVoid(callback, false, '引擎未启动')
+		done()
+		return
+	}
+	if (gRenderGone) {
+		deliverVoid(callback, false, 'WebView 渲染进程已崩溃，需重启音源引擎')
+		done()
+		return
+	}
+	const host = gHost!
+	const prefix = play ? '播放包' : 'bundle '
+	if (play) {
+		host.setPlaySource(code)
+	} else {
+		host.setBundleSource(code)
+	}
+	let trigger = '__qtImportBundle()'
+	if (play) {
+		// 模块图按**完整 URL** 缓存，而播放包会在同一引擎生命周期里反复装载
+		// （切换生效包/覆盖更新）。URL 不变时第二次 import 直接命中缓存、不重新执行，
+		// 拿到的还是旧包的工厂——所以每次带自增序号击穿缓存。
+		// onInterceptRequest 只按 path 匹配，查询串不参与判定。
+		gPlaySeq += 1
+		trigger = '__qtImportPlay("' + PLAY_URL + '?v=' + gPlaySeq + '")'
+	}
+	const t0 = Date.now()
+	evalStep(trigger, (v: string, err: string) => {
+		if (err.length > 0) {
+			deliverVoid(callback, false, prefix + '装载失败：' + err)
+			done()
+			return
+		}
+		pollLoadStatus(play, t0, callback, done)
+	})
+}
+
+/** 轮询装载状态（import 是异步的，状态由 bootstrap 写在全局） */
+function pollLoadStatus(play: boolean, t0: number, callback: QtJsVoidCallback, done: () => void): void {
+	const prefix = play ? '播放包' : 'bundle '
+	if (gRenderGone) {
+		deliverVoid(callback, false, 'WebView 渲染进程已崩溃，需重启音源引擎')
+		done()
+		return
+	}
+	if (!engineEvalReady()) {
+		deliverVoid(callback, false, '引擎未启动')
+		done()
+		return
+	}
+	evalStep(play ? '__qtEnvPlayLoadStatus()' : '__qtEnvLoadStatus()', (st: string, err: string) => {
+		if (st.length == 0) {
+			// 求值本身失败（超时/渲染进程崩溃）：直接上报，别死等到装载超时
+			const why = err.length > 0 ? err : '装载状态读取失败'
+			if (gRenderGone) {
+				deliverVoid(callback, false, 'WebView 渲染进程已崩溃，需重启音源引擎')
+				done()
+				return
+			}
+			if (why.indexOf('超时') >= 0) {
+				deliverVoid(callback, false, prefix + '装载阻塞（' + why + '）')
+				done()
+				return
+			}
+			deliverVoid(callback, false, why)
+			done()
+			return
+		}
+		if (play) {
+			if (st == 'ok') {
+				deliverVoid(callback, true, '')
+				done()
+				return
+			}
+		} else if (st.indexOf('ok:') == 0) {
+			// ③ 入口数校验（bootstrap 已经判过，这里再确认一次）
+			evalStep('__qtEnvEntries()', (n: string, e2: string) => {
+				if (countOfText(n) <= 0) {
+					deliverVoid(callback, false, 'bundle 未注册任何入口（__qtEntries 为空）')
+					done()
+					return
+				}
+				const cost = Date.now() - t0
+				if (cost > EVAL_TIMEOUT_MS) {
+					deliverVoid(callback, false, `bundle 装载阻塞 ${cost}ms`)
+					done()
+					return
+				}
+				deliverVoid(callback, true, '')
+				done()
+			})
+			return
+		}
+		if (st.indexOf('err:') == 0) {
+			// 带上页面 origin/baseURI 诊断：绝对 URL 化之后若仍失败，多半是 CORS
+			evalStep('__qtEnvDocBase()', (base: string, e3: string) => {
+				const suffix = base.length > 0 ? `（页面 ${base}）` : ''
+				deliverVoid(callback, false, st.substring(4) + suffix)
+				done()
+			})
+			return
+		}
+		if (Date.now() - t0 > LOAD_TIMEOUT_MS) {
+			deliverVoid(callback, false, prefix + `模块装载超时（${LOAD_TIMEOUT_MS}ms）`)
+			done()
+			return
+		}
+		timerSet(() => pollLoadStatus(play, t0, callback, done), POLL_INTERVAL_MS)
+	})
+}
+
+// ============================================================================
+// 语义层（九）：invoke / 泵 / HTTP 回投 / 定时器回投
+//
+// 这一段是安卓 InvokeTask + PumpTask + dispatchLines + startTimer + startHttp +
+// settleOp + FireTimerTask + ResolveHttpTask + HttpTask 的合并对应物。
+// 结构差异只有一处，但必须说清楚：
+//
+//   安卓把这些都 post 到**同一条引擎线程**，所以「一个 op 从发起到结算」中间
+//   不会被别的 op 插进来，`evalString` 也是同步的，写起来像单线程代码。
+//   鸿蒙侧没有第二条线程可用（ArkWeb 只能在主线程求值），求值变成异步回调，
+//   于是「串行」这件事必须显式做出来：所有求值走 evalStep（串行队列），
+//   所有「操作」走 runSerialOp（也是串行队列）。两条队列各自串行、彼此不阻塞，
+//   对应安卓「任务在引擎线程排队、HTTP 在别的线程跑完再回来」的时序。
+//
+// 协议本身（k='H'/'T'/'R' 三种行、opId 是字符串、超时用 'timeout' 结算）与安卓
+// 完全一致——见 README 的「泵协议」表，改这里必须同步改 app-android。
+// ============================================================================
+
+/**
+ * 解 ArkWeb `runJavaScript` 的返回值。
+ *
+ * 与安卓 webview.uts 的 unwrapEval 同一职责、同一顺序，差别只在入参：
+ *   · 安卓 `evaluateJavascript` 对 undefined/null 回调字符串 `"null"`，且把 JS 返回值
+ *     再 JSON 编码一次（两端带引号），所以要「先解引号、再解信封」；
+ *   · 鸿蒙 `runJavaScript` 在 builder.ets 里已经把 null/undefined 归一成空串，
+ *     但仍会把 JS 字符串结果按 JSON 编码回传，所以第一层解引号同样需要。
+ *
+ * ⚠️ 绝不对「非对象」的中间结果再调一次 JSON.parse：io.dcloud.uts.JSON.parse 会吞异常，
+ * 把失败塞进 ObjectKt.getGlobalError()，之后任意一次 parse 都可能把它当本次错误吐出来
+ * （安卓侧实机表现为 unwrapEval 处炸 MalformedJsonException）。裸字符串（`ok`/`pending`）
+ * 正是这种情况，所以先判首字符（123 == '{'）再决定要不要 parse。
+ */
+function unwrapEval(raw: string): string {
+	if (raw.length == 0 || raw == 'null') {
+		return ''
+	}
+	let inner = raw
+	const n = raw.length
+	// 形态①：被 JSON 编码过的字符串（两端都是 "）才需要先解一层
+	if (n >= 2 && raw.charCodeAt(0)! == 34 && raw.charCodeAt(n - 1)! == 34) {
+		try {
+			// 鸿蒙侧 JSON.parse 的返回类型带 null（`any | null` → ArkTS `Object | null`），
+			// 直接喂给 anyText 会被 ArkTS 拒（10605999 Object | null 不可赋给 Object），
+			// 必须先判空。语义与安卓一致：解不出来就退回原串。
+			const decoded = JSON.parse(raw)
+			inner = decoded == null ? '' : anyText(decoded)
+		} catch (e) {
+			// 不是 JSON（理论上不会发生）：按裸字符串处理，避免把结果吞掉
+			return raw
+		}
+	}
+	if (inner.length == 0) {
+		return ''
+	}
+	// 形态②：非对象（裸字符串/数字）——原样返回，不做第二次 parse（见函数头注释）
+	if (inner.charCodeAt(0)! != 123) {
+		return inner
+	}
+	try {
+		const o = JSON.parse(inner) as UTSJSONObject
+		// 信封字段一律用**带类型的取值器**：`o.get()` 的返回类型是 `ESObject | null`
+		// （= ArkTS 的 any），声明成局部变量会直接触发 arkts-no-any-unknown。
+		// 信封由本插件自己写：`{ ok: 1, v: '...' }` / `{ ok: 0, e: '...' }`（见下方
+		// 两处 JSON.stringify），ok 是**数字** 1/0，v 与 e 都是字符串。
+		const okNum = o.getNumber('ok', -1)
+		if (okNum == 0) {
+			const errStr = o.getString('e', '')
+			gLastEvalError = errStr.length == 0 ? '脚本执行异常' : errStr
+			return ''
+		}
+		return o.getString('v', '')
+	} catch (e) {
+		return inner
+	}
+}
+
+/** 在等一次 invoke 结果的人：opId → 回调 + 截止时刻 */
+class Waiter {
+	opId: string
+	deadline: number
+	callback: QtJsEvalCallback
+
+	constructor(opId: string, deadline: number, callback: QtJsEvalCallback) {
+		this.opId = opId
+		this.deadline = deadline
+		this.callback = callback
+	}
+}
+
+/** 求值表达式：引号转义一律交给 quoteJs，这里只负责拼串（与安卓 v8Expr* 同形） */
+function exprCall(name: string, argsJson: string): string {
+	return '__qtEnvCall(' + quoteJs(name) + ',' + quoteJs(argsJson) + ')'
+}
+
+function exprPump(): string {
+	return '__qtEnvPump()'
+}
+
+function exprResolveHttp(id: string, status: number, headersJson: string, body: string, error: string): string {
+	return (
+		'__qtEnvResolveHttp(' +
+		quoteJs(id) +
+		',' +
+		`${status}` +
+		',' +
+		quoteJs(headersJson) +
+		',' +
+		quoteJs(body) +
+		',' +
+		quoteJs(error) +
+		')'
+	)
+}
+
+function exprFireTimer(id: string): string {
+	return '__qtEnvFireTimer(' + quoteJs(id) + ')'
+}
+
+function exprDropOp(id: string): string {
+	return '__qtEnvDropOp(' + quoteJs(id) + ')'
+}
+
+/**
+ * 一次 invoke：把 `__qtEntries[name](argsJson)` 交给 JS 跑，拿回 opId 后登记等待。
+ *
+ * 与安卓 InvokeTask.run 逐条对齐，包括三处「看起来多余但踩过坑」的判定：
+ *   · 求值耗时 > STALL_MS 说明脚本卡住了引擎，直接停用（否则后续每次求值都会卡）；
+ *   · opId 为空时先看 gLastEvalError——ArkWeb 的 runJavaScript 不回传异常，
+ *     脚本报错被信封收在 gLastEvalError 里（evalStep 已经把它带出来了）；
+ *   · opId 去掉空白后为空或 '0' 视为「没拿到 opId」，不能登记等待，否则必然超时。
+ */
+function opInvoke(
+	name: string,
+	argsJson: string,
+	timeoutMs: number,
+	callback: QtJsEvalCallback,
+	done: () => void
+): void {
+	if (gPoisoned) {
+		deliverEval(callback, false, '', '引擎已停用，需重启音源引擎')
+		done()
+		return
+	}
+	if (!engineEvalReady()) {
+		deliverEval(callback, false, '', '引擎未启动')
+		done()
+		return
+	}
+	const t0 = Date.now()
+	evalStep(exprCall(name, argsJson), (rawOpId: string, err0: string) => {
+		let opId = rawOpId
+		let err = err0
+		const cost = Date.now() - t0
+		if (cost > STALL_MS) {
+			poison(`脚本执行阻塞 ${cost}ms`)
+			deliverEval(callback, false, '', '脚本执行阻塞，引擎已停用')
+			done()
+			return
+		}
+		if (err.length > 0) {
+			deliverEval(callback, false, '', err)
+			done()
+			return
+		}
+		opId = opId.trim()
+		if (opId.length == 0 || opId == '0') {
+			deliverEval(callback, false, '', '未取得 opId')
+			done()
+			return
+		}
+		let timeout = timeoutMs
+		if (timeout <= 0) {
+			timeout = DEFAULT_INVOKE_TIMEOUT_MS
+		}
+		gWaiters.push(new Waiter(opId, Date.now() + timeout, callback))
+		// 立刻开始拉取（bundle 里同步部分可能已经排了 HTTP/定时器）
+		schedulePump(0)
+		done()
+	})
+}
+
+/** 排一次泵；已有排队时不再重复排（最坏多等一个 PUMP_INTERVAL_MS）——与安卓同款去重 */
+function schedulePump(delayMs: number): void {
+	if (gPumpScheduled) {
+		return
+	}
+	if (!engineEvalReady()) {
+		return
+	}
+	gPumpScheduled = true
+	timerSet(() => pumpOnce(), toDelayMs(delayMs))
+}
+
+/**
+ * 一次拉取：取走 JS 侧待办并分发，然后决定要不要继续轮询。
+ *
+ * 注意「泵返回空串是正常的」（当前没有待办），所以空串**不能**当失败；
+ * 真正的失败只有两种：求值本身报错（gLastEvalError 非空）或单次求值卡死。
+ */
+function pumpOnce(): void {
+	gPumpScheduled = false
+	if (!engineEvalReady()) {
+		return
+	}
+	const t0 = Date.now()
+	evalStep(exprPump(), (out: string, err0: string) => {
+		const err = err0
+		const cost = Date.now() - t0
+		if (cost > STALL_MS) {
+			poison(`单次脚本执行阻塞 ${cost}ms`)
+			return
+		}
+		if (err.length > 0) {
+			failAll(`脚本拉取失败: ${err}`)
+			return
+		}
+		if (out.length > 0) {
+			dispatchLines(out)
+		}
+		expireWaiters()
+		if (gWaiters.length > 0) {
+			schedulePump(PUMP_INTERVAL_MS)
+		}
+	})
+}
+
+/** 分发 pump 返回的待办行（每行一个 ASCII JSON） */
+function dispatchLines(text: string): void {
+	const lines = text.split('\n')
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]
+		if (line.length == 0) {
+			continue
+		}
+		// 只 parse 对象行：JSON.parse 对非法输入不抛异常，而是把异常存进
+		// ObjectKt.getGlobalError()，后续任一 parse 都会把它当自己的错误吐出来。
+		if (line.charCodeAt(0)! != 123) {
+			console.error('[qt-js-engine] pump 行不是对象:', line)
+			continue
+		}
+		const o = parseJsonObject(line)
+		if (o == null) {
+			console.error('[qt-js-engine] pump 行解析失败:', line)
+			continue
+		}
+		const k = fieldStr(o, 'k')
+		if (k == 'H') {
+			startHttp(o)
+		} else if (k == 'T') {
+			startTimer(o)
+		} else if (k == 'R') {
+			settleOp(o)
+		}
+	}
+}
+
+/**
+ * JS 侧 setTimeout/setInterval 的落地：起一个原生定时器，到点回 JS 触发。
+ *
+ * 为什么要用原生定时器而不是让页面自己跑：ArkWeb 在页面不可见时会节流甚至冻结
+ * 页内定时器，而音源包的取链/刷新逻辑大量依赖定时器（见 prelude 文件头）。
+ * 原生定时器不受页面可见性影响，这是鸿蒙侧相对安卓唯一「更稳」的地方。
+ */
+function startTimer(o: UTSJSONObject): void {
+	const id = fieldStr(o, 'id')
+	let ms = fieldInt(o, 'ms')
+	if (ms < 0) {
+		ms = 0
+	}
+	timerSet(() => startFireTimer(id), toDelayMs(ms))
+}
+
+/** 定时器到点：回到 JS 执行回调，然后立刻拉一次泵（回调里多半又排了活） */
+function startFireTimer(id: string): void {
+	if (!engineEvalReady()) {
+		return
+	}
+	evalStep(exprFireTimer(id), (v: string, err: string) => {
+		if (err.length > 0) {
+			console.error('[qt-js-engine] 定时器回调失败:', err)
+		}
+		schedulePump(0)
+	})
+}
+
+/**
+ * JS 侧 `__qtHost.request` 的落地：起一次真实 HTTP，回来后把结果回投 JS。
+ *
+ * 与安卓 HttpTask 的语义对照：
+ *   · 超时：connectTimeout/readTimeout 交给 NetworkKit（与安卓 setConnectTimeout/
+ *     setReadTimeout 同值）；但「一个请求永远不回调」是网络栈也可能出现的故障，
+ *     所以额外挂一条 timeoutMs + HTTP_WATCHDOG_EXTRA_MS 的看门狗兜底，
+ *     否则这条 op 会一直挂在 gWaiters 里直到 invoke 超时（20s）。
+ *   · 重定向：NetworkKit 默认跟随（安卓显式 setInstanceFollowRedirects(true)）。
+ *   · gzip：**不需要手动解压**（安卓要，因为它自己声明 Accept-Encoding: gzip）。
+ *   · 连接复用：安卓刻意不 disconnect 以复用 keep-alive；鸿蒙侧每个 HttpRequest
+ *     用完必须 destroy（否则底层连接池随请求数增长），由 httpDestroy 收口。
+ */
+function startHttp(o: UTSJSONObject): void {
+	const id = fieldStr(o, 'id')
+	const url = fieldStr(o, 'url')
+	const method = fieldStr(o, 'method')
+	const headers = fieldStr(o, 'headers')
+	const body = fieldStr(o, 'body')
+	let timeoutMs = fieldInt(o, 'timeoutMs')
+	if (timeoutMs <= 0) {
+		timeoutMs = DEFAULT_HTTP_TIMEOUT_MS
+	}
+	const hostPart = hostPartOf(url)
+	const t0 = Date.now()
+	const req = newHttpRequest()
+	let settled = false
+	const watchdog = timerSet(() => {
+		if (settled) {
+			return
+		}
+		settled = true
+		httpDestroy(req)
+		const cost = Date.now() - t0
+		const why = `请求超时（${cost}ms）`
+		console.log('[qt-js-engine] HTTP ' + cost + 'ms status=0 len=0 ' + hostPart + ' err=' + why)
+		onHttpDone(id, 0, '{}', '', why)
+	}, timeoutMs + HTTP_WATCHDOG_EXTRA_MS)
+	const finish = (status: number, headersJson: string, text: string, error: string): void => {
+		if (settled) {
+			return
+		}
+		settled = true
+		timerClear(watchdog)
+		httpDestroy(req)
+		let bodyText = text
+		let err = error
+		if (bodyText.length > MAX_RESPONSE_BYTES) {
+			// 与安卓 readAll 的上限判定同一语义：超限即失败，且不把半个响应体交上去
+			bodyText = ''
+			err = `响应体超过 ${MAX_RESPONSE_BYTES} 字节上限`
+		}
+		console.log(
+			'[qt-js-engine] HTTP ' +
+				(Date.now() - t0) +
+				'ms status=' +
+				status +
+				' len=' +
+				bodyText.length +
+				' ' +
+				hostPart +
+				(err.length > 0 ? ' err=' + err : '')
+		)
+		onHttpDone(id, status, headersJson, bodyText, err)
+	}
+	try {
+		const options = httpOptionsOf(method, httpHeadersOf(headers), body, timeoutMs)
+		httpRequestSend(req, url, options, (err: BusinessError, resp: http.HttpResponse) => {
+			// 成功时 err 为 null/undefined；不比较 err.message 的字段类型，统一走 errText
+			const message = err == null ? '' : errText(err)
+			if (message.length > 0) {
+				finish(0, '{}', '', message)
+				return
+			}
+			if (resp == null) {
+				finish(0, '{}', '', '请求未返回响应')
+				return
+			}
+			const probe = bodyTextOf(resp)
+			finish(statusOf(resp), headersJsonOf(resp), probe.text, probe.ok ? '' : '响应体无法转换为文本')
+		})
+	} catch (e) {
+		finish(0, '{}', '', errText(e))
+	}
+}
+
+/** HTTP 结果回投 JS（安卓 ResolveHttpTask 的对应物） */
+function onHttpDone(id: string, status: number, headersJson: string, body: string, error: string): void {
+	if (!engineEvalReady()) {
+		return
+	}
+	evalStep(exprResolveHttp(id, status, headersJson, body, error), (v: string, err: string) => {
+		if (err.length > 0) {
+			console.error('[qt-js-engine] HTTP 回投失败:', err)
+		}
+		schedulePump(0)
+	})
+}
+
+/** JS 侧报来一个 op 的结果：找到等待者、摘掉、回调 */
+function settleOp(o: UTSJSONObject): void {
+	const opId = fieldStr(o, 'id')
+	const ok = fieldInt(o, 'ok') == 1
+	const value = fieldStr(o, 'value')
+	const error = fieldStr(o, 'error')
+	let target: Waiter | null = null
+	for (let i = 0; i < gWaiters.length; i++) {
+		if (gWaiters[i].opId == opId) {
+			target = gWaiters[i]
+			break
+		}
+	}
+	if (target == null) {
+		return
+	}
+	removeWaiter(opId)
+	deliverEval(target.callback, ok, value, error)
+}
+
+/** 摘掉一个等待者（重建数组的写法，不依赖 splice 的签名差异） */
+function removeWaiter(opId: string): void {
+	const keep: Waiter[] = []
+	for (let i = 0; i < gWaiters.length; i++) {
+		if (gWaiters[i].opId != opId) {
+			keep.push(gWaiters[i])
+		}
+	}
+	gWaiters = keep
+}
+
+/** 到点的调用按超时结束（引擎本身仍可用，只是这次没等到结果） */
+function expireWaiters(): void {
+	if (gWaiters.length == 0) {
+		return
+	}
+	const now = Date.now()
+	const expired: Waiter[] = []
+	for (let i = 0; i < gWaiters.length; i++) {
+		if (gWaiters[i].deadline <= now) {
+			expired.push(gWaiters[i])
+		}
+	}
+	for (let i = 0; i < expired.length; i++) {
+		const w = expired[i]
+		removeWaiter(w.opId)
+		// 告知 bundle 丢掉这个 op，别再往里写结果
+		evalStep(exprDropOp(w.opId), (v: string, err: string) => {})
+		deliverEval(w.callback, false, '', 'timeout')
+	}
+}
+
+/** 引擎停用：把所有在等的调用一次性失败掉 */
+function poison(reason: string): void {
+	if (gPoisoned) {
+		return
+	}
+	gPoisoned = true
+	gPumpScheduled = false
+	console.error('[qt-js-engine] 引擎停用:', reason)
+	failAll(reason)
+}
+
+/** 把所有等待者一次性失败掉（poison / 泵失败时调用） */
+function failAll(reason: string): void {
+	const list = gWaiters
+	gWaiters = []
+	for (let i = 0; i < list.length; i++) {
+		deliverEval(list[i].callback, false, '', reason)
+	}
+}
+
+// ============================================================================
+// 语义层（十）：对外 API（18 个导出，与 interface.uts 一一对应）
+//
+// 这一节是「翻译层」，只做三件事：把调用方的话翻译成语义层的调用、把结论翻译成
+// 契约里的形状、以及**把任何异常兜成失败**（绝不向外抛）。
+//
+// 与安卓的对应关系：
+//   · 安卓每个 API 里 `h.post(new XxxTask(...))` 的写法，在这里统一是
+//     `runSerialOp((done) => opXxx(..., done))` —— 同一条串行队列，同样的时序；
+//   · 文件类 API 在安卓里**没有** post（直接在当前线程做），这里也直接做，
+//     只有回调经 deliverFile 投递一拍（与安卓 Handler.post 的回调时序一致）。
+// ============================================================================
+
+/**
+ * 启动引擎（幂等：已启动时直接回调现有 info）。
+ *
+ * 幂等快路径刻意放在队列**外面**：安卓也是先判 gStarted 再 post，
+ * 这样「已经跑着引擎」时调用方拿到的回调不会被前面的操作排队拖慢。
+ * 注意快路径给的 probe 是空串而不是 "2"：probe 是「本次启动探针的结果」，
+ * 这次没启动自然没有探针结果，契约的调用方（services/source-engine.uts）也不看它。
+ */
+export const start: QtJsStart = function (options: QtJsStartOptions, callback: QtJsStartCallback) {
+	if (gStarted && !gPoisoned) {
+		deliverStart(callback, buildInfo(''), null)
+		return
+	}
+	try {
+		runSerialOp((done: () => void) => opStart(callback, done))
+	} catch (e) {
+		deliverStart(callback, null, errText(e))
+	}
+}
+
+/**
+ * 停止并销毁引擎。
+ *
+ * 安卓的 stop 要 post 到引擎线程（脚本死循环时那条线程已经堵死，所以它额外写了
+ * 一条「已停用就直接销毁」的分支）。鸿蒙这边**不需要**这条分支：操作队列与求值
+ * 队列是分开的，脚本把求值队列堵死不影响 stop 被处理；而且卸载只是节点 dispose，
+ * 同步完成。对外结论仍然是 ok=true。
+ */
+export const stop: QtJsStop = function (callback: QtJsVoidCallback) {
+	try {
+		runSerialOp((done: () => void) => opStop(callback, done))
+	} catch (e) {
+		deliverVoid(callback, false, errText(e))
+	}
+}
+
+/**
+ * 执行一段 JS（调试/冒烟用）。
+ *
+ * 与安卓 EvalTask 逐条对齐的判定：
+ *   · 耗时 > STALL_MS 视为「脚本把引擎堵住了」，停用引擎并报错（pumpEvalQueue
+ *     里已经判过一次，这里再判一次是为了让这条路径的结论与安卓一字不差）；
+ *   · 求值本身失败（超时/注入失败）时 gLastEvalError 非空，原样作为 error 上报。
+ */
+export const evaluate: QtJsEvaluate = function (code: string, callback: QtJsEvalCallback) {
+	if (gPoisoned) {
+		deliverEval(callback, false, '', '引擎已停用，需重启音源引擎')
+		return
+	}
+	if (!engineEvalReady()) {
+		deliverEval(callback, false, '', '引擎未启动')
+		return
+	}
+	try {
+		runSerialOp((done: () => void) => {
+			const t0 = Date.now()
+			evalStep(code, (value: string, err: string) => {
+				const cost = Date.now() - t0
+				if (err.length == 0 && cost > STALL_MS) {
+					poison(`脚本执行阻塞 ${cost}ms`)
+					deliverEval(callback, false, '', '脚本执行阻塞，引擎已停用')
+					done()
+					return
+				}
+				if (err.length > 0) {
+					deliverEval(callback, false, '', err)
+					done()
+					return
+				}
+				deliverEval(callback, true, value, '')
+				done()
+			})
+		})
+	} catch (e) {
+		deliverEval(callback, false, '', errText(e))
+	}
+}
+
+/** 装载音源包脚本（语法校验 → 执行 → 数入口，三道闸门都在 opLoadBundle 里） */
+export const loadBundle: QtJsLoadBundle = function (code: string, callback: QtJsVoidCallback) {
+	try {
+		runSerialOp((done: () => void) => opLoadBundle(code, false, callback, done))
+	} catch (e) {
+		deliverVoid(callback, false, errText(e))
+	}
+}
+
+/**
+ * 装载播放包脚本。与 loadBundle 分槽（独立源码/状态/校验对象）。
+ * 鸿蒙侧不需要安卓那套「落盘 + 动态 import」的绕路（源码由 onInterceptRequest
+ * 直接从内存回填），但**模块图按完整 URL 缓存**这条浏览器语义仍然在，
+ * 所以 opLoadBundle 会给播放包的 URL 挂自增序号击穿缓存。
+ */
+export const loadPlayBundle: QtJsLoadPlayBundle = function (code: string, callback: QtJsVoidCallback) {
+	try {
+		runSerialOp((done: () => void) => opLoadBundle(code, true, callback, done))
+	} catch (e) {
+		deliverVoid(callback, false, errText(e))
+	}
+}
+
+/**
+ * 调用 bundle 入口（回调式，内部走泵协议）。
+ *
+ * 注意 opInvoke 在**登记完等待者之后就 done()**：等待结果的是 gWaiters 与泵，
+ * 不是操作队列。若把 done() 拖到结果回来才调，一次慢 invoke 会把整条操作队列
+ * （包括后续的 stop）一起堵住——安卓那边 InvokeTask 也是登记完就返回。
+ */
+export const invoke: QtJsInvoke = function (
+	name: string,
+	argsJson: string,
+	timeoutMs: number,
+	callback: QtJsEvalCallback
+) {
+	try {
+		runSerialOp((done: () => void) => opInvoke(name, argsJson, timeoutMs, callback, done))
+	} catch (e) {
+		deliverEval(callback, false, '', errText(e))
+	}
+}
+
+/**
+ * 放弃一个 op（一般不用：invoke 超时后插件会自己调）。
+ *
+ * 刻意**不**在这里摘掉 gWaiters 里对应的等待者，与安卓一致：
+ * dropOp 的语义是「告诉 bundle 别再往这个 op 里写结果」，而调用方的回调
+ * 仍然按原超时结算成 error='timeout'。两边都摘会让「谁负责回调」出现两个主人。
+ */
+export const dropOp: QtJsDropOp = function (opId: number) {
+	if (!engineEvalReady()) {
+		return
+	}
+	try {
+		runSerialOp((done: () => void) => {
+			evalStep(exprDropOp(`${opId}`), (v: string, err: string) => {
+				if (err.length > 0) {
+					console.error('[qt-js-engine] dropOp 失败:', err)
+				}
+				done()
+			})
+		})
+	} catch (e) {
+		console.error('[qt-js-engine] dropOp 异常:', e)
+	}
+}
+
+/** 引擎是否已启动 */
+export const isRunning: QtJsIsRunning = function (): boolean {
+	return gStarted
+}
+
+/** 引擎是否健康（脚本卡死过、或渲染进程被回收，都会变 false，需 stop + start 重建） */
+export const isHealthy: QtJsIsHealthy = function (): boolean {
+	if (gPoisoned) {
+		return false
+	}
+	// 渲染进程被系统回收后 runJavaScript 不会再回调，视同不健康，
+	// 由 services/source-engine.uts 的 ensureEngine() 触发 stop + start 重建。
+	if (gStarted && gRenderGone) {
+		return false
+	}
+	return true
+}
+
+// ==================== 音源包文件读写（@ohos.file.fs，不依赖 uni.getFileSystemManager） ====================
+// 路径为绝对路径，由调用方用 dataDir() 拼出来。语义与安卓的 java.io 版逐条对齐：
+// 成功即 ok=true，任何异常折算成 ok=false + error，**绝不向外抛**。
+
+/** 应用私有目录绝对路径（鸿蒙为 UIAbilityContext.filesDir；取不到返回空串） */
+export const dataDir: QtJsDataDir = function (): string {
+	return filesDirPath()
+}
+
+export const readTextFile: QtJsReadTextFile = function (path: string, callback: QtJsFileCallback) {
+	try {
+		deliverFile(callback, true, fsReadText(path), '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+export const writeTextFile: QtJsWriteTextFile = function (
+	path: string,
+	text: string,
+	callback: QtJsFileCallback
+) {
+	try {
+		// 先建父目录：调用方（source-bundle-fs）是按「目录已存在」的假设写文件的，
+		// 安卓的 FileOutputStream 也**不会**替它建目录，所以这一步必须在这里补上，
+		// 否则首次安装音源包会以 ENOENT 失败。
+		const parent = parentDirOf(path)
+		if (parent.length > 0 && !fsExists(parent)) {
+			fsMkdirs(parent)
+		}
+		fsWriteText(path, text)
+		deliverFile(callback, true, '', '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+/** 是否存在。value 是字符串 "1"/"0"（契约如此，不是布尔） */
+export const exists: QtJsExists = function (path: string, callback: QtJsFileCallback) {
+	try {
+		deliverFile(callback, true, fsExists(path) ? '1' : '0', '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+/** 删除路径（文件或目录，目录递归删）。路径不存在算成功（幂等），与安卓一致 */
+export const remove: QtJsRemove = function (path: string, callback: QtJsFileCallback) {
+	try {
+		if (!fsExists(path)) {
+			deliverFile(callback, true, '', '')
+			return
+		}
+		fsRemovePath(path)
+		deliverFile(callback, true, '', '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+/** 逐级创建目录。已存在算成功（幂等） */
+export const mkdirs: QtJsMkdirs = function (path: string, callback: QtJsFileCallback) {
+	try {
+		if (!fsExists(path)) {
+			fsMkdirs(path)
+		}
+		deliverFile(callback, true, '', '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+/**
+ * 列目录，value 为 `[{"name":"a.js","dir":false,"size":123}]`。
+ *
+ * 目录不存在/不是目录时返回 `[]` 而不是失败——安卓的 `File.listFiles()` 在
+ * 这两种情况下都返回 null，上层据此得到「空目录」。这里用 fsIsDir 显式还原
+ * 同一个判定，避免把「目录还没建」变成一次调用方要处理的错误。
+ */
+export const listDir: QtJsListDir = function (dir: string, callback: QtJsFileCallback) {
+	try {
+		if (!fsIsDir(dir)) {
+			deliverFile(callback, true, '[]', '')
+			return
+		}
+		const names = fsListNames(dir)
+		let out = '['
+		for (let i = 0; i < names.length; i++) {
+			const name = names[i]
+			const full = joinPath(dir, name)
+			if (i > 0) {
+				out += ','
+			}
+			// name 走 quoteAscii：这个 JSON 文本要交给上层的 JSON.parse，
+			// 非 ASCII 必须先转义（详见 quoteAscii 的注释）
+			out +=
+				'{"name":' +
+				quoteAscii(name) +
+				',"dir":' +
+				(fsIsDir(full) ? 'true' : 'false') +
+				',"size":' +
+				`${fsEntrySize(full)}` +
+				'}'
+		}
+		deliverFile(callback, true, out + ']', '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+// ==================== 应用内置资源读取 ====================
+
+/**
+ * 内置资源的候选相对路径（对应安卓的 assetPrefixes + openAsset 那两次尝试）。
+ *
+ * [A7 已核对] `UTSHarmony.getAppId(): string`（UTSHarmony.d.ts:604 导出清单）。
+ *
+ * 与安卓同款思路：uni-app x 把 www 资源放在带 appid 的目录下，而 appid 是打包时
+ * 定的，插件不该写死，所以运行时取；取不到就只试裸路径（安卓在
+ * `assets.list('apps')` 失败时也是这个降级）。
+ *
+ * 与安卓的差别：鸿蒙这边多一档 `www/` 前缀。安卓的 assets 里 www 是**平铺**在
+ * `apps/<appid>/www/` 下的，而鸿蒙的 rawfile 打包层级由 uni 运行时决定，
+ * 两档都留着比猜一档稳（多试一次不存在的路径只是多一次异常，代价可忽略）。
+ */
+function assetCandidates(path: string): string[] {
+	const out: string[] = []
+	try {
+		const appid = UTSHarmony.getAppId()
+		if (appid.length > 0) {
+			out.push('apps/' + appid + '/www/' + path)
+			out.push('apps/' + appid + '/' + path)
+		}
+	} catch (e) {
+		// 取不到 appid 就只试裸路径
+	}
+	out.push('www/' + path)
+	out.push(path)
+	return out
+}
+
+/**
+ * 依次尝试候选路径，两种读法都试：
+ *   · rawFileTry —— 直接把 rawfile 读成文本（[A2]）；
+ *   · resourcePathTry —— 先拿原生绝对路径再用 fileIo 读（[A3]）。
+ * 两条路都留着是因为它们的签名不确定性互不重叠：任一条能过，readAssetText 就能用。
+ */
+function assetReadText(path: string): TextProbe {
+	const candidates = assetCandidates(path)
+	for (let i = 0; i < candidates.length; i++) {
+		const rel = candidates[i]
+		const raw = rawFileTry(rel)
+		if (raw.ok) {
+			return raw
+		}
+		const viaPath = resourcePathTry(rel)
+		if (viaPath.ok) {
+			return viaPath
+		}
+	}
+	return new TextProbe(false, '')
+}
+
+/**
+ * 读应用内置资源文本（通用资源读取接口）。
+ * path 相对 www 根目录，如 "static/theme.json"。
+ */
+export const readAssetText: QtJsReadAssetText = function (path: string, callback: QtJsFileCallback) {
+	try {
+		const probe = assetReadText(path)
+		if (!probe.ok) {
+			deliverFile(callback, false, '', '内置资源不存在：' + path)
+			return
+		}
+		deliverFile(callback, true, probe.text, '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+// ==================== J0 spike：原生 → JS 回调链路 ====================
+
+/**
+ * J0 spike：验证「原生 → JS」回调链路。
+ *
+ * 先在 JS 里装一个记录器（__qtFireTimer 把 id 记进 __qtTimerFired），再用**原生**
+ * 定时器到点后回 JS 执行 __qtEnvFireTimer('7')，最后读回记录值。
+ * fired == "7" 即通过。
+ *
+ * 为什么读回值要排在「回投完成之后 + 200ms」而不是与回投同时排：
+ * 安卓把两次 postDelayed 都丢给引擎线程，天然串行（回投一定先跑完）；
+ * 鸿蒙的定时器回调都在主线程，两次 evalStep 却可能一前一后交叠，
+ * 所以这里显式串成「回投完成 → 再等 200ms → 读回」，等价于安卓的时序。
+ */
+export const spikeNativeTimer: QtJsSpikeNativeTimer = function (
+	delayMs: number,
+	callback: QtJsSpikeTimerCallback
+) {
+	if (!engineEvalReady()) {
+		deliverSpike(callback, '', '引擎未启动')
+		return
+	}
+	try {
+		runSerialOp((done: () => void) => {
+			const install =
+				'globalThis.__qtTimerFired = 0;' +
+				'globalThis.__qtFireTimer = function (id) { globalThis.__qtTimerFired = id };' +
+				'String("installed")'
+			evalStep(install, (v: string, err: string) => {
+				if (err.length > 0) {
+					deliverSpike(callback, '', err)
+					done()
+					return
+				}
+				const delay = toDelayMs(delayMs)
+				// 延时后从原生侧进入 JS（走的是定时器回投那条真实链路，不是直接求值）
+				timerSet(() => {
+					evalStep(exprFireTimer('7'), (v2: string, err2: string) => {
+						if (err2.length > 0) {
+							deliverSpike(callback, '', err2)
+							return
+						}
+						// 再等一拍读回结果
+						timerSet(() => {
+							evalStep('String(globalThis.__qtTimerFired)', (fired: string, err3: string) => {
+								if (err3.length > 0) {
+									deliverSpike(callback, '', err3)
+									return
+								}
+								deliverSpike(callback, fired, '')
+							})
+						}, 200)
+					})
+				}, delay)
+				done()
+			})
+		})
+	} catch (e) {
+		deliverSpike(callback, '', errText(e))
+	}
+}

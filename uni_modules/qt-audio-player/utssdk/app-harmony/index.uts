@@ -1,0 +1,1771 @@
+/**
+ * qt-audio-player 鸿蒙端原生实现（HarmonyOS Next / ArkTS）
+ *
+ * ── 为什么自研而不复用 uni.getBackgroundAudioManager() ──
+ * uni 内置后台音频只提供「播/停/进度」这一薄层，拿不到媒体会话元数据、队列语义、
+ * 音频焦点策略与懒解析桥；而本项目的播放链路（音源包动态取址、坏流自愈、队列无损
+ * 同步、同时播放模式）全部建立在原生可控的前提上。安卓端因此是自研的
+ * 前台服务 + MediaSession + 媒体通知，鸿蒙端这里用等价的
+ * **AVPlayer + AVSession + 长时任务（AUDIO_PLAYBACK）** 三件套复刻同一套对外契约。
+ *
+ * ── 与安卓端的架构映射 ──
+ *   media3 ExoPlayer（自带时间线/自动衔接） → AVPlayer（**单地址**，无时间线）
+ *     ⇒ 播放队列必须由本文件自己维护（gItems/gIndex），这是本文件最大的结构性差异；
+ *   MediaSessionService + 前台服务保活        → backgroundTaskManager 长时任务
+ *   MediaSession + MediaStyle 通知            → AVSession（系统自动渲染通知/锁屏/控制中心）
+ *   ResolvingDataSource（qt-resolve:// 懒解析）→ 本文件在 loadIndex 里显式向 JS 换取地址
+ *   android.media.audiofx.Equalizer           → 鸿蒙无系统级等价物（EQ 留到后续轮次）
+ *
+ * ── 对外契约必须与 app-android 完全一致 ──
+ * services/audio-player.uts 通过模块级函数调用播放器（绝不持有 UTS 类实例，原因见
+ * app-android/index.uts「模块级门面」一节：JS 侧的实例是数字 id 代理，Activity 销毁重建
+ * 后代理失效会抛出 JS 接不住的 IllegalStateException）。鸿蒙端沿用同一约定：本文件
+ * 不导出任何类，状态全部放模块级全局。
+ *
+ * ── 签名核对状态 ──
+ * 全部原生调用已对着 HBuilderX 自带的鸿蒙 d.ts 逐条核对过
+ * （E:\HBuilderX\plugins\uniapp-uts-v1\node_modules\@dcloudio\uni-uts-v1\lib\uts\types\
+ *  uni-x\app-harmony\ohos\，API 12 / 5.0.0）。仍然存疑的只有运行时行为（如
+ * backgroundModes 在 UIAbility 上是否触发配置校验告警），不是签名问题。
+ */
+
+import { media } from '@kit.MediaKit'
+import { avSession } from '@kit.AVSessionKit'
+import { backgroundTaskManager } from '@kit.BackgroundTasksKit'
+import { wantAgent, WantAgent, common, Want } from '@kit.AbilityKit'
+import { audio } from '@kit.AudioKit'
+import { image } from '@kit.ImageKit'
+import { http } from '@kit.NetworkKit'
+import { notificationManager } from '@kit.NotificationKit'
+import { BusinessError } from '@kit.BasicServicesKit'
+
+import type {
+	AudioPlayerVoidCallback,
+	AudioPlayerTimeCallback,
+	AudioPlayerErrorCallback,
+	AudioPlayerStateCallback,
+	EnsureNotificationPermission,
+	AudioPlaylistItem,
+	AudioResolveRequestCallback,
+	AudioTrackChangedCallback,
+} from '../interface.uts'
+
+// ==================== 常量 ====================
+
+/** 懒解析地址的 scheme（与安卓端一致：条目 uri 为 qt-resolve://?mid=xxx 时向 JS 换取真实地址） */
+const RESOLVE_SCHEME = 'qt-resolve://'
+/** 解析超时（秒）：与安卓端 RESOLVE_TIMEOUT_SECONDS 对齐，超时按加载失败走错误回调 */
+const RESOLVE_TIMEOUT_SECONDS = 15
+/** AVSession 标签（同一应用内唯一，用于系统播控识别本会话） */
+const SESSION_TAG = 'qt_music_session'
+/** 「播放出错」提示通知的固定 id（与媒体通知同渠道，避免刷屏） */
+const NOTICE_ID_ERROR = 1001
+/** 长时任务提示通知 id */
+const NOTICE_ID_CONTINUOUS = 1002
+
+/** 让路时的播放器增益（与安卓端 DUCK_VOLUME 对齐） */
+const DUCK_VOLUME = 0.3
+const SPEED_MIN = 0.5
+/** 上限 2.0：media.PlaybackSpeed 枚举最高档是 SPEED_FORWARD_2_00_X，没有 3.0 档 */
+const SPEED_MAX = 2.0
+/** 推给系统播控的队列窗口上限（当前曲目附近这么多首）。
+ *  系统卡片只展示当前曲目附近几首，推全量在长队列下每次都要跨 IPC 传上千个对象 */
+const QUEUE_PUSH_LIMIT = 13
+
+// ==================== 适配层（薄封装集中区） ====================
+// 把原生调用集中在此处：签名或版本差异只需改这几处，不必在业务逻辑里到处找调用点。
+// 已对着 HBuilderX 自带 d.ts（API 12）逐条核对。
+
+/** 取 UIAbilityContext。UTSHarmony 是鸿蒙运行时的全局对象（app-harmony/index.d.ts 声明），
+ *  其 getUIAbilityContext() 由 uni 运行时注入，无需 import；拿不到时返回 null 走降级。 */
+function harmonyContext(): common.UIAbilityContext | null {
+	try {
+		return UTSHarmony.getUIAbilityContext()
+	} catch (e) {
+		return null
+	}
+}
+
+/**
+ * 把 0.5–2.0 的任意倍速吸附到鸿蒙 AVPlayer 支持的档位。
+ * media.PlaybackSpeed 共 9 档：0.125 / 0.25 / 0.5 / 0.75 / 1.00 / 1.25 / 1.50 / 1.75 / 2.00
+ * （0.5/1.5 有对应档位；**3.0 不存在**，故 SPEED_MAX 收敛到 2.0）。
+ * 安卓端是 0.5~3.0 连续可变，鸿蒙上必然降级为档位吸附——这是平台差异，不是实现缺陷。
+ */
+function nearestSpeed(speed: number): media.PlaybackSpeed {
+	if (speed < 0.1875) return media.PlaybackSpeed.SPEED_FORWARD_0_125_X
+	if (speed < 0.375) return media.PlaybackSpeed.SPEED_FORWARD_0_25_X
+	if (speed < 0.625) return media.PlaybackSpeed.SPEED_FORWARD_0_50_X
+	if (speed < 0.875) return media.PlaybackSpeed.SPEED_FORWARD_0_75_X
+	if (speed < 1.125) return media.PlaybackSpeed.SPEED_FORWARD_1_00_X
+	if (speed < 1.375) return media.PlaybackSpeed.SPEED_FORWARD_1_25_X
+	if (speed < 1.625) return media.PlaybackSpeed.SPEED_FORWARD_1_50_X
+	if (speed < 1.875) return media.PlaybackSpeed.SPEED_FORWARD_1_75_X
+	return media.PlaybackSpeed.SPEED_FORWARD_2_00_X
+}
+
+/**
+ * 组装 AVSession 元数据。
+ * AVMetadata 是**具名字段接口**（不是键值对数组）：{ assetId, title?, artist?, album?,
+ * duration?: number, mediaImage?: image.PixelMap | string }。
+ * 注意 setAVMetadata 是**整体覆盖**：任何一次调用都必须给全字段，只补 mediaImage 会把标题清空。
+ */
+function buildMetadata(assetId: string, title: string, artist: string, album: string,
+	cover: string, durationMs: number, coverImage?: image.PixelMap): avSession.AVMetadata {
+	const m: avSession.AVMetadata = {
+		assetId: assetId,
+		title: title,
+		artist: artist,
+		album: album,
+	} as avSession.AVMetadata
+	// duration 是 number（不是字符串），且 0 会被系统显示成 00:00，只在已知时写
+	if (durationMs > 0) {
+		m.duration = durationMs
+	}
+	// 优先用已解码的位图；没有位图时退回落 URL（系统对网络图支持依版本而异）
+	if (coverImage != null) {
+		m.mediaImage = coverImage
+	} else if (cover.length > 0) {
+		m.mediaImage = cover
+	}
+	return m
+}
+
+// ==================== 模块级状态 ====================
+
+let gPlayer: media.AVPlayer | null = null
+/** 播放器创建中的 in-flight 标志。createAVPlayer 是异步的，没有这个标志时
+ *  audioSetPlaylist 的 ensurePlayer 与紧随其后的 loadIndex→startLoad→ensurePlayer
+ *  会在同一次 JS 调用里并发建出两个播放器：后者覆盖 gPlayer，前者从此无人引用，
+ *  却仍在解码/出声，也永远不会被 release（ArkTS GC 与 V8 不同，这种泄漏更危险）。
+ *  与 ensureSession 的 gSessionCreating 是同一套做法。 */
+let gPlayerCreating = false
+let gSession: avSession.AVSession | null = null
+let gWantAgent: WantAgent | null = null
+/** 长时任务是否已启动：startBackgroundRunning 可重入但重复调用会报错，用标志兜住 */
+let gBackgroundRunning = false
+
+/** 播放队列（本文件自己维护——AVPlayer 没有时间线概念） */
+let gItems: AudioPlaylistItem[] = []
+let gIndex = -1
+/** 当前已加载条目的 mediaId（空串 = 无）：JS 的 audioCurrentMediaId 对账探针读它 */
+let gLoadedMediaId = ''
+/** 已解析地址缓存：键 = mediaId。整条队列重推时清空（新一轮取址），syncTimeline 不清 */
+let gResolvedUrls: Map<string, string> = new Map<string, string>()
+
+/** 解析等待中的 mediaId 与该次加载的续播参数（一次只允许一个在飞） */
+let gPendingMid = ''
+let gPendingPositionSec = 0.0
+let gPendingAutoPlay = false
+let gPendingTimer = -1
+
+/** 下一次要加载的地址：AVPlayer 换源必须先 reset 回 idle，reset 是异步的，
+ *  所以地址先寄存，等 stateChange 回调进 idle 时才真正赋给 player.url */
+let gNextUri = ''
+
+/** 旧单曲链路（audioSetSrc + audioPlay）的状态，与安卓端 gSrc/gTitle... 同名同义 */
+let gSrc = ''
+let gTitle = ''
+let gSinger = ''
+let gAlbum = ''
+let gCoverUrl = ''
+
+let gPrepared = false
+let gAwaitPrepare = false
+let gDurationMs = 0.0
+/** 用户播放意图（playWhenReady 语义）：真暂停=false；缓冲中同样不能靠 state 判断 */
+let gIntendPlay = false
+
+let gUserVolume = 1.0
+let gDucked = false
+let gPlaybackSpeed = 1.0
+
+/** 循环模式：0 不循环 / 1 单曲循环 / 2 列表循环（随机由 JS 洗牌后重推队列实现） */
+let gRepeatMode = 0
+/** 同时播放模式：0 不允许（默认）/ 1 部分场景可让路压低 / 2 全部场景不打断 */
+let gConcurrentMode = 0
+/** 焦点丢失自动暂停标记：仅「非用户主动暂停」时置位，焦点恢复后据此自动续播 */
+let gPausedByFocusLoss = false
+
+/** 「正在播放」是否已经通知过 JS。安卓端的 play/pause 来自 Player.Listener 的
+ *  onIsPlayingChanged，是**边沿触发**（只有状态真的翻转才回调一次）；鸿蒙这边的
+ *  firePlay/firePause 会被多个来源重复调用（用户 pause 主动 fire 一次 + 紧随其后的
+ *  stateChange('paused') 再走一次、焦点丢失时 onAudioInterrupt 与 stateChange 各一次），
+ *  直连 JS 会让 onState 收到两次同值回调。这里在派发层做边沿去重，把语义拉回安卓端。 */
+let gPlayingNotified = false
+let gPausedNotified = false
+/** waiting/canplay 同理：AVPlayer 的 bufferingUpdate 会 START/END 各来一次，
+ *  而切歌时 startLoad 又会主动 fireWaiting 一次，不去重 JS 会收到重复的等待态。 */
+let gWaitingNotified = false
+let gCanplayNotified = false
+/** 解析轮次号：区分「同一个 mediaId 的两次解析」，用于让上一轮的定时器失效（见 requestResolve） */
+let gResolveToken = 0
+
+// 事件回调（JS 侧注册；null = 未注册）
+let cbPlay: AudioPlayerVoidCallback | null = null
+let cbPause: AudioPlayerVoidCallback | null = null
+let cbStop: AudioPlayerVoidCallback | null = null
+let cbEnded: AudioPlayerVoidCallback | null = null
+let cbCanplay: AudioPlayerVoidCallback | null = null
+let cbWaiting: AudioPlayerVoidCallback | null = null
+let cbPrev: AudioPlayerVoidCallback | null = null
+let cbNext: AudioPlayerVoidCallback | null = null
+let cbTime: AudioPlayerTimeCallback | null = null
+let cbError: AudioPlayerErrorCallback | null = null
+let cbResolve: AudioResolveRequestCallback | null = null
+let cbTrack: AudioTrackChangedCallback | null = null
+
+// ==================== 事件派发 ====================
+// play / pause / waiting / canplay 四个是**边沿触发**：只有状态真的翻转才通知 JS，
+// 重复的同值通知在派发层就吃掉（原因见上方 gPlayingNotified 的说明）。
+// 其余事件（stop/ended/prev/next/error/time/track）保持原有「来一次报一次」的语义。
+
+function firePlay(): void {
+	if (gPlayingNotified) return
+	gPlayingNotified = true
+	gPausedNotified = false
+	cbPlay?.()
+}
+
+function firePause(): void {
+	if (gPausedNotified) return
+	gPausedNotified = true
+	gPlayingNotified = false
+	cbPause?.()
+}
+
+function fireStop(): void {
+	// stop 是终态：把边沿标志复位，下一次 play/pause 才能重新上报
+	gPlayingNotified = false
+	gPausedNotified = false
+	cbStop?.()
+}
+
+function fireEnded(): void { cbEnded?.() }
+
+function fireCanplay(): void {
+	if (gCanplayNotified) return
+	gCanplayNotified = true
+	gWaitingNotified = false
+	cbCanplay?.()
+}
+
+function fireWaiting(): void {
+	if (gWaitingNotified) return
+	gWaitingNotified = true
+	gCanplayNotified = false
+	cbWaiting?.()
+}
+
+function firePrev(): void { cbPrev?.() }
+function fireNext(): void { cbNext?.() }
+
+function fireError(message: string): void {
+	console.log('[QT Audio H] ' + message)
+	cbError?.(message)
+}
+
+function fireTimeUpdate(): void {
+	const cb = cbTime
+	if (cb == null) return
+	const p = gPlayer
+	if (p == null) return
+	let position = 0.0
+	try {
+		position = p.currentTime / 1000.0
+	} catch (e) {
+		return
+	}
+	cb(position, gDurationMs / 1000.0)
+}
+
+function fireTrackChanged(mediaId: string, naturalEnd: boolean): void {
+	cbTrack?.(mediaId, naturalEnd)
+}
+
+// ==================== 长时任务（后台保活） ====================
+// 鸿蒙不允许应用在后台「无理由」继续运行：想边听边退到后台，必须申请
+// ohos.permission.KEEP_BACKGROUND_RUNNING 并启动 AUDIO_PLAYBACK 长时任务。
+// 与前台的绑定关系由系统强制：任务只能在应用可见时启动，长时间不播放会被系统回收，
+// 所以「队列真正播完」时本文件主动停掉任务（见 onTrackCompleted）。
+
+/** 构建点击媒体通知回到应用的 WantAgent（AVSession 的 setLaunchAbility 也用它） */
+function ensureWantAgent(onReady: (agent: WantAgent) => void): void {
+	const cached = gWantAgent
+	if (cached != null) {
+		onReady(cached)
+		return
+	}
+	const ctx = harmonyContext()
+	if (ctx == null) return
+	// ArkTS 不允许无类型的对象字面量：wants 元素先声明成 Want 局部变量再入数组
+	const target: Want = {
+		bundleName: ctx.abilityInfo.bundleName,
+		abilityName: ctx.abilityInfo.name,
+	}
+	// 已核对 d.ts：WantAgentInfo 具名于 wantAgent 命名空间内
+	// （@ohos.app.ability.wantAgent.d.ts:158 getWantAgent、:304 START_ABILITY、
+	//  :239 UPDATE_PRESENT_FLAG、:407 export type WantAgent = object；
+	//  wantAgent/wantAgentInfo.d.ts:37 wants / :55 actionType / :63 requestCode / :81 actionFlags）
+	const info: wantAgent.WantAgentInfo = {
+		wants: [target],
+		actionType: wantAgent.OperationType.START_ABILITY,
+		requestCode: 0,
+		actionFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG],
+	}
+	try {
+		wantAgent.getWantAgent(info, (err: BusinessError, agent: WantAgent) => {
+			if (err != null && err.code != 0) {
+				console.log('[QT Audio H] getWantAgent 失败 code=' + err.code.toString())
+				return
+			}
+			if (agent == null) return
+			gWantAgent = agent
+			onReady(agent)
+		})
+	} catch (e) {
+		console.log('[QT Audio H] getWantAgent 抛错: ' + (e != null ? e.toString() : 'unknown'))
+	}
+}
+
+/** 启动长时任务（幂等）。失败不阻塞播放：退到后台会被系统冻结，但前台播放照常 */
+function startBackgroundRunning(): void {
+	if (gBackgroundRunning) return
+	const ctx = harmonyContext()
+	if (ctx == null) return
+	ensureWantAgent((agent: WantAgent) => {
+		if (gBackgroundRunning) return
+		try {
+			// 已核对 d.ts：API 12 起为 4 参数重载 (context, bgMode, wantAgent, callback)
+			// （@ohos.resourceschedule.backgroundTaskManager.d.ts:216；AUDIO_PLAYBACK = 2 见 :419）
+			backgroundTaskManager.startBackgroundRunning(
+				ctx,
+				backgroundTaskManager.BackgroundMode.AUDIO_PLAYBACK,
+				agent,
+				(err: BusinessError) => {
+					if (err != null && err.code != 0) {
+						console.log('[QT Audio H] 长时任务启动失败 code=' + err.code.toString())
+						return
+					}
+					gBackgroundRunning = true
+					console.log('[QT Audio H] 长时任务已启动（AUDIO_PLAYBACK）')
+				}
+			)
+		} catch (e) {
+			console.log('[QT Audio H] 长时任务启动抛错: ' + (e != null ? e.toString() : 'unknown'))
+		}
+	})
+}
+
+/** 停止长时任务（幂等）：真正停止播放 / 队列自然播完时调用 */
+function stopBackgroundRunning(): void {
+	if (!gBackgroundRunning) return
+	gBackgroundRunning = false
+	const ctx = harmonyContext()
+	if (ctx == null) return
+	try {
+		backgroundTaskManager.stopBackgroundRunning(ctx, (err: BusinessError) => {
+			if (err != null && err.code != 0) {
+				console.log('[QT Audio H] 长时任务停止失败 code=' + err.code.toString())
+			}
+		})
+	} catch (e) {
+		console.log('[QT Audio H] 长时任务停止抛错: ' + (e != null ? e.toString() : 'unknown'))
+	}
+}
+
+// ==================== 系统播控（AVSession） ====================
+// 鸿蒙的媒体通知 / 锁屏卡片 / 控制中心都**不由应用自己画**：应用只需正确维护一个
+// 激活的 AVSession（元数据 + 播放状态 + 队列），系统会按会话状态渲染并回派控制指令。
+// 这与安卓端「media3 按会话状态自动填充 MediaStyle 通知」是同一套分工。
+
+/** 创建并激活会话（幂等）；创建是异步的，期间重复调用会被 gSession 是否为空之外
+ *  的 in-flight 标志挡住——否则首播路径的连续调用会create出多个会话互相抢播控 */
+let gSessionCreating = false
+
+function ensureSession(): void {
+	if (gSession != null || gSessionCreating) return
+	const ctx = harmonyContext()
+	if (ctx == null) return
+	gSessionCreating = true
+	try {
+		avSession.createAVSession(ctx, SESSION_TAG, 'audio', (err: BusinessError, session: avSession.AVSession) => {
+			gSessionCreating = false
+			if (err != null && err.code != 0) {
+				console.log('[QT Audio H] 创建 AVSession 失败 code=' + err.code.toString())
+				return
+			}
+			if (session == null) return
+			gSession = session
+			bindSessionListeners(session)
+			// 点媒体通知回到应用：不设 launchAbility 时点卡片无反应
+			ensureWantAgent((agent: WantAgent) => {
+				try {
+					session.setLaunchAbility(agent)
+				} catch (e) {
+					// 非致命：仅影响「点通知回应用」
+				}
+			})
+			try {
+				session.activate()
+			} catch (e) {
+				console.log('[QT Audio H] activate 抛错: ' + (e != null ? e.toString() : 'unknown'))
+			}
+			// 会话建好后补一次元数据/状态：首播时元数据可能早于会话就绪
+			applySessionMetadata()
+			applySessionPlaybackState()
+		})
+	} catch (e) {
+		gSessionCreating = false
+		console.log('[QT Audio H] 创建 AVSession 抛错: ' + (e != null ? e.toString() : 'unknown'))
+	}
+}
+
+/** 系统播控/媒体键回派：统一的控制入口，JS 侧回调优先，未注册时才原生兜底 */
+function bindSessionListeners(session: avSession.AVSession): void {
+	try {
+		session.on('play', () => {
+			gPausedByFocusLoss = false
+			audioResume()
+		})
+		session.on('pause', () => {
+			audioPause()
+		})
+		session.on('stop', () => {
+			audioStop()
+		})
+		// 上一首/下一首：JS 侧握有随机/队列语义，优先交回 JS（它随后调 audioPlayTimelineIndex）；
+		// JS 未注册回调时才用本文件的顺序推进兜底，避免按了没反应
+		session.on('playNext', () => {
+			if (cbNext != null) {
+				fireNext()
+			} else {
+				advanceByOffset(1, false)
+			}
+		})
+		session.on('playPrevious', () => {
+			if (cbPrev != null) {
+				firePrev()
+			} else {
+				advanceByOffset(-1, false)
+			}
+		})
+		// 已核对 d.ts：on('seek', callback: (time: number) => void)，注释逐字写明 The callback provides
+		// the seek time(ms)（@ohos.multimedia.avsession.d.ts:1115 / :1095）—— 单位是毫秒，本文件用秒
+		session.on('seek', (time: number) => {
+			audioSeek(time / 1000.0)
+		})
+		session.on('fastForward', () => {
+			audioSeek(currentSeconds() + 15.0)
+		})
+		session.on('rewind', () => {
+			audioSeek(currentSeconds() - 15.0)
+		})
+		// 系统播控下发循环模式：AVSession 没有 setLoopMode 方法，这是**入向**命令（d.ts:1211）。
+		// 安卓端 media3 同样不支持系统侧改循环，故此处只本地生效并回报系统，不新增 JS 回调
+		// （interface.uts 无对应回调，加了会破坏与安卓的导出对称）。
+		session.on('setLoopMode', (mode: avSession.LoopMode) => {
+			if (mode == avSession.LoopMode.LOOP_MODE_SINGLE) {
+				gRepeatMode = 1
+			} else if (mode == avSession.LoopMode.LOOP_MODE_LIST) {
+				gRepeatMode = 2
+			} else {
+				gRepeatMode = 0
+			}
+			applySessionPlaybackState()
+		})
+		// 用户在控制中心/锁屏的队列卡片里直接点某一首。
+		// itemId 就是 pushSessionQueue 推上去的**绝对下标**（d.ts:4462 文档原文
+		// 「The serial number of the item to be played」），所以能直接换回时间线下标。
+		// 安卓端 media3 有真实 timeline，系统这个命令由它内部 seekToDefaultPosition 消化；
+		// 鸿蒙 AVPlayer 没有 timeline，必须由本文件自己换曲——语义等价，故此处不新增 JS 回调。
+		session.on('skipToQueueItem', (itemId: number) => {
+			const idx = Math.round(itemId)
+			if (idx < 0 || idx >= gItems.length) return
+			if (idx == gIndex) {
+				// 点的是当前这首 = 从头重播（与 media3 seekToDefaultPosition 一致）
+				audioSeek(0.0)
+				return
+			}
+			// naturalEnd = false：这是用户主动点选，不是自然播完，
+			// 不能让 JS 走「提前结束」的容错分支
+			loadIndex(idx, 0.0, true, false)
+		})
+	} catch (e) {
+		console.log('[QT Audio H] 会话监听注册失败: ' + (e != null ? e.toString() : 'unknown'))
+	}
+}
+
+function currentSeconds(): number {
+	const p = gPlayer
+	if (p == null) return 0.0
+	try {
+		return p.currentTime / 1000.0
+	} catch (e) {
+		return 0.0
+	}
+}
+
+/** 当前歌曲的元数据来源：队列模式用队列条目，单曲模式用 gTitle/gSinger/gAlbum/gCoverUrl */
+function currentItem(): AudioPlaylistItem | null {
+	if (gIndex >= 0 && gIndex < gItems.length) return gItems[gIndex]
+	return null
+}
+
+/** 把当前曲目元数据写进会话（标题/歌手/专辑/封面/时长/assetId） */
+function applySessionMetadata(): void {
+	const session = gSession
+	if (session == null) return
+	const item = currentItem()
+	let title = gTitle
+	let artist = gSinger
+	let album = gAlbum
+	let cover = gCoverUrl
+	let assetId = gLoadedMediaId
+	if (item != null) {
+		title = item.title
+		artist = item.artist
+		album = item.album
+		cover = item.coverUrl
+		assetId = item.mediaId
+	}
+	// AVMetadata 是具名字段对象（整体覆盖），一次构造完整
+	try {
+		session.setAVMetadata(buildMetadata(assetId, title, artist, album, cover, gDurationMs))
+	} catch (e) {
+		console.log('[QT Audio H] setAVMetadata 抛错: ' + (e != null ? e.toString() : 'unknown'))
+	}
+	// 队列信息：控制中心/锁屏可展示「上下曲」，也支持 skipToQueueItem
+	pushSessionQueue(session)
+	// 封面：异步加载，加载完成后校验 mediaId 未变才写回（避免快速切歌写错封面）。
+	// 用 gCoverLoadingFor 去重：applySessionMetadata 会被 setTitle/Singer/Album/Cover
+	// 连调 4 次，不去重就会对同一张封面并发下 4 个 HTTP 请求
+	if (cover.length > 0 && assetId.length > 0 && gCoverLoadingFor != assetId) {
+		gCoverLoadingFor = assetId
+		loadCoverIntoSession(session, cover, assetId)
+	}
+}
+
+/** 正在下载封面的 assetId（去重用；下载结束/失败都要复位，否则该曲不再尝试封面） */
+let gCoverLoadingFor = ''
+
+/** 已推入会话的队列签名（长度+首尾 id）：队列没变就不重复 setAVQueueItems */
+let gQueueSignature = ''
+
+/** 把播放队列同步进会话（条目少时开销可忽略；队列变化只在重推/同步时发生） */
+function pushSessionQueue(session: avSession.AVSession): void {
+	if (gItems.length == 0) return
+	// 只推当前曲目附近的一段窗口，而不是整条队列：
+	// AVQueueItem.itemId 就是 skipToQueueItem 回传的序号，系统据此定位曲目，
+	// 推全量时一旦 JS 侧队列上千首，每次 setAVQueueItems 都要跨 IPC 传上千个对象
+	//（applySessionMetadata 每首歌都会走这里），而系统卡片实际只展示当前曲目附近几首。
+	const start = queueWindowStart()
+	const count = Math.min(QUEUE_PUSH_LIMIT, gItems.length - start)
+	// 签名比对：applySessionMetadata 每首歌会被调用多次，队列本身往往没动。
+	// 窗口起点必须进签名——队列没变但当前曲目移动导致窗口平移时同样要重推
+	const sig = start.toString() + '|' + count.toString() + '|' + gItems[start].mediaId + '|' + gItems[start + count - 1].mediaId
+	if (sig == gQueueSignature) return
+	try {
+		const queue: avSession.AVQueueItem[] = []
+		for (let i = 0; i < count; i++) {
+			const it = gItems[start + i]
+			// AVQueueItem = { itemId: number, description?: AVMediaDescription }；
+			// AVMediaDescription = { assetId, title?, artist?, albumTitle?, mediaImage?, ... }（已核对 d.ts）
+			// 注意字段名与 AVMetadata 不同：AVMetadata 是 album，AVMediaDescription 是 **albumTitle**
+			//（d.ts:2724 vs :3025），写错不会报错、只会静默丢字段，队列里的专辑名永远空着
+			const desc = {
+				assetId: it.mediaId,
+				title: it.title,
+				artist: it.artist,
+				albumTitle: it.album,
+			} as avSession.AVMediaDescription
+			const qi = {
+				// itemId 用**绝对下标**：系统 skipToQueueItem 回传的值要能直接对回 gItems
+				itemId: start + i,
+				description: desc,
+			} as avSession.AVQueueItem
+			queue.push(qi)
+		}
+		session.setAVQueueItems(queue)
+		session.setAVQueueTitle('播放队列')
+		// 只有真的推成功才记签名：失败时留着空串，下次还有机会重试
+		gQueueSignature = sig
+	} catch (e) {
+		// 队列信息是增强项，失败不影响播放与基本播控
+	}
+}
+
+/** 队列窗口起点：尽量让当前曲目居中，同时保证 gIndex 落在窗口内 */
+function queueWindowStart(): number {
+	let start = gIndex - Math.floor(QUEUE_PUSH_LIMIT / 2)
+	if (start < 0) start = 0
+	if (start + QUEUE_PUSH_LIMIT > gItems.length) start = gItems.length - QUEUE_PUSH_LIMIT
+	if (start < 0) start = 0
+	return start
+}
+
+/**
+ * 复位封面去重标记，但只在槽位仍属于这次下载时复位。
+ * 直接 `gCoverLoadingFor = ''` 会在「A 下载中 → 切到 B → A 的回包到达」时把 B 的
+ * 去重标记抹掉，同一张封面被并发重复下载；而完全不复位又会让 A 的标记永久残留，
+ * 用户切回 A 时因为 `gCoverLoadingFor == 'A'` 被当成「正在下载」而永远拿不到封面。
+ * 只回收自己占的那个槽位，两种错都避开。
+ */
+function releaseCoverSlot(assetId: string): void {
+	if (gCoverLoadingFor == assetId) gCoverLoadingFor = ''
+}
+
+/**
+ * 异步下载封面并作为 PixelMap 写进会话。
+ * 为什么要自己下载解码：系统对网络封面图（AVMetadata.mediaImage 传 URL）的支持依版本而异，
+ * 自己解码成 PixelMap 是唯一稳定可控的路径（安卓端也是自己 setBitmapLoader）。
+ * 失败静默——封面缺失不该影响播放。
+ */
+function loadCoverIntoSession(session: avSession.AVSession, url: string, assetId: string): void {
+	try {
+		const req = http.createHttp()
+		// 必须显式声明要 ArrayBuffer：HttpResponse.result 是 string | Object | ArrayBuffer，
+		// 不声明 expectDataType 时默认给 string，createImageSource 会在运行时抛错。
+		// 超时必须显式给：默认值在弱网/挂死 CDN 上会拖很久，而这个请求只是装饰性封面，
+		// 不该占着连接不放（与安卓端的封面下载超时对齐）。
+		const opt: http.HttpRequestOptions = {
+			expectDataType: http.HttpDataType.ARRAY_BUFFER,
+			connectTimeout: 30000,
+			readTimeout: 30000,
+		} as http.HttpRequestOptions
+		req.request(url, opt, (err: BusinessError, resp: http.HttpResponse) => {
+			try {
+				// destroy 必须容错：请求可能已经自行结束/被系统回收，destroy 抛错会
+				// 把后面的封面处理整个跳过（catch 里只是忽略，封面就永远不写了）
+				try {
+					req.destroy()
+				} catch (eDestroy) {
+				}
+				if (err != null && err.code != 0) {
+					// 失败时允许以后重试（网络抖动不该让这首曲子永远没封面）
+					releaseCoverSlot(assetId)
+					return
+				}
+				if (resp == null || resp.result == null) {
+					releaseCoverSlot(assetId)
+					return
+				}
+				// 快速切歌保护：封面回来时当前曲目已换，直接丢弃。
+				// 归还也走 releaseCoverSlot：槽位已被新曲目接管时它会原样保留
+				//（不会抹掉新曲目的去重标记）；若新曲目根本没有封面、槽位还留在自己
+				// 名下，则归还槽位，用户切回本曲时还能再试一次
+				if (gLoadedMediaId != assetId) {
+					releaseCoverSlot(assetId)
+					return
+				}
+				// 即便声明了 expectDataType，也做一次运行时判断：非 ArrayBuffer 直接放弃，不要断言掩盖
+				const buf = resp.result
+				if (!(buf instanceof ArrayBuffer)) {
+					releaseCoverSlot(assetId)
+					return
+				}
+				const src = image.createImageSource(buf as ArrayBuffer)
+				src.createPixelMap((e: BusinessError, pixelMap: image.PixelMap) => {
+					// ImageSource 持有原生解码缓冲，无论成败都要释放：不然每次换封面
+					// 都留一份原生内存（ArkTS 的 GC 对 native 句柄无能为力）。
+					// AsyncCallback<T, E = void> 的第二个泛型有默认值，故可只给一个参数
+					try {
+						src.release((eRelease: BusinessError) => {
+						})
+					} catch (eRelease) {
+					}
+					if (e != null && e.code != 0) {
+						releaseCoverSlot(assetId)
+						return
+					}
+					if (pixelMap == null) {
+						releaseCoverSlot(assetId)
+						return
+					}
+					// 快速切歌保护（同上，归还槽位）
+					if (gLoadedMediaId != assetId) {
+						releaseCoverSlot(assetId)
+						return
+					}
+					// 播放器已经不在「有曲目在播」的状态时不必再写封面：
+					// 这一般意味着用户已经 stop，写进去反而让通知栏留着已停止曲目的封面
+					const p = gPlayer
+					if (p == null || (p.state != 'prepared' && p.state != 'playing' && p.state != 'paused')) {
+						releaseCoverSlot(assetId)
+						return
+					}
+					// setAVMetadata 是整体覆盖：必须重发完整元数据对象，只传 mediaImage 会把标题/歌手清空
+					const item = currentItem()
+					let title = gTitle
+					let artist = gSinger
+					let album = gAlbum
+					let cover = gCoverUrl
+					if (item != null && item.mediaId == assetId) {
+						title = item.title
+						artist = item.artist
+						album = item.album
+						cover = item.coverUrl
+					}
+					try {
+						session.setAVMetadata(buildMetadata(assetId, title, artist, album, cover, gDurationMs, pixelMap))
+					} catch (e2) {
+						console.log('[QT Audio H] 写回封面失败: ' + (e2 != null ? e2.toString() : 'unknown'))
+					}
+					releaseCoverSlot(assetId)
+				})
+			} catch (e) {
+				// 忽略：封面是装饰性信息
+				releaseCoverSlot(assetId)
+			}
+		})
+	} catch (e) {
+		// 忽略
+		releaseCoverSlot(assetId)
+	}
+}
+
+/** 把播放状态写进会话（状态/进度/倍速/时长）：系统据此渲染播控按钮与进度条 */
+function applySessionPlaybackState(): void {
+	const session = gSession
+	if (session == null) return
+	const p = gPlayer
+	let state = avSession.PlaybackState.PLAYBACK_STATE_STOP
+	if (p != null) {
+		const raw = p.state
+		if (raw == 'playing') {
+			state = avSession.PlaybackState.PLAYBACK_STATE_PLAY
+		} else if (raw == 'paused' || raw == 'prepared' || raw == 'initialized') {
+			// prepared/initialized 也算「可播放但未出声」：用 PAUSE 让系统显示播放按钮
+			state = gIntendPlay ? avSession.PlaybackState.PLAYBACK_STATE_PREPARE : avSession.PlaybackState.PLAYBACK_STATE_PAUSE
+		} else if (raw == 'completed') {
+			state = avSession.PlaybackState.PLAYBACK_STATE_COMPLETED
+		} else if (raw == 'error') {
+			state = avSession.PlaybackState.PLAYBACK_STATE_ERROR
+		}
+	}
+	try {
+		// 已核对 d.ts：AVPlaybackState = { state?, speed?, position?: {elapsedTime, updateTime},
+		// bufferedTime?, loopMode?, duration? }（@ohos.multimedia.avsession.d.ts:3253 起）
+		const pb: avSession.AVPlaybackState = {
+			state: state,
+			position: {
+				elapsedTime: currentSeconds() * 1000.0,
+				updateTime: new Date().getTime(),
+			},
+			speed: gPlaybackSpeed,
+			duration: gDurationMs,
+			loopMode: sessionLoopMode(),
+			// 系统据此高亮「当前在播的是队列里哪一条」。这里必须用**绝对下标**，
+			// 与 pushSessionQueue 里 AVQueueItem.itemId 的取值保持一致
+			// （d.ts @ohos.multimedia.avsession.d.ts:3351 activeItemId?: number）。
+			// 队列为空时 gIndex 为 -1，传 -1 表示「不在队列中」
+			activeItemId: gIndex,
+		} as avSession.AVPlaybackState
+		session.setAVPlaybackState(pb)
+	} catch (e) {
+		console.log('[QT Audio H] setAVPlaybackState 抛错: ' + (e != null ? e.toString() : 'unknown'))
+	}
+}
+
+/** 本文件的循环模式（0/1/2）→ 系统 LoopMode。AVSession **没有** setLoopMode 方法，
+ *  只能通过 setAVPlaybackState({ loopMode }) 上报（d.ts 里 setLoopMode 只是系统下发命令的监听）。 */
+function sessionLoopMode(): avSession.LoopMode {
+	if (gRepeatMode == 1) return avSession.LoopMode.LOOP_MODE_SINGLE
+	if (gRepeatMode == 2) return avSession.LoopMode.LOOP_MODE_LIST
+	return avSession.LoopMode.LOOP_MODE_SEQUENCE
+}
+
+/** 释放会话：停止播放时调用。不释放会让系统一直显示「正在播放」卡片 */
+function releaseSession(): void {
+	const session = gSession
+	if (session == null) return
+	gSession = null
+	try {
+		session.deactivate()
+	} catch (e) {
+		// 忽略
+	}
+	try {
+		session.destroy()
+	} catch (e) {
+		// 忽略
+	}
+}
+
+// ==================== 通知（权限 / 附带提示） ====================
+
+/**
+ * 检查/请求通知权限。
+ * 鸿蒙没有安卓 13 的 POST_NOTIFICATIONS 运行时权限，取而代之的是「通知开关」：
+ * isNotificationEnabled 查询、requestEnableNotification 拉起系统授权弹窗。
+ * 语义与安卓端一致：最终结果一律经 onGranted 上报，调用方只关心 booleans。
+ */
+export const ensureNotificationPermission: EnsureNotificationPermission = (
+	onGranted: (granted: boolean) => void
+): void => {
+	if (onGranted == null) return
+	const ctx = harmonyContext()
+	if (ctx == null) {
+		onGranted(false)
+		return
+	}
+	try {
+		notificationManager.isNotificationEnabled().then((enabled: boolean) => {
+			if (enabled) {
+				onGranted(true)
+				return
+			}
+			// 已核对 d.ts：requestEnableNotification(context: UIAbilityContext) 需 UIAbilityContext，
+			// 且必须在 UI 线程调用（@ohos.notificationManager.d.ts:762/:854；
+			// isNotificationEnabled 见 :505/:551）
+			notificationManager.requestEnableNotification(ctx).then(() => {
+				onGranted(true)
+			}).catch((err: BusinessError) => {
+				console.log('[QT Audio H] 通知授权被拒绝 code=' + err.code.toString())
+				onGranted(false)
+			})
+		}).catch((err: BusinessError) => {
+			console.log('[QT Audio H] 查询通知开关失败 code=' + err.code.toString())
+			onGranted(false)
+		})
+	} catch (e) {
+		onGranted(false)
+	}
+}
+
+/** 发布一条基础文本通知（audioPostNotice 用） */
+function publishNotice(id: number, title: string, body: string): void {
+	try {
+		const content: notificationManager.NotificationContent = {
+			notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
+			normal: {
+				title: title,
+				text: body,
+			} as notificationManager.NotificationBasicContent,
+		} as notificationManager.NotificationContent
+		const request: notificationManager.NotificationRequest = {
+			id: id,
+			content: content,
+		} as notificationManager.NotificationRequest
+		notificationManager.publish(request, (err: BusinessError) => {
+			if (err != null && err.code != 0) {
+				console.log('[QT Audio H] 发布通知失败 code=' + err.code.toString())
+			}
+		})
+	} catch (e) {
+		console.log('[QT Audio H] 发布通知抛错: ' + (e != null ? e.toString() : 'unknown'))
+	}
+}
+
+// ==================== AVPlayer 生命周期 ====================
+
+/** 创建播放器并挂事件监听（幂等）。
+ *  createAVPlayer 是异步的：没有 gPlayerCreating 时，audioSetPlaylist 里的 ensurePlayer
+ *  与紧随其后的 loadIndex→startLoad→ensurePlayer 会在同一次 JS 调用里建出两个播放器——
+ *  后建的那个覆盖 gPlayer，先建的那个从此无人引用却仍在解码出声，也永远不会被 release。
+ *  （与 ensureSession 的 gSessionCreating 同一套做法；ArkTS 的 GC 与 V8 不同，这类
+ *   脱管原生对象比在浏览器里危险得多。） */
+function ensurePlayer(): void {
+	if (gPlayer != null || gPlayerCreating) return
+	gPlayerCreating = true
+	try {
+		media.createAVPlayer((err: BusinessError, player: media.AVPlayer) => {
+			// 无论成败都要先放开闸门，否则一次创建失败会让播放器永久建不出来
+			gPlayerCreating = false
+			if (err != null && err.code != 0) {
+				fireError('创建播放器失败 code=' + err.code.toString())
+				return
+			}
+			if (player == null) return
+			gPlayer = player
+			attachPlayerListeners(player)
+			// 创建是异步的：期间可能已经排入了待加载地址。
+			// 只在这里消费 gNextUri；onStateChange 的 'idle' 分支也会消费它，两处互斥
+			//（这里处理「播放器还不存在」，那里处理「换源后 reset 回到 idle」）。
+			const next = gNextUri
+			if (next.length > 0) {
+				gNextUri = ''
+				setPlayerUrl(player, next)
+			}
+		})
+	} catch (e) {
+		gPlayerCreating = false
+		fireError('创建播放器抛错: ' + (e != null ? e.toString() : 'unknown'))
+	}
+}
+
+/** 赋 url：AVPlayer 只允许在 idle 状态设置 url，否则必须先 reset（异步回 idle） */
+function setPlayerUrl(player: media.AVPlayer, uri: string): void {
+	try {
+		if (player.state == 'idle') {
+			player.url = uri
+		} else {
+			// 换源：寄存地址，等 stateChange 回到 idle 时再赋（见 onStateChange）
+			gNextUri = uri
+			player.reset()
+		}
+	} catch (e) {
+		fireError('设置播放地址失败: ' + (e != null ? e.toString() : 'unknown'))
+	}
+}
+
+function attachPlayerListeners(player: media.AVPlayer): void {
+	player.on('stateChange', (state: media.AVPlayerState, reason: media.StateChangeReason) => {
+		onStateChange(player, state)
+	})
+	player.on('error', (err: BusinessError) => {
+		// 鸿蒙错误码分段与安卓不同，这里只保证「有错必报」：JS 侧的错误策略
+		// （重取地址 → 有限次自动切歌 → 超限暂停提示）只依赖「收到错误」这一事实
+		fireError('播放出错: code=' + err.code.toString() + ' msg=' + err.message)
+	})
+	player.on('timeUpdate', (time: number) => {
+		fireTimeUpdate()
+	})
+	player.on('durationUpdate', (duration: number) => {
+		gDurationMs = duration
+		applySessionMetadata()
+	})
+	// 已核对 d.ts：'bufferingUpdate' 自 API 9 起可用（@ohos.multimedia.media.d.ts:2264），
+	// 回调为 (infoType: BufferingInfoType, value: number)，共三档 START/END/PERCENT。
+	// PERCENT 只用于展示缓冲进度，本播放器不画进度条，忽略即可（不能落进 else 误发 canplay）。
+	player.on('bufferingUpdate', (infoType: media.BufferingInfoType, value: number) => {
+		if (infoType == media.BufferingInfoType.BUFFERING_START) {
+			fireWaiting()
+		} else if (infoType == media.BufferingInfoType.BUFFERING_END) {
+			fireCanplay()
+		}
+	})
+	// 音频焦点：耳机/蓝牙媒体键与「别的应用抢焦点」都由系统在这里回派。
+	// 同时播放模式的三档语义与安卓端一致（0 独占 / 1 让路压低 / 2 永不打断）。
+	player.on('audioInterrupt', (info: audio.InterruptEvent) => {
+		onAudioInterrupt(info)
+	})
+	player.on('seekDone', (seekDoneTime: number) => {
+		applySessionPlaybackState()
+	})
+	player.on('speedDone', (speed: number) => {
+		applySessionPlaybackState()
+	})
+}
+
+function onStateChange(player: media.AVPlayer, state: media.AVPlayerState): void {
+	// idle：换源时 reset 的落点，把寄存的地址真正赋上去
+	if (state == 'idle') {
+		const next = gNextUri
+		if (next.length > 0) {
+			gNextUri = ''
+			setPlayerUrl(player, next)
+		}
+		return
+	}
+	if (state == 'initialized') {
+		// 已拿到地址，进入准备阶段（真正建连/解码信息解析在 prepare 之后）
+		try {
+			player.prepare()
+		} catch (e) {
+			fireError('prepare 失败: ' + (e != null ? e.toString() : 'unknown'))
+		}
+		return
+	}
+	if (state == 'prepared') {
+		gPrepared = true
+		const awaitFlag = gAwaitPrepare
+		gAwaitPrepare = false
+		// 倍速/音量必须等 prepared 之后才能设置（idle/initialized 状态调用会报错）
+		try {
+			player.setVolume(gDucked ? gUserVolume * DUCK_VOLUME : gUserVolume)
+		} catch (e) {
+			// 忽略：音量设置失败不影响播放
+		}
+		applySpeed(player)
+		// 续播定位：AVPlayer 只能 seek 到 [0, duration)，越界会失败，故先夹紧
+		if (gPendingPositionSec > 0) {
+			const targetMs = gPendingPositionSec * 1000.0
+			gPendingPositionSec = 0.0
+			seekTo(player, targetMs)
+		}
+		if (awaitFlag) fireCanplay()
+		if (gPendingAutoPlay) {
+			gPendingAutoPlay = false
+			playInternal()
+		}
+		applySessionPlaybackState()
+		return
+	}
+	if (state == 'playing') {
+		gPrepared = true
+		gIntendPlay = true
+		gPausedByFocusLoss = false
+		firePlay()
+		// 出声即需要后台保活：这里而不是 play() 调用点，是因为 play() 可能只是恢复意图
+		startBackgroundRunning()
+		applySessionPlaybackState()
+		return
+	}
+	if (state == 'paused') {
+		// 真暂停还是缓冲中的临时停顿由 gIntendPlay 区分（与安卓端的 playWhenReady 同义）
+		if (gIntendPlay) {
+			applySessionPlaybackState()
+		} else {
+			firePause()
+			applySessionPlaybackState()
+		}
+		return
+	}
+	if (state == 'completed') {
+		onTrackCompleted()
+		return
+	}
+	if (state == 'stopped' || state == 'released') {
+		gPrepared = false
+		applySessionPlaybackState()
+		return
+	}
+	// 'error' 是 AVPlayerState 的合法成员（d.ts:1108）：播放器已进入不可用状态，
+	// 必须把准备标记清掉，否则后续 play() 会以为还能直接 play 而不重建播放器。
+	// 具体错误文本已由 'error' 事件上报，这里只做状态收尾。
+	if (state == 'error') {
+		gPrepared = false
+		gAwaitPrepare = false
+		applySessionPlaybackState()
+		return
+	}
+}
+
+/**
+ * 条目自然播完：本文件自己实现安卓端 media3 的时间线衔接语义。
+ * naturalEnd=true 会随切歌事件传给 JS —— 它靠这个识别「内容提前结束」
+ * （截断流/坏缓存时播放器同样视为正常播完，不会报错）。
+ *
+ * 重入保护：fireEnded() 是同步调用 JS 的，而 store 的播完回调会立刻走 this.next(true)
+ * 重新推队列/换曲。也就是说 fireEnded() 返回时，本文件的状态可能已经被 JS 改过了，
+ * 此时再按**旧**的 gIndex/gItems 自行推进，就会和 JS 的决策打架（典型症状：JS 已经切到
+ * 第 3 首，原生又把它按「原第 1 首的下一首」改成第 2 首，来回跳）。
+ * 做法：派发前先把「当前曲目 + 原生打算去的下一首」记下来，派发后核对状态有没有被
+ * 外部改动；改过就放手，让 JS 的决策生效。
+ */
+function onTrackCompleted(): void {
+	// 派发前快照：原生这一轮准备去哪一首（只算下标，不动任何状态）
+	const curMid = gLoadedMediaId
+	let plannedIndex = -1
+	if (gRepeatMode == 1) {
+		plannedIndex = gIndex
+	} else if (gIndex + 1 < gItems.length) {
+		plannedIndex = gIndex + 1
+	} else if (gRepeatMode == 2 && gItems.length > 0) {
+		plannedIndex = 0
+	}
+	const plannedMid = plannedIndex >= 0 && plannedIndex < gItems.length ? gItems[plannedIndex].mediaId : ''
+
+	fireEnded()
+
+	// JS 在 fireEnded() 里同步换过曲（当前曲目已变）或已经自行定位到别处：交还控制权。
+	// 用 mediaId 比对而不是对象引用，因为 audioSetPlaylist 每次都会重建整条数组。
+	if (gLoadedMediaId != curMid) return
+	if (plannedMid.length > 0 && gIndex != plannedIndex) return
+
+	if (plannedIndex < 0) {
+		// 队列尾且不循环：播放意图已结束，主动交还长时任务（系统对「挂着长时任务却不出声」
+		// 有回收策略，主动停掉比被系统杀掉更可控）
+		gIntendPlay = false
+		stopBackgroundRunning()
+		applySessionPlaybackState()
+		return
+	}
+	loadIndex(plannedIndex, 0.0, true, true)
+}
+
+/** 上一首/下一首的原生兜底推进（JS 未注册回调时才走这里） */
+function advanceByOffset(offset: number, naturalEnd: boolean): void {
+	if (gItems.length == 0) return
+	let next = gIndex + offset
+	if (next < 0) {
+		next = gRepeatMode == 2 ? gItems.length - 1 : 0
+	} else if (next >= gItems.length) {
+		next = gRepeatMode == 2 ? 0 : gItems.length - 1
+	}
+	loadIndex(next, 0.0, true, naturalEnd)
+}
+
+/** 应用当前倍速（prepared 之后才允许调用） */
+function applySpeed(player: media.AVPlayer): void {
+	try {
+		player.setSpeed(nearestSpeed(gPlaybackSpeed))
+	} catch (e) {
+		// 个别设备不支持变速：静默降级为 1.0
+	}
+}
+
+function seekTo(player: media.AVPlayer, targetMs: number): void {
+	let ms = targetMs
+	if (ms < 0) ms = 0
+	if (gDurationMs > 0 && ms >= gDurationMs) ms = gDurationMs > 1000 ? gDurationMs - 1000 : 0
+	try {
+		player.seek(ms, media.SeekMode.SEEK_CLOSEST)
+	} catch (e) {
+		console.log('[QT Audio H] seek 抛错: ' + (e != null ? e.toString() : 'unknown'))
+	}
+}
+
+/** 播放意图置位并出声（prepared/paused 状态直接 play；completed 走重载） */
+function playInternal(): void {
+	const p = gPlayer
+	if (p == null) {
+		ensurePlayer()
+		return
+	}
+	gIntendPlay = true
+	try {
+		// AVPlayer 在 completed 状态调 play 会从头重播；衔接逻辑已由 onTrackCompleted
+		// 接管，这里只需处理 prepared/paused 两种正常续播状态
+		if (p.state == 'prepared' || p.state == 'paused' || p.state == 'playing') {
+			p.play()
+		} else if (p.state == 'completed') {
+			p.play()
+		} else if (p.state == 'idle' || p.state == 'initialized') {
+			// 还没准备好：等 prepared 后由 gPendingAutoPlay 触发
+			gPendingAutoPlay = true
+		}
+	} catch (e) {
+		fireError('播放失败: ' + (e != null ? e.toString() : 'unknown'))
+	}
+	// 会话状态在 stateChange 的 playing/paused 分支刷新；这里补一次是为了
+	// 「点了播放但还在缓冲」时系统播控立刻显示为播放中
+	applySessionPlaybackState()
+}
+
+// ==================== 音频焦点（同时播放模式） ====================
+
+/**
+ * 焦点事件处理：三档语义与安卓端完全一致。
+ *   mode 0 独占：可让路时暂停；焦点恢复且非用户主动暂停则自动续播
+ *   mode 1 部分场景：不暂停，压低增益继续（DUCK/UNDUCK）
+ *   mode 2 全部场景：任何焦点变化都不打断
+ * 注意 forceType=INTERRUPT_FORCE 表示系统**已经**处理（如已把我们暂停），
+ * 应用侧只需对齐内部状态；INTERRUPT_SHARE 才需要应用自己动手。
+ */
+function onAudioInterrupt(info: audio.InterruptEvent): void {
+	const hint = info.hintType
+	if (hint == audio.InterruptHint.INTERRUPT_HINT_DUCK) {
+		if (gConcurrentMode != 2) {
+			gDucked = true
+			applyVolumeToPlayer()
+		}
+		return
+	}
+	if (hint == audio.InterruptHint.INTERRUPT_HINT_UNDUCK) {
+		gDucked = false
+		applyVolumeToPlayer()
+		return
+	}
+	const forced = info.forceType == audio.InterruptForceType.INTERRUPT_FORCE
+	if (hint == audio.InterruptHint.INTERRUPT_HINT_PAUSE || hint == audio.InterruptHint.INTERRUPT_HINT_STOP) {
+		if (gConcurrentMode == 2) return
+		if (gConcurrentMode == 1 && hint == audio.InterruptHint.INTERRUPT_HINT_PAUSE) {
+			// 部分场景：不暂停，改用压低表示让路
+			gDucked = true
+			applyVolumeToPlayer()
+			return
+		}
+		gPausedByFocusLoss = true
+		if (!forced) {
+			const p = gPlayer
+			if (p != null) {
+				try {
+					p.pause()
+				} catch (e) {
+					// 忽略
+				}
+			}
+			gIntendPlay = false
+			firePause()
+		}
+		return
+	}
+	if (hint == audio.InterruptHint.INTERRUPT_HINT_RESUME) {
+		if (gConcurrentMode == 2) return
+		gDucked = false
+		applyVolumeToPlayer()
+		// 只续播「因焦点丢失被暂停」的播放；用户主动暂停的绝不能自己响起来
+		if (gPausedByFocusLoss) {
+			gPausedByFocusLoss = false
+			playInternal()
+		}
+		return
+	}
+}
+
+function applyVolumeToPlayer(): void {
+	const p = gPlayer
+	if (p == null) return
+	try {
+		p.setVolume(gDucked ? gUserVolume * DUCK_VOLUME : gUserVolume)
+	} catch (e) {
+		// 忽略
+	}
+}
+
+// ==================== 播放队列 + 懒解析 ====================
+
+/**
+ * 条目可立即使用的地址：
+ * - 非 qt-resolve:// ：原样直过（http/https/file 等原生支持）
+ * - qt-resolve://    ：查解析缓存，未命中返回空串（调用方转入异步解析）
+ */
+function directUriOf(item: AudioPlaylistItem): string {
+	const uri = item.uri
+	if (uri == null || uri.length < RESOLVE_SCHEME.length) return uri != null ? uri : ''
+	if (uri.indexOf(RESOLVE_SCHEME) != 0) return uri
+	const cached = gResolvedUrls.get(item.mediaId)
+	return cached != null ? cached : ''
+}
+
+/**
+ * 加载队列第 index 条并（可选）起播。
+ * positionSec > 0 = 恢复进度续播；autoPlay = 是否立刻出声（false 时只备好）。
+ * naturalEnd 只影响切歌事件参数，不参与加载决策。
+ */
+function loadIndex(index: number, positionSec: number, autoPlay: boolean, naturalEnd: boolean): void {
+	if (index < 0 || index >= gItems.length) return
+	gIndex = index
+	const item = gItems[index]
+	gLoadedMediaId = item.mediaId
+	// 元数据先落会话：即使地址还在解析/建连，锁屏与通知栏也已经显示正确曲目
+	applySessionMetadata()
+	fireTrackChanged(item.mediaId, naturalEnd)
+	const known = directUriOf(item)
+	if (known.length > 0) {
+		startLoad(known, positionSec, autoPlay)
+		return
+	}
+	requestResolve(item.mediaId, positionSec, autoPlay)
+}
+
+/** 真正把地址交给播放器：补上非队列路径的 gSrc 身份，便于单曲重复播放时走「恢复」分支 */
+function startLoad(uri: string, positionSec: number, autoPlay: boolean): void {
+	gPendingPositionSec = positionSec
+	gPendingAutoPlay = autoPlay
+	gAwaitPrepare = true
+	gSrc = uri
+	fireWaiting()
+	ensureSession()
+	const p = gPlayer
+	if (p == null) {
+		// 播放器创建是异步的：地址寄存，创建完成回调里立刻加载
+		gNextUri = uri
+		ensurePlayer()
+		return
+	}
+	setPlayerUrl(p, uri)
+}
+
+/**
+ * 向 JS 请求真实播放地址（qt-resolve:// 懒解析）。
+ * 设计沿用安卓端：只有「真正要加载这一条」时才解析，而不是推队列时把整队都解析一遍——
+ * 音源包取址有配额与耗时，提前解析既浪费又容易过期。
+ */
+function requestResolve(mediaId: string, positionSec: number, autoPlay: boolean): void {
+	const cb = cbResolve
+	if (cb == null) {
+		fireError('缺少解析回调，无法获取播放地址: ' + mediaId)
+		return
+	}
+	// 上一次解析还没回来就被新一次覆盖时，旧定时器必须在这里清掉：否则它会照原计划
+	// 在 15 秒后触发，把**新**的 gPendingMid 当成超时清空并报错（一次误报 + 新解析被作废）。
+	// 安卓端的 gPendingResolves 是 ConcurrentHashMap（每个 mediaId 一条独立记录），
+	// 鸿蒙这里是单槽位，必须在入槽时显式回收上一个槽位。
+	if (gPendingTimer >= 0) {
+		clearTimeout(gPendingTimer)
+		gPendingTimer = -1
+	}
+	gPendingMid = mediaId
+	gPendingPositionSec = positionSec
+	gPendingAutoPlay = autoPlay
+	// 解析轮次号：同一个 mediaId 连续重试时，字符串内容比对区分不出新旧定时器
+	// （旧定时器会看到 gPendingMid 仍是自己那个 id 而误报超时），必须靠单调递增的轮次号。
+	gResolveToken++
+	const token = gResolveToken
+	fireWaiting()
+	// 解析超时兜底：loading 线程在安卓端靠 CountDownLatch 超时，鸿蒙侧没有阻塞等待，
+	// 用定时器实现同样的「超时即报错」语义，否则 JS 不回调就会永久卡在 waiting
+	gPendingTimer = setTimeout(() => {
+		gPendingTimer = -1
+		// 槽位已经被新一轮解析接管时静默退出，把超时判定的责任交给那一轮
+		if (token != gResolveToken || gPendingMid.length == 0) return
+		gPendingMid = ''
+		fireError('解析播放地址超时: ' + mediaId)
+	}, RESOLVE_TIMEOUT_SECONDS * 1000) as number
+	cb(mediaId)
+}
+
+// ==================== 导出：播放控制 ====================
+
+/** 播放地址设置（旧单曲链路）：只记录，真正加载在 audioPlay */
+export function audioSetSrc(url: string): void { gSrc = url }
+export function audioSetTitle(title: string): void {
+	gTitle = title
+	applySessionMetadata()
+}
+export function audioSetSinger(singer: string): void {
+	gSinger = singer
+	applySessionMetadata()
+}
+export function audioSetAlbum(album: string): void {
+	gAlbum = album
+	applySessionMetadata()
+}
+export function audioSetCover(url: string): void {
+	gCoverUrl = url
+	applySessionMetadata()
+}
+
+/**
+ * 播放（旧单曲链路）：把 gSrc 作为「唯一条目」的队列推入并起播。
+ * 为什么复用队列而不是另起一套：安卓端 nativePlay 也是把单曲包成一个 MediaItem，
+ * 复用同一套加载/解析/会话链路可以避免两条路径的状态漂移。
+ * 队列路径的恢复播放请用 audioResume（与安卓端一致，那是两件事）。
+ */
+export function audioPlay(): void {
+	if (gSrc.length == 0) {
+		fireError('音频地址为空')
+		return
+	}
+	// 同一首且仍可续播：仅恢复播放意图，不重新建连（否则每次点播放都要重新缓冲）
+	const p = gPlayer
+	if (gPrepared && gLoadedMediaId == gSrc && p != null) {
+		if (p.state == 'prepared' || p.state == 'playing' || p.state == 'paused') {
+			playInternal()
+			return
+		}
+		// 走到这里说明播放器里装的就是这首歌，但状态已不可续播（completed / stopped / error）。
+		// 不能直接把地址再赋一遍：非 idle 状态下 setPlayerUrl 会走 reset()，而部分版本的
+		// reset 不会再发 stateChange('idle')，地址就永远加载不上；随后 audioResume 的
+		// play() 会把已经播完的那首又「播」一遍（进度停在末尾、实际不出声）。
+		// 整体拆掉重建最干净，代价只是重播已播完的歌时重新建连一次。
+		gLoadedMediaId = ''
+		if (gPendingTimer >= 0) {
+			clearTimeout(gPendingTimer)
+			gPendingTimer = -1
+		}
+		gResolveToken++
+		gPendingMid = ''
+		gPrepared = false
+		gAwaitPrepare = false
+		gPendingAutoPlay = false
+		gNextUri = ''
+		try {
+			p.stop()
+		} catch (eStop) {
+		}
+		try {
+			p.release()
+		} catch (eRelease) {
+		}
+		gPlayer = null
+		gPlayerCreating = false
+	}
+	const item: AudioPlaylistItem = {
+		mediaId: gSrc,
+		uri: gSrc,
+		title: gTitle,
+		artist: gSinger,
+		album: gAlbum,
+		coverUrl: gCoverUrl,
+	}
+	gItems = [item]
+	gIndex = -1
+	// 单曲链路不该复用上一轮队列的解析记忆：换歌意味着重新取址
+	gResolvedUrls.clear()
+	loadIndex(0, 0.0, true, false)
+}
+
+/** 恢复播放（队列路径）：只置播放意图，不重新取址 */
+export function audioResume(): void {
+	const p = gPlayer
+	if (p == null) {
+		// 播放器还没建（进程刚起/刚 stop 过）：若旧单曲链路留有地址就按播放处理，
+		// 否则没有任何可恢复的对象，静默返回
+		if (gSrc.length > 0) audioPlay()
+		return
+	}
+	gPausedByFocusLoss = false
+	playInternal()
+}
+
+export function audioPause(): void {
+	// 用户主动暂停：清掉「焦点丢失自动续播」标记，避免焦点瞬时恢复后自己响起来
+	gPausedByFocusLoss = false
+	gIntendPlay = false
+	const p = gPlayer
+	if (p == null) return
+	try {
+		p.pause()
+	} catch (e) {
+		fireError('暂停失败: ' + (e != null ? e.toString() : 'unknown'))
+		return
+	}
+	firePause()
+	applySessionPlaybackState()
+}
+
+/** 停止并释放：拆掉长时任务、会话与播放器（下次播放整体重建） */
+export function audioStop(): void {
+	// 已经拆干净了（播放器、当前曲目、地址三者皆空）：跳过整套拆卸，但**照旧通知**
+	// JS 一次 stop —— 安卓端 nativeStop 每次都无条件 fireStop()，这里保持同一语义，
+	// 只省掉对已释放对象再调 stop/release、再跑一遍停任务与销毁会话的无谓开销。
+	// 注意 gSrc 本身**不清空**：队列路径下 audioResume 在播放器已释放时正是靠
+	// gSrc 回退到 audioPlay（见 audioResume 注释，安卓端同款处理）
+	if (gPlayer == null && gLoadedMediaId.length == 0 && gSrc.length == 0) {
+		fireStop()
+		return
+	}
+	gIntendPlay = false
+	gPausedByFocusLoss = false
+	gPrepared = false
+	gAwaitPrepare = false
+	// 解析槽位与定时器一起回收：否则停止后那个 15 秒定时器还会醒过来报一次超时错误
+	gPendingMid = ''
+	gResolveToken++
+	if (gPendingTimer >= 0) {
+		clearTimeout(gPendingTimer)
+		gPendingTimer = -1
+	}
+	gPendingAutoPlay = false
+	gNextUri = ''
+	// 当前曲目身份与元数据一并复位（对齐安卓 nativeStop 的 gLoadedSrc/标题/歌手/专辑/封面），
+	// 否则停止后 currentMediaId() 仍报上一首，store 的状态对账探针会误判成「还在播这首」
+	gLoadedMediaId = ''
+	gCoverUrl = ''
+	gTitle = ''
+	gSinger = ''
+	gAlbum = ''
+	gCoverLoadingFor = ''
+	stopBackgroundRunning()
+	const p = gPlayer
+	if (p != null) {
+		try {
+			p.stop()
+		} catch (e) {
+			// 忽略：可能本就不在可停止状态
+		}
+		try {
+			p.release()
+		} catch (e) {
+			// 忽略
+		}
+		gPlayer = null
+	}
+	// 释放闸门复位：release 之后状态已经归零，下次 ensurePlayer 必须能重新创建
+	gPlayerCreating = false
+	releaseSession()
+	fireStop()
+}
+
+export function audioSeek(seconds: number): void {
+	const p = gPlayer
+	if (p == null) return
+	// 只有真正「有媒体在手」的状态才转发 seek：
+	// idle/initialized 时 AVPlayer 还没拿到媒体（d.ts:1503 文档要求 timeMs ∈ [0, duration]），
+	// 此时下发会失败或把这次位置悄悄吞掉，让随后的 gPendingPositionSec 与实际不符；
+	// 而 completed/stopped/released/error 下 seek 也无意义（store 走的是重新 loadIndex）。
+	// 安卓端 nativeSeek 不做此闸门，是因为 media3 的 seek 自带状态机兜底；鸿蒙没有。
+	const st = p.state
+	if (st != 'prepared' && st != 'playing' && st != 'paused') {
+		console.log('[QT Audio H] seek 忽略：播放器状态为 ' + st)
+		return
+	}
+	seekTo(p, seconds * 1000.0)
+}
+
+/** 原生是否「意图播放」：暂停=false；缓冲中同样不是 playing，但意图仍是 true。
+ *  store 的状态对账探针靠这个区分「真暂停」和「缓冲中」。 */
+export function audioIsIntendingToPlay(): boolean {
+	return gIntendPlay
+}
+
+/** 当前播放位置（秒）；播放器未创建时 0 */
+export function audioGetCurrentTime(): number {
+	return currentSeconds()
+}
+
+// ==================== 导出：队列 ====================
+
+/**
+ * 推送整条播放队列并定位到 startIndex（0 起）。
+ * autoPlay=true 时定位后立即出声；startPositionSec > 0 时从该位置续播。
+ */
+export function audioSetPlaylist(items: AudioPlaylistItem[], startIndex: number, autoPlay: boolean, startPositionSec: number): void {
+	if (items == null || items.length == 0) return
+	// 整条重推 = 新一轮取址：清掉旧条目的解析记忆，refetch 流程才能拿到新地址
+	gResolvedUrls.clear()
+	// 队列签名只由「窗口起点|条数|首尾 mediaId」构成，两条不同队列完全可能同签名
+	//（同长度、首尾同曲、只换了中间几首），所以整条重推时必须显式作废签名
+	gQueueSignature = ''
+	gItems = items
+	// 上一轮解析已被这次整条重推取代：作废它的超时定时器，否则 15 秒后会把新一轮
+	// 正在等的解析当成超时清掉（安卓端每个 mediaId 一条独立记录，不存在这个串扰）
+	gResolveToken++
+	if (gPendingTimer >= 0) {
+		clearTimeout(gPendingTimer)
+		gPendingTimer = -1
+	}
+	gPendingMid = ''
+	let start = Math.round(startIndex)
+	if (start >= items.length) start = items.length - 1
+	if (start < 0) start = 0
+	ensurePlayer()
+	ensureSession()
+	loadIndex(start, startPositionSec > 0 ? startPositionSec : 0.0, autoPlay, false)
+}
+
+/** 定位到时间线下标并播放（JS 的上一首/下一首/点选执行端） */
+export function audioPlayTimelineIndex(index: number): void {
+	if (index < 0 || index >= gItems.length) return
+	loadIndex(Math.round(index), 0.0, true, false)
+}
+
+/** 循环模式：0 不循环 / 1 单曲循环 / 2 列表循环（顺序衔接由本文件 onTrackCompleted 执行） */
+export function audioSetRepeatMode(mode: number): void {
+	gRepeatMode = Math.round(mode)
+	// AVSession 没有 setLoopMode 方法（d.ts 里只有 on('setLoopMode') 监听系统下发），
+	// 系统侧只能通过 setAVPlaybackState({ loopMode }) 上报，故重发一次播放状态
+	applySessionPlaybackState()
+}
+
+/** 当前条目 mediaId（空串 = 无）：store 对账探针用它核对「底层加载的是不是这首歌」 */
+export function audioCurrentMediaId(): string {
+	return gLoadedMediaId
+}
+
+/** 时间线条目数（JS 推队列后可校验） */
+export function audioTimelineSize(): number {
+	return gItems.length
+}
+
+/**
+ * 队列编辑（追加/删除/排序）后的无损同步。
+ * 鸿蒙端队列就是普通数组，同步成本远低于安卓端的差量 add/remove/move：
+ * 直接换数组 + 重算当前下标即可，**不触碰播放器**，正在播的歌不重新加载、进度不动。
+ * expectedCurrentMid 与实际加载条目对不上时直接放弃（说明 JS 与原生已脱钩，
+ * 下次 play() 的整条重推才是权威）。
+ */
+export function audioSyncTimeline(items: AudioPlaylistItem[], expectedCurrentMid: string): void {
+	if (items == null || items.length == 0) return
+	if (gLoadedMediaId.length == 0 || gLoadedMediaId != expectedCurrentMid) return
+	// 期望列表必须包含当前曲目：否则换完数组当前下标就丢了，播放器与 UI 会脱钩
+	let found = -1
+	for (let i = 0; i < items.length; i++) {
+		if (items[i].mediaId == expectedCurrentMid) {
+			found = i
+			break
+		}
+	}
+	if (found < 0) return
+	gItems = items
+	gIndex = found
+	// 编辑队列（追加/删除/排序）会改掉窗口**中间**的内容，而签名只看首尾，
+	// 故此处显式作废签名强制重推，保证控制中心看到的是编辑后的队列
+	gQueueSignature = ''
+	pushSessionQueueSafe()
+}
+
+function pushSessionQueueSafe(): void {
+	const session = gSession
+	if (session == null) return
+	pushSessionQueue(session)
+}
+
+// ==================== 导出：懒解析回调桥 ====================
+
+/** JS 注册解析处理器：收到 mediaId 后取真实地址，回 audioResolveDone / audioResolveFail */
+export function audioOnResolveRequest(callback: AudioResolveRequestCallback | null): void {
+	cbResolve = callback
+}
+
+/** JS 回填解析结果（成功） */
+export function audioResolveDone(mediaId: string, url: string): void {
+	if (gPendingMid.length == 0 || gPendingMid != mediaId) return
+	gPendingMid = ''
+	if (gPendingTimer >= 0) {
+		clearTimeout(gPendingTimer)
+		gPendingTimer = -1
+	}
+	if (url == null || url.length == 0) {
+		fireError('解析结果为空: ' + mediaId)
+		return
+	}
+	// 记住解析结果：同一首二次播放（含列表循环回到它）不再重复取址
+	gResolvedUrls.set(mediaId, url)
+	startLoad(url, gPendingPositionSec, gPendingAutoPlay)
+}
+
+/** JS 回填解析结果（失败）：走错误回调，由 store 的既有错误策略处理 */
+export function audioResolveFail(mediaId: string): void {
+	if (gPendingMid.length == 0 || gPendingMid != mediaId) return
+	gPendingMid = ''
+	if (gPendingTimer >= 0) {
+		clearTimeout(gPendingTimer)
+		gPendingTimer = -1
+	}
+	fireError('解析播放地址失败: ' + mediaId)
+}
+
+/** JS 注册切歌事件：原生自动切歌 / 定位跳转 / 队列重推都会触发 */
+export function audioOnTrackChanged(callback: AudioTrackChangedCallback | null): void {
+	cbTrack = callback
+}
+
+// ==================== 导出：音量 / 倍速 / 模式 ====================
+
+/** 设置用户音量（0–1）：播放中立即生效并跨曲目保持 */
+export function audioSetVolume(volume: number): void {
+	let v = volume
+	if (!(v >= 0)) v = 1.0
+	if (v > 1) v = 1.0
+	gUserVolume = v
+	applyVolumeToPlayer()
+}
+
+/** 设置播放倍速（0.5–3.0）：鸿蒙只支持五档吸附，见 nearestSpeed 的说明 */
+export function audioSetSpeed(speed: number): void {
+	let s = speed
+	if (!(s > 0)) s = 1.0
+	if (s < SPEED_MIN) s = SPEED_MIN
+	if (s > SPEED_MAX) s = SPEED_MAX
+	gPlaybackSpeed = s
+	const p = gPlayer
+	if (p != null && gPrepared) applySpeed(p)
+}
+
+/**
+ * 同时播放模式（0/1/2）：立即生效。
+ * 鸿蒙的焦点策略由系统按音频流用途施加，应用侧只能通过 audioInterrupt 事件
+ * 决定「是否跟随系统的暂停/压低」，无法像安卓那样自己构造 AudioFocusRequest 的
+ * gain 类型，所以这里只记录模式、由 onAudioInterrupt 按模式分流。
+ */
+export function audioSetConcurrentMode(mode: number): void {
+	let m = Math.round(mode)
+	if (!(m >= 0) || m > 2) m = 0
+	gConcurrentMode = m
+}
+
+/**
+ * 音频缓存上限（MB）：**鸿蒙端不实现磁盘缓存**。
+ * AVPlayer 没有 media3 那种可插入的 CacheDataSource，边下边播缓存要么自己用
+ * ohos.request 预下载成文件、要么整首歌下完再本地播放（牺牲秒开）。这属于第二轮
+ * 的「缓存/并发」议题，此处记录配置但不生效，避免上层以为设了就有用。
+ */
+let gCacheLimitMb = 1024
+
+export function audioSetCacheLimit(mb: number): void {
+	// 只保留下界校验语义（与安卓端一致：太小的上限等于没缓存）
+	if (mb > 0) {
+		gCacheLimitMb = mb
+		console.log('[QT Audio H] 记录缓存上限 ' + gCacheLimitMb.toString() + 'MB（鸿蒙端暂不生效）')
+	}
+}
+
+export function audioClearCache(): boolean {
+	// 没有缓存可清：返回 false 让 UI 如实提示「当前平台无缓存」而不是假装成功
+	return false
+}
+
+/** 单曲缓存精准清除：鸿蒙端无缓存，恒 false（上层据此跳过自愈路径） */
+export function audioEvictSongCache(mediaId: string): boolean {
+	return false
+}
+
+// ==================== 导出：通知 ====================
+
+/** 发布一条提示通知（如播放失败提醒） */
+export function audioPostNotice(title: string, body: string): void {
+	publishNotice(NOTICE_ID_ERROR, title, body)
+}
+
+// ==================== 导出：事件注册 ====================
+
+export function audioOnPlay(callback: AudioPlayerVoidCallback | null): void { cbPlay = callback }
+export function audioOnPause(callback: AudioPlayerVoidCallback | null): void { cbPause = callback }
+export function audioOnStop(callback: AudioPlayerVoidCallback | null): void { cbStop = callback }
+export function audioOnEnded(callback: AudioPlayerVoidCallback | null): void { cbEnded = callback }
+export function audioOnCanplay(callback: AudioPlayerVoidCallback | null): void { cbCanplay = callback }
+export function audioOnWaiting(callback: AudioPlayerVoidCallback | null): void { cbWaiting = callback }
+export function audioOnTimeUpdate(callback: AudioPlayerTimeCallback | null): void { cbTime = callback }
+export function audioOnError(callback: AudioPlayerErrorCallback | null): void { cbError = callback }
+export function audioOnPrev(callback: AudioPlayerVoidCallback | null): void { cbPrev = callback }
+export function audioOnNext(callback: AudioPlayerVoidCallback | null): void { cbNext = callback }
+
+// ==================== 导出：均衡器（鸿蒙暂不支持） ====================
+// 安卓端把 android.media.audiofx.Equalizer 挂在 ExoPlayer 的音频会话 id 上。
+// 鸿蒙的音频框架没有暴露等价的系统级效果器：要么切到 AudioRenderer 自绘 DSP 链
+// （等于重写整个播放内核），要么引入第三方 .har 解码/音效库。第一版保持静默降级
+// （等同无 EQ），配置仍由 JS 侧持久化，后续轮次接入时无需改动上层。
+
+export function audioSetEqualizerEnabled(on: boolean): void {
+	// 空实现：见上
+}
+
+export function audioSetEqualizerBands(levelsDb: number[]): void {
+	// 空实现：见上
+}
+
+// ==================== 导出：桌面歌词（鸿蒙不支持） ====================
+// 安卓端桌面歌词是 TYPE_APPLICATION_OVERLAY 悬浮窗。鸿蒙的悬浮窗
+// （ohos.permission.SYSTEM_FLOAT_WINDOW）**只对系统应用开放**，普通应用无法在其他
+// 应用之上绘制，因此这一整套能力在鸿蒙上没有可行实现：
+// 替代方向是「实况窗（Live View）」或在媒体通知里展示歌词行，都属于后续轮次的产品决策。
+// 这里全部按「无能力」返回，让 services/desktop-lyric.uts 走既有的能力探测降级，
+// 绝不在调用点抛异常（那会让设置页整块崩掉）。
+
+export function audioLyricHasOverlayPermission(): boolean {
+	return false
+}
+
+export function audioLyricRequestOverlayPermission(): boolean {
+	return false
+}
+
+export function audioLyricShow(): boolean {
+	return false
+}
+
+export function audioLyricHide(): void {
+}
+
+export function audioLyricIsShowing(): boolean {
+	return false
+}
+
+export function audioLyricUpdate(line: string, translation: string): void {
+}
+
+export function audioLyricSetLocked(locked: boolean): void {
+}
+
+export function audioLyricSetFontSp(main: number, tr: number): void {
+}
+
+export function audioLyricSetTextColor(color: number): void {
+}
+
+export function audioLyricSetTypeface(index: number): void {
+}
+
+export function audioLyricSetWidth(pct: number): void {
+}
+
+export function audioLyricSetStroke(enabled: boolean, width: number): void {
+}
+
+export function audioLyricSetShadow(enabled: boolean): void {
+}
+
+export function audioLyricSetAlign(align: string): void {
+}
+
+export function audioLyricSetBackground(mode: string, colorArgb: number, opacity: number): void {
+}
+
+/** 桌面歌词窗口显隐变化回调：鸿蒙上永远不会触发，保留签名仅为跨平台类型一致 */
+export function audioOnLyricWindowChanged(callback: AudioPlayerStateCallback | null): void {
+}

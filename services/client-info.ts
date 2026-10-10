@@ -9,7 +9,7 @@
  *
  * | 头名            | 取值                                        | 示例            |
  * | --------------- | ------------------------------------------- | --------------- |
- * | `X-App-Ut`      | app-android / app-ios / app-windows / web   | app-android     |
+ * | `X-App-Ut`      | app-android / app-ios / app-windows / app-harmony / web | app-android |
  * | `X-App-Version` | manifest.json 的 versionName（语义化版本）   | 3.0.1           |
  * | `X-Device`      | 设备型号                                     | Pixel 6         |
  * | `X-OS`          | 操作系统及版本                                | Android 14      |
@@ -35,6 +35,8 @@ export const HEADER_OS = "X-OS";
 export const CLIENT_UT_ANDROID = "app-android";
 /** 平台取值：iOS App */
 export const CLIENT_UT_IOS = "app-ios";
+/** 平台取值：HarmonyOS App（鸿蒙原生包） */
+export const CLIENT_UT_HARMONY = "app-harmony";
 /** 平台取值：Windows 桌面端（qt-pc 用） */
 export const CLIENT_UT_WINDOWS = "app-windows";
 /** 平台取值：Web / H5（管理台用） */
@@ -55,6 +57,9 @@ export function getClientUt(): string {
   // #endif
   // #ifdef APP-IOS
   return CLIENT_UT_IOS;
+  // #endif
+  // #ifdef APP-HARMONY
+  return CLIENT_UT_HARMONY;
   // #endif
   // #ifdef WEB
   return CLIENT_UT_WEB;
