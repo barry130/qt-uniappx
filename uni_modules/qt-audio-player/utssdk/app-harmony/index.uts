@@ -1385,7 +1385,20 @@ export function audioResume(): void {
 	if (p == null) {
 		// 播放器还没建（进程刚起/刚 stop 过）：若旧单曲链路留有地址就按播放处理，
 		// 否则没有任何可恢复的对象，静默返回
-		if (gSrc.length > 0) audioPlay()
+		if (gSrc.length > 0) {
+			audioPlay()
+			return
+		}
+		// 队列路径且播放器尚未建好：把起播意图补回去。此前若用户在解析窗口内按过
+		// 暂停，audioPause 已清掉 gPendingAutoPlay（防「按了暂停反而开始播」），
+		// 这里重新点播放必须重新置起，否则 prepared 一到只备好不出声，观感是
+		// 「点了播放没反应」。两种待加载形态都要覆盖：
+		//   ① gPendingMid 非空 —— 地址还在解析，结果回来才 startLoad
+		//   ② gNextUri 非空 —— 地址已交给 startLoad，正等播放器建好消费它
+		if (gPendingMid.length > 0 || gNextUri.length > 0) {
+			gIntendPlay = true
+			gPendingAutoPlay = true
+		}
 		return
 	}
 	gPausedByFocusLoss = false
@@ -1396,6 +1409,11 @@ export function audioPause(): void {
 	// 用户主动暂停：清掉「焦点丢失自动续播」标记，避免焦点瞬时恢复后自己响起来
 	gPausedByFocusLoss = false
 	gIntendPlay = false
+	// 懒解析/准备窗口内暂停：必须同时撤销「准备完成后自动起播」的意图，否则
+	// prepared 一到就按 gPendingAutoPlay 又播起来，把用户的暂停吃掉（观感是
+	// 「按了暂停反而开始播」）。这里在拿到播放器之前就清，p == null 的早退路径
+	// 同样要生效（冷启动首次播放时播放器往往还没建好）。
+	gPendingAutoPlay = false
 	const p = gPlayer
 	if (p == null) return
 	try {

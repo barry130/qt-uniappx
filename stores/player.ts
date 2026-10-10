@@ -53,6 +53,13 @@ const RECOVERY_PROBE_MAX_MS = 120000;
 /** 恢复探测尝试上限：超过就彻底交给用户（避免长期不可用时反复取链） */
 const RECOVERY_PROBE_LIMIT = 8;
 
+/** 播放意图落地后的「原生尚未起播」宽限窗（毫秒）。冷启动/播放器重建后首次点播放，
+ *  底层要走 ensurePlayer→loadIndex→requestResolve→startLoad→prepared 一整套，gIntendPlay
+ *  到 prepared 后才置 true；这段窗口（约 1s）内 down-reconcile 探针会误判成「真暂停」，
+ *  把 playing 拉平成 false（「先暂停」），随后原生起播、状态同步又把 playing 拉回 true
+ *  （「再播放」）——先暂停再播放的闪动。窗口内放行（native 尚未起播不算真暂停）。 */
+const PLAY_START_GRACE_MS = 3000;
+
 
 /**
  * 生成全局唯一 pid（UUID v4 形态，36 字符，满足后端 ≤64 约束）。
@@ -281,6 +288,16 @@ class PlayerStore {
   private idleProbePos = -1;
   /** 播放态向下对账：连续命中计数（见进度时钟 playing 分支） */
   private activeProbeMisses = 0;
+  /** 最近一次「用户/系统请求起播」的时间戳（0 = 无未消化意图）。
+      冷启动/播放器重建后首次点播放，原生要经过懒解析→prepared 才真正置起播意图，
+      down-reconcile 探针在该窗口内会看到「底层未意图播放」而误判成真暂停，把
+      playing 拉平；宽限窗内放行，等原生 prepared→playInternal 或状态同步回调给出
+      权威结果。真实暂停（pause/toggle 停）会清掉它，因此不会掩盖用户暂停。 */
+  private playRequestedAt = 0;
+  /** 正在向 JS 请求地址的 mediaId（空 = 没有解析在飞）。懒解析窗口内原生必然
+      尚未置起播意图，向下对账探针必须放行；用「在飞」而不是纯时间窗判定，
+      弱网取链超过固定宽限窗也不会把首播误拉平成暂停。 */
+  private resolveInFlightMid = "";
   /** media3 时间线里的条目顺序（mediaId 列表）：时间线下标 ≠ 展示队列下标，定位用 */
   private timelineIds: string[] = [];
   /** 自动下一首标识：播放失败且为 true 时自动切下一首；连续失败 5 首自动关闭
@@ -398,7 +415,22 @@ class PlayerStore {
         // 里 playWhenReady 仍是 true，天然不会误判成暂停。
         const cur = this.current;
         const curMid = cur != null ? this.mediaIdOf(cur) : "";
+        // 起播宽限：刚请求过播放、原生还在懒解析/准备（gIntendPlay 未置位），此刻
+        // 「底层未意图播放」不是真暂停，不能据此拉平（否则冷启动首播会「先暂停再
+        // 播放」）。两条判据取或：① 距最近一次起播请求不足 PLAY_START_GRACE_MS；
+        // ② 当前曲的取链还在飞 —— 地址没回来底层根本不可能起播，弱网取链超过固定
+        // 窗口也不能算真暂停。宽限结束后仍未起播才按真暂停处理。
+        const resolving = this.resolveInFlightMid.length > 0 && this.resolveInFlightMid == curMid;
+        const inPlayGrace =
+          resolving ||
+          (this.playRequestedAt > 0 && now - this.playRequestedAt < PLAY_START_GRACE_MS);
+        if (audioPlayer.isNativeIntendingToPlay()) {
+          // 底层已经真正置起播意图：宽限使命完成，清掉以免长期压制对账
+          this.playRequestedAt = 0;
+          this.resolveInFlightMid = "";
+        }
         if (
+          !inPlayGrace &&
           curMid.length > 0 &&
           audioPlayer.currentMediaId() == curMid &&
           !audioPlayer.isNativeIntendingToPlay()
@@ -406,6 +438,8 @@ class PlayerStore {
           this.activeProbeMisses++;
           if (this.activeProbeMisses >= 3) {
             this.activeProbeMisses = 0;
+            this.playRequestedAt = 0;
+            this.resolveInFlightMid = "";
             console.log("[QT Player] 状态对账：底层已暂停而 store 认为在播，按底层拉平");
             this.playing = false;
             this.persist();
@@ -598,6 +632,10 @@ class PlayerStore {
         if (this.playing != playing) {
           this.playing = playing;
           qtDiag("[QT Prog] 播放状态同步 → playing=" + playing);
+          // 底层给出了权威状态：起播宽限到此结束（真播起来了，或用户从通知栏
+          // 暂停了）。不清的话下一次真暂停后仍会被宽限压制对账。
+          this.playRequestedAt = 0;
+          this.activeProbeMisses = 0;
           this.persist();
         }
       },
@@ -619,12 +657,28 @@ class PlayerStore {
         audioPlayer.resolveFail(mediaId);
         return;
       }
+      // 取链请求到达 = 原生正处在「懒解析窗口」：此刻底层尚未置起播意图，
+      // 向下对账探针必须继续放行。除了续期宽限，还标记「解析在飞」——地址没回来
+      // 底层根本不可能起播，弱网取链超过固定宽限窗也不会被误拉平成暂停。
+      const curNow = this.current;
+      if (
+        this.playing &&
+        curNow != null &&
+        curNow.platform + ":" + curNow.id == mediaId
+      ) {
+        this.playRequestedAt = Date.now();
+      }
+      this.resolveInFlightMid = mediaId;
       // 本地歌不走网络取链：地址就是 content:// 本体（pushTimeline 已直接推真实地址，
       // 正常不会进来；url 缺失的脏数据兜底在这里回填，缺失则按失败处理）
       if (song.platform == "local") {
         if (song.url != null && song.url.length > 0) {
+          this.resolveInFlightMid = "";
+          // 交地址给底层 = 进入 prepare 窗口：重置宽限，覆盖「解析慢、prepare 还在走」
+          if (this.playing) this.playRequestedAt = Date.now();
           audioPlayer.resolveDone(mediaId, song.url);
         } else {
+          this.resolveInFlightMid = "";
           audioPlayer.resolveFail(mediaId);
         }
         return;
@@ -633,6 +687,7 @@ class PlayerStore {
         .then((res: { url: string; stalled: boolean }) => {
           // 记下本次失败性质，handlePlaybackError 据此区分「网络慢」与「没地址」
           this.stalledMap.set(mediaId, res.stalled);
+          if (this.resolveInFlightMid == mediaId) this.resolveInFlightMid = "";
           if (res.url.length > 0) {
             // 留一份展示副本（管理端「当前播放地址」用，见 resolvedUrlMap），
             // 并把当前播放曲的 url 字段回填：展示入口读 current.url 时才不是空
@@ -641,12 +696,16 @@ class PlayerStore {
             if (cur != null && cur.platform + ":" + cur.id == mediaId) {
               cur.url = res.url;
             }
+            // 取链慢时 playRequestedAt 可能已过期：这里以「交地址给底层」为新起点
+            // 重置宽限，否则解析完到 prepared 之间那段仍会被误判成真暂停
+            if (this.playing) this.playRequestedAt = Date.now();
             audioPlayer.resolveDone(mediaId, res.url);
           } else {
             audioPlayer.resolveFail(mediaId);
           }
         })
         .catch(() => {
+          if (this.resolveInFlightMid == mediaId) this.resolveInFlightMid = "";
           this.stalledMap.set(mediaId, true);
           audioPlayer.resolveFail(mediaId);
         });
@@ -1129,6 +1188,10 @@ class PlayerStore {
     // 抑制窗口内一律不计入 healthyRun（否则重取地址会被误判成播放成功，见 onTime）
     this.healthyRun = 0;
     this.healthyIgnoreUntil = Date.now() + 3000;
+    // 带播放意图的重推 = 起播请求：记下时刻，供进度时钟的向下对账在原生
+    // 懒解析/准备窗口内放行（见 PLAY_START_GRACE_MS 与 activeProbeMisses 分支）。
+    // 冷启动首播走的就是这条路（播放器尚未建立，ensurePlayback 落到 play()）。
+    if (this.playing) this.playRequestedAt = Date.now();
     // 不喜欢列表：时间线剔除被屏蔽的歌，song（点播曲）永远保留。
     // 必须先过滤再找 curIdx——过滤会让索引前移，先找后滤会定位到错的歌
     const dislikes = useDislikesStore();
@@ -1395,6 +1458,10 @@ class PlayerStore {
     // 当前条目对不上（热退出/进程重建后点播放、切歌失败停在别曲）按当前曲重推，
     // restorePosition 让播放从上次进度续播
     if (audioPlayer.currentMediaId() == this.mediaIdOf(this.current)) {
+      // 恢复播放意图同样是起播请求：原生播放器若已被拆掉（热退出/进程重建），
+      // audioResume 会走 audioPlay 整体重建，起播窗口与冷启动首播一样长，
+      // 需要同一段宽限（见 PLAY_START_GRACE_MS）
+      this.playRequestedAt = Date.now();
       audioPlayer.resume();
       return;
     }
@@ -1406,9 +1473,13 @@ class PlayerStore {
     this.playing = !this.playing;
     if (this.playing) {
       this.pauseIntentAt = 0;
+      this.playRequestedAt = Date.now();
       this.ensurePlayback();
     } else {
       this.pauseIntentAt = Date.now();
+      this.playRequestedAt = 0;
+      // 明确暂停：在飞的取链不再具有「即将起播」含义，连同标记一起撤掉
+      this.resolveInFlightMid = "";
       audioPlayer.pause();
     }
     this.persist();
@@ -1418,6 +1489,8 @@ class PlayerStore {
     if (this.current == null) return;
     this.playing = false;
     this.pauseIntentAt = Date.now();
+    this.playRequestedAt = 0;
+    this.resolveInFlightMid = "";
     audioPlayer.pause();
     this.persist();
   }
@@ -1426,6 +1499,8 @@ class PlayerStore {
       否则恢复探测会误判「用户不想听」而不自动重放 */
   private autoPause(): void {
     this.playing = false;
+    this.playRequestedAt = 0;
+    this.resolveInFlightMid = "";
     audioPlayer.pause();
     this.persist();
   }
@@ -1433,6 +1508,7 @@ class PlayerStore {
   resume(): void {
     if (this.current == null) return;
     this.playing = true;
+    this.playRequestedAt = Date.now();
     this.ensurePlayback();
     this.persist();
   }
@@ -1442,6 +1518,9 @@ class PlayerStore {
     this.current = null;
     this.queue = [];
     this.playing = false;
+    // 停播：起播宽限与在飞取链一并作废，否则下一次冷启动首播前的对账会被旧宽限压制
+    this.playRequestedAt = 0;
+    this.resolveInFlightMid = "";
     this.timelineIds = [];
     this.markProgress(0);
     this.duration = 0;
@@ -1457,6 +1536,8 @@ class PlayerStore {
   stopForExit(): void {
     this.stopProgressClock();
     this.playing = false;
+    this.playRequestedAt = 0;
+    this.resolveInFlightMid = "";
     audioPlayer.stop();
     this.persist();
   }
