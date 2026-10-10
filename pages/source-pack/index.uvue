@@ -118,7 +118,7 @@
 </template>
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { onShow } from "@dcloudio/uni-app";
+import { onShow, onUnload } from "@dcloudio/uni-app";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtCard from "@/uni_modules/qt-ui/components/qt-card/qt-card.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
@@ -135,6 +135,7 @@ import { parsePackHeader } from "@/services/source-pack-header";
 import { openInBrowser, pickJsFile } from "@/services/app-native";
 import { OFFICIAL_SOURCE_SETUP_URL } from "@/services/official-site";
 import { useSourceUpdateStore } from "@/stores/source-update";
+import { beginLoading, finishLoading } from "@/services/ui-loading";
 
 /**
  * 音源包管理独立页（v3 统一包模型）：当前状态 / 数据包 / 播放包 /
@@ -274,6 +275,21 @@ onShow(() => {
   checkClipboardPackLink();
 });
 
+/**
+ * 页面级操作令牌：onUnload 时作废，在途的异步回调（下载 / 验签 / applyUpdate /
+ * 引擎重载）回来后先验令牌，失效就静默收手，不再碰页面与 loading。
+ *
+ * 这页的所有操作都是「弹 loading → 秒级 await → 收 loading」，用户在这期间按返回
+ * 会直接销毁页面。框架的 uni-showLoading 内部对已销毁页面调 show/hide 会抛空指针
+ * （NativeLoading.updateUI index.kt:84），所以令牌是这里的第一道防线，
+ * ui-loading.uts 是第二道。
+ */
+let pageAlive: boolean = true;
+
+onUnload(() => {
+  pageAlive = false;
+});
+
 /** 剪贴板里已提示过的链接（同一链接一次会话只提示一次） */
 let lastPromptedClip = "";
 
@@ -401,16 +417,16 @@ function installFromLink(url: string): void {
     return;
   }
   const link = url.trim();
-  uni.showLoading({ title: "下载中", mask: true });
+  const token = beginLoading("下载中");
   downloadPackText(link).then((text) => {
-    uni.hideLoading();
+    finishLoading(token);
     if (text.length == 0) {
       uni.showToast({ title: "下载失败，请检查链接是否可直连", icon: "none" });
       return;
     }
     confirmAndInstall(text, "url", link);
   }).catch(() => {
-    uni.hideLoading();
+    finishLoading(token);
     uni.showToast({ title: "下载失败，请重试", icon: "none" });
   });
 }
@@ -438,9 +454,9 @@ async function confirmAndInstall(text: string, source: string, ref: string): Pro
   let content = "类型：" + kindLabel + "\n名称：" + (header.name.length > 0 ? header.name : header.id) + "\n版本：" + header.versionName + "（" + header.versionCode + "）\nid：" + header.id + "\n" + refLine;
   let confirmText = "安装";
   if (isOfficialPackId(header.id)) {
-    uni.showLoading({ title: "校验签名", mask: true });
+    const sigToken = beginLoading("校验签名");
     const check = await verifyOfficialSignature(text);
-    uni.hideLoading();
+    finishLoading(sigToken);
     if (!check.ok) {
       uni.showModal({
         title: "官方包校验失败",
@@ -458,15 +474,17 @@ async function confirmAndInstall(text: string, source: string, ref: string): Pro
     cancelText: "取消",
     success: (res) => {
       if (!res.confirm) return;
-      uni.showLoading({ title: "安装中", mask: true });
+      const installToken = beginLoading("安装中");
       pickSmokeSongs().then((songs) => {
         return installFromText(text, songs, source, ref);
       }).then((r) => {
-        uni.hideLoading();
+        finishLoading(installToken);
+        if (!pageAlive) return;
         refreshSourceUi();
         uni.showModal({ title: r.ok ? "安装完成" : "安装失败", content: r.message, showCancel: false });
       }).catch(() => {
-        uni.hideLoading();
+        finishLoading(installToken);
+        if (!pageAlive) return;
         uni.showToast({ title: "安装失败，请重试", icon: "none" });
       });
     },
@@ -525,9 +543,10 @@ function runSourceInstallFile(): void {
 
 /** 检查更新：双渠道发现（force 跳过节流），发现到新版逐条列出、可一键全部更新 */
 function runSourceCheck(): void {
-  uni.showLoading({ title: "检查更新", mask: true });
+  const checkToken = beginLoading("检查更新");
   discoverUpdates(true).then((offers) => {
-    uni.hideLoading();
+    finishLoading(checkToken);
+    if (!pageAlive) return;
     refreshSourceUi();
     if (offers.length == 0) {
       uni.showToast({ title: "所有音源包都已是最新版本", icon: "none" });
@@ -546,23 +565,35 @@ function runSourceCheck(): void {
       },
     });
   }).catch(() => {
-    uni.hideLoading();
+    finishLoading(checkToken);
+    if (!pageAlive) return;
     uni.showToast({ title: "检查失败", icon: "none" });
   });
 }
 
 /** 依次应用一组更新（复用单条管线，含下载/校验/生效/回滚） */
 async function runSourceApplyAll(offers: PackUpdateOffer[]): Promise<void> {
-  uni.showLoading({ title: "更新中", mask: true });
-  const songs = await pickSmokeSongs();
-  for (let i = 0; i < offers.length; i++) {
-    const r = await applyUpdate(offers[i], songs);
-    uni.hideLoading();
-    refreshSourceUi();
-    uni.showToast({ title: r.message, icon: "none", duration: 3000 });
-    if (i < offers.length - 1) {
-      uni.showLoading({ title: "更新中（" + (i + 2) + "/" + offers.length + "）", mask: true });
+  let token = beginLoading("更新中");
+  try {
+    const songs = await pickSmokeSongs();
+    for (let i = 0; i < offers.length; i++) {
+      if (!pageAlive) return;
+      const r = await applyUpdate(offers[i], songs);
+      finishLoading(token);
+      if (!pageAlive) return;
+      refreshSourceUi();
+      uni.showToast({ title: r.message, icon: "none", duration: 3000 });
+      if (i < offers.length - 1) {
+        token = beginLoading("更新中（" + (i + 2) + "/" + offers.length + "）");
+      }
     }
+  } catch (_) {
+    finishLoading(token);
+    if (!pageAlive) return;
+    uni.showToast({ title: "更新失败，请重试", icon: "none" });
+  } finally {
+    // 兜底：任何提前 return / 异常路径都保证 loading 被收掉（页面已销毁则静默跳过）
+    finishLoading(token);
   }
 }
 
@@ -583,15 +614,17 @@ function runSourceApplyUpdate(id: string): void {
 
 /** 启用一个已落盘的包（meta 重装引擎槽 / play 热装载 + 冒烟自检） */
 function runSourceActivate(id: string): void {
-  uni.showLoading({ title: "启用中", mask: true });
+  const actToken = beginLoading("启用中");
   pickSmokeSongs().then((songs) => {
     return activatePack(id, songs);
   }).then((r) => {
-    uni.hideLoading();
+    finishLoading(actToken);
+    if (!pageAlive) return;
     refreshSourceUi();
     uni.showModal({ title: "启用音源包", content: r.message, showCancel: false });
   }).catch(() => {
-    uni.hideLoading();
+    finishLoading(actToken);
+    if (!pageAlive) return;
     uni.showToast({ title: "启用失败", icon: "none" });
   });
 }
@@ -620,13 +653,15 @@ function runSourceUninstall(id: string): void {
     cancelText: "取消",
     success: (res) => {
       if (!res.confirm) return;
-      uni.showLoading({ title: "卸载中", mask: true });
+      const unToken = beginLoading("卸载中");
       uninstallPack(id).then((r) => {
-        uni.hideLoading();
+        finishLoading(unToken);
+        if (!pageAlive) return;
         refreshSourceUi();
         uni.showToast({ title: r.ok ? "已卸载" : r.message, icon: "none" });
       }).catch(() => {
-        uni.hideLoading();
+        finishLoading(unToken);
+        if (!pageAlive) return;
         uni.showToast({ title: "卸载失败，请重试", icon: "none" });
       });
     },

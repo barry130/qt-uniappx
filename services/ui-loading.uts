@@ -1,0 +1,104 @@
+/**
+ * 安全全局 loading 包装（uni.showLoading / uni.hideLoading 的唯一出口）。
+ *
+ * 为什么需要这个文件：框架 `uni-showLoading` 模块在**页面已销毁**时被调用会
+ * 抛内部空指针（真机栈）：
+ *
+ *   java.lang.NullPointerException
+ *     at uts.sdk.modules.DCloudUniLoading.NativeLoading.updateUI(index.kt:84)
+ *     at uts.sdk.modules.DCloudUniLoading.NativeLoading.updateStyle(index.kt:73)
+ *     at ...UniUTSMethodRegister$Companion.registerUTSMethod$lambda$0(index.kt:206)
+ *     at io.dcloud.uts.UTSBridge.invokeUTSMethod
+ *     ...
+ *     at io.dcloud.uniappxv.bridge.Bridge.onJSTimerFired(Native Method)
+ *
+ * 成因：`uni.showLoading` 的共享数据绑定的是**调用那一刻的前台页面**
+ * （框架内部 `UniShowLoadingPageSharedData`）。页面销毁后该 NativeLoading 的
+ * `pbContainer` / `progressBarView` / `$element` 已是 null，`updateStyle → updateUI`
+ * 再去触达就 NPE。这个坑项目里已被记录过一次（stores/player.ts 的
+ * syncLikedFromServerInBackground 注释：登录页已销毁时调 loading 会把已销毁的
+ * Activity 钉进全局注册表，LeakCanary 实测泄漏 7.8KB），当时用「延后 700ms」
+ * 绕过——那是治标。这里的包装是治本。
+ *
+ * 三层防护，任一层生效即可拦下：
+ * 1. show 前判活：页面栈为空 ⇒ 没有任何前台页面可绑定，直接跳过；
+ * 2. 记 route：show 时记下当时的栈顶路由，hide 前校验仍是同一个页面，
+ *    避免「A 页 show、B 页 hide」这种跨页配对错位；
+ * 3. 令牌机制：beginLoading() 返回一个令牌，finishLoading(token) 只在令牌
+ *    仍是最新的那次时收口——多段并发时旧回调不会把新弹出的 loading 误关掉。
+ *
+ * 另外刻意保留：调用方仍需保证「同一页面栈内 show/hide 配对」。本模块只解决
+ * 「页面已销毁 / 跨页错位 / 并发错关」三类问题，不替代业务侧的 try/finally。
+ */
+
+/** 当前未被收口的 loading 令牌（0 = 没有 loading 在显示） */
+let gLoadingToken: number = 0;
+/** 令牌自增序号 */
+let gTokenSeq: number = 0;
+/** 最近一次 showLoading 时的栈顶路由（"" = 未记录） */
+let gRoute: string = "";
+/** 是否有 loading 正在显示（避免重复 show 与无谓的 hide） */
+let gShown: boolean = false;
+
+/**
+ * 栈顶页面路由；页面栈为空返回 ""。
+ * getCurrentPages 是 uni-app 运行时提供的全局 API（App.uvue / qt-mini-player 同款用法）。
+ */
+function topRoute(): string {
+  try {
+    const pages = getCurrentPages();
+    if (pages.length > 0) {
+      const top = pages[pages.length - 1];
+      const route = top.route;
+      if (route != null) return route;
+    }
+  } catch (_) {}
+  return "";
+}
+
+/** 当前是否有活着的页面（loading 只能绑到活页面上） */
+function hasLivePage(): boolean {
+  return topRoute().length > 0;
+}
+
+/**
+ * 弹全局 loading。返回令牌，后续必须传给 finishLoading；
+ * 无活页面时返回 0（此时 finishLoading(0) 是空操作）。
+ */
+export function beginLoading(title: string, mask: boolean = true): number {
+  // 无活页面：不弹。框架内部会把它绑到已销毁的 Activity 上导致 NPE。
+  if (!hasLivePage()) return 0;
+  // 已有 loading 在显示：先收掉再重弹，避免叠两层遮罩（框架只维护一份状态）
+  if (gShown) {
+    try {
+      uni.hideLoading();
+    } catch (_) {}
+  }
+  gTokenSeq++;
+  gLoadingToken = gTokenSeq;
+  gRoute = topRoute();
+  gShown = true;
+  uni.showLoading({ title: title, mask: mask });
+  return gLoadingToken;
+}
+
+/**
+ * 收掉全局 loading。
+ * @param token beginLoading 返回的令牌；传 0 或不传（默认取当前令牌）表示无条件收口。
+ * @param silent 页面已销毁时静默跳过——此时调 hideLoading 同样是打空指针风险路径。
+ */
+export function finishLoading(token: number = 0, silent: boolean = true): void {
+  const t = token > 0 ? token : gLoadingToken;
+  // 已被更新的令牌覆盖：这是上一次并发操作的收尾，不能动当前的 loading
+  if (t != gLoadingToken) return;
+  if (!gShown) return;
+  // 页面已不在（或已换成别的页面）：不碰框架状态。留着比误关更安全，
+  // 因为框架下一次 showLoading 会自己重建。
+  if (silent && (!hasLivePage() || topRoute() != gRoute)) return;
+  try {
+    uni.hideLoading();
+  } catch (_) {}
+  gShown = false;
+  gLoadingToken = 0;
+  gRoute = "";
+}

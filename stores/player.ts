@@ -10,6 +10,7 @@ import type { Song, Playlist, LikeChange, PendingLikeOp } from "@/types/music";
 import { getAccessToken } from "@/services/auth";
 import { DEFAULT_PLAYLIST_COVER_ASSET } from "@/services/media";
 import { qtDiag } from "@/services/diag";
+import { beginLoading, finishLoading } from "@/services/ui-loading";
 import { useDislikesStore, DISLIKES_CHANGED_EVENT } from "@/stores/dislikes";
 import { findCrossSourceDup, collectDupMessage, type CollectDupConflict } from "@/services/collect-dup";
 
@@ -3234,17 +3235,18 @@ class PlayerStore {
    * 体感很差），后台跑；超过 600ms 还没完成才弹全局加载框提示，完成后收回——
    * 快网下一闪而过的加载框反而是噪音。失败静默（登录跳转不受影响）。
    *
-   * 启动前先等 700ms：登录侧 500ms 后才跳转，而 uni.showLoading 的共享数据
-   * 绑定「调用时的前台页面」——在随后销毁的登录页上调，框架会把已销毁的
-   * Activity 钉进全局注册表（UniShowLoadingPageSharedData 泄漏，真机
-   * LeakCanary 实测 7.8KB）。延后启动，加载框绑到跳转后的活页面上。
+   * 加载框走 services/ui-loading.uts 的安全包装：框架 uni-showLoading 绑定
+   * 「调用时的前台页面」，对已销毁页面调 show/hide 会抛内部空指针
+   * （NativeLoading.updateUI index.kt:84）。这里延后 700ms 起跑，让登录跳转
+   * （500ms）先完成，是第二道保险；第一道是包装层的判活 + 令牌。
    */
   async syncLikedFromServerInBackground(): Promise<void> {
     await new Promise<void>((r) => setTimeout(r, 700) as number);
+    let token = 0;
     let shown = false;
     const showTimer = setTimeout(() => {
-      shown = true;
-      uni.showLoading({ title: "正在同步收藏" });
+      token = beginLoading("正在同步收藏");
+      shown = token > 0;
     }, 600) as number;
     try {
       await this.syncLikedFromServer();
@@ -3252,7 +3254,7 @@ class PlayerStore {
       // 忽略同步失败（与旧登录流程同语义）
     } finally {
       clearTimeout(showTimer);
-      if (shown) uni.hideLoading();
+      if (shown) finishLoading(token);
     }
   }
 

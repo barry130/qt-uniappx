@@ -24,6 +24,7 @@ import {
 } from '@/services/source-update'
 import type { PackUpdateOffer } from '@/services/source-update'
 import { exitApp, ensureNotificationPermission, openNotificationSettings, applyLegacyInsets, isIgnoringBatteryOptimizations, openBatteryOptimizationSettings } from '@/services/app-native'
+import { beginLoading, finishLoading } from '@/services/ui-loading'
 import { refreshQtLayout, pauseQtLayoutWatcher, resumeQtLayoutWatcher } from '@/uni_modules/qt-ui/composables/use-qt-layout'
 import { installBootGuard } from '@/services/boot-guard'
 import { refreshMe } from '@/services/user-cache'
@@ -122,12 +123,31 @@ async function promptPackUpdates(offers: PackUpdateOffer[]): Promise<void> {
       })
     })
     if (!confirmed) continue
-    uni.showLoading({ title: '正在更新…', mask: true })
+    // 用户在确认框弹出后可能已离开当时的前台页面。框架的 uni-showLoading 绑定
+    // 「调用时的前台页面」，对已销毁页面调 show/hide 会抛内部空指针
+    // （NativeLoading.updateUI index.kt:84）。这里记下确认框弹出时的路由，
+    // 用户确认后若路由已变，就只刷新红点、跳过这次更新。
+    const routeAtPrompt = currentTopRoute()
+    const token = beginLoading('正在更新…')
     const songs = await pickSmokeSongs()
     const result = await applyUpdate(offer, songs)
-    uni.hideLoading()
+    finishLoading(token)
+    if (routeAtPrompt != currentTopRoute()) continue
     uni.showToast({ title: result.message, icon: 'none', duration: 3000 })
   }
+}
+
+/** 栈顶页面路由；页面栈为空或取不到时返回 "" */
+function currentTopRoute(): string {
+  try {
+    const pages = getCurrentPages()
+    if (pages.length > 0) {
+      const top = pages[pages.length - 1]
+      const route = top.route
+      if (route != null) return route
+    }
+  } catch (_) {}
+  return ""
 }
 
 /** 播放包缺失引导的弹窗节流：1 分钟内最多一次（用户点了「去安装」则到设置页处理） */

@@ -85,6 +85,7 @@ import {
   DEFAULT_PLAYLIST_COVER_ASSET,
 } from "@/services/media";
 import { getAccessToken } from "@/services/auth";
+import { beginLoading, finishLoading } from "@/services/ui-loading";
 
 const player = usePlayerStore();
 const themeStore = useThemeStore();
@@ -174,14 +175,14 @@ async function changeCover(pl: { id: string; platform: string }): Promise<void> 
     return; // 用户取消选图
   }
   coverBusy.value = true;
-  uni.showLoading({ title: "上传中..." });
+  const upToken = beginLoading("上传中...");
   try {
     const url = await uploadPlaylistCover(pl.id, pl.platform, path);
     player.setSavedPlaylistCover(pl.platform, pl.id, url);
-    uni.hideLoading();
+    finishLoading(upToken);
     uni.showToast({ title: "封面已更新", icon: "none" });
   } catch (e) {
-    uni.hideLoading();
+    finishLoading(upToken);
     uni.showToast({ title: (e as Error).message || "上传失败", icon: "none", duration: 3000 });
   } finally {
     coverBusy.value = false;
@@ -191,14 +192,14 @@ async function changeCover(pl: { id: string; platform: string }): Promise<void> 
 async function restoreCover(pl: { id: string; platform: string }): Promise<void> {
   if (coverBusy.value) return;
   coverBusy.value = true;
-  uni.showLoading({ title: "处理中..." });
+  const rstToken = beginLoading("处理中...");
   try {
     await clearPlaylistCover(pl.id, pl.platform);
     player.setSavedPlaylistCover(pl.platform, pl.id, "");
-    uni.hideLoading();
+    finishLoading(rstToken);
     uni.showToast({ title: "已恢复默认封面", icon: "none" });
   } catch (e) {
-    uni.hideLoading();
+    finishLoading(rstToken);
     uni.showToast({ title: (e as Error).message || "操作失败", icon: "none", duration: 3000 });
   } finally {
     coverBusy.value = false;

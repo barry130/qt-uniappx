@@ -72,6 +72,7 @@ import { musicApi } from "@/services/music-api";
 import { parseLrc } from "@/utils/lrc.uts";
 import { useShareCardStore } from "@/stores/share-card";
 import { DEFAULT_PLAYLIST_COVER_ASSET } from "@/services/media";
+import { beginLoading, finishLoading } from "@/services/ui-loading";
 
 const layout = useQtLayout();
 const themeStore = useThemeStore();
@@ -140,11 +141,11 @@ function snapshotCard(onDone: (tempPath: string) => void, onFail: () => void): v
   }
   working.value = true;
   // 截图是异步原生调用，先给 loading，避免“点了没反应”的错觉
-  uni.showLoading({ title: "生成图片中...", mask: true });
+  const snapToken = beginLoading("生成图片中...");
   el.takeSnapshot({
     success: (res) => {
       working.value = false;
-      uni.hideLoading();
+      finishLoading(snapToken);
       const path = res.tempFilePath;
       if (path == null || path.length == 0) {
         uni.showToast({ title: "生成图片失败", icon: "none", duration: 2500 });
@@ -155,7 +156,7 @@ function snapshotCard(onDone: (tempPath: string) => void, onFail: () => void): v
     },
     fail: () => {
       working.value = false;
-      uni.hideLoading();
+      finishLoading(snapToken);
       uni.showToast({ title: "生成图片失败", icon: "none", duration: 2500 });
       onFail();
     },

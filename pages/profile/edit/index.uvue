@@ -96,6 +96,7 @@ import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import { getAccessToken, clearTokens } from "@/services/auth";
+import { beginLoading, finishLoading } from "@/services/ui-loading";
 import { meCached, refreshMe, clearCachedMe } from "@/services/user-cache";
 import {
   uploadAvatar, chooseImage, getCachedAvatar,
@@ -193,17 +194,17 @@ async function changeAvatar(): Promise<void> {
     return; // 用户取消选图，静默返回
   }
   avatarBusy.value = true;
-  uni.showLoading({ title: "上传中..." });
+  const upToken = beginLoading("上传中...");
   try {
     const url = await uploadAvatar(path);
     avatarUrl.value = url;
     avatarBroken.value = false;
-    uni.hideLoading();
+    finishLoading(upToken);
     uni.showToast({ title: "头像已更新", icon: "none" });
     // 头像走 ticket+complete 直写服务端，不经 updateProfile；后台刷新一次 /me 缓存保持一致
     refreshMe();
   } catch (e) {
-    uni.hideLoading();
+    finishLoading(upToken);
     uni.showToast({ title: (e as Error).message || "上传失败", icon: "none", duration: 3000 });
   } finally {
     avatarBusy.value = false;
@@ -258,15 +259,15 @@ async function saveImage(): Promise<void> {
     uni.showToast({ title: "暂无可保存的头像", icon: "none" });
     return;
   }
-  uni.showLoading({ title: "保存中..." });
+  const saveToken = beginLoading("保存中...");
   try {
     const temp = await downloadToTemp(src);
     if (temp.length === 0) throw new Error("图片地址无法访问，下载超时或失败");
     await saveToAlbum(temp);
-    uni.hideLoading();
+    finishLoading(saveToken);
     uni.showToast({ title: "已保存到相册", icon: "success" });
   } catch (e) {
-    uni.hideLoading();
+    finishLoading(saveToken);
     uni.showToast({ title: (e as Error).message || "保存失败", icon: "none", duration: 3000 });
   }
 }
