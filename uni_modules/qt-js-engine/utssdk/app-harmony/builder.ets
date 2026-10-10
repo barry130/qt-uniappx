@@ -131,8 +131,26 @@ interface BusinessErrorLike {
   code?: number;
 }
 
-/** 从「可能是 BusinessError 的任意对象」里取错误文本；取不到或 code===0 一律返回空串 */
-function errMessage(e: Object): string {
+/** 从「可能是 BusinessError 的任意对象」里取错误文本；取不到或 code===0 一律返回空串。
+ *
+ *  [崩溃修复] 形参声明为 `Object | undefined | null` 而不是 `Object`：ArkTS 里这个
+ *  类型标注只是编译期约定，**运行时不产生任何检查**。`runJavaScript(code, cb)` 在
+ *  **成功**时把 `err` 传成 `undefined`（见 builder.ets:560 的调用点），而成功正是最常见
+ *  的路径，于是 `(undefined as BusinessErrorLike).message` 抛
+ *  `TypeError: Cannot read property message of undefined`。
+ *
+ *  这个回调是异步的（ArkWeb 线程回调），抛出点不在任何 try/catch 的词法作用域内，
+ *  因此外层 `try { runJavaScript(...) } catch` **拦不住**；ArkTS 未捕获异常会直接
+ *  升级为 `[FRAMEWORK,PROCESS_KILL,JS_ERROR]`，表现为「一启动就闪退、图标/页面都看不到」。
+ *  实测崩溃栈：
+ *    Reason:TypeError / Error message:Cannot read property message of undefined
+ *    at errMessage (uni_modules/qt-js-engine/utssdk/app-harmony/builder.ets:137:22)
+ *    at anonymous (uni_modules/qt-js-engine/utssdk/app-harmony/builder.ets:563:25)
+ *  所以必须在**解引用之前**判空，而不是依赖调用方或类型系统。 */
+function errMessage(e: Object | undefined | null): string {
+  if (e === undefined || e === null) {
+    return '';
+  }
   const be = e as BusinessErrorLike;
   const message = be.message;
   const code = be.code;
@@ -146,7 +164,7 @@ function errMessage(e: Object): string {
 }
 
 /** 错误文本：ArkTS 的 catch 变量是 unknown 语义，统一在这里转型 */
-function errorText(e: Object): string {
+function errorText(e: Object | undefined | null): string {
   const message = errMessage(e);
   return message.length > 0 ? message : String(e);
 }
