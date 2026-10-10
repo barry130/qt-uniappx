@@ -8,6 +8,19 @@
  *   import { iconSrc } from "@/uni_modules/qt-ui/services/icons";
  *   iconSrc("play", "#ffffff")
  * 或在模板中使用 `components/qt-icon.uvue`。
+ *
+ * ── 鸿蒙图标不显示的坑（已修，勿回退） ──────────────────────────────────────
+ * 鸿蒙（ArkUI）的 Image 组件对 SVG 有额外要求，真机逐项探针结论：
+ *   viewBox + width/height + base64 data URI   → 正常 ✓（当前实现）
+ *   只有 viewBox（无固有尺寸）                  → 空白 ✗
+ *   data:image/svg+xml;utf8,<encodeURIComponent> → 空白 ✗
+ *   data:image/svg+xml,<原文>                   → 空白 ✗
+ *   data:image/svg+xml;charset=utf-8,<encoded>  → 空白 ✗
+ *   data:image/png;base64,<b64>                 → 正常
+ *   文件形式的 .svg（static / 运行时写入）       → 正常
+ * 两个必要条件缺一不可：根节点必须有 width/height，且必须是 base64 形式。
+ * 之前全站图标在鸿蒙上全部不显示，就是同时缺了这两条。
+ * 这两条对 Android / iOS / H5 同样合法，因此不再需要按平台分支。
  */
 
 /** 描边宽度占位符，生成时替换为实际颜色 */
@@ -91,15 +104,77 @@ const ICON_BODIES: Record<string, string> = {
 };
 
 /**
- * data URI 结果缓存。
+ * 结果缓存。
  * 长列表里每个行组件都带 1~2 个图标（150 行就是 300 次），而每次 iconSrc() 都要
- * 拼接 SVG 字符串再做一次 encodeURIComponent；同一 (name,color,strokeWidth) 结果
- * 完全一致，缓存下来即可。图标名固定 48 个、颜色取自主题调色板，缓存规模有界。
+ * 拼接 SVG 字符串再做一次 base64；同一 (name,color,strokeWidth) 结果完全一致，
+ * 缓存下来即可。图标名固定 50 个、颜色取自主题调色板，缓存规模有界。
  */
 const srcCache = new Map<string, string>();
 
+const B64_TABLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
 /**
- * 生成图标的 data URI。
+ * UTF-8 → Base64。
+ * 运行时不提供 btoa / uni.arrayBufferToBase64 的同步版本，且 SVG 内容是纯 ASCII，
+ * 所以自带一个最小实现（仍然按 UTF-8 编码，颜色/文本若含非 ASCII 也不会写坏）。
+ */
+function toBase64(input: string): string {
+  const bytes: number[] = [];
+  for (let i = 0; i < input.length; i++) {
+    const c = input.charCodeAt(i);
+    if (c < 0x80) {
+      bytes.push(c);
+    } else if (c < 0x800) {
+      bytes.push(0xc0 | (c >> 6), 0x80 | (c & 63));
+    } else {
+      bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+    }
+  }
+  let out = "";
+  let i = 0;
+  while (i < bytes.length) {
+    const b1 = bytes[i++];
+    const b2 = i < bytes.length ? bytes[i++] : -1;
+    const b3 = i < bytes.length ? bytes[i++] : -1;
+    out += B64_TABLE.charAt(b1 >> 2);
+    out += B64_TABLE.charAt(((b1 & 3) << 4) | (b2 < 0 ? 0 : b2 >> 4));
+    out += b2 < 0 ? "=" : B64_TABLE.charAt(((b2 & 15) << 2) | (b3 < 0 ? 0 : b3 >> 6));
+    out += b3 < 0 ? "=" : B64_TABLE.charAt(b3 & 63);
+  }
+  return out;
+}
+
+/**
+ * 生成图标的 SVG 文本。
+ *
+ * `width`/`height` 必须显式写上，这是鸿蒙端图标能否显示的关键：
+ * 鸿蒙的 SVG 渲染器遇到「只有 viewBox、没有固有尺寸」的根节点会直接不渲染。
+ * 真机 A/B 对照（同一段图形，只改根节点属性）：
+ *   只有 viewBox                → 空白
+ *   viewBox + width/height      → 正常
+ *   `fill="none"` 有无           → 无影响
+ * 之前全站图标在鸿蒙上都不显示，根因就是这里缺了固有尺寸。
+ *
+ * @param name 图标名，必须存在于 ICON_BODIES
+ * @param stroke 描边/填充颜色
+ * @param strokeWidth 描边宽度
+ */
+function iconSvg(name: string, stroke: string, strokeWidth: number): string {
+  const raw = ICON_BODIES[name] ?? "";
+  const body = raw.split(COLOR_TOKEN).join(stroke);
+  return (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="' +
+    stroke +
+    '" stroke-width="' +
+    strokeWidth +
+    '" stroke-linecap="round" stroke-linejoin="round">' +
+    body +
+    "</svg>"
+  );
+}
+
+/**
+ * 生成图标的可用 src（data URI）。
  * @param name 图标名，必须存在于 ICON_BODIES
  * @param color 描边/填充颜色
  * @param strokeWidth 描边宽度，默认 2
@@ -109,17 +184,8 @@ export function iconSrc(name: string, color: string = "#ffffff", strokeWidth: nu
   const cacheKey = name + "|" + stroke + "|" + strokeWidth;
   const cached = srcCache.get(cacheKey);
   if (cached != null) return cached;
-  const raw = ICON_BODIES[name] ?? "";
-  const body = raw.split(COLOR_TOKEN).join(stroke);
-  const svg =
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="' +
-    stroke +
-    '" stroke-width="' +
-    strokeWidth +
-    '" stroke-linecap="round" stroke-linejoin="round">' +
-    body +
-    "</svg>";
-  const src = "data:image/svg+xml;utf8," + encodeURIComponent(svg);
+  const svg = iconSvg(name, stroke, strokeWidth);
+  const src = "data:image/svg+xml;base64," + toBase64(svg);
   srcCache.set(cacheKey, src);
   return src;
 }
