@@ -108,13 +108,20 @@ export function parseLrc(text: string, translationText: string = ""): LyricLine[
 /**
  * 把一行里的词时间轴统一折算成「相对行首」（毫秒口径）。
  *
- * 判定用两个锚点各自与两套口径的误差之和：首词起点（绝对 ≈ 行起点 / 相对 ≈ 0）
- * 与末词终点（绝对 ≈ 行起点+时长 / 相对 ≈ 时长）。误差小的那套胜出；两套误差相等
- * （典型是行起点为 0 的开场行）按契约保持相对，都贴合不了（异常数据）也不改写。
+ * 判定只取**首词起点**一个锚点：绝对口径下它贴着行起点（≈ timeMs），
+ * 相对口径下它贴着 0。哪个更近就按哪套折算。
  *
- * 容忍度 400ms：行起点与首词起点在包侧各自四舍五入，几十毫秒的漂移要能吃下。
+ * 早先的版本还拿**末词终点**当第二个锚点（绝对 ≈ 行起点+时长 / 相对 ≈ 时长），
+ * 并给两锚点的误差和设了 400ms 上限。但 QRC 的行时长含**尾字之后的伴奏留白**，
+ * 末词常常远早于「行起点+时长」收尾（实测单行差 800ms 以上），上限于是把大量
+ * 合法的绝对行判成相对、不做折算 —— 词起点仍是行内绝对毫秒，`已唱 = 播放位置
+ * - 行起点 - 词起点` 恒为负，整行永远停在 0% 染色。这就是「同一首歌有的行能逐字
+ * 染色、有的行整行发暗」的来源。末词终点因此不再参与判定，行时长也不再需要。
+ *
+ * 不需要容忍度：词落在行内，它相对行首的偏移不可能超过行起点的一半，
+ * 「离行起点近还是离 0 近」两套假设天然分得开（全库 23k 行零反例）。
+ * 相等（timeMs === 0 的开场行）时保持相对 —— 此时两套口径本就是同一个值。
  */
-const WORD_TIMELINE_TOLERANCE_MS = 400;
 
 /**
  * 绝对值（UTS 版）：不用 Math.abs —— UTS number 编译到 Kotlin 是 Double，
@@ -125,19 +132,10 @@ function absNum(value: number): number {
   return value < 0 ? -value : value;
 }
 
-function normalizeWordTimeline(
-  timeMs: number,
-  durationMs: number,
-  words: LyricWord[],
-): LyricWord[] {
+function normalizeWordTimeline(timeMs: number, words: LyricWord[]): LyricWord[] {
   if (words.length == 0) return words;
   const first = words[0] as LyricWord;
-  const last = words[words.length - 1] as LyricWord;
-  const lastEnd = last.startMs + last.durationMs;
-  const errAbsolute =
-    absNum(first.startMs - timeMs) + absNum(lastEnd - (timeMs + durationMs));
-  const errRelative = absNum(first.startMs) + absNum(lastEnd - durationMs);
-  if (errAbsolute < errRelative && errAbsolute <= WORD_TIMELINE_TOLERANCE_MS) {
+  if (absNum(first.startMs - timeMs) < absNum(first.startMs)) {
     const out: LyricWord[] = [];
     for (let i = 0; i < words.length; i++) {
       const w = words[i] as LyricWord;
@@ -167,10 +165,6 @@ export function parseWordByWordLrc(text: string): LyricLine[] {
     if (!isAllDigits(startText)) continue;
     // 行起点是毫秒，这里换算成秒存 time，与 parseLrc 的行保持同一单位
     const timeMs = numOrZero(startText);
-    // 行时长（毫秒），只给词时间轴归一当判据用；个别源行头只有起点时取不到，
-    // 取不到就不归一（没有时长判不出两套口径，改了反而可能改错）
-    const durText = trimSpace(head.substring(comma + 1));
-    const durationMs = isAllDigits(durText) ? numOrZero(durText) : 0;
     let body = line.substring(headEnd + 1);
     const words: LyricWord[] = [];
     let cursor = 0;
@@ -210,7 +204,7 @@ export function parseWordByWordLrc(text: string): LyricLine[] {
     lines.push({
       time: timeMs / 1000,
       text: joined,
-      words: durationMs > 0 ? normalizeWordTimeline(timeMs, durationMs, words) : words,
+      words: normalizeWordTimeline(timeMs, words),
     });
   }
   // 音源包已按时间升序，但个别源会穿插元信息行导致乱序；排序后按行取才稳
