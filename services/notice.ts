@@ -10,7 +10,6 @@ import { logErrV, logWarnV } from "./logger";
 import type { Notice, NoticeDispatch } from "@/types/notice";
 import { getCurrentVersionCode } from "@/services/app-version";
 import { qtShowToast } from "@/services/toast";
-import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
 
 /**
  * 打开公告跳转目标
@@ -23,7 +22,7 @@ export function openNoticeUrl(url?: string): void {
     openInBrowser(url);
     return;
   }
-  uni.navigateTo({ animationType: qtNavAnimation(),
+  uni.navigateTo({
     url,
     fail: () => {
       qtShowToast({ title: "链接无法打开", icon: "none" });

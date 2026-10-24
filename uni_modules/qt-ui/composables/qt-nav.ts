@@ -1,23 +1,22 @@
 /**
- * 页面跳转的统一入口（宽屏去动画 + rail 工具入口就地托管）。
+ * 页面跳转的统一入口（rail 工具入口就地托管 + 栈内直达）。
  *
- * 为什么需要：宽屏下左侧 rail 是 `position: fixed` 的常驻导航，由 `qt-page-frame`
- * 挂在框架层。但 Android 的 `uni.navigateTo` 默认会把**整个新页面**从右侧滑入，
- * rail 跟着一起滑 —— 观感上就是「换页时导航栏重新加载了一次」，与桌面软件
- * 「导航固定、只换内容区」的语义不符。
+ * 为什么需要：rail 工具入口在宽屏下不再导航，而是把工具页**就地托管**进当前
+ * tab 页（qt-wide-workspace，官方 page-as-component）。原因是 uni-app x 在
+ * Android 上一页一个 Activity，新 Activity 的系统起始窗必然先显示 ~4 帧默认底色
+ * （UniPageActivity 主题没覆写 windowBackground），`animationType` 只能改变它的
+ * 形态、关不掉它 —— 真机屏录实测见 qt-wide-workspace.ts 注释。就地托管是同
+ * Activity、同帧换内容 ⇒ 没有起始窗。
  *
- * rail 工具入口更进一步：宽屏下不再导航，而是把工具页**就地托管**进当前 tab 页
- * （qt-wide-workspace，官方 page-as-component）。原因是 uni-app x 在 Android 上一页
- * 一个 Activity，新 Activity 的系统起始窗必然先显示 ~4 帧默认底色（UniPageActivity
- * 主题没覆写 windowBackground），`animationType` 只能改变它的形态、关不掉它 —— 真机
- * 屏录实测见 qt-wide-workspace.ts 注释。就地托管是同 Activity、同帧换内容 ⇒ 没有起始窗。
- *
- * 普通页面跳转用 `uni.navigateTo` + `animationType: qtNavAnimation()`：宽屏瞬切（none），窄屏默认横滑。
+ * 普通页面跳转**一律不传 `animationType`**（走框架默认动画）。曾试过显式传值
+ * （宽屏 none 瞬切 / 窄屏 auto），真机反馈「每次点击都黑屏闪一下」：none 会让
+ * 起始窗整窗裸闪（深色系统下就是黑屏），显式 auto 与「不传」在运行时的等价性
+ * 也无法保证 —— 全部回退到不传，与引入前的真机表现逐字节一致。宽屏导航时
+ * rail 会跟着页面动画短暂移动，这是默认动画的固有形态，接受它。
  *
  * 平台事实（uni-app x 文档 api/navigator.md）：`animationType` 自 Android 4.18 起
- * 支持，合法值含 `none`；`animationDuration` 在 Android 不支持，所以只能选动画
- * 类型，不能调时长。pages.json 里的 `animationType` 在 Android 也不支持，只能在
- * 调用点传。
+ * 支持，合法值含 `none`；`animationDuration` 在 Android 不支持。pages.json 里的
+ * `animationType` 在 Android 也不支持，只能在调用点传。
  */
 import { qtLayout } from "./use-qt-layout";
 import { qtTopRoute } from "./qt-page-chrome";
@@ -26,11 +25,6 @@ import {
   qtCloseWideTool,
   qtIsWideToolHost,
 } from "./qt-wide-workspace";
-
-/** 普通跳转：宽屏瞬切，窄屏保留默认横滑。 */
-export function qtNavAnimation(): string {
-  return qtLayout().isWide ? "none" : "auto";
-}
 
 /**
  * 切换底部导航页（发现 / 我的）的唯一入口。
@@ -123,7 +117,7 @@ export function qtRailNavigate(url: string): void {
         success: () => {
           // 托管仍不成立（栈时序异常）时退回原生导航，别让这次点击落空
           if (!qtOpenWideTool(target)) {
-            uni.navigateTo({ url: target, animationType: qtNavAnimation() });
+            uni.navigateTo({ url: target });
           }
         },
       });
@@ -133,10 +127,10 @@ export function qtRailNavigate(url: string): void {
   const existing = qtStackRouteIndex(url);
   if (existing >= 0 && existing < pages - 1) {
     // 目标页仍在栈内：直接回到已挂载的原生视图，不创建/销毁目标页。
-    uni.navigateBack({ delta: pages - 1 - existing, animationType: qtNavAnimation() });
+    uni.navigateBack({ delta: pages - 1 - existing });
     return;
   }
-  uni.navigateTo({ url: url, animationType: qtNavAnimation() });
+  uni.navigateTo({ url: url });
 }
 
 /**
@@ -172,7 +166,7 @@ export function qtRailSwitchTab(url: string): void {
 /** 返回上一页：宽屏同样去掉滑动动画 */
 export function qtNavigateBack(): void {
   if (qtPageStackDepthSafe() > 1) {
-    uni.navigateBack({ animationType: qtNavAnimation() });
+    uni.navigateBack();
     return;
   }
   // 栈底没有上一页（深链直达）：回首页而不是让返回键失效

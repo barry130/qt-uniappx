@@ -12,7 +12,6 @@ import { useDislikesStore } from "@/stores/dislikes";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import { qtShowToast } from "@/services/toast";
-import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
 
 export function useSongSheet() {
   const player = usePlayerStore();
@@ -80,7 +79,6 @@ export function useSongSheet() {
       shareCard.open(song);
     } else if (index == 5) {
       uni.navigateTo({
-        animationType: qtNavAnimation(),
         url:
           "/pages/artist/index?name=" +
           encodeURIComponent(song.singer) +

@@ -102,7 +102,6 @@ import { useSourceUpdateStore } from "@/stores/source-update";
 import { formatFileSize } from "@/services/upgrade";
 import { logBytes, logSupported } from "@/services/logger";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
-import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
 import { qtTopRoute, qtIsSettingsRoute } from "@/uni_modules/qt-ui/composables/qt-page-chrome";
 
 /**
@@ -387,7 +386,7 @@ function aiProvidersSummary(): string {
 }
 
 function goAiProviders(): void {
-  uni.navigateTo({ url: "/pages/ai-providers/index", animationType: qtNavAnimation() });
+  uni.navigateTo({ url: "/pages/ai-providers/index" });
 }
 
 /**
@@ -447,15 +446,16 @@ function refreshLogSize(): void {
  * - 已经处在**某个设置子页**（三栏模式的中间栏里点）：redirectTo 就地替换。
  *   否则会堆成 settings → theme → permissions → cache …，手机返回键要按十几次
  *   才退得出设置，而宽屏下中栏本来就一直显示、用户要的是「右栏换一页」。
- * 宽屏另用 qtNavAnimation() 关掉横滑动画，中栏因此视觉静止。
+ * 跳转不传 animationType（默认动画）：曾用宽屏 none 保持中栏静止，但会让新页
+ *   起始窗整窗裸闪（真机黑屏闪反馈），已回退，见 qt-nav.ts 头注释。
  */
 function goSubpage(url: string): void {
   const top = qtTopRoute();
   if (qtIsSettingsRoute(top) && top != "/pages/settings/index") {
-    uni.redirectTo({ animationType: qtNavAnimation(), url: url });
+    uni.redirectTo({ url: url });
     return;
   }
-  uni.navigateTo({ animationType: qtNavAnimation(), url: url });
+  uni.navigateTo({ url: url });
 }
 
 /** 打开「播放设置」页（倍速/定时关闭/均衡器/同时播放/默认音质/缓存上限，原来散在本页，现在独立） */

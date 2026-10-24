@@ -117,7 +117,6 @@ import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtContentWidth, QT_GUTTER_PX } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
-import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
 import { qtTopRoute, qtIsProfileRoute } from "@/uni_modules/qt-ui/composables/qt-page-chrome";
 import { qtShowToast } from "@/services/toast";
 import { usePlayerStore } from "@/stores/player";
@@ -311,7 +310,7 @@ async function fetchDakaInfo() {
 /** 点击宫格即签到（未登录先去登录） */
 async function doDaka() {
   if (!loggedIn.value) {
-    uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/login/index" });
+    uni.navigateTo({ url: "/pages/login/index" });
     return;
   }
   if (dakaLoading.value || todayDakaDone.value) {
@@ -342,16 +341,17 @@ async function doDaka() {
  * - 已经处在**某个我的族子页**（三栏模式的中间栏里点）：redirectTo 就地替换右栏。
  *   否则收藏、本地、下载……会层层堆栈，返回键要按很多次才退得出去，
  *   而宽屏下中栏本来就一直显示、用户要的是「右栏换一页」。
- * 宽屏另用 qtNavAnimation() 关掉横滑动画，中栏因此视觉静止。
+ * 跳转不传 animationType（默认动画）：曾用宽屏 none 保持中栏静止，但会让新页
+ *   起始窗整窗裸闪（真机黑屏闪反馈），已回退，见 qt-nav.ts 头注释。
  */
 function goPage(url: string): void {
   const top = qtTopRoute();
   if (qtIsProfileRoute(top) && top != "/pages/profile/index") {
     if (top == url) return;
-    uni.redirectTo({ animationType: qtNavAnimation(), url: url });
+    uni.redirectTo({ url: url });
     return;
   }
-  uni.navigateTo({ animationType: qtNavAnimation(), url: url });
+  uni.navigateTo({ url: url });
 }
 
 /** 用户卡点击：已登录进用户信息页（含修改资料/退出），未登录进登录注册页 */
@@ -393,7 +393,7 @@ function goAbout() {
  * navigateTo 保持两套三栏各自完整，返回键回到我的族。
  */
 function goSettings() {
-  uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/settings/index" });
+  uni.navigateTo({ url: "/pages/settings/index" });
 }
 
 // ==================== 刷新 ====================
