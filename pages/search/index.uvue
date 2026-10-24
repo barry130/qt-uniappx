@@ -64,16 +64,19 @@
       <view class="type-row" :class="layout.isWide ? 'type-row-wide' : ''" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';'">
         <qt-segmented :list="typeLabels" v-model="typeIndex" @change="switchType" />
       </view>
-      <!-- 聚合搜索开关：仅宽屏（窄屏的聚合开关收进了标题栏药丸；qt-pc 同款——
-           并发全部音源、合并去重、按相关性排序） -->
-      <view v-if="type == 'song' && layout.isWide" class="agg-row" :class="layout.isWide ? 'agg-row-wide' : ''">
-        <view
-          class="agg-chip" :class="[aggregateMode ? 'agg-chip-on' : '', layout.isWide ? 'agg-chip-wide' : '']"
-          :style="aggChipStyle"
-          @click="toggleAggregateMode"
-          ><text class="agg-chip-text" :class="layout.isWide ? 'agg-chip-text-wide' : ''" :style="aggChipTextStyle + qtFontDual(24, 12)">聚合搜索</text></view
-        >
-        <text class="agg-hint" :class="layout.isWide ? 'agg-hint-wide' : ''" :style="'color:' + theme.skin.textSubtle + ';' + qtFontDual(22, 12)">跨音源合并去重</text>
+      <!-- 宽屏播放全部：常驻列表上方（窄屏仍是列表首项）。聚合开关不再单独占行——
+           顶部药丸行的「聚合搜索」就是同一开关（onHeaderChipTap），内容区重复了 -->
+      <view
+        v-if="type == 'song' && layout.isWide && songs.length > 0 && !searching"
+        class="play-all-row" :class="layout.isWide ? 'play-all-row-wide' : ''"
+        :style="'background-color:' + theme.skin.surfaceMuted + ';border-bottom-color:' + theme.skin.divider + ';'"
+        @click="playAllSongs"
+      >
+        <view class="play-all-chip" :class="layout.isWide ? 'play-all-chip-wide' : ''" :style="'background-color:' + theme.skin.accentSoft + ';'">
+          <QtIcon name="play" :size="12" :color="theme.skin.accent" />
+        </view>
+        <text class="play-all-text" :class="layout.isWide ? 'play-all-text-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 16)">播放全部</text>
+        <text class="play-all-count" :class="layout.isWide ? 'play-all-count-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13)">({{ songs.length }})</text>
       </view>
       <!-- 全部：四类型分节预览（主流搜索默认页形态），各节「查看更多」跳对应 tag -->
       <scroll-view v-show="type == 'all'" class="results" direction="vertical" :show-scrollbar="false">
@@ -162,7 +165,7 @@
         <!-- 播放全部：必须放在 v-for 之前（状态/操作条目一律先于数据条目，
              否则长列表回收时行错乱），内容包在内层 view 里保证 list-item 只有一个 view 子节点 -->
         <list-item
-          v-if="songs.length > 0 && !searching"
+          v-if="songs.length > 0 && !searching && !layout.isWide"
           class="play-all-item" :class="layout.isWide ? 'play-all-item-wide' : ''"
           @click="playAllSongs"
         >
@@ -601,15 +604,6 @@ function songPageSize(): number {
   if (aggregateMode.value) return aggregatePageSize();
   return musicApi.searchPageMaxOf(sourceStore.current as Source);
 }
-const aggChipStyle = computed((): string => {
-  if (aggregateMode.value) {
-    return "background-color:" + theme.skin.accent + ";border-color:" + theme.skin.accent + ";";
-  }
-  return "background-color:" + theme.skin.surfaceMuted + ";border-color:" + theme.skin.border + ";";
-});
-const aggChipTextStyle = computed((): string => {
-  return "color:" + (aggregateMode.value ? theme.skin.onAccent : theme.skin.textMuted) + ";";
-});
 
 function typeLabel(value: string): string {
   if (value == "all") return "全部";
@@ -1220,25 +1214,6 @@ function openAlbum(al: Album): void {
 
   border-radius: 24rpx;
 }
-.agg-row {
-  padding: 12rpx 28rpx 2rpx;
-  flex-direction: row;
-  align-items: center;
-}
-.agg-row-wide { padding: 7px 24px 1px; }
-.agg-chip {
-  padding: 8rpx 24rpx;
-  border-width: 1px; border-style: solid;
-  border-radius: 999rpx;
-}
-.agg-chip-wide { padding: 4px 13px; }
-.agg-chip-text { font-size: 24rpx; }
-.agg-chip-text-wide { font-size: 12px; }
-.agg-hint {
-  margin-left: 16rpx;
-  font-size: 22rpx;
-}
-.agg-hint-wide { margin-left: 9px; font-size: 12px; }
 .hot-wrap {
   flex: 1;
 }
