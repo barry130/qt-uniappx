@@ -7,7 +7,7 @@
   - 交互：整行点击触发 @play 播放；`selecting` 时改为切换勾选（@select），
     并且隐藏红心 / 更多，避免误触与「选择态还能收藏单曲」的语义混乱。
   用法：
-    <qt-song-row-lite :song="song" :showBadge="false" @play="play(song)" />
+    <qt-song-row-lite :song="song" @play="play(song)" />
     <qt-song-row-lite :song="song" :selecting="selecting" :selected="isSel(song)" @select="toggleSelect(song)" />
 -->
 <template>
@@ -23,9 +23,6 @@
     </view>
     <view class="lite-cover-wrap" :class="layout.isWide ? 'lite-cover-wrap-wide' : ''">
       <image class="lite-cover" :class="layout.isWide ? 'lite-cover-wide' : ''" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
-      <view v-if="showBadge" class="lite-badge" :class="layout.isWide ? 'lite-badge-wide' : ''" :style="badgeStyle">
-        <text class="lite-badge-text" :class="layout.isWide ? 'lite-badge-text-wide' : ''" :style="('color:#ffffff;') + qtFontDual(18, 10)">{{ shortName(song.platform) }}</text>
-      </view>
     </view>
     <view class="lite-info">
       <view class="lite-name-row">
@@ -86,7 +83,6 @@ import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const props = defineProps<{
   song: Song;
-  showBadge?: boolean;
   usePicker?: boolean;
   /** 批量选择态：整行点击改为切换勾选，左侧出现勾选框，右侧动作按钮隐藏 */
   selecting?: boolean;
@@ -126,10 +122,6 @@ function onCheckTap(): void {
 const liked = computed(() => player.isLiked(props.song));
 // 不喜欢列表：命中任何规则（歌或歌手）→ 歌名置灰提示（读 store 是既有先例，见 liked）
 const disliked = computed(() => dislikes.isDisliked(props.song));
-
-const badgeStyle = computed(
-  (): string => "background-color:" + platformColor(props.song.platform) + ";"
-);
 
 /**
  * 红心：不再有内置的「我喜欢的歌曲」，收藏必须落到用户自建的歌单上，
@@ -173,16 +165,6 @@ function shortName(platform: string): string {
   width: 88rpx;
   height: 88rpx;
   border-radius: 12rpx;
-}
-.lite-badge {
-  position: absolute;
-  left: 0;
-  bottom: 0;
-  padding: 2rpx 10rpx;
-  border-radius: 0 8rpx 0 12rpx;
-}
-.lite-badge-text {
-  font-size: 18rpx;
 }
 .lite-info {
   flex: 1;
@@ -235,8 +217,6 @@ function shortName(platform: string): string {
 .lite-actions-wide { min-width: 78px; }
 .lite-heart-wide { margin-right: 12px; }
 .lite-more-wide { margin-right: 0; }
-.lite-badge-wide { padding: 2px 6px; border-radius: 0 4px 0 6px; }
-.lite-badge-text-wide { font-size: 11px; }
 /* 桌面指针反馈：只在宽屏启用（手机上 hover-class 会在点按瞬间闪一下，观感不对） */
 .lite-row-hover { background-color: rgba(255, 255, 255, 0.06); }
 </style>
