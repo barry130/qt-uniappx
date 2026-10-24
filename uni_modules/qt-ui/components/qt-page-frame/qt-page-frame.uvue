@@ -153,6 +153,29 @@
             />
           </view>
           <view class="qt-page-frame-pane" :class="showSettingsSplit && isSettingsOverview ? 'qt-page-frame-pane-empty' : ''">
+            <!-- 宽屏药丸行：宽屏不画标题栏（用户定稿），但排行榜/搜索页的音源切换 tab
+                 还是要有地方住——单独挂在内容列顶部。与手机档标题栏里的药丸行共用同一套
+                 测量/居中/降档机制；两档互斥渲染，.qt-page-frame-chip-row 节点全场唯一。 -->
+            <scroll-view
+              v-if="layout.isWide && headerChips.length > 0"
+              class="qt-page-frame-chip-row qt-page-frame-chipbar-wide"
+              :style="chipRowStyle"
+              direction="horizontal"
+              :show-scrollbar="false"
+              :scroll-left="chipScrollLeft"
+              :scroll-with-animation="true"
+              @scroll="onChipRowScroll"
+            >
+              <view class="qt-page-frame-chip-inner" :style="'width:' + chipContentWidth + 'px;' + chipRowInline">
+                <view
+                  v-for="(chipText, chipIndex) in headerChips"
+                  :key="'qt-frame-widechip-' + chipIndex"
+                  class="qt-page-frame-chip qt-page-frame-barchip"
+                  :style="chipBoxInline"
+                  @click="onChipTap(chipIndex)"
+                ><text class="qt-page-frame-chip-text" :style="barChipTextStyle(chipIndex)">{{ chipText }}</text></view>
+              </view>
+            </scroll-view>
             <slot v-if="!showSettingsSplit || !isSettingsOverview" />
             <view v-if="showSettingsSplit && isSettingsOverview" class="qt-page-frame-empty-pane" />
           </view>
@@ -552,6 +575,11 @@ const CHIP_FONT_TIERS_RPX: number[] = [30, 28, 26];
  *  换算用 layout.windowWidth（与 CSS rpx 同源，见 use-qt-layout 的 qtRpx 注释），
  *  这样窗口一变宽度，预测档位就跟着重算。 */
 const chipRowAvailPx = computed((): number => {
+  // 宽屏宿主：药丸行住在内容列顶部，没有返回键/动作图标挤占，可用宽 ≈ 内容列 − 左右内边距
+  if (layout.isWide) {
+    const w = contentWidthPx.value - 48;
+    return w > 0 ? w : 0;
+  }
   const u = layout.windowWidth / 750;
   let w = layout.windowWidth - (88 + 8 + 24) * u;
   const acts = props.headerActions;
@@ -606,8 +634,12 @@ const chipScrollLeft = ref(0);
 let chipLeftNow = 0;
 // 宽度实测后显式给；高度同理按字号算（固定 64rpx 在大字号档下会把 tab 上下裁掉）
 const chipRowStyle = computed((): string => {
-  const w = chipRowWidth.value > 0 ? "width:" + chipRowWidth.value + "px;" : "flex:1;";
-  return w + "height:" + chipRowRpx.value + "rpx;";
+  // 宽屏宿主不在标题栏的 flex 行里（首帧没有 flex:1 可吃的横向上下文，列容器里
+  // flex:1 会错拉成纵向），首帧直接给内容列宽的显式 px，等 measureChipRow 实测覆盖；
+  // 窄屏维持 flex:1（mid 格横向 flex 上下文）。
+  let w = chipRowWidth.value;
+  if (w <= 0 && layout.isWide) w = contentWidthPx.value;
+  return (w > 0 ? "width:" + w + "px;" : "flex:1;") + "height:" + chipRowRpx.value + "rpx;";
 });
 let chipMeasureTimer = 0;
 
@@ -1087,6 +1119,11 @@ const snavStyle = computed((): string => {
   height: 64rpx;
   flex-direction: row;
   align-items: center;
+}
+/* 宽屏宿主：药丸行挂在内容列顶部（宽屏无标题栏），左右与页面内容对齐留 24px */
+.qt-page-frame-chipbar-wide {
+  flex-shrink: 0;
+  padding: 2px 24px 6px;
 }
 /* scroll-view 的内容行：显式 px 宽由脚本给（chipContentWidth 估算），必须成行 */
 .qt-page-frame-chip-inner {

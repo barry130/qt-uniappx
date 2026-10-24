@@ -89,12 +89,14 @@ const theme = useThemeStore();
 // 预热页面树；旧的 qt-page-preload.ts 已删除 —— uni.preloadPage 在 uni-app x 不支持，
 // 就地托管后宽屏连预热的目标都不存在了）。
 const compact = computed((): boolean => layout.sizeClass == "medium");
-/** 固定在窗口左缘（不随 qt-page-frame 限宽居中），上下贴边撑满页面区 */
+/** 固定在窗口左缘（不随 qt-page-frame 限宽居中），高度显式撑满窗口 */
 const railStyle = computed((): string => {
   // 恒加状态栏高度：全站 navigationStyle=custom 后页面区从窗口顶缘起，
   // rail 不主动让位就会被状态栏文字压住（历史实现只在发现的 3 个页面让位）。
   const sb = qtStatusBarPx();
-  return "padding-top:" + sb + "px;background-color:" + theme.skin.surfaceInset + ";border-right-color:" + theme.skin.divider + ";";
+  // 高度必须显式给 px：position:fixed 下 top+bottom 双锚拉伸在 Vapor 不可靠
+  // （2026-10-24 宽屏 rail 整条消失的根因，同 stats hero 底图），塌成高 0 就不可见
+  return "padding-top:" + sb + "px;height:" + layout.windowHeight + "px;background-color:" + theme.skin.surfaceInset + ";border-right-color:" + theme.skin.divider + ";";
 });
 
 type NavItem = { page: string; label: string; icon: string };
@@ -162,7 +164,6 @@ function goPage(page: string): void {
   position: fixed;
   left: 0;
   top: 0;
-  bottom: 0;
   z-index: 900;
   width: 208px;
   flex-shrink: 0;
