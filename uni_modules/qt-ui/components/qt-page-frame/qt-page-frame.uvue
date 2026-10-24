@@ -153,29 +153,47 @@
             />
           </view>
           <view class="qt-page-frame-pane" :class="showSettingsSplit && isSettingsOverview ? 'qt-page-frame-pane-empty' : ''">
-            <!-- 宽屏药丸行：宽屏不画标题栏（用户定稿），但排行榜/搜索页的音源切换 tab
-                 还是要有地方住——单独挂在内容列顶部。与手机档标题栏里的药丸行共用同一套
-                 测量/居中/降档机制；两档互斥渲染，.qt-page-frame-chip-row 节点全场唯一。 -->
-            <scroll-view
-              v-if="layout.isWide && headerChips.length > 0"
-              class="qt-page-frame-chip-row qt-page-frame-chipbar-wide"
-              :style="chipRowStyle"
-              direction="horizontal"
-              :show-scrollbar="false"
-              :scroll-left="chipScrollLeft"
-              :scroll-with-animation="true"
-              @scroll="onChipRowScroll"
+            <!-- 宽屏药丸行区域：宽屏不画标题栏（用户定稿），排行榜/搜索页的音源切换 tab
+                 住在内容列顶部，右侧留给页面塞进来的动作按钮（搜索页的「播放全部」，
+                 仅歌曲 tab 传非空文案）。同排布局：按钮 flex-shrink:0 先占位，药丸行
+                 flex:1 吃剩余宽——横向 flex 上下文由本区域容器提供，药丸行不再需要
+                 首帧显式 px 宽（按钮随类型 tab 显隐，实测宽会过期）。两档互斥渲染，
+                 .qt-page-frame-chip-row 节点全场唯一。 -->
+            <view
+              v-if="layout.isWide && (headerChips.length > 0 || paneHeadText.length > 0)"
+              class="qt-page-frame-chipbar-area"
             >
-              <view class="qt-page-frame-chip-inner" :style="'width:' + chipContentWidth + 'px;' + chipRowInline">
-                <view
-                  v-for="(chipText, chipIndex) in headerChips"
-                  :key="'qt-frame-widechip-' + chipIndex"
-                  class="qt-page-frame-chip qt-page-frame-barchip"
-                  :style="chipBoxInline"
-                  @click="onChipTap(chipIndex)"
-                ><text class="qt-page-frame-chip-text" :style="barChipTextStyle(chipIndex)">{{ chipText }}</text></view>
+              <scroll-view
+                v-if="headerChips.length > 0"
+                class="qt-page-frame-chip-row"
+                :style="chipRowStyle"
+                direction="horizontal"
+                :show-scrollbar="false"
+                :scroll-left="chipScrollLeft"
+                :scroll-with-animation="true"
+                @scroll="onChipRowScroll"
+              >
+                <view class="qt-page-frame-chip-inner" :style="'width:' + chipContentWidth + 'px;' + chipRowInline">
+                  <view
+                    v-for="(chipText, chipIndex) in headerChips"
+                    :key="'qt-frame-widechip-' + chipIndex"
+                    class="qt-page-frame-chip qt-page-frame-barchip"
+                    :style="chipBoxInline"
+                    @click="onChipTap(chipIndex)"
+                  ><text class="qt-page-frame-chip-text" :style="barChipTextStyle(chipIndex)">{{ chipText }}</text></view>
+                </view>
+              </scroll-view>
+              <view
+                v-if="paneHeadText.length > 0"
+                class="qt-page-frame-pane-btn"
+                :style="'background-color:' + theme.skin.accentSoft + ';'"
+                @click="onPaneHeadTap"
+              >
+                <QtIcon name="play" :size="12" :color="theme.skin.accent" />
+                <text class="qt-page-frame-pane-btn-text" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 15)">{{ paneHeadText }}</text>
+                <text v-if="paneHeadCount >= 0" class="qt-page-frame-pane-btn-count" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 12)">({{ paneHeadCount }})</text>
               </view>
-            </scroll-view>
+            </view>
             <slot v-if="!showSettingsSplit || !isSettingsOverview" />
             <view v-if="showSettingsSplit && isSettingsOverview" class="qt-page-frame-empty-pane" />
           </view>
@@ -238,7 +256,7 @@ import {
   qtIsWideToolHost,
 } from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
 import { qtSwitchTab } from "@/uni_modules/qt-ui/composables/qt-nav";
-import { qtFont, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFont, qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useSourceUpdateStore } from "@/stores/source-update";
 import { usePlayerStore } from "@/stores/player";
 import { useDisclaimerStore } from "@/stores/disclaimer";
@@ -301,6 +319,13 @@ const props = defineProps<{
   headerChipTexts?: string[];
   /** 各药丸的选中态（与 headerChipTexts 按下标对应）；选中 = accent 底 */
   headerChipActives?: boolean[];
+  /**
+   * 宽屏药丸行右侧的动作按钮文案（空串 = 不渲染）。搜索页把「播放全部」提到
+   * 顶部药丸行右端：仅歌曲 tab 且有结果时传非空，切走类型自动消失。
+   */
+  paneHeadText?: string;
+  /** 动作按钮的计数（渲染成 (88) 这种）；< 0 不显示 */
+  paneHeadCount?: number;
 }>();
 
 const emit = defineEmits<{
@@ -314,6 +339,8 @@ const emit = defineEmits<{
   headerSearchConfirm: [];
   /** 点了第 index 个药丸 */
   headerChipTap: [index: number];
+  /** 点了药丸行右侧的动作按钮（paneHeadText 非空时可见） */
+  paneHeadTap: [];
 }>();
 
 const theme = useThemeStore();
@@ -574,6 +601,12 @@ function barChipTextStyle(index: number): string {
 function onSearchConfirm(): void {
   emit("headerSearchConfirm");
 }
+/** 药丸行右侧动作按钮：文案与计数由页面给（空串时不渲染） */
+const paneHeadText = computed((): string => props.paneHeadText != null ? props.paneHeadText : "");
+const paneHeadCount = computed((): number => props.paneHeadCount != null ? props.paneHeadCount : -1);
+function onPaneHeadTap(): void {
+  emit("paneHeadTap");
+}
 function onChipTap(index: number): void {
   emit("headerChipTap", index);
   // 点谁就立刻居中谁，不等 props 回传：父组件把 actives 更新回来再靠 watch 兜底，
@@ -668,12 +701,12 @@ const chipScrollLeft = ref(0);
 let chipLeftNow = 0;
 // 宽度实测后显式给；高度同理按字号算（固定 64rpx 在大字号档下会把 tab 上下裁掉）
 const chipRowStyle = computed((): string => {
-  // 宽屏宿主不在标题栏的 flex 行里（首帧没有 flex:1 可吃的横向上下文，列容器里
-  // flex:1 会错拉成纵向），首帧直接给内容列宽的显式 px，等 measureChipRow 实测覆盖；
-  // 窄屏维持 flex:1（mid 格横向 flex 上下文）。
-  let w = chipRowWidth.value;
-  if (w <= 0 && layout.isWide) w = contentWidthPx.value;
-  return (w > 0 ? "width:" + w + "px;" : "flex:1;") + "height:" + (layout.isWide ? WIDE_CHIP_ROW_PX + "px;" : chipRowRpx.value + "rpx;");
+  // 宽屏在药丸行区域容器（横向 flex 行）里，flex:1 吃右侧动作按钮以外的剩余宽；
+  // 不能给显式 px 宽：按钮随页面状态显隐，实测宽会过期（量宽不会跟着重跑）。
+  // 窄屏维持 flex:1（mid 格横向 flex 上下文），实测后给显式宽防抖。
+  if (layout.isWide) return "flex:1;height:" + WIDE_CHIP_ROW_PX + "px;";
+  const w = chipRowWidth.value;
+  return (w > 0 ? "width:" + w + "px;" : "flex:1;") + "height:" + chipRowRpx.value + "rpx;";
 });
 let chipMeasureTimer = 0;
 
@@ -1155,9 +1188,27 @@ const snavStyle = computed((): string => {
   align-items: center;
 }
 /* 宽屏宿主：药丸行挂在内容列顶部（宽屏无标题栏），左右与页面内容对齐留 24px */
-.qt-page-frame-chipbar-wide {
+.qt-page-frame-chipbar-area {
   flex-shrink: 0;
+  flex-direction: row;
+  align-items: center;
   padding: 2px 24px 6px;
+}
+.qt-page-frame-pane-btn {
+  flex-shrink: 0;
+  margin-left: 12px;
+  height: 30px;
+  padding: 0 14px;
+  border-radius: 15px;
+  flex-direction: row;
+  align-items: center;
+}
+.qt-page-frame-pane-btn-text {
+  margin-left: 6px;
+  font-weight: 600;
+}
+.qt-page-frame-pane-btn-count {
+  margin-left: 4px;
 }
 /* scroll-view 的内容行：显式 px 宽由脚本给（chipContentWidth 估算），必须成行 */
 .qt-page-frame-chip-inner {

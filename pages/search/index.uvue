@@ -4,6 +4,9 @@
        宽屏没有标题栏（框架约定），所以宽屏保留原来的页内搜索行 + 聚合行。 -->
   <qt-page-frame
     width-kind="list"
+    :pane-head-text="widePlayAllText"
+    :pane-head-count="songs.length"
+    @pane-head-tap="playAllSongs"
     :header-searching="true"
     :header-search-value="keyword"
     header-search-placeholder="搜索"
@@ -63,20 +66,6 @@
     <template v-else>
       <view class="type-row" :class="layout.isWide ? 'type-row-wide' : ''" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';'">
         <qt-segmented :list="typeLabels" v-model="typeIndex" @change="switchType" />
-      </view>
-      <!-- 宽屏播放全部：常驻列表上方（窄屏仍是列表首项）。聚合开关不再单独占行——
-           顶部药丸行的「聚合搜索」就是同一开关（onHeaderChipTap），内容区重复了 -->
-      <view
-        v-if="type == 'song' && layout.isWide && songs.length > 0 && !searching"
-        class="play-all-row" :class="layout.isWide ? 'play-all-row-wide' : ''"
-        :style="'background-color:' + theme.skin.surfaceMuted + ';border-bottom-color:' + theme.skin.divider + ';'"
-        @click="playAllSongs"
-      >
-        <view class="play-all-chip" :class="layout.isWide ? 'play-all-chip-wide' : ''" :style="'background-color:' + theme.skin.accentSoft + ';'">
-          <QtIcon name="play" :size="12" :color="theme.skin.accent" />
-        </view>
-        <text class="play-all-text" :class="layout.isWide ? 'play-all-text-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 16)">播放全部</text>
-        <text class="play-all-count" :class="layout.isWide ? 'play-all-count-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13)">({{ songs.length }})</text>
       </view>
       <!-- 全部：四类型分节预览（主流搜索默认页形态），各节「查看更多」跳对应 tag -->
       <scroll-view v-show="type == 'all'" class="results" direction="vertical" :show-scrollbar="false">
@@ -419,6 +408,12 @@ function onHeaderInput(value: string): void {
 function onHeaderClose(): void {
   keyword.value = "";
 }
+/**
+ * 宽屏药丸行右侧「播放全部」按钮的文案：仅歌曲 tab 且有结果时非空（空 = 不渲染）。
+ * 框架只在宽屏画药丸行区域；窄屏的播放全部仍是列表首项。
+ */
+const widePlayAllText = computed((): string => type.value == "song" && songs.value.length > 0 && !searching.value ? "播放全部" : "");
+
 /** 标题栏药丸文案：[当前音源, 聚合搜索]（宽屏没有标题栏，用不到） */
 // 标题栏药丸宽度有限：音源用简写（网易/QQ/酷我…），全名放下会太挤
 const headerChips = computed((): string[] => [platformShort(sourceStore.current), "聚合搜索"]);
