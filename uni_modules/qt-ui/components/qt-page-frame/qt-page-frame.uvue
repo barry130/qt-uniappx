@@ -546,17 +546,29 @@ const chipRowRpx = computed((): number => {
   return h > 64 ? h : 64;
 });
 const chipBoxInline = computed((): string => {
+  // 宽屏：类里的 padding/margin/radius 是 rpx（宽窗口膨胀数倍），内联整体换成桌面口径
+  if (layout.isWide) {
+    return "height:" + WIDE_CHIP_BOX_PX + "px;padding:0 " + WIDE_CHIP_PADX_PX + "px;margin-left:" + WIDE_CHIP_GAP_PX
+      + "px;border-radius:" + Math.round(WIDE_CHIP_BOX_PX / 2) + "px;background-color:transparent;border-width:0;";
+  }
   return "height:" + chipBoxRpx.value + "rpx;background-color:transparent;border-width:0;";
 });
 const chipRowInline = computed((): string => {
-  return "height:" + chipRowRpx.value + "rpx;";
+  return "height:" + (layout.isWide ? WIDE_CHIP_ROW_PX + "px;" : chipRowRpx.value + "rpx;");
 });
 
 function barChipTextStyle(index: number): string {
   const on = chipOn(index);
-  return "color:" + (on ? theme.skin.accent : theme.skin.textMuted)
-    + ";font-weight:" + (on ? "600" : "400")
-    + ";line-height:" + chipLineRpx.value + "rpx;"
+  const base = "color:" + (on ? theme.skin.accent : theme.skin.textMuted)
+    + ";font-weight:" + (on ? "600" : "400") + ";";
+  // 宽屏走固定 px（rpx 在宽窗口膨胀数倍，真机 1920 宽下 28rpx ≈ 72px 巨字）；
+  // 降档机制（CHIP_FONT_TIERS_RPX）是窄屏标题栏「塞进一行」的事，宽屏宽度富余不参与。
+  if (layout.isWide) {
+    const s = fontScale.scale;
+    return base + "font-size:" + Math.round(WIDE_CHIP_FONT_PX * s * 100) / 100
+      + "px;line-height:" + Math.round(WIDE_CHIP_LINE_PX * s * 100) / 100 + "px;";
+  }
+  return base + "line-height:" + chipLineRpx.value + "rpx;"
     + qtFont(chipFontRpx.value);
 }
 function onSearchConfirm(): void {
@@ -577,6 +589,15 @@ const chipContentMeasured = ref(0);
 const chipLefts = ref<number[]>([]);
 // 标题栏 tab 字号档（rpx 基准，qtFont 会再乘全局字号倍率）。
 // 从大到小排；预测/实测都只在这三档里取，落到最小档仍放不下才靠横滑。
+/** 宽屏药丸行的桌面口径（固定 px）：rpx 体系只服务窄屏标题栏——窗口宽 1920 时
+ *  1rpx ≈ 2.56px，28rpx 字号渲染成 72px 巨字（真机截图实证：搜索/排行榜的音源
+ *  tab 在宽屏巨大突兀）。宽屏与窄屏共用测量/居中/降档机制，尺寸在这里分档。 */
+const WIDE_CHIP_ROW_PX = 40;
+const WIDE_CHIP_BOX_PX = 30;
+const WIDE_CHIP_FONT_PX = 14;
+const WIDE_CHIP_LINE_PX = 20;
+const WIDE_CHIP_PADX_PX = 14;
+const WIDE_CHIP_GAP_PX = 4;
 const CHIP_FONT_TIERS_RPX: number[] = [30, 28, 26];
 
 /** 可用行宽（px，与 layout.windowWidth 同单位）：窗口宽 − 返回键 − 栏内边距 − 右侧动作。
@@ -600,9 +621,12 @@ const chipRowAvailPx = computed((): number => {
 /** 单颗 tab 在给定基准字号下的估算宽（px）：CJK ≈ 1em，ASCII ≈ 0.56em，
  *  加左右内边距（10rpx×2）与左边距（6rpx）。字号变了估算值也跟着变。 */
 function chipEstWidthAt(label: string, baseRpx: number): number {
+  // 宽屏字号走固定 px（与 barChipTextStyle 的宽屏分支同源），内边距同口径；
+  // 估算只服务首帧初值/居中兜底，真实内容宽由 measureChipRow 实测覆盖。
+  const wide = layout.isWide;
   const rpxPx = layout.windowWidth / 750;
-  const fontPx = baseRpx * fontScale.scale * rpxPx;
-  let w = (10 + 10 + 6) * rpxPx;
+  const fontPx = wide ? WIDE_CHIP_FONT_PX * fontScale.scale : baseRpx * fontScale.scale * rpxPx;
+  let w = wide ? (WIDE_CHIP_PADX_PX * 2 + WIDE_CHIP_GAP_PX) : (10 + 10 + 6) * rpxPx;
   for (let c = 0; c < label.length; c++) {
     w += label.charCodeAt(c) > 255 ? fontPx : fontPx * 0.56;
   }
@@ -649,7 +673,7 @@ const chipRowStyle = computed((): string => {
   // 窄屏维持 flex:1（mid 格横向 flex 上下文）。
   let w = chipRowWidth.value;
   if (w <= 0 && layout.isWide) w = contentWidthPx.value;
-  return (w > 0 ? "width:" + w + "px;" : "flex:1;") + "height:" + chipRowRpx.value + "rpx;";
+  return (w > 0 ? "width:" + w + "px;" : "flex:1;") + "height:" + (layout.isWide ? WIDE_CHIP_ROW_PX + "px;" : chipRowRpx.value + "rpx;");
 });
 let chipMeasureTimer = 0;
 
