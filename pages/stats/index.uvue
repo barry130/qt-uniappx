@@ -3,14 +3,14 @@
   <view class="page">
     <scroll-view class="scroll" direction="vertical" :scroll-top="scrollTop" @scroll="onListScroll">
       <!-- 紧凑报告封面，说明从右上角展开；底图显式绑定像素宽度。 -->
-      <view class="hero" :class="layout.isWide ? 'hero-wide' : ''" :style="'background-color:' + heroBaseColor + ';'">
+      <view id="stats-hero" class="hero" :class="layout.isWide ? 'hero-wide' : ''" :style="'background-color:' + heroBaseColor + ';'">
         <image
           v-if="heroCover != ''"
           class="hero-bg"
-          :style="'width:' + heroBgWidth + 'px;'"
+          :style="'width:' + heroBgWidth + 'px;height:' + heroBgHeight + 'px;'"
           :src="heroCover" mode="aspectFill"
         />
-        <view v-if="heroCover != ''" class="hero-scrim"></view>
+        <view v-if="heroCover != ''" class="hero-scrim" :style="'width:' + heroBgWidth + 'px;height:' + heroBgHeight + 'px;'"></view>
         <view class="hero-body">
           <view class="hero-toolbar">
             <text :style="('color:' + heroMutedColor + ';') + qtFontDual(21, 12)">全部听歌记录</text>
@@ -308,6 +308,8 @@ function openDetail(kind: string, target: string): void { detailKind.value = kin
 function closeDetail(): void { detailKind.value = ""; detailTarget.value = ""; }
 onBackPress((): boolean => { if (detailKind.value == "") return false; closeDetail(); return true; });
 onShow(() => {
+  // 回页重量 hero 实高：改完字号/旋转后回来底图要跟上新高度
+  measureHeroHeight();
   stats.load(player.history, player.playCounts).then(async () => {
     await stats.flush();
     // 近 30 天可能已经有一部分日子被备份进文件，进页面先把窗口补齐再渲染。
@@ -602,6 +604,27 @@ const heroTagBg = computed((): string => {
 const heroSub = computed((): string => historyCount.value > 0 ? "把听过的歌，重新听一遍" : "还没有开始记录");
 const heroTag = computed((): string => "已记录 " + formatCount(historyCount.value) + " 首歌");
 
+// 底图与遮罩要在 Vapor 下铺满整卡：绝对定位的 top+bottom 双锚拉伸与百分比高度都不可靠
+// （qt-batch-bar 命中区同款教训），只能给显式像素——宽度按窗口算，高度量一次卡片实高。
+const heroBgHeight = ref(0);
+let heroMeasureSeq = 0;
+function measureHeroHeight(): void {
+  if (heroCover.value == "") return;
+  const seq = ++heroMeasureSeq;
+  uni.createSelectorQuery()
+    .select("#stats-hero")
+    .boundingClientRect((rect: UniNodeInfo | null) => {
+      // 只认最后一次测量：窗口宽度连续变化时，先回来的旧结果直接丢弃
+      if (seq != heroMeasureSeq) return;
+      if (rect != null && rect.height > 0) heroBgHeight.value = Math.round(rect.height);
+    })
+    .exec();
+}
+// 卡片高度由内容行撑出，与封面无关；封面就位后才渲染底图，此刻量准。
+watch(heroCover, () => { measureHeroHeight(); });
+// 折叠/旋转/分屏改窗口 → hero 宽高都变；进页/回页（含改完字号回来）→ onShow 里量。
+watch(() => layout.windowWidth, () => { measureHeroHeight(); });
+
 async function playSong(song: Song): Promise<void> {
   if (loadingKey.value != "") return;
   loadingKey.value = reportSongKey(song);
@@ -619,8 +642,8 @@ async function playSong(song: Song): Promise<void> {
 
 /* 紧凑封面与统计入口 */
 .hero { margin:24rpx 24rpx 0; padding:28rpx 32rpx 30rpx; border-radius:32rpx; overflow:hidden; position:relative; }
-.hero-bg { position:absolute; left:0; top:0; bottom:0; }
-.hero-scrim { position:absolute; left:0; top:0; right:0; bottom:0; background-color:rgba(8,11,20,0.54); }
+.hero-bg { position:absolute; left:0; top:0; }
+.hero-scrim { position:absolute; left:0; top:0; background-color:rgba(8,11,20,0.54); }
 .hero-body { position:relative; }
 .hero-title { margin-top:16rpx; font-weight:700; }
 .hero-sub { margin-top:12rpx; }
