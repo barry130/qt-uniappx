@@ -246,6 +246,19 @@ export async function fetchCapabilities(agentCode: string): Promise<AiCapabiliti
   return normalizeCapabilities(res as UTSJSONObject);
 }
 
+/** 当前用户在指定智能体下的会话列表（后端按更新时间倒序） */
+export async function fetchConversations(agentCode: string): Promise<AiConversation[]> {
+  const data = new UTSJSONObject();
+  data.set("agentCode", agentCode);
+  const res = await apiRequest("app/ai/conversations", data, "GET", true);
+  const list = listOf(res as any);
+  const out: AiConversation[] = [];
+  for (let i = 0; i < list.length; i++) {
+    out.push(normalizeConversation(list[i] as UTSJSONObject));
+  }
+  return out;
+}
+
 export async function createConversation(agentCode: string, title: string): Promise<AiConversation> {
   const body = new UTSJSONObject();
   body.set("agentCode", agentCode);
