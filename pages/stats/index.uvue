@@ -141,7 +141,7 @@
             <text class="artist-initial" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(26, 14)">{{ artistInitial(item.name) }}</text>
           </view>
           <view class="song-info" :class="layout.isWide ? 'song-info-wide' : ''">
-            <text class="song-name" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(25, 14)" :max-lines="1">{{ item.name }}</text>
+            <text class="song-name" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(25, 14)" :max-lines="1">{{ dailyDisplayName(item) }}</text>
             <text class="song-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 11)" :max-lines="1">{{ dailyMeta(item) }}</text>
           </view>
           <text class="song-count" :class="layout.isWide ? 'song-count-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(20, 11)">{{ item.count }} 次</text>
@@ -507,6 +507,13 @@ function dailyMeta(entry: ReportEntry): string {
   if (dailyKind.value == "songs") return (entry.song != null ? entry.song.singer : "") + " · " + reportDuration(entry.seconds);
   if (dailyKind.value == "sources") return entry.tracks + " 首歌 · " + reportDuration(entry.seconds);
   return entry.tracks + " 首歌 · " + reportDuration(entry.seconds);
+}
+
+// 音源行的 name 是归并 id（wyy/qq），直接渲染就是英文短码；展示走注册表中文全称，
+// 兜底与 qt-listen-detail 的 sourceLabel 一致（注册表没认出的 id 退大写）。
+function dailyDisplayName(entry: ReportEntry): string {
+  if (dailyKind.value != "sources") return entry.name;
+  return sourceRegistry.label(entry.id) || entry.id.toUpperCase();
 }
 function openDailyRow(entry: ReportEntry): void { openDetail(dailyKind.value, entry.id); }
 // 这三个切换点都要写在模板里能取到的地方（<script setup> 顶层即可）。
