@@ -1,31 +1,60 @@
 <template>
   <view
     class="seg"
-    :class="layout.isWide ? 'seg-wide' : ''"
+    :class="[layout.isWide ? 'seg-wide' : '']"
     :style="'background-color:' + theme.skin.surfaceMuted + ';'"
   >
-    <view
-      v-for="(item, index) in list"
-      :key="index"
-      class="seg-item"
-      :class="layout.isWide ? 'seg-item-wide' : ''"
-      :style="itemStyle(index)"
-      @click="select(index)"
-    >
-      <text
-        class="seg-text"
-        :class="layout.isWide ? 'seg-text-wide' : ''"
-        :style="'color:' + (modelValue == index ? theme.skin.accent : theme.skin.textSubtle) + ';'"
-        >{{ item }}</text
+    <view v-if="!scrollable" class="seg-flex">
+      <view
+        v-for="(item, index) in list"
+        :key="index"
+        class="seg-item"
+        :class="layout.isWide ? 'seg-item-wide' : ''"
+        :style="itemStyle(index)"
+        @click="select(index)"
       >
+        <text
+          class="seg-text"
+          :class="layout.isWide ? 'seg-text-wide' : ''"
+          :style="('color:' + (modelValue == index ? theme.skin.accent : theme.skin.textSubtle) + ';') + qtFontDual(26, 14)"
+          >{{ item }}</text
+        >
+      </view>
     </view>
+    <scroll-view
+      v-else
+      class="seg-scrolllist"
+      direction="horizontal"
+      :show-scrollbar="false"
+      :scroll-left="scrollLeftPx"
+      :style="'height:' + rowHeightPx + 'px;'"
+    >
+      <view class="seg-auto" :style="'width:' + autoRowWidth + 'px;'">
+        <view
+          v-for="(item, index) in list"
+          :key="index"
+          class="seg-item seg-item-auto"
+          :class="layout.isWide ? 'seg-item-wide seg-item-auto-wide' : ''"
+          :style="itemStyle(index)"
+          @click="select(index)"
+        >
+          <text
+            class="seg-text"
+            :class="layout.isWide ? 'seg-text-wide' : ''"
+            :style="('color:' + (modelValue == index ? theme.skin.accent : theme.skin.textSubtle) + ';') + qtFontDual(26, 14)"
+            >{{ item }}</text
+          >
+        </view>
+      </view>
+    </scroll-view>
   </view>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 const props = defineProps<{
   list: string[];
   modelValue: number;
@@ -34,12 +63,109 @@ const props = defineProps<{
    * 只有两个短标签时（如「歌曲卡片 / 歌词卡片」）文字会贴在一起，页面可把它调大。
    */
   itemGap?: number;
+  /**
+   * 是否允许横向滚动。默认 false：各 tag 均分整行宽度（flex:1），适合 2-4 个固定短标签。
+   * true：容器横向可滑动、每项按内容自适应宽度（flex:none + 固定左右内边距），
+   * 适合标签数量不定、内容长度不固定的场景（如音源数量随数据包变化）。
+   */
+  scrollable?: boolean;
 }>();
 const layout = useQtLayout();
 const theme = useThemeStore();
 const emit = defineEmits<{ "update:modelValue": [value: number]; change: [value: number] }>();
 
 const itemGap = computed((): number => props.itemGap != null ? props.itemGap! : 0);
+
+/** rpx → px 的窗口换算单位（与 uni-app x 的 rpx 定义一致） */
+const unit = computed((): number => layout.windowWidth / 750);
+/** 单个 tag 左右内边距合计（px）：窄屏 24rpx×2，宽屏 12px×2，与 .seg-item-auto 对齐 */
+const autoPadPx = computed((): number => layout.isWide ? 24 : Math.ceil(48 * unit.value));
+/** tag 行高（px）：必须与 .seg-item / .seg-item-wide 的 height 一致 */
+const rowHeightPx = computed((): number => layout.isWide ? 36 : Math.ceil(60 * unit.value));
+
+/**
+ * 预估单个标签的文字宽度（px）。中文按 1.06 字宽、非中文按 0.82 字宽估算。
+ *
+ * 系数来自真机实测反推（HarmonyOS Mate 90 Pro 1280px 宽、fontPx=44.37）：
+ * 「网易云音乐」5 个汉字实测 233px → 1.05 em/字；「QQ音乐」2 汉字 + 2 字母
+ * 实测 165px，扣掉汉字后每个字母 0.81 em。**刻意取略大的值**：估小了会让内容行
+ * 比真实文字窄，滚到最右时最后一个 tag 仍会被裁掉（这正是本组件要修的问题）。
+ */
+function labelWidthPx(text: string): number {
+  const fontPx = (layout.isWide ? 14 : 26 * unit.value) * fontScale.scale;
+  let units = 0.0;
+  for (let index = 0; index < text.length; index++) {
+    units += text.charCodeAt(index) > 127 ? 1.06 : 0.82;
+  }
+  return Math.ceil(units * fontPx);
+}
+
+/**
+ * 滚动模式的内容总宽（px）。
+ *
+ * 为什么必须显式算：原生端横向 scroll-view **不会按内容自动撑开**，而内容行
+ * .seg-auto 是 flex:none，没有确定宽度时子项会被压回可视区宽度内 —— 实测
+ * 6 个音源只渲染出 4 个，第 5 个被裁在卡片右边缘（同 playlists 页 cat-rows、
+ * theme 页 skin-row 的既有处理）。
+ */
+const autoRowWidth = computed((): number => {
+  let sum = 0;
+  const items = props.list;
+  for (let index = 0; index < items.length; index++) {
+    sum += labelWidthPx(items[index]) + autoPadPx.value + itemGap.value;
+  }
+  // 尾部补一段内边距，滚到底时最后一个 tag 不会贴着右边缘
+  return sum + autoPadPx.value;
+});
+
+/**
+ * 选中项左边缘在内容行中的偏移（px），绑定到 scroll-view 的 scroll-left。
+ *
+ * 为什么需要：外部改选中项时（进页面从 sourceStore 恢复上次音源、异步换包后重算）
+ * 内容行不会自己滚动，选中第 5/6 个音源时行仍停在起点 —— 用户看不到任何选中态，
+ * 观感与「这个包只给了 4 个音源」完全一样，正是本组件要修的那个误解。
+ *
+ * 目标值超过最大滚动量时由原生 scroll-view 自动夹到末端，所以选中最后一项也不会
+ * 在右侧留出空白。用户手动拖动不会改这个值，因此不会和手势互相打架。
+ */
+const selectedOffset = computed((): number => {
+  const items = props.list;
+  const limit = Math.min(Math.max(props.modelValue, 0), items.length);
+  let sum = 0;
+  for (let index = 0; index < limit; index++) {
+    sum += labelWidthPx(items[index]) + autoPadPx.value + itemGap.value;
+  }
+  return Math.ceil(sum);
+});
+
+/**
+ * 绑定到 scroll-view 的 scroll-left。
+ *
+ * 用 scroll-left 而不是 scroll-into-view：本仓库已在 player 页记录过 scroll-into-view
+ * 在原生端不可靠（list-item 复用会滚错位置、动画中途冻结），scroll-left / scroll-top
+ * 才是 1:1 生效的机制。
+ */
+const scrollLeftPx = ref(0);
+
+/**
+ * 用户点击时记下目标 index，用于吃掉这次选中带来的滚动。
+ *
+ * 为什么不直接用一个布尔量：父组件若没接 v-model（非受控），点击后 selectedOffset
+ * 不会变化，布尔量就永远卡在 true，把之后真正需要的外部对位也一起吞掉。记 index
+ * 并与 modelValue 比对是自愈的 —— 没更新就保持不匹配，下次外部变更照常对位。
+ */
+let userSelectedIndex = -1;
+
+// immediate：进页面时选中项可能已经是第 5/6 个（从 sourceStore 恢复上次音源），
+// 必须在首次渲染前就把 scroll-left 设成目标值，否则 scroll-view 挂载时读到 0，
+// 之后再没有外部变更来触发对位。
+watch(selectedOffset, (value: number) => {
+  if (userSelectedIndex >= 0 && userSelectedIndex == props.modelValue) {
+    userSelectedIndex = -1;
+    return;
+  }
+  scrollLeftPx.value = value;
+}, { immediate: true });
 
 /**
  * 选中态底色 + tag 间隔。
@@ -57,6 +183,7 @@ function itemStyle(index: number): string {
 
 function select(index: number): void {
   if (index == props.modelValue) return;
+  userSelectedIndex = index;
   emit("update:modelValue", index);
   emit("change", index);
 }
@@ -68,12 +195,32 @@ function select(index: number): void {
   border-radius: 999rpx;
   padding: 6rpx;
 }
+/* 均分模式的内容行：铺满整行，子项 flex:1 等分 */
+.seg-flex {
+  flex-direction: row;
+  flex: 1;
+}
+/* 滚动模式外层：占满可用宽度，横向溢出交给内部 scroll-view */
+.seg-scrolllist {
+  flex: 1;
+}
+/* 滚动模式的内容行：按内容宽度铺开，不压缩子项 */
+.seg-auto {
+  flex-direction: row;
+  flex: none;
+}
 .seg-item {
   flex: 1;
   height: 60rpx;
   justify-content: center;
   align-items: center;
   border-radius: 999rpx;
+}
+/* 滚动模式：每项按内容自适应宽度，用固定内边距留出胶囊左右留白 */
+.seg-item-auto {
+  flex: none;
+  padding-left: 24rpx;
+  padding-right: 24rpx;
 }
 .seg-text {
   font-size: 26rpx;
@@ -83,5 +230,6 @@ function select(index: number): void {
 /* 宽屏 px 覆盖（rpx 会随窗口放大，见 design.md §6.6） */
 .seg-wide { padding: 4px; }
 .seg-item-wide { height: 36px; }
+.seg-item-auto-wide { padding-left: 12px; padding-right: 12px; }
 .seg-text-wide { font-size: 14px; }
 </style>

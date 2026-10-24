@@ -5,40 +5,57 @@
       :style="panelStyle"
       @click.stop
     >
-      <view class="picker-triangle"></view>
-      <view class="picker-header">
-        <text class="picker-title">{{ title }}</text>
-        <text class="picker-header-sub">选择歌单</text>
+      <view class="picker-triangle" :class="layout.isWide ? 'picker-triangle-wide' : ''"></view>
+      <view class="picker-header" :class="layout.isWide ? 'picker-header-wide' : ''">
+        <text class="picker-title" :class="layout.isWide ? 'picker-title-wide' : ''" :style="qtFontDual(32, 16)">{{ title }}</text>
+        <text class="picker-header-sub" :class="layout.isWide ? 'picker-header-sub-wide' : ''" :style="qtFontDual(24, 12)">{{ subtitle }}</text>
       </view>
-      <scroll-view class="picker-list" direction="vertical" :show-scrollbar="false">
+      <scroll-view class="picker-list" :class="layout.isWide ? 'picker-list-wide' : ''" direction="vertical" :show-scrollbar="false">
         <view
           v-for="playlist in playlists"
           :key="playlist.id"
           class="picker-item"
+          :class="layout.isWide ? 'picker-item-wide' : ''"
           @click="togglePlaylist(playlist)"
         >
           <view class="picker-item-left">
             <image
               v-if="playlist.picUrl"
               class="picker-item-cover"
+              :class="layout.isWide ? 'picker-item-cover-wide' : ''"
               :src="playlist.picUrl"
               mode="aspectFill"
             />
-            <view v-else class="picker-item-cover placeholder">
-              <text class="picker-item-cover-text">{{ playlist.name.charAt(0) }}</text>
+            <view v-else class="picker-item-cover placeholder" :class="layout.isWide ? 'picker-item-cover-wide' : ''">
+              <text class="picker-item-cover-text" :class="layout.isWide ? 'picker-item-cover-text-wide' : ''" :style="qtFontDual(32, 16)">{{ playlist.name.charAt(0) }}</text>
             </view>
-            <text class="picker-item-name">{{ playlist.name }}</text>
+            <text class="picker-item-name" :class="layout.isWide ? 'picker-item-name-wide' : ''" :style="qtFontDual(28, 14)">{{ playlist.name }}</text>
           </view>
-          <view class="picker-item-check">
-            <view v-if="selectedPlaylistIds.includes(playlist.id)" class="picker-check-icon">
-              <QtIcon name="check" :size="28" color="#ffffff" />
+          <view class="picker-item-check" :class="layout.isWide ? 'picker-item-check-wide' : ''">
+            <view v-if="selectedPlaylistIds.includes(playlist.id)" class="picker-check-icon" :class="layout.isWide ? 'picker-check-icon-wide' : ''">
+              <QtIcon name="check" :size="layout.isWide ? 16 : 28" color="#ffffff" />
             </view>
           </view>
         </view>
       </scroll-view>
-      <view class="picker-footer">
-        <qt-button label="取消" variant="outline" size="sm" @click="close" />
-        <qt-button label="确定" variant="primary" size="sm" @click="confirm" />
+      <view class="picker-footer" :class="layout.isWide ? 'picker-footer-wide' : ''">
+        <template v-if="batchMode">
+          <input
+            class="picker-new-input"
+            :class="layout.isWide ? 'picker-new-input-wide' : ''"
+            type="text"
+            :value="newName"
+            @input="onNameInput"
+            placeholder="新建歌单"
+            :maxlength="20"
+          />
+          <qt-button label="新建" variant="secondary" size="sm" @click="submitCreate" />
+          <qt-button label="完成" variant="primary" size="sm" @click="close" />
+        </template>
+        <template v-else>
+          <qt-button label="取消" variant="outline" size="sm" @click="close" />
+          <qt-button label="确定" variant="primary" size="sm" @click="confirm" />
+        </template>
       </view>
     </view>
   </view>
@@ -49,6 +66,8 @@ import { ref, computed, watch } from 'vue';
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import type { Playlist } from '@/types/music';
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 
 const props = withDefaults(defineProps<{
   visible: boolean;
@@ -56,42 +75,87 @@ const props = withDefaults(defineProps<{
   playlists: Playlist[];
   selectedIds: string[];
   title?: string;
+  subtitle?: string;
   anchorTop?: number; // 像素坐标，来自触发元素；为空则居中偏上
+  // 批量模式：点一行不再本地增删 + 确定提交，而是 emit('toggle') 交给宿主
+  // （宿主按「整批都已在里面 → 取消收藏，否则收藏」决定增还是删），
+  // 底部换成「新建歌单输入行 + 完成」。勾选态仍由 selectedIds 驱动。
+  batchMode?: boolean;
 }>(), {
   title: '选择歌单',
+  subtitle: '选择歌单',
   anchorTop: -1,
+  batchMode: false,
 });
 
 const emit = defineEmits<{
   (e: 'update:visible', value: boolean): void;
   (e: 'confirm', selectedIds: string[]): void;
+  // 批量模式下点某一行歌单（宿主负责增/删，并通过 selectedIds 回灌勾选态）
+  (e: 'toggle', playlistId: string): void;
+  // 批量模式下点「新建」：宿主建歌单并把已选歌曲收进去
+  (e: 'create', name: string): void;
 }>();
 
+const layout = useQtLayout();
 const selectedPlaylistIds = ref<string[]>([...props.selectedIds]);
+/** 批量模式下的新建歌单名称（面板内输入行 —— uni.showModal 的 editable 输入框在 App 端不渲染） */
+const newName = ref<string>('');
 
 watch(() => props.selectedIds, (newVal) => {
   selectedPlaylistIds.value = [...newVal];
 });
 
-// 面板定位：若给了 anchorTop（px）则该点下方展开；否则屏幕约 28% 处
+/**
+ * 面板定位：若给了 anchorTop（px）则该点下方展开；否则屏幕约 28% 处。
+ *
+ * 尺寸口径（2026-10-21 修）：把面板宽度的「浮动档」按 rpx 换算，与面板内的 rpx
+ * 样式同源 —— 原来宽度写 `min(screenW - 40, 340)` 而内部字号写死 px，在 720dp
+ * 这类窗口上面板撑到 340dp、字还是 14dp，比 375dp 手机上更小。宽屏继续走固定 px
+ * 面板（rpx 在宽屏会膨胀数倍，design.md §6.6）。
+ */
 const panelStyle = computed(() => {
   const screenW = uni.getSystemInfoSync().windowWidth;
   const screenH = uni.getSystemInfoSync().windowHeight;
-  const panelW = Math.min(screenW - 40, 340);
-  const pct = screenW / 750;
+  const wide = layout.isWide;
+  const marginX = wide ? 40 : qtRpx(40);
+  const maxW = wide ? 340 : qtRpx(680);
+  const panelW = Math.min(screenW - marginX, maxW);
   const defaultY = screenH * 0.28;
-  const top = props.anchorTop >= 0 ? props.anchorTop + 10 : defaultY;
+  const top = props.anchorTop >= 0 ? props.anchorTop + (wide ? 10 : qtRpx(20)) : defaultY;
   const left = (screenW - panelW) / 2;
   return 'top:' + Math.round(top) + 'px;left:' + Math.round(left) + 'px;width:' + Math.round(panelW) + 'px;';
 });
 
 function togglePlaylist(playlist: Playlist) {
+  if (props.batchMode) {
+    // 批量模式不在本地改勾选：勾选态的真实来源是「这批歌是否已整批在该歌单里」，
+    // 只有宿主（拿到 songs 的那一层）算得出来。本地先改会和宿主回灌的值打架。
+    emit('toggle', playlist.id);
+    return;
+  }
   const index = selectedPlaylistIds.value.indexOf(playlist.id);
   if (index !== -1) {
     selectedPlaylistIds.value.splice(index, 1);
   } else {
     selectedPlaylistIds.value.push(playlist.id);
   }
+}
+
+function onNameInput(e: InputEvent): void {
+  newName.value = e.detail.value;
+}
+
+/**
+ * 批量模式「新建」：把名字交给宿主，宿主建歌单 + 把已选歌曲收进去。
+ * 这里按下即清空输入框（按钮语义就是「建这一个」）；建失败时宿主弹红字回执
+ * （空名 / 重名），用户重打一次 —— 面板内不再回传失败原因，避免多一条状态通路。
+ */
+function submitCreate(): void {
+  const name = newName.value.trim();
+  if (name.length == 0) return;
+  newName.value = '';
+  emit('create', name);
 }
 
 function confirm() {
@@ -105,6 +169,11 @@ function close() {
 </script>
 
 <style scoped>
+/*
+ * 尺寸口径（2026-10-21 统一）：手机档（!isWide）一律 rpx —— 随窗口线性放大，
+ * 720dp 上 1rpx ≈ 0.96dp；宽屏继续固定 px（rpx 在宽屏会膨胀数倍，design.md §6.6）。
+ * base 是 rpx（= 375dp 手机上原 px 值 ×2），-wide 是原 px，标准档渲染逐像素不变。
+ */
 .picker-mask {
   position: fixed;
   top: 0;
@@ -117,17 +186,24 @@ function close() {
 .picker-panel {
   position: fixed;
   background: #ffffff;
-  border-radius: 16px;
-  padding: 16px;
+  border-radius: 32rpx;
+  padding: 32rpx;
   box-sizing: border-box;
 }
 .picker-triangle {
   position: absolute;
-  top: -8px;
+  top: -16rpx;
   left: 50%;
-  margin-left: -8px;
+  margin-left: -16rpx;
   width: 0;
   height: 0;
+  border-left: 16rpx solid transparent;
+  border-right: 16rpx solid transparent;
+  border-bottom: 16rpx solid #ffffff;
+}
+.picker-triangle-wide {
+  top: -8px;
+  margin-left: -8px;
   border-left: 8px solid transparent;
   border-right: 8px solid transparent;
   border-bottom: 8px solid #ffffff;
@@ -135,28 +211,45 @@ function close() {
 .picker-header {
   flex-direction: row;
   align-items: center;
-  margin-bottom: 12px;
-  border-bottom-width: 1px;
+  margin-bottom: 24rpx;
+  border-bottom-width: 1px; border-bottom-style: solid;
   border-bottom-color: #f0f0f0;
+  padding-bottom: 20rpx;
+}
+.picker-header-wide {
+  margin-bottom: 12px;
   padding-bottom: 10px;
 }
 .picker-title {
-  font-size: 16px;
+  font-size: 32rpx;
   font-weight: 700;
   color: #191d26;
 }
+.picker-title-wide {
+  font-size: 16px;
+}
 .picker-header-sub {
-  margin-left: 8px;
-  font-size: 12px;
+  margin-left: 16rpx;
+  font-size: 24rpx;
   color: #6b7385;
 }
+.picker-header-sub-wide {
+  margin-left: 8px;
+  font-size: 12px;
+}
 .picker-list {
+  max-height: 600rpx;
+}
+.picker-list-wide {
   max-height: 300px;
 }
 .picker-item {
   flex-direction: row;
   align-items: center;
   justify-content: space-between;
+  padding: 20rpx 0;
+}
+.picker-item-wide {
   padding: 10px 0;
 }
 .picker-item-left {
@@ -166,6 +259,12 @@ function close() {
   overflow: hidden;
 }
 .picker-item-cover {
+  width: 72rpx;
+  height: 72rpx;
+  border-radius: 12rpx;
+  margin-right: 20rpx;
+}
+.picker-item-cover-wide {
   width: 36px;
   height: 36px;
   border-radius: 6px;
@@ -177,46 +276,83 @@ function close() {
   justify-content: center;
 }
 .picker-item-cover-text {
-  font-size: 16px;
+  font-size: 32rpx;
   color: #666;
 }
+.picker-item-cover-text-wide {
+  font-size: 16px;
+}
 .picker-item-name {
-  font-size: 14px;
+  font-size: 28rpx;
   color: #191d26;
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.picker-item-name-wide {
+  font-size: 14px;
+}
 .picker-item-check {
-  width: 24px;
-  height: 24px;
+  width: 48rpx;
+  height: 48rpx;
   align-items: center;
   justify-content: center;
 }
-.picker-check-icon {
+.picker-item-check-wide {
   width: 24px;
   height: 24px;
+}
+.picker-check-icon {
+  width: 48rpx;
+  height: 48rpx;
   border-radius: 50%;
   background: #4CAF50;
   color: #fff;
   align-items: center;
   justify-content: center;
+  font-size: 28rpx;
+}
+.picker-check-icon-wide {
+  width: 24px;
+  height: 24px;
   font-size: 14px;
 }
 .picker-footer {
   flex-direction: row;
   justify-content: flex-end;
+  align-items: center;
+  padding-top: 28rpx;
+}
+.picker-footer-wide {
   padding-top: 14px;
 }
-.picker-btn {
+/* 批量模式的「新建歌单」输入行：吃掉剩余宽度，右侧两个按钮固定 */
+.picker-new-input {
+  flex: 1;
+  height: 68rpx;
+  margin-right: 20rpx;
+  padding: 0 20rpx;
+  border-radius: 16rpx;
+  background: #f2f3f5;
+  font-size: 28rpx;
+  color: #191d26;
+}
+.picker-new-input-wide {
   height: 34px;
-  padding: 0 18px;
-  margin-left: 12px;
-  border-radius: 17px;
+  margin-right: 10px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+.picker-btn {
+  height: 68rpx;
+  padding: 0 36rpx;
+  margin-left: 24rpx;
+  border-radius: 34rpx;
   background: #f2f3f5;
   color: #596173;
-  font-size: 14px;
-  line-height: 34px;
+  font-size: 28rpx;
+  line-height: 68rpx;
   border: none;
   text-align: center;
 }

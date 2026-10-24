@@ -1,5 +1,5 @@
 <template>
-  <qt-page-frame :max-width="640">
+  <qt-page-frame width-kind="form">
   <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']">
     <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
       <!-- 头像：点击图片放大预览（不展示文字）；放大视图左「保存图片」右「更换图片」 -->
@@ -54,7 +54,7 @@
         </view>
       </view>
 
-      <text v-if="tip.length > 0" class="tip" :class="layout.isWide ? 'tip-wide' : ''">{{ tip }}</text>
+      <text v-if="tip.length > 0" class="tip" :class="layout.isWide ? 'tip-wide' : ''" :style="qtFontDual(23, 13)">{{ tip }}</text>
 
       <qt-button
         class="action"
@@ -76,10 +76,10 @@
           <image :src="displayAvatar" class="avatar-preview-img" mode="aspectFit" @error="onAvatarError" />
           <view class="avatar-preview-actions" :class="layout.isWide ? 'avatar-preview-actions-wide' : ''">
             <view class="avatar-preview-btn avatar-preview-btn-save" :class="layout.isWide ? 'avatar-preview-btn-wide' : ''" @click="saveImage">
-              <text class="avatar-preview-btn-text avatar-preview-btn-text-dark" :class="layout.isWide ? 'avatar-preview-btn-text-wide' : ''">保存图片</text>
+              <text class="avatar-preview-btn-text avatar-preview-btn-text-dark" :class="layout.isWide ? 'avatar-preview-btn-text-wide' : ''" :style="qtFontDual(30, 16)">保存图片</text>
             </view>
             <view class="avatar-preview-btn avatar-preview-btn-change" :class="layout.isWide ? 'avatar-preview-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @click="onChangeImage">
-              <text class="avatar-preview-btn-text avatar-preview-btn-text-light" :class="layout.isWide ? 'avatar-preview-btn-text-wide' : ''">更换图片</text>
+              <text class="avatar-preview-btn-text avatar-preview-btn-text-light" :class="layout.isWide ? 'avatar-preview-btn-text-wide' : ''" :style="qtFontDual(30, 16)">更换图片</text>
             </view>
           </view>
         </view>
@@ -88,6 +88,7 @@
 </template>
 
 <script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { ref, computed, onMounted, onUnmounted } from "vue";
 import { accountApi } from "@/services/music-api";
@@ -102,6 +103,7 @@ import {
   uploadAvatar, chooseImage, getCachedAvatar,
   DEFAULT_AVATAR_ASSET,
 } from "@/services/media";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const themeStore = useThemeStore();
 const layout = useQtLayout();
@@ -143,7 +145,6 @@ function onChangeImage(): void {
   previewOpen.value = false;
   changeAvatar();
 }
-
 
 function onNicknameInput(e: InputEvent): void {
   nickname.value = String((e.detail as any).value ?? "");
@@ -189,6 +190,7 @@ async function changeAvatar(): Promise<void> {
   if (avatarBusy.value) return;
   let path = "";
   try {
+    // chooseImage 固定 count:1（且只取第一张），所以头像一次只会选到一张
     path = await chooseImage();
   } catch (_) {
     return; // 用户取消选图，静默返回
@@ -200,12 +202,12 @@ async function changeAvatar(): Promise<void> {
     avatarUrl.value = url;
     avatarBroken.value = false;
     finishLoading(upToken);
-    uni.showToast({ title: "头像已更新", icon: "none" });
+    qtShowToast({ title: "头像已更新", icon: "none" });
     // 头像走 ticket+complete 直写服务端，不经 updateProfile；后台刷新一次 /me 缓存保持一致
     refreshMe();
   } catch (e) {
     finishLoading(upToken);
-    uni.showToast({ title: (e as Error).message || "上传失败", icon: "none", duration: 3000 });
+    qtShowToast({ title: (e as Error).message || "上传失败", icon: "none", duration: 3000 });
   } finally {
     avatarBusy.value = false;
   }
@@ -256,7 +258,7 @@ function saveToAlbum(filePath: string): Promise<void> {
 async function saveImage(): Promise<void> {
   const src = avatarUrl.value;
   if (src.length === 0) {
-    uni.showToast({ title: "暂无可保存的头像", icon: "none" });
+    qtShowToast({ title: "暂无可保存的头像", icon: "none" });
     return;
   }
   const saveToken = beginLoading("保存中...");
@@ -265,10 +267,10 @@ async function saveImage(): Promise<void> {
     if (temp.length === 0) throw new Error("图片地址无法访问，下载超时或失败");
     await saveToAlbum(temp);
     finishLoading(saveToken);
-    uni.showToast({ title: "已保存到相册", icon: "success" });
+    qtShowToast({ title: "已保存到相册", icon: "success" });
   } catch (e) {
     finishLoading(saveToken);
-    uni.showToast({ title: (e as Error).message || "保存失败", icon: "none", duration: 3000 });
+    qtShowToast({ title: (e as Error).message || "保存失败", icon: "none", duration: 3000 });
   }
 }
 
@@ -278,20 +280,20 @@ onMounted(() => {
 
 async function submit(): Promise<void> {
   if (nickname.value.trim().length == 0) {
-    uni.showToast({ title: "请输入昵称", icon: "none" });
+    qtShowToast({ title: "请输入昵称", icon: "none" });
     return;
   }
   const mail = email.value.trim();
   if (mail.length == 0) {
-    uni.showToast({ title: "请输入邮箱", icon: "none" });
+    qtShowToast({ title: "请输入邮箱", icon: "none" });
     return;
   }
   if (!isEmail(mail)) {
-    uni.showToast({ title: "请输入正确的邮箱地址", icon: "none" });
+    qtShowToast({ title: "请输入正确的邮箱地址", icon: "none" });
     return;
   }
   if (password.value.length > 0 && (password.value.length < 6 || password.value.length > 18)) {
-    uni.showToast({ title: "密码长度为 6-18 位", icon: "none" });
+    qtShowToast({ title: "密码长度为 6-18 位", icon: "none" });
     return;
   }
 
@@ -316,12 +318,12 @@ async function submit(): Promise<void> {
     uni.removeStorageSync("qt-nickname");
     uni.removeStorageSync("qt-email");
     uni.removeStorageSync("qt-avatar");
-    uni.showToast({ title: "资料已更新，请重新登录", icon: "success" });
+    qtShowToast({ title: "资料已更新，请重新登录", icon: "success" });
     editReloadTimer = setTimeout(() => {
       uni.reLaunch({ url: "/pages/login/index" });
     }, 800) as number;
   } catch (error) {
-    uni.showToast({ title: (error as Error).message || "保存失败", icon: "none" });
+    qtShowToast({ title: (error as Error).message || "保存失败", icon: "none" });
   } finally {
     loading.value = false;
   }
@@ -439,7 +441,7 @@ onUnmounted(() => {
   margin-top: 26rpx;
   padding: 0 28rpx;
   background-color: #f4f5fa;
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
   border-color: #eef0f5;
   border-radius: 22rpx;
 }
@@ -470,11 +472,6 @@ onUnmounted(() => {
 }
 .action {
   margin-top: 48rpx;
-}
-.action-text {
-  color: #ffffff;
-  font-size: 32rpx;
-  font-weight: 600;
 }
 
 /* Vapor 宽屏：px 覆盖 rpx，1600x900 下避免按窗口比例放大 2.7 倍 */
@@ -537,5 +534,4 @@ onUnmounted(() => {
 .action-wide {
   margin-top: 20px;
 }
-.action-text-wide { font-size: 15px; }
 </style>

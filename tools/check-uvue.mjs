@@ -58,6 +58,11 @@ function usedIcons(template) {
 function indirectIcons(script, defined) {
   const names = new Set();
   for (const m of script.matchAll(/return "([a-z0-9-]+)"/g)) if (defined.has(m[1])) names.add(m[1]);
+  // 标题栏动作数组（如 pages/playlists 的 headerActions = ["grid"]）：
+  // 图标名只出现在这个数组里，模板经 header-action 事件转发渲染
+  for (const m of script.matchAll(/headerActions[^=]*=\s*\[([^\]]*)\]/g)) {
+    for (const q of m[1].matchAll(/["']([a-z0-9-]+)["']/g)) if (defined.has(q[1])) names.add(q[1]);
+  }
   return names;
 }
 

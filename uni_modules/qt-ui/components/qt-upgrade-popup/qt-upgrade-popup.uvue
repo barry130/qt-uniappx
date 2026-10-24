@@ -1,14 +1,14 @@
 <template>
   <view v-if="visible" class="up-mask" @click="onMaskTap">
-    <view class="up-card" :class="layout.isWide ? 'up-card-wide' : ''" @click.stop>
+    <view class="up-card" :class="layout.isWide ? 'up-card-wide' : ''" :style="cardStyle" @click.stop>
       <view class="up-header" :class="layout.isWide ? 'up-header-wide' : ''">
         <image class="up-icon" :class="layout.isWide ? 'up-icon-wide' : ''" src="/static/icon/xxxhdpi.png" mode="aspectFill" />
-        <text class="up-title" :class="layout.isWide ? 'up-title-wide' : ''">发现新版本</text>
-        <view v-if="isBeta" class="up-badge" :class="layout.isWide ? 'up-badge-wide' : ''"><text class="up-badge-text" :class="layout.isWide ? 'up-badge-text-wide' : ''">测试版</text></view>
+        <text class="up-title" :class="layout.isWide ? 'up-title-wide' : ''" :style="qtFontDual(34, 19)">发现新版本</text>
+        <view v-if="isBeta" class="up-badge" :class="layout.isWide ? 'up-badge-wide' : ''"><text class="up-badge-text" :class="layout.isWide ? 'up-badge-text-wide' : ''" :style="qtFontDual(20, 12)">测试版</text></view>
       </view>
       <view class="up-version-row" :class="layout.isWide ? 'up-version-row-wide' : ''">
-        <text class="up-version" :class="layout.isWide ? 'up-version-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">{{ info.versionName }}</text>
-        <text v-if="sizeText.length > 0" class="up-size" :class="layout.isWide ? 'up-size-wide' : ''">{{ sizeText }}</text>
+        <text class="up-version" :class="layout.isWide ? 'up-version-wide' : ''" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(40, 23)">{{ info.versionName }}</text>
+        <text v-if="sizeText.length > 0" class="up-size" :class="layout.isWide ? 'up-size-wide' : ''" :style="qtFontDual(24, 13)">{{ sizeText }}</text>
       </view>
       <scroll-view class="up-content" :class="layout.isWide ? 'up-content-wide' : ''" direction="vertical" :show-scrollbar="false">
         <!-- 更新说明富文本：与公告内容同一渲染方式（支持 HTML/纯文本） -->
@@ -24,7 +24,7 @@
         <view class="up-progress-track">
           <view class="up-progress-bar" :style="'width:' + progress + '%;background-color:' + themeStore.skin.accent + ';'"></view>
         </view>
-        <text class="up-progress-text" :class="layout.isWide ? 'up-progress-text-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">{{ progressText }}</text>
+        <text class="up-progress-text" :class="layout.isWide ? 'up-progress-text-wide' : ''" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(24, 13)">{{ progressText }}</text>
       </view>
       <view class="up-actions" :class="layout.isWide ? 'up-actions-wide' : ''">
         <!-- 双链接规则（UPDATE_DESIGN.md §3.1）：双链接 = 直接下载(主) + 浏览器下载(次)；
@@ -34,7 +34,7 @@
           class="up-btn up-btn-cancel" :class="[layout.isWide ? 'up-btn-wide' : '', layout.isWide ? 'up-btn-cancel-wide' : '']"
           @click="cancel"
         >
-          <text class="up-btn-text-cancel" :class="layout.isWide ? 'up-btn-text-wide' : ''">以后再说</text>
+          <text class="up-btn-text-cancel" :class="layout.isWide ? 'up-btn-text-wide' : ''" :style="qtFontDual(28, 15)">以后再说</text>
         </view>
         <view
           v-if="showDirectBtn"
@@ -42,10 +42,10 @@
           :style="(showBrowserBtn ? (layout.isWide ? 'margin-right:12px;' : 'margin-right:20rpx;') : '') + 'background-color:' + themeStore.skin.accent + ';'"
           @click="update"
         >
-          <text class="up-btn-text-primary" :class="layout.isWide ? 'up-btn-text-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">{{ primaryBtnText }}</text>
+          <text class="up-btn-text-primary" :class="layout.isWide ? 'up-btn-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(28, 15)">{{ primaryBtnText }}</text>
         </view>
         <view v-if="showBrowserBtn && !downloading && !probing" class="up-btn up-btn-browser" :class="layout.isWide ? 'up-btn-wide' : ''" :style="'border-color:' + themeStore.skin.accent + ';'" @click="updateByBrowser">
-          <text class="up-btn-text-browser" :class="layout.isWide ? 'up-btn-text-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">浏览器下载</text>
+          <text class="up-btn-text-browser" :class="layout.isWide ? 'up-btn-text-wide' : ''" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(28, 15)">浏览器下载</text>
         </view>
       </view>
     </view>
@@ -53,17 +53,30 @@
 </template>
 
 <script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
 import { ref, computed, onUnmounted } from "vue";
 import QtRichText from "@/uni_modules/qt-ui/components/qt-rich-text/qt-rich-text.uvue";
 import type { AppUpdateInfo } from "@/services/upgrade";
 import { formatFileSize, resolveDownloadUrl } from "@/services/upgrade";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 
 const layout = useQtLayout();
 const themeStore = useThemeStore();
+
+/**
+ * 宽屏宽度走统一浮层契约（QT_SHEET_WIDTH.modal = 560），并夹到窗口内。
+ * 改造前写死 560px，在 640×360 之类窄横屏上会横出窗口。
+ */
+const cardStyle = computed((): string => {
+  if (!layout.isWide) return "width:600rpx;";
+  return "width:" + qtSheetWidth("modal") + "px;";
+});
 import { downloadApk, installApk, openInBrowser } from "@/services/app-native";
 import { saveToPublicMedia, ensurePublicDirPermission } from "@/uni_modules/qt-app-native";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { logMsg, logMsgErr } from "@/services/logger";
 
 /** APP 更新包公共目录（固定）：Download/QtDownload/Update */
 const UPDATE_SUB_DIR = "QtDownload/Update";
@@ -166,10 +179,10 @@ async function update(): Promise<void> {
     probing.value = false;
   }
   if (url.length == 0) {
-    uni.showToast({ title: "暂无可用下载地址", icon: "none" });
+    qtShowToast({ title: "暂无可用下载地址", icon: "none" });
     return;
   }
-  console.log("[Upgrade] 开始下载：" + url);
+  logMsg("[Upgrade] 开始下载：" + url);
   // 直链下载（uni.downloadFile + 进度条）
   downloading.value = true;
   progress.value = 0;
@@ -181,13 +194,19 @@ async function update(): Promise<void> {
     // 另存一份到公共目录 Download/QtDownload/Update（固定，不可修改）
     let installPath = path;
     try {
-      ensurePublicDirPermission();
-      const apkName = UPDATE_FILE_PREFIX + "_v" + info.versionName + ".apk";
-      const saved = saveToPublicMedia(path, "download", apkName, UPDATE_SUB_DIR);
-      if (saved != null && saved.length > 0) installPath = saved;
-      else console.log("[Upgrade] 公共目录保存失败，使用临时文件安装");
+      // 权限申请与写入都是异步的（鸿蒙首次会弹下载目录权限弹窗），必须 await：
+      // 否则会拿弹窗还没结束的空结果，APK 只能留在临时目录
+      const granted = await ensurePublicDirPermission();
+      if (granted) {
+        const apkName = UPDATE_FILE_PREFIX + "_v" + info.versionName + ".apk";
+        const saved = await saveToPublicMedia(path, "download", apkName, UPDATE_SUB_DIR);
+        if (saved != null && saved.length > 0) installPath = saved;
+        else logMsg("[Upgrade] 公共目录保存失败，使用临时文件安装");
+      } else {
+        logMsg("[Upgrade] 无公共目录权限，使用临时文件安装");
+      }
     } catch (e) {
-      console.log("[Upgrade] 公共目录保存失败", e != null ? e.toString() : "unknown");
+      logMsgErr("[Upgrade] 公共目录保存失败", e);
     }
     // 下载完成，拉起安装。
     // 注意：拉起安装成功不放开强制更新——用户取消安装回到 APP 后仍然要拦住；
@@ -217,7 +236,7 @@ async function update(): Promise<void> {
     // 下载失败：放开关闭入口（强制更新也能退出），用户可改用浏览器下载
     escapeAllowed.value = true;
     const msg = e != null && (e as Error).message != null ? (e as Error).message : "下载失败";
-    uni.showToast({ title: msg, icon: "none" });
+    qtShowToast({ title: msg, icon: "none" });
   }
 }
 </script>
@@ -351,7 +370,7 @@ async function update(): Promise<void> {
 /* Vapor 宽屏：px 覆盖 rpx。弹窗限宽 560px 居中，
    避免 600rpx 在 1600x900 / 2560x1440 上被放大到 900dp+ 占满整屏 */
 .up-card-wide {
-  width: 560px;
+  /* 宽度改由 cardStyle 内联给出（走 qtSheetWidth 契约，窄窗口自动夹紧） */
   border-radius: 16px;
   padding: 24px 24px 20px;
 }

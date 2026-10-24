@@ -16,42 +16,6 @@ import type { Song, Playlist, LikeChange } from "@/types/music";
  */
 const PID_MAX_LEN = 64;
 
-/**
- * 单曲收藏/取消收藏（POST /app/user/like/song）
- *
- * pid 是可选字段：表示这次操作针对的是「这首歌在哪个歌单里的那一条记录」。
- * 一首歌可以同时属于多个歌单（每个歌单一条记录），所以：
- * - add 时带上目标歌单的 pid，落库/复活那一条
- * - remove 时也带 pid，后端按 (sid, pid) 定位，**只删这一条**，
- *   否则会把同一首歌在其他歌单里的记录一起删掉
- * pid 为空或超长时不上送，交给后端按无归属处理。
- */
-export async function likeSong(
-  song: Song,
-  action: "add" | "remove",
-  pid?: string
-): Promise<number> {
-  const data = new UTSJSONObject();
-  data.set("action", action);
-  data.set("sid", song.id);
-  data.set("platform", song.platform);
-  data.set("name", song.name);
-  data.set("singer", song.singer);
-  data.set("album", song.album);
-  if (song.musicId != null && song.musicId.length > 0) {
-    data.set("hash", song.musicId);
-  }
-  if (pid != null && pid.length > 0 && pid.length <= PID_MAX_LEN) {
-    data.set("pid", pid);
-  }
-  // 封面地址仅 add 且非空时上送（remove 没有图片语义，空值不上送避免覆盖云端已有图）
-  if (action == "add" && song.picUrl != null && song.picUrl.length > 0) {
-    data.set("picUrl", song.picUrl);
-  }
-  const res = await apiRequest("app/user/like/song", data, "POST", true);
-  return seqOf(res);
-}
-
 /** 歌单收藏/取消收藏（POST /app/user/like/playlist） */
 export async function likePlaylist(
   playlist: Playlist,

@@ -28,11 +28,6 @@ export function getAccessToken(): string {
   return (uni.getStorageSync(ACCESS_TOKEN_KEY) as string) || "";
 }
 
-/** 读取 refresh token */
-export function getRefreshToken(): string {
-  return (uni.getStorageSync(REFRESH_TOKEN_KEY) as string) || "";
-}
-
 /** 获取 token 过期时间 */
 export function getTokenExpiry(): number {
   return (uni.getStorageSync(TOKEN_EXPIRY_KEY) as number) || 0;

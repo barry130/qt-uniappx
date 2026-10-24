@@ -1,13 +1,13 @@
 <template>
   <view v-if="visible" class="mg-mask" @click="onMaskTap">
-    <view class="mg-card" :class="layout.isWide ? 'mg-card-wide' : ''" @click.stop>
+    <view class="mg-card" :class="layout.isWide ? 'mg-card-wide' : ''" :style="cardStyle" @click.stop>
       <view class="mg-icon-wrap" :class="layout.isWide ? 'mg-icon-wrap-wide' : ''">
         <QtIcon name="disc" :size="layout.isWide ? 28 : 52" :color="themeStore.skin.accent" />
       </view>
-      <text class="mg-title" :class="layout.isWide ? 'mg-title-wide' : ''">安装数据包，启用在线功能</text>
-      <text class="mg-sub" :class="layout.isWide ? 'mg-sub-wide' : ''">在线搜索 · 歌单 · 歌词 · 封面</text>
+      <text class="mg-title" :class="layout.isWide ? 'mg-title-wide' : ''" :style="qtFontDual(34, 18)">安装数据包，启用在线功能</text>
+      <text class="mg-sub" :class="layout.isWide ? 'mg-sub-wide' : ''" :style="qtFontDual(24, 13)">在线搜索 · 歌单 · 歌词 · 封面</text>
       <view class="mg-divider" :class="layout.isWide ? 'mg-divider-wide' : ''"></view>
-      <text class="mg-body" :class="layout.isWide ? 'mg-body-wide' : ''">应用未内置数据包：需在「音源包管理」页安装一次，支持从链接或本地文件安装。未安装时在线功能不可用（搜索/歌单/歌词/在线播放），本地音乐播放不受影响。</text>
+      <text class="mg-body" :class="layout.isWide ? 'mg-body-wide' : ''" :style="qtFontDual(26, 14)">应用未内置数据包：需在「音源包管理」页安装一次，支持从链接或本地文件安装。未安装时在线功能不可用（搜索/歌单/歌词/在线播放），本地音乐播放不受影响。</text>
       <view class="mg-actions" :class="layout.isWide ? 'mg-actions-wide' : ''">
         <qt-button class="mg-btn" :class="layout.isWide ? 'mg-btn-wide' : ''" label="暂不" variant="ghost" size="md" @click="onDismiss" />
         <qt-button class="mg-btn" :class="layout.isWide ? 'mg-btn-wide' : ''" label="去安装" variant="primary" size="md" @click="onGo" />
@@ -31,11 +31,23 @@
  * emit dismiss。
  */
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { computed } from "vue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const layout = useQtLayout();
 const themeStore = useThemeStore();
+
+/**
+ * 宽屏宽度走统一浮层契约（QT_SHEET_WIDTH.dialog = 420），并夹到窗口内。
+ * 改造前写死 420px，在 640×360 之类窄横屏上会横出窗口。
+ */
+const cardStyle = computed((): string => {
+  if (!layout.isWide) return "width:600rpx;";
+  return "width:" + qtSheetWidth("dialog") + "px;";
+});
 
 const emit = defineEmits<{
   (e: "go"): void;
@@ -81,7 +93,7 @@ function onMaskTap(): void {
   align-items: center;
 }
 .mg-card-wide {
-  width: 420px;
+  /* 宽度改由 cardStyle 内联给出（走 qtSheetWidth 契约，窄窗口自动夹紧） */
   padding: 30px 32px 26px;
   border-radius: 16px;
 }

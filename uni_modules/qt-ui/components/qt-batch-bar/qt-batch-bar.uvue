@@ -1,0 +1,246 @@
+<template>
+  <!-- column 档（宽屏详情页左栏封面块专用）：竖排两行 —— 全选行 + 下载/收藏/取消三等分。
+       对齐 qt-pc 的 embedded BatchBar：批量操作属于页头封面块，列表顶不另占行；
+       操作要么全收进左栏、要么全留在列表顶，不混搭（m01246）。自然高度，宿主不必定高。 -->
+  <view v-if="column" class="qt-batch-bar-col">
+    <view class="qt-batch-bar-col-head" @click="onToggle">
+      <QtCheckbox :checked="allSelected" size="md" @change="onToggle" />
+      <text class="qt-batch-bar-col-label" :style="colLabelStyle" :max-lines="1">{{ label }}</text>
+    </view>
+    <view class="qt-batch-bar-col-btns">
+      <view class="qt-batch-bar-col-btn" :class="enabled ? '' : 'qt-batch-bar-col-btn-off'" :style="colSoftStyle" @click="onDownload">
+        <text class="qt-batch-bar-col-btn-text" :style="colSoftTextStyle" :max-lines="1">下载</text>
+      </view>
+      <view class="qt-batch-bar-col-btn qt-batch-bar-col-gap" :class="enabled ? '' : 'qt-batch-bar-col-btn-off'" :style="colSoftStyle" @click="onCollect">
+        <text class="qt-batch-bar-col-btn-text" :style="colSoftTextStyle" :max-lines="1">收藏</text>
+      </view>
+      <view class="qt-batch-bar-col-btn qt-batch-bar-col-gap" :style="colGhostStyle" @click="onCancel">
+        <text class="qt-batch-bar-col-btn-text" :style="colGhostTextStyle" :max-lines="1">取消</text>
+      </view>
+    </view>
+  </view>
+  <view v-else class="qt-batch-bar" :class="sizeClass">
+    <!-- 勾选框与文案同属一个命中区：只点勾选框本体太窄（44rpx），
+         宿主行高本来就有 96rpx，整块都能点才符合手指习惯。
+         qt-checkbox 内部 `@click.stop`，所以它的点击不会冒到本层，
+         两个处理器各自绑一次、不会双触发。 -->
+    <view class="qt-batch-bar-check" :class="checkClass" @click="onToggle">
+      <QtCheckbox :checked="allSelected" size="md" @change="onToggle" />
+    </view>
+    <text
+      class="qt-batch-bar-count"
+      :style="countStyle"
+      :max-lines="1"
+      @click="onToggle"
+      >{{ label }}</text
+    >
+    <view
+      class="qt-batch-bar-btn"
+      :class="[btnClass, gapClass, enabled ? '' : 'qt-batch-bar-btn-off']"
+      :style="softStyle"
+      @click="onDownload"
+    >
+      <text class="qt-batch-bar-btn-text" :class="btnTextClass" :style="softTextStyle" :max-lines="1">下载</text>
+    </view>
+    <view
+      class="qt-batch-bar-btn"
+      :class="[btnClass, gapClass, enabled ? '' : 'qt-batch-bar-btn-off']"
+      :style="softStyle"
+      @click="onCollect"
+    >
+      <text class="qt-batch-bar-btn-text" :class="btnTextClass" :style="softTextStyle" :max-lines="1">收藏</text>
+    </view>
+    <view class="qt-batch-bar-btn" :class="[btnClass, gapClass]" :style="ghostStyle" @click="onCancel">
+      <text class="qt-batch-bar-btn-text" :class="btnTextClass" :style="ghostTextStyle" :max-lines="1">取消</text>
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed } from "vue";
+import QtCheckbox from "@/uni_modules/qt-ui/components/qt-checkbox/qt-checkbox.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtFontDual, qtFontPx } from "@/uni_modules/qt-ui/stores/font-scale";
+
+/**
+ * 列表批量管理条（批量下载 / 批量收藏 / 全选 / 退出选择）。
+ * 对应 PC 的 `qt-pc/src/components/discovery/BatchBar.tsx`，交互逐条对齐：
+ * 整批都已在目标歌单里时，再点一次那行歌单就是**批量取消收藏**
+ * （没有独立按钮，与单曲红心「点一下加、再点一下取消」一致）。
+ *
+ * ## 布局契约（重要，多处靠它做到零跳动）
+ * - **bar 档不自带外框**：没有背景色、没有边框、没有外边距 —— 外框由宿主给
+ *   （歌单详情页 / 每日推荐页都挂在窄屏 `.list-head` 那个圆角胶囊里），
+ *   这样选择态与非选择态占位完全一致，切进切出不会抖。
+ * - **bar 档必须放在横向（row）容器里**，且宿主容器高度 ≡ 本组件对应档位高度：
+ *   `md` = 96rpx / 60px、`lg` = 132rpx / 76px（与 `.list-head` 同值）。
+ *   根节点是 `flex:1`，靠它填满宿主行的剩余宽度；放进纵向容器会被 flex-grow
+ *   沿竖直方向撑开（flex-basis 为 0，height 会被忽略），这是刻意的取舍。
+ * - **column 档（宽屏详情页左栏封面块专用）**：竖排两行 —— 全选行 + 下载/收藏/
+ *   取消三等分行，自然高度、宿主不必定高。宽屏的歌单详情 / 每日推荐把全部操作
+ *   （播放全部 / 加入队列 / 批量入口 / 选择态批量条）都收进左栏封面块，列表顶
+ *   不再有任何操作条 —— 对齐 qt-pc 的 embedded BatchBar（批量属于页头封面块，
+ *   列表上方不另占行）。用户口径：悬浮操作条要么全去掉、要么全保留，
+ *   去掉一半留一半不和谐（m01246）。
+ * - **bar 档尺寸与宿主的按钮同值**：`md` 档按钮 60rpx/40px 圆角 30rpx/20px，
+ *   与 `.head-btn` 完全一致；`lg` 档 68rpx/44px。故意不复用 `qt-button`
+ *   （md 档 96rpx，比宿主行还高，塞进去必然撑破）。column 档固定 px 规格
+ *   （40px 高、20px 圆角，与左栏操作钮同值），`size` prop 不参与。
+ * - `total` 传**当前可见集合**的条数（有筛选/搜索时不要传全集），
+ *   否则「全选」会把筛选外看不见的歌一起勾上。
+ *
+ * ## 为什么中间那格是 flex:1
+ * 右侧三个按钮必须钉在右边。文案长短一变（「全选」→「已选 12 首」）就会把
+ * 按钮推来推去，页头宽度一变整个标题跟着抖（用户 m09470）—— 所以文案占
+ * 剩余空间（flex:1），按钮由 `margin-left` 固定间距，右侧永不动。
+ */
+const props = defineProps<{
+  /** 已选数量（宿主的选择态，本组件自己不持有） */
+  count: number;
+  /** 可选项总数 / 当前可见集合条数（判断是否全选） */
+  total: number;
+  /** md：列表页头档（96rpx/60px）；lg：详情页 hero 档（132rpx/76px） */
+  size?: "md" | "lg";
+  /** bar：横向管理条（默认，窄屏吸顶操作条用）；column：竖排两行（宽屏左栏封面块用） */
+  layout?: "bar" | "column";
+}>();
+const emit = defineEmits<{
+  (e: "toggle"): void;
+  (e: "download"): void;
+  (e: "collect"): void;
+  (e: "cancel"): void;
+}>();
+
+const theme = useThemeStore();
+const layout = useQtLayout();
+
+/** 事件名一律单个小写单词：uvue 模板的属性名会被小写化，驼峰/连字符监听不可靠 */
+const size = computed((): string => (props.size != null ? props.size! : "md"));
+const wide = computed((): boolean => layout.isWide);
+const sizeClass = computed((): string => {
+  const s = size.value == "lg" ? "lg" : "md";
+  return wide.value ? "qt-batch-bar-" + s + "-wide" : "qt-batch-bar-" + s;
+});
+const checkClass = computed((): string => (wide.value ? "qt-batch-bar-check-wide" : ""));
+const btnClass = computed((): string => {
+  const s = size.value == "lg" ? "lg" : "md";
+  return wide.value ? "qt-batch-bar-btn-" + s + "-wide" : "qt-batch-bar-btn-" + s;
+});
+const btnTextClass = computed((): string => (wide.value ? "qt-batch-bar-btn-text-wide" : ""));
+const gapClass = computed((): string => (wide.value ? "qt-batch-bar-gap-wide" : "qt-batch-bar-gap"));
+
+/** 数量为 0 时「下载 / 收藏」没有作用对象，淡出且不响应（取消始终可用） */
+const enabled = computed((): boolean => props.count > 0);
+const allSelected = computed((): boolean => props.count > 0 && props.total > 0 && props.count == props.total);
+const label = computed((): string => (props.count > 0 ? "已选 " + props.count + " 首" : "全选"));
+
+const countStyle = computed((): string => {
+  const fs = size.value == "lg" ? 28 : 26;
+  const fsw = size.value == "lg" ? 16 : 15;
+  return "color:" + theme.skin.text + ";" + qtFontDual(fs, fsw);
+});
+/** 主操作按钮：强调色弱化底 + 强调色文字（与 qt-button 的 secondary 同色，但高度贴宿主行） */
+const softStyle = computed((): string => {
+  return "background-color:" + theme.skin.accentSoft + ";border-color:transparent;";
+});
+const softTextStyle = computed((): string => {
+  const fs = size.value == "lg" ? 26 : 24;
+  const fsw = size.value == "lg" ? 15 : 14;
+  return "color:" + theme.skin.accent + ";" + qtFontDual(fs, fsw);
+});
+/** 取消是退出，不是主操作：透明底 + 描边，视觉权重最低 */
+const ghostStyle = computed((): string => {
+  return "background-color:transparent;border-color:" + theme.skin.border + ";";
+});
+const ghostTextStyle = computed((): string => {
+  const fs = size.value == "lg" ? 26 : 24;
+  const fsw = size.value == "lg" ? 15 : 14;
+  return "color:" + theme.skin.textMuted + ";" + qtFontDual(fs, fsw);
+});
+
+/** column 档（宽屏详情页左栏封面块）：竖排两行、自然高度，宿主不用定高。
+ *  固定 px 规格，与左栏操作钮（40px 高、20px 圆角）一致，size prop 不参与。 */
+const column = computed((): boolean => props.layout == "column");
+const colLabelStyle = computed((): string => {
+  return "color:" + theme.skin.text + ";" + qtFontPx(14);
+});
+const colSoftStyle = computed((): string => {
+  return "background-color:" + theme.skin.accentSoft + ";border-color:transparent;";
+});
+const colSoftTextStyle = computed((): string => {
+  return "color:" + theme.skin.accent + ";" + qtFontPx(13);
+});
+const colGhostStyle = computed((): string => {
+  return "background-color:transparent;border-color:" + theme.skin.border + ";";
+});
+const colGhostTextStyle = computed((): string => {
+  return "color:" + theme.skin.textMuted + ";" + qtFontPx(13);
+});
+
+function onToggle(): void {
+  emit("toggle");
+}
+function onDownload(): void {
+  if (!enabled.value) return;
+  emit("download");
+}
+function onCollect(): void {
+  if (!enabled.value) return;
+  emit("collect");
+}
+function onCancel(): void {
+  emit("cancel");
+}
+</script>
+
+<style>
+.qt-batch-bar {
+  flex-direction: row;
+  align-items: center;
+  /* 横向容器里填满剩余宽度（宿主行是 space-between 的一行，这里是唯一子节点） */
+  flex: 1;
+}
+/* 档位高度 = 宿主容器高度：md 对齐 .list-head，lg 对齐 .hero，切换时零跳动 */
+.qt-batch-bar-md { height: 96rpx; }
+.qt-batch-bar-md-wide { height: 60px; }
+.qt-batch-bar-lg { height: 132rpx; }
+.qt-batch-bar-lg-wide { height: 76px; }
+
+/* 勾选框命中区：靠 align-self 撑满整行高度，不用 height:100%（百分比高度在 Vapor 下不可靠） */
+.qt-batch-bar-check { align-self: stretch; justify-content: center; align-items: center; padding-right: 14rpx; }
+.qt-batch-bar-check-wide { padding-right: 10px; }
+
+/* 文案吃掉剩余空间 → 右侧按钮永远钉在右边 */
+.qt-batch-bar-count {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.qt-batch-bar-btn {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  /* border-style 必须显式写，否则 Vapor 下边框不绘制，「取消」的描边会消失 */
+  border-style: solid;
+  border-width: 1px;
+}
+.qt-batch-bar-btn-md { height: 60rpx; padding: 0 24rpx; border-radius: 30rpx; }
+.qt-batch-bar-btn-md-wide { height: 40px; padding: 0 18px; border-radius: 20px; }
+.qt-batch-bar-btn-lg { height: 68rpx; padding: 0 28rpx; border-radius: 34rpx; }
+.qt-batch-bar-btn-lg-wide { height: 44px; padding: 0 20px; border-radius: 22px; }
+.qt-batch-bar-btn-off { opacity: 0.4; }
+.qt-batch-bar-gap { margin-left: 12rpx; }
+.qt-batch-bar-gap-wide { margin-left: 8px; }
+
+/* column 档（宽屏详情页左栏封面块）：竖排两行、自然高度，宿主不用定高 */
+.qt-batch-bar-col { flex-direction: column; align-self: stretch; }
+.qt-batch-bar-col-head { height: 40px; flex-direction: row; align-items: center; }
+.qt-batch-bar-col-label { margin-left: 10px; font-size: 14px; }
+.qt-batch-bar-col-btns { margin-top: 10px; flex-direction: row; align-self: stretch; }
+.qt-batch-bar-col-btn { flex: 1; height: 40px; border-radius: 20px; flex-direction: row; align-items: center; justify-content: center; border-width: 1px; border-style: solid; }
+.qt-batch-bar-col-gap { margin-left: 8px; }
+.qt-batch-bar-col-btn-text { font-size: 13px; }
+.qt-batch-bar-col-btn-off { opacity: 0.4; }
+</style>

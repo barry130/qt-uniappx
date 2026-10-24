@@ -1,4 +1,5 @@
 <script setup lang="uts">
+import { qtShowToast } from "@/services/toast";
 import { usePlayerStore } from '@/stores/player'
 import { useDownloadsStore } from '@/stores/downloads'
 import { useDislikesStore } from '@/stores/dislikes'
@@ -7,7 +8,9 @@ import { useSourceStore } from '@/stores/source'
 import { playerBarCounted, usePlayerBarStore } from '@/stores/player-bar'
 import { isQtAdmin } from '@/services/music-api'
 import { useThemeStore } from '@/uni_modules/qt-ui/stores/theme'
+import { useFontScaleStore } from '@/uni_modules/qt-ui/stores/font-scale'
 import { useNoticeStore } from '@/stores/notice'
+import { useDisclaimerStore } from '@/stores/disclaimer'
 import { audioPlayer } from '@/services/audio-player'
 import { desktopLyric } from '@/services/desktop-lyric'
 import { resolveUrl } from '@/services/http'
@@ -26,10 +29,11 @@ import type { PackUpdateOffer } from '@/services/source-update'
 import { exitApp, ensureNotificationPermission, openNotificationSettings, applyLegacyInsets, isIgnoringBatteryOptimizations, openBatteryOptimizationSettings } from '@/services/app-native'
 import { beginLoading, finishLoading } from '@/services/ui-loading'
 import { refreshQtLayout, pauseQtLayoutWatcher, resumeQtLayoutWatcher } from '@/uni_modules/qt-ui/composables/use-qt-layout'
-import { installBootGuard } from '@/services/boot-guard'
+import { qtNavAnimation } from '@/uni_modules/qt-ui/composables/qt-nav'
+import { installBootGuard, notifyAppForeground, notifyAppBackground } from '@/services/boot-guard'
 import { refreshMe } from '@/services/user-cache'
-
-const themeStore = useThemeStore()
+import { initLogger, flushLogs, logLine, logMsgErr, LOG_ERROR } from '@/services/logger'
+import { qtConfirm } from '@/services/confirm'
 
 onLaunch(() => {
   // 三星 One UI 手势导航下 edge-to-edge 窗口会让运行时首屏挂载竞态（S24 Ultra
@@ -37,6 +41,9 @@ onLaunch(() => {
   applyLegacyInsets()
   // 尽早确定宽窄屏状态（qt-page-frame / 各组件的响应式判断都依赖它）
   refreshQtLayout(720)
+  // 本地日志最先初始化：后面每一步（统计、恢复、预热）都可能出错，
+  // 而那些错误只有在日志已经能落盘时才有地方记。发行包没有控制台，这是唯一现场。
+  initLogger()
   // 统计采集最先初始化（JS/UTS 层错误等，走自建 /api/v1/app/stat/report）
   initQtStat({
     ingestUrl: resolveUrl('app/stat/report'),
@@ -67,6 +74,9 @@ onLaunch(() => {
   // 白名单里的第 5 个按钮当成超额项截掉（表现为「设置了，返回又没了」）。
   usePlayerBarStore().restore((id: string): boolean => playerBarCounted(id, isQtAdmin()))
   useThemeStore().init()
+  // 全局字号缩放：纯本地偏好，必须在首屏渲染前恢复，否则首帧字号会先按标准档
+  // 画一次再跳变（内联 :style 绑定依赖 store 已就绪的 scale）
+  useFontScaleStore().init()
   // 酷我 Cookie 鉴权随音源包走（bundle 内惰性初始化），启动无需本端预热
   // 启动时检查/请求通知栏权限（Android 13+ 弹系统授权框，并说明用途）
   checkNotificationPermission()
@@ -108,19 +118,14 @@ async function promptPackUpdates(offers: PackUpdateOffer[]): Promise<void> {
     .sort((a, b) => (a.kind == 'meta' ? -1 : 1))
   for (let i = 0; i < sorted.length; i++) {
     const offer = sorted[i]
-    const confirmed = await new Promise<boolean>((resolve) => {
-      uni.showModal({
-        title: '音源包更新',
-        content:
-          offerLabel(offer) +
-          (offer.notes.length > 0 ? '\n' + offer.notes : '') +
-          '\n是否现在下载并更新？',
-        confirmText: '更新',
-        cancelText: '暂不',
-        confirmColor: themeStore.skin.accent,
-        success: (res) => resolve(res.confirm),
-        fail: (_) => resolve(false),
-      })
+    const confirmed = await qtConfirm({
+      title: '音源包更新',
+      content:
+        offerLabel(offer) +
+        (offer.notes.length > 0 ? '\n' + offer.notes : '') +
+        '\n是否现在下载并更新？',
+      confirmText: '更新',
+      cancelText: '暂不',
     })
     if (!confirmed) continue
     // 用户在确认框弹出后可能已离开当时的前台页面。框架的 uni-showLoading 绑定
@@ -129,11 +134,19 @@ async function promptPackUpdates(offers: PackUpdateOffer[]): Promise<void> {
     // 用户确认后若路由已变，就只刷新红点、跳过这次更新。
     const routeAtPrompt = currentTopRoute()
     const token = beginLoading('正在更新…')
-    const songs = await pickSmokeSongs()
-    const result = await applyUpdate(offer, songs)
-    finishLoading(token)
-    if (routeAtPrompt != currentTopRoute()) continue
-    uni.showToast({ title: result.message, icon: 'none', duration: 3000 })
+    try {
+      const songs = await pickSmokeSongs()
+      const result = await applyUpdate(offer, songs)
+      if (routeAtPrompt != currentTopRoute()) continue
+      qtShowToast({ title: result.message, icon: 'none', duration: 3000 })
+    } catch (e) {
+      // 单条更新链路意外失败不拦住后续 offer：落日志、继续弹下一条
+      logMsgErr('[App] 音源包更新失败: ' + (e != null ? String(e) : 'unknown'))
+    } finally {
+      // beginLoading/finishLoading 必须配对：ui-loading 只防页面销毁/跨页错位，
+      // 不兜业务异常，漏收口就是永久 loading
+      finishLoading(token)
+    }
   }
 }
 
@@ -157,21 +170,22 @@ function showPlayPackMissingGuide(): void {
   const now = Date.now()
   if (now - lastPlayPackGuideAt < 60000) return
   lastPlayPackGuideAt = now
-  uni.showModal({
+  qtConfirm({
     title: '未安装播放音源包',
     content: '在线播放需要在 设置 → 音源包管理 安装并启用播放音源包。本地音乐播放不受影响。',
     confirmText: '去安装',
     cancelText: '暂不',
-    confirmColor: themeStore.skin.accent,
-    success: (res) => {
-      if (!res.confirm) return
-      uni.navigateTo({ url: '/pages/source-pack/index' })
-    },
+  }).then((ok) => {
+    if (!ok) return
+    uni.navigateTo({ url: '/pages/source-pack/index', animationType: qtNavAnimation() })
   })
 }
 
 // 进入前台时发送 show 事件（统计回前台）；已登录时增量拉取收藏变更（多端同步，LIKE_SYNC_DESIGN.md）
 onShow(() => {
+  // 首屏守卫回前台：后台期间系统会冻结 JS 定时器，冻到很晚才触发的「未挂载」判定
+  // 毫无意义（实测有间隔 19 分钟的用例），所以回前台重新计时并重新给一次机会
+  notifyAppForeground()
   qtTrack('show')
   useThemeStore().syncSystemTheme()
   // 回前台恢复窗口尺寸监听（后台期间系统可能改了窗口尺寸，如分屏 / 旋转）
@@ -184,10 +198,16 @@ onShow(() => {
 
 // 进入后台时保存播放状态（当前歌曲/进度），供下次重启后恢复；并追加统计 flush
 onHide(() => {
+  // 进后台立刻停掉首屏守卫的判定：后台白屏不该被当成启动失败
+  notifyAppBackground()
+  // 注意：**后台继续下载**，这里不暂停。只有「退出/被杀后重新启动」才是暂停态，
+  // 那条路径由 restoreTasks 恢复成 paused 保证（见 stores/downloads.ts）。
   usePlayerStore().persist()
   // 暂停宽窄屏窗口监听，避免后台空转
   pauseQtLayoutWatcher()
   qtStatFlush()
+  // 日志刷盘：后台后进程随时可能被系统回收，队列里没写完的行不能等下次启动再补
+  flushLogs().catch(() => {})
 })
 
 /**
@@ -236,27 +256,35 @@ onError((err: any) => {
       if (r != null) page = r
     }
   } catch (_) {}
+  // 本地日志留一份：发行包用户报障时，服务端统计未必拿到（离线/未同意），
+  // 而文件是「用户能复制出来发给我们」的那一份
+  logLine(LOG_ERROR, 'App', '未捕获运行错误 page=' + page + ' msg=' + msg + (stack.length > 0 ? '\n' + stack : ''))
   qtTrackError('js', msg, stack, page)
 })
+
+// 关于未处理的 Promise 拒绝：uni-app x 只在**选项式** App 接口里给了
+// `onUnhandledRejection?(): void`（types/app.d.ts:830），组合式 API 没有对应
+// 导出（LifeCycle.d.ts 里只有 onError），而且它连拒绝原因都不传。
+// 所以这里注册不了全局拒绝钩子——拒绝值只能由各调用点自己 catch 后 logError，
+// services 里的关键链路（http / 音源 / 下载 / 更新）都按这个约定处理。
 
 /** 启动时检查通知栏权限，未授权则弹系统授权框，并说明用途 */
 function checkNotificationPermission(): void {
   ensureNotificationPermission().then((granted) => {
     if (granted) return
     // 拒绝或未授权：说明用途，避免用户不理解为何需要此权限
-    uni.showModal({
+    qtConfirm({
       title: '开启通知权限',
       content: '为了在后台播放时也能显示歌曲信息与播放控制，需要开启「通知」权限。\n是否前往系统设置开启？',
       confirmText: '去设置',
       cancelText: '暂不',
-      confirmColor: themeStore.skin.danger,
-      success: (res) => {
-        if (!res.confirm) return
-        const ok = openNotificationSettings()
-        if (!ok) {
-          uni.showToast({ title: '无法打开设置页，请手动在系统设置中开启', icon: 'none' })
-        }
-      },
+      danger: true,
+    }).then((ok) => {
+      if (!ok) return
+      const opened = openNotificationSettings()
+      if (!opened) {
+        qtShowToast({ title: '无法打开设置页，请手动在系统设置中开启', icon: 'none' })
+      }
     })
   })
 }
@@ -283,20 +311,18 @@ function guideBatteryOptimization(): void {
   try {
     uni.setStorageSync(BATTERY_GUIDE_KEY, '1')
   } catch (_) {}
-  uni.showModal({
+  qtConfirm({
     title: '让后台播放更稳定',
     content:
       '检测到本应用未加入电池优化白名单，锁屏或切到后台后系统可能限制网络，导致自动播放下一首失败。\n建议在系统设置中允许后台运行。',
     confirmText: '去设置',
     cancelText: '暂不',
-    confirmColor: themeStore.skin.accent,
-    success: (res) => {
-      if (!res.confirm) return
-      const ok = openBatteryOptimizationSettings()
-      if (!ok) {
-        uni.showToast({ title: '无法打开设置页，请手动在 设置→电池 中放行', icon: 'none' })
-      }
-    },
+  }).then((ok) => {
+    if (!ok) return
+    const opened = openBatteryOptimizationSettings()
+    if (!opened) {
+      qtShowToast({ title: '无法打开设置页，请手动在 设置→电池 中放行', icon: 'none' })
+    }
   })
 }
 
@@ -305,12 +331,12 @@ async function runStartup(): Promise<void> {
   // 1. 校验是否为官方 APP：非官方则提示并 3S 后自动退出
   const isOfficial = await checkOfficialVersion()
   if (!isOfficial) {
-    uni.showModal({
+    qtConfirm({
       title: '提示',
       content: '检测到非官方版本，3 秒后自动退出',
       showCancel: false,
       confirmText: '知道了',
-      confirmColor: themeStore.skin.danger,
+      danger: true,
     })
     setTimeout(() => {
       exitApp()
@@ -326,11 +352,15 @@ async function runStartup(): Promise<void> {
       setPendingUpdate(info)
     }
   } catch (e) {
-    console.log('[App] 检查更新异常', e)
+    logMsgErr('[App] 检查更新异常', e)
   }
 
   // 3. 加载 APP 公告
   useNoticeStore().load().catch(() => {})
+  // 3.1 首次启动免责声明（正文由后台下发）：与公告同一时机拉取。
+  //     独立请求而不是复用上面那份列表，是为了让两个功能互不牵连——
+  //     公告接口失败不该连带声明不弹，反之亦然。init() 内部自己吞异常。
+  useDisclaimerStore().init().catch(() => {})
   // 4. 后台保活引导：延迟到冷启动流程之后，避免和官方校验/更新弹窗抢焦点
   setTimeout(() => {
     guideBatteryOptimization()

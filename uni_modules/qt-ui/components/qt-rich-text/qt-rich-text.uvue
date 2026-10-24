@@ -37,8 +37,11 @@ import { parseRichText } from "@/services/richtext";
 import type { RichBlock, RichRun } from "@/services/richtext";
 import { openNoticeUrl } from "@/services/notice";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useFontScaleStore } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const layout = useQtLayout();
+/** 全局字号倍率：富文本字号在 JS 侧算，模板无内联位置，只能在这里乘 */
+const fontScale = useFontScaleStore();
 
 const props = defineProps<{
   /** HTML 字符串（纯文本亦可） */
@@ -80,19 +83,110 @@ function lineHeightRpx(size: number): number {
  * 宽屏下 rpx 随窗口宽度放大（1600x900 时约 2.7 倍、2560x1440 约 3.4 倍），
  * 富文本若继续按 rpx 渲染，公告/更新说明会被放大到难以阅读。
  * 这里在宽屏时按 750 设计稿折算为绝对 px（1rpx ≈ 0.7px）。
+ *
+ * 最后再乘全局字号倍率（设置页「文字大小」）：富文本的字号全在这里算，
+ * 模板上没有任何可内联的位置，所以倍率只能加在这一步。行高与圆点偏移
+ * 都派生自本函数，跟着一起缩放，块高不会因放大而错位。
  */
 function scaledSize(size: number): number {
-  if (!layout.isWide) return size;
-  return Math.max(11, Math.round(size * 0.7));
+  const scaled = layout.isWide ? Math.max(11, Math.round(size * 0.7)) : size;
+  return Math.round(scaled * fontScale.scale * 100) / 100;
 }
 function scaledLine(size: number): number {
   return Math.round(scaledSize(size) * baseLine.value);
 }
 
+/**
+ * 作者写死的字号换算成组件自己的字号体系（rpx）。
+ *
+ * 公告正文由富文本编辑器产出，标题上会写死 `font-size:20px` / `16px` 这类「网页 px」。
+ * 直接照抄有两个坑：
+ *  1. 单位不同源 —— 正文走 props.fontSize 的 rpx（竖屏 750rpx = 窗口宽），
+ *     在 366dp 宽的手机上 26rpx 只有约 12.7dp，而 16px 是绝对 16dp，
+ *     于是 h3 比正文还大一号，作者想表达的层级被单位换算搅乱；
+ *  2. 内联优先级 —— run 嵌在段落 `<text :style="paraStyle(b)">` 内部，
+ *     在 run 上写死 px 会直接盖掉容器算好的 rpx 字号。
+ *
+ * 因此这里把作者的 px 当作「相对网页正文 14px 的倍数」换算到组件基准字号上：
+ * 20px → base × 20/14 ≈ 1.43 倍，16px → 1.14 倍，正文（不写字号）仍是 base。
+ * 这样作者的相对层级在任何基准字号、任何窗口宽度下都成立，且统一经过
+ * scaledSize（宽屏折算 + 字号倍率）一起缩放。
+ * 作者若自己写了 rpx（服务端手工内容偶见），按设计稿单位原样用。
+ */
+const WEB_BODY_PX = 14;
+
+function authorRpx(raw: string, base: number): number {
+  const v = raw.trim().toLowerCase();
+  if (v.length == 0) return 0;
+  const m = /([0-9]+(\.[0-9]+)?)/.exec(v);
+  if (m == null) return 0;
+  const n = parseFloat(m[1]);
+  if (n != n || n <= 0) return 0;
+  const out = v.indexOf("rpx") >= 0 ? n : (base * n) / WEB_BODY_PX;
+  if (out < 12) return 12;
+  if (out > 72) return 72;
+  return Math.round(out);
+}
+
+/** 块内作者写死的最大字号（rpx）；整块没写死返回 0 */
+function blockAuthorRpx(b: RichBlock, base: number): number {
+  let max = 0;
+  for (const r of b.runs) {
+    if (r.fontSize.length == 0) continue;
+    const v = authorRpx(r.fontSize, base);
+    if (v > max) max = v;
+  }
+  return max;
+}
+
+/**
+ * 富文本里作者写死的颜色是否为「中性色」（近黑/近灰/近白，彩度极低）。
+ *
+ * 公告正文多由富文本编辑器产出，正文与标题会写死浅色主题配色
+ * （实测线上公告：<p color:#333333>、<h3 color:#1f2329>）。这类颜色在深色
+ * 主题下与卡片底色（#20222b）对比度不到 1.5:1，整段标题直接看不见。
+ * 中性色一律回落到主题正文色（props.color），有彩度的颜色——链接 #1a73e8、
+ * 警示红橙等——按作者原样保留，避免误伤真正的强调色。
+ */
+function isNeutralColor(c: string): boolean {
+  const v = c.trim().toLowerCase();
+  if (v.length == 0) return true;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  if (v.charCodeAt(0) == 35) {
+    let hex = v.substring(1);
+    if (hex.length == 3) {
+      hex = hex.charAt(0) + hex.charAt(0) + hex.charAt(1) + hex.charAt(1) + hex.charAt(2) + hex.charAt(2);
+    }
+    if (hex.length != 6) return false;
+    r = parseInt(hex.substring(0, 2), 16);
+    g = parseInt(hex.substring(2, 4), 16);
+    b = parseInt(hex.substring(4, 6), 16);
+  } else if (v.indexOf("rgb(") == 0 || v.indexOf("rgba(") == 0) {
+    const m = /^rgba?\(\s*([0-9]+)\s*,\s*([0-9]+)\s*,\s*([0-9]+)/.exec(v);
+    if (m == null) return false;
+    r = parseInt(m[1]);
+    g = parseInt(m[2]);
+    b = parseInt(m[3]);
+  } else {
+    return v == "black" || v == "white" || v == "gray" || v == "grey" || v == "silver";
+  }
+  if (r != r || g != g || b != b) return false;
+  const max = Math.max(r, Math.max(g, b));
+  const spread = max - Math.min(r, Math.min(g, b));
+  // 两条都判「中性」：绝对差值很小的近黑/近灰，以及彩度（三通道极差/最大值）
+  // 低于 0.35 的带色灰（编辑器里的 #666666、应用调色板里的 #6b7385 一类）。
+  // 链接蓝 #1a73e8 彩度 0.89、警示红橙 0.69/0.91，都会按作者原样保留。
+  return spread < 18 || spread * 100 < max * 35;
+}
+
 /** 段落/标题容器样式 */
 function paraStyle(b: RichBlock): string {
+  const authored = blockAuthorRpx(b, baseSize.value);
   let size = baseSize.value;
-  if (b.kind == "h") size = size + headingDelta(b.level);
+  if (authored > 0) size = authored;
+  else if (b.kind == "h") size = size + headingDelta(b.level);
   const out = scaledSize(size);
   let s = "color:" + baseColor.value + ";";
   s += "font-size:" + out + (layout.isWide ? "px;" : "rpx;");
@@ -104,7 +198,8 @@ function paraStyle(b: RichBlock): string {
 
 /** 列表项文字样式：始终左对齐，避免居中导致圆点与文字分离 */
 function liStyle(b: RichBlock): string {
-  const size = baseSize.value;
+  const authored = blockAuthorRpx(b, baseSize.value);
+  const size = authored > 0 ? authored : baseSize.value;
   const out = scaledSize(size);
   let s = "color:" + baseColor.value + ";";
   s += "font-size:" + out + (layout.isWide ? "px;" : "rpx;");
@@ -121,11 +216,20 @@ function dotStyle(): string {
 
 /** 行内片段样式 */
 function runStyle(r: RichRun, b: RichBlock): string {
-  let s = "";
+  // 颜色必须逐 run 写死在片段自己身上：app-uvue 文字样式不继承，段落 <text> 上的
+  // 内联 color 传不到嵌套的 run <text>，不带色的片段会静默回落框架默认色（近黑）。
+  // 作者写死的中性色（#333333 一类浅色主题配色）同样换成主题色，见 isNeutralColor。
+  const c = r.color.length > 0 && !isNeutralColor(r.color) ? r.color : baseColor.value;
+  let s = "color:" + c + ";";
   if (r.bold || b.kind == "h") s += "font-weight:700;";
   if (r.italic) s += "font-style:italic;";
-  if (r.color.length > 0) s += "color:" + r.color + ";";
-  if (r.fontSize.length > 0) s += "font-size:" + r.fontSize + ";";
+  // 片段自带字号必须走 authorRpx + scaledSize：原样把作者的 px 上屏会盖掉
+  // 段落容器算好的 rpx 字号（run 在容器内部，内联样式优先级更高），
+  // 结果就是 h2/h3 的 20px/16px 压过正文 26rpx，层级翻过来。
+  if (r.fontSize.length > 0) {
+    const authored = authorRpx(r.fontSize, baseSize.value);
+    if (authored > 0) s += "font-size:" + scaledSize(authored) + (layout.isWide ? "px;" : "rpx;");
+  }
   if (r.underline) s += "text-decoration-line:underline;";
   else if (r.strike) s += "text-decoration-line:line-through;";
   return s;

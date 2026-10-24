@@ -2,7 +2,7 @@
   <view
     v-if="!layout.isWide"
     class="tab-bar"
-    :style="'background-color:' + theme.skin.tabSurface + ';border-top-color:' + theme.skin.divider + ';'"
+    :style="'background-color:' + theme.skin.tabSurface + ';border-color:' + theme.skin.border + ';'"
   >
     <view
       v-for="item in tabs"
@@ -11,20 +11,25 @@
       @click="go(item.path)"
     >
       <view
-        class="tab-icon-wrap"
+        class="tab-chip"
         :style="active(item.path) ? 'background-color:' + theme.skin.accentSoft + ';' : 'background-color:transparent;'"
       >
-        <QtIcon
-          :name="item.icon"
-          :size="26"
-          :color="active(item.path) ? theme.skin.accent : theme.skin.iconMuted"
-        />
-        <view v-if="hasDot(item.path)" class="tab-dot" />
+        <view class="tab-icon-wrap">
+          <!-- 图标 48rpx：与 .tab-icon-wrap 的 56 x 52rpx 配套。原先写 24 是
+               24rpx = 375dp 手机上只有 12dp，正好是容器的一半（容器当时写的是
+               28px，px 与 rpx 混排的另一处老账），720dp 窗口上才偶然对上 -->
+          <QtIcon
+            :name="item.icon"
+            :size="48"
+            :color="active(item.path) ? theme.skin.accent : theme.skin.iconMuted"
+          />
+          <view v-if="hasDot(item.path)" class="tab-dot" />
+        </view>
+        <text
+          class="tab-label"
+          :style="('color:' + (active(item.path) ? theme.skin.accent : theme.skin.textMuted) + ';') + qtFont(22)"
+        >{{ item.label }}</text>
       </view>
-      <text
-        class="tab-label"
-        :style="'color:' + (active(item.path) ? theme.skin.accent : theme.skin.textMuted) + ';'"
-      >{{ item.label }}</text>
     </view>
   </view>
 </template>
@@ -33,7 +38,29 @@
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtSwitchTab } from "@/uni_modules/qt-ui/composables/qt-nav";
+import { qtFont } from "@/uni_modules/qt-ui/stores/font-scale";
 
+/**
+ * 竖屏底部导航：悬浮胶囊（2026-10-19 起从通栏改为悬浮 pill，参照用户给的
+ * 悬浮导航设计稿）：左右各一个入口「发现 / 我的」，中间不放发布按钮。
+ *
+ * 几何契约：离地 24rpx + 高 120rpx（合计 144rpx），总占位写进 use-qt-layout.ts 的
+ * QT_TAB_BAR_HEIGHT_RPX，由 qtTabBarHeightPx() 按窗口宽折算——qt-toast-host 的让位、
+ * qt-mini-player 悬浮球的初始边距都按它取值，三处必须同源（tools/check-toast.mjs
+ * 断言 qtTabBarHeightPx() 被 toast-host 使用、常量等于 144）。
+ *
+ * 2026-10-20 起这里的尺寸改用 rpx（设计 px × 2）而不是写死 px：本组件只在
+ * `!layout.isWide` 的手机档渲染，而手机档整页内容都是 rpx（随窗口宽度线性放大）。
+ * 写死 px 会让它在宽一点的窗口上「内容巨大、底部导航还是手机大小」，用户实测
+ * 720dp 模拟器时原话就是「底部tag显示太小」。改成 rpx 后 375dp 手机上渲染结果
+ * 与改动前完全一致（375/750 = 0.5，rpx 值 × 0.5 正好等于原 px 值），宽窗口上则
+ * 跟着整页一起放大。
+ *
+ * 宽屏不渲染（rail 接管导航）；阴影不用 box-shadow（可点击容器在
+ * uni-app x Android 上会点击穿透，见 design.md），靠 border 与
+ * tabSurface 色差表达悬浮层次。
+ */
 const props = defineProps<{
   current: string;
   /** 需要亮红点的 tab 路径列表（不带前导斜杠，如 pages/profile/index） */
@@ -59,48 +86,70 @@ function hasDot(path: string): boolean {
   return props.dots.indexOf(bare) >= 0;
 }
 
+/**
+ * 切换底部导航页：统一走 qtSwitchTab（鸿蒙 reLaunch / 其它平台 switchTab）。
+ *
+ * 2026-10-19 鸿蒙实测（这条坑值得留档）：`uni.switchTab` 与 `uni.reLaunch` 到 tab
+ * 页都会回调 success、`getCurrentPages()` 栈顶也会变成目标路由，但原生视图停在
+ * 原页不动 —— 因为两者最终都走 runtime 的 `switchSelect → tabBar0.appendItem`，
+ * 而原生 Tabs 容器在追加第二个 tab 页时不生效。最终解法是 pages.json 在鸿蒙上
+ * 不注册 tabBar（`#ifndef APP-HARMONY`），首页/我的退化成普通页面，`reLaunch`
+ * 走普通页路由，实测可切换。
+ */
 function go(path: string): void {
   if (active(path)) return;
-  uni.switchTab({ url: "/" + path, fail: (_: any) => {} });
+  qtSwitchTab("/" + path);
 }
+
 </script>
 
 <style>
 .tab-bar {
   position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 58px;
+  left: 40rpx;
+  right: 40rpx;
+  bottom: 24rpx;
+  /* 总占位 = 24rpx 离地 + 120rpx 高 = 144rpx（375dp 基准下 = 72px），与
+     use-qt-layout.ts 的 QT_TAB_BAR_HEIGHT_RPX 保持一致（toast 让位、悬浮球初始边距都按它算） */
+  height: 120rpx;
   flex-direction: row;
   align-items: center;
-  border-top-width: 1px;
+  border-radius: 60rpx;
+  border-width: 1px;
+  border-style: solid;
 }
 .tab-item {
   flex: 1;
-  height: 58px;
+  height: 120rpx;
   justify-content: center;
   align-items: center;
 }
+/* 当前项的圆角 chip：图标与文字一起包进 accentSoft（参照设计稿的高亮胶囊） */
+.tab-chip {
+  flex-direction: column;
+  align-items: center;
+  padding: 10rpx 40rpx;
+  border-radius: 40rpx;
+}
 .tab-icon-wrap {
-  width: 46px;
-  height: 30px;
-  border-radius: 15px;
+  position: relative;
+  width: 56rpx;
+  height: 52rpx;
   justify-content: center;
   align-items: center;
 }
 .tab-dot {
   position: absolute;
-  top: -1px;
-  right: 6px;
-  width: 8px;
-  height: 8px;
-  border-radius: 4px;
+  top: -4rpx;
+  right: -8rpx;
+  width: 16rpx;
+  height: 16rpx;
+  border-radius: 8rpx;
   background-color: #ff4b4b;
 }
 .tab-label {
-  margin-top: 1px;
-  font-size: 11px;
+  margin-top: 4rpx;
+  font-size: 22rpx;
   font-weight: 500;
 }
 </style>

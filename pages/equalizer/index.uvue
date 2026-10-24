@@ -1,53 +1,56 @@
 <template>
-  <qt-page-frame :max-width="960">
+  <qt-page-frame width-kind="form">
     <view class="page" :class="layout.isWide ? 'page-wide' : ''">
       <!-- 均衡器开关 -->
       <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';'">
-        <view class="head-row" :class="layout.isWide ? 'head-row-wide' : ''">
+        <view class="head-row">
           <view class="head-info">
-            <text class="head-title" :style="'color:' + themeStore.skin.text + ';'">均衡器</text>
-            <text class="head-sub" max-lines="2" :style="'color:' + themeStore.skin.textMuted + ';'">五段音效调节，对所有播放声音即时生效</text>
+            <text class="head-title" :class="layout.isWide ? 'head-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(32, 16)">均衡器</text>
+            <text class="head-sub" :class="layout.isWide ? 'head-sub-wide' : ''" max-lines="2" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 12)">五段音效调节，对所有播放声音即时生效</text>
           </view>
-          <view class="toggle" :style="'background-color:' + (enabled ? themeStore.skin.accent : themeStore.skin.surfaceInset) + ';'" @click="toggleEnabled">
-            <view class="toggle-knob" :class="enabled ? 'toggle-knob-on' : ''" :style="'background-color:' + (enabled ? themeStore.skin.onAccent : themeStore.skin.textMuted) + ';'" />
+          <view class="toggle" :class="layout.isWide ? 'toggle-wide' : ''" :style="'background-color:' + (enabled ? themeStore.skin.accent : themeStore.skin.surfaceInset) + ';'" @click="toggleEnabled">
+            <view class="toggle-knob" :class="knobClass" :style="'background-color:' + (enabled ? themeStore.skin.onAccent : themeStore.skin.textMuted) + ';'" />
           </view>
         </view>
       </view>
 
       <!-- 预设 -->
       <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';'">
-        <text class="section-title" :style="'color:' + themeStore.skin.text + ';'">预设</text>
-        <view class="chips" :class="layout.isWide ? 'chips-wide' : ''">
+        <text class="section-title" :class="layout.isWide ? 'section-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 14)">预设</text>
+        <view class="chips">
           <view
             v-for="(name, idx) in presets"
             :key="idx"
             class="chip"
+            :class="layout.isWide ? 'chip-wide' : ''"
             :style="'background-color:' + (presetIndex == idx ? themeStore.skin.accent : themeStore.skin.surfaceInset) + ';'"
             @click="applyPreset(idx)"
+          :hover-class="layout.isWide ? 'chip-hover' : 'none'"
           >
-            <text class="chip-text" :style="'color:' + (presetIndex == idx ? themeStore.skin.onAccent : themeStore.skin.text) + ';'">{{ name }}</text>
+            <text class="chip-text" :class="layout.isWide ? 'chip-text-wide' : ''" :style="('color:' + (presetIndex == idx ? themeStore.skin.onAccent : themeStore.skin.text) + ';') + qtFontDual(26, 13)">{{ name }}</text>
           </view>
         </view>
       </view>
 
       <!-- 五段调节 -->
       <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';'">
-        <text class="section-title" :style="'color:' + themeStore.skin.text + ';'">{{ presetIndex >= 0 ? presets[presetIndex] : "自定义" }}</text>
-        <view v-for="(label, i) in bandLabels" :key="i" class="band-row">
-          <text class="band-label" :style="'color:' + themeStore.skin.textMuted + ';'">{{ label }}</text>
+        <text class="section-title" :class="layout.isWide ? 'section-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 14)">{{ presetIndex >= 0 ? presets[presetIndex] : "自定义" }}</text>
+        <view v-for="(label, i) in bandLabels" :key="i" class="band-row" :class="layout.isWide ? 'band-row-wide' : ''">
+          <text class="band-label" :class="layout.isWide ? 'band-label-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 12)">{{ label }}</text>
           <slider
             class="band-slider"
+            :class="layout.isWide ? 'band-slider-wide' : ''"
             :min="-12"
             :max="12"
             :step="1"
             :value="bands[i]"
-            :block-size="22"
+            :block-size="layout.isWide ? 22 : qtRpx(44)"
             track-class="eq-track"
             track-active-class="eq-track-active"
             thumb-class="eq-thumb"
             @change="onBandChange(i, $event)"
           />
-          <text class="band-value" :style="'color:' + themeStore.skin.text + ';'">{{ dbText(bands[i]) }}</text>
+          <text class="band-value" :class="layout.isWide ? 'band-value-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(24, 12)">{{ dbText(bands[i]) }}</text>
         </view>
       </view>
     </view>
@@ -55,9 +58,10 @@
 </template>
 <script setup lang="ts">
 import { onLoad } from "@dcloudio/uni-app";
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
-import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
 import { audioPlayer } from "@/services/audio-player.uts";
@@ -81,6 +85,19 @@ const presetBands: number[][] = [
 const enabled = ref(audioPlayer.eqEnabled);
 const bands = ref<number[]>(audioPlayer.eqBands.slice());
 const presetIndex = ref(-1);
+
+/**
+ * 滑块的 class 有两个来源（开/关位移 + 宽窄尺寸），:class 只能绑一个表达式，
+ * 所以这里合成一个字符串。不要拆成两处 :class —— Vapor 会后者覆盖前者。
+ */
+const knobClass = computed((): string => {
+  const on = enabled.value;
+  const wide = layout.isWide;
+  if (on && wide) return "toggle-knob-on toggle-knob-on-wide toggle-knob-wide";
+  if (on) return "toggle-knob-on";
+  if (wide) return "toggle-knob-wide";
+  return "";
+});
 
 onLoad(() => {
   qtTrackPage("pages/equalizer/index");
@@ -139,13 +156,24 @@ function toggleEnabled(): void {
 }
 </script>
 <style lang="css">
+/*
+ * 尺寸口径（2026-10-21 统一，用户报 720dp 模拟器「字体太小」）：
+ * 手机档（!isWide）一律用 rpx —— 它会随窗口宽度线性放大，720dp 上 1rpx ≈ 0.96dp；
+ * 宽屏档继续用固定 px，因为宽屏下 rpx 会膨胀数倍（design.md §6.6）。
+ * 每个尺寸都成对写：base 是 rpx（= 375dp 手机上原来那个 px 值 ×2），-wide 是原 px。
+ */
 .page {
-  padding: 16px;
+  padding: 32rpx;
 }
 .page-wide {
   padding: 20px;
 }
 .card {
+  border-radius: 32rpx;
+  padding: 36rpx;
+  margin-bottom: 28rpx;
+}
+.card-wide {
   border-radius: 16px;
   padding: 18px;
   margin-bottom: 14px;
@@ -159,14 +187,28 @@ function toggleEnabled(): void {
   flex: 1;
 }
 .head-title {
-  font-size: 16px;
+  font-size: 32rpx;
   font-weight: bold;
 }
+.head-title-wide {
+  font-size: 16px;
+}
 .head-sub {
+  margin-top: 8rpx;
+  font-size: 24rpx;
+}
+.head-sub-wide {
   margin-top: 4px;
   font-size: 12px;
 }
 .toggle {
+  width: 92rpx;
+  height: 52rpx;
+  border-radius: 26rpx;
+  padding: 6rpx;
+  margin-left: 24rpx;
+}
+.toggle-wide {
   width: 46px;
   height: 26px;
   border-radius: 13px;
@@ -174,47 +216,85 @@ function toggleEnabled(): void {
   margin-left: 12px;
 }
 .toggle-knob {
+  width: 40rpx;
+  height: 40rpx;
+  border-radius: 20rpx;
+}
+.toggle-knob-wide {
   width: 20px;
   height: 20px;
   border-radius: 10px;
 }
 .toggle-knob-on {
+  margin-left: 40rpx;
+}
+.toggle-knob-on-wide {
   margin-left: 20px;
 }
 .section-title {
-  font-size: 14px;
+  font-size: 28rpx;
   font-weight: bold;
+  margin-bottom: 24rpx;
+}
+.section-title-wide {
+  font-size: 14px;
   margin-bottom: 12px;
 }
 .chips {
   flex-direction: row;
   flex-wrap: wrap;
 }
+/* 桌面指针反馈：只在宽屏启用 */
+.chip-hover {
+  opacity: 0.82;
+}
 .chip {
+  border-radius: 28rpx;
+  padding: 12rpx 28rpx;
+  margin: 0 20rpx 20rpx 0;
+}
+.chip-wide {
   border-radius: 14px;
   padding: 6px 14px;
   margin: 0 10px 10px 0;
 }
 .chip-text {
+  font-size: 26rpx;
+}
+.chip-text-wide {
   font-size: 13px;
 }
 .band-row {
   flex-direction: row;
   align-items: center;
+  margin-bottom: 8rpx;
+}
+.band-row-wide {
   margin-bottom: 4px;
 }
 .band-label {
+  width: 104rpx;
+  font-size: 24rpx;
+}
+.band-label-wide {
   width: 52px;
   font-size: 12px;
 }
 .band-slider {
   flex: 1;
+  margin: 0 20rpx;
+}
+.band-slider-wide {
   margin: 0 10px;
 }
 .band-value {
+  width: 116rpx;
+  font-size: 24rpx;
+  text-align: right;
+}
+.band-value-wide {
   width: 58px;
   font-size: 12px;
-  text-align: right;
 }
 .eq-track {
   background-color: rgba(128, 128, 128, 0.35);

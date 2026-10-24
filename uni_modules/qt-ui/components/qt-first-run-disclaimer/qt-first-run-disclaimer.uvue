@@ -1,0 +1,270 @@
+<!--
+  首次启动免责声明 / 开源通知弹窗。
+
+  对应 qt-pc 的 `src/components/common/FirstRunDisclaimer.tsx`，**正文与读秒都由后端下发**
+  （后台「消息管理」发一条开屏公告 + 填条款版本号，见 stores/disclaimer.ts），
+  代码里不存文案 —— 改一句话不用发版。
+
+  与 qt-notice-splash 的分工：普通开屏公告走那个组件（可勾「今天不显示」、
+  可点遮罩关闭、不可关闭时点「我知道了」= exitApp()）；本组件只服务免责声明，
+  **遮罩不可点、没有关闭键、必须读满秒数才能确认** —— 声明最怕的就是被顺手点掉。
+
+  挂载点：qt-page-frame（框架层，全站一次覆盖，与 qt-toast-host / qt-player-bar 同一处）。
+  宽屏工具页托管层里每个工具页各有一份框架层，因此本组件可能同时存在多个实例；
+  可见的永远只有最上面那份（宿主页那份被托管覆盖层 z-index 1000 盖住），
+  与 toast 宿主、播放栏的既有结论一致，不需要额外的「只挂一份」判据。
+-->
+<template>
+  <view v-if="active" class="frd-mask" :style="maskStyle">
+    <view class="frd-card" :class="layout.isWide ? 'frd-card-wide' : ''" :style="cardStyle">
+      <text class="frd-title" :class="layout.isWide ? 'frd-title-wide' : ''" :style="titleStyle">{{ title }}</text>
+      <scroll-view
+        class="frd-content"
+        :class="layout.isWide ? 'frd-content-wide' : ''"
+        direction="vertical"
+        :show-scrollbar="false"
+        :style="contentStyle"
+      >
+        <QtRichText :html="content" :color="theme.skin.text" :font-size="26" :line-height="1.7" align="left" />
+      </scroll-view>
+      <view v-if="hasUrl" class="frd-link" :class="layout.isWide ? 'frd-link-wide' : ''" @click="onOpenUrl">
+        <QtIcon name="globe" :size="layout.isWide ? 14 : 26" :color="theme.skin.accent" />
+        <text class="frd-link-text" :class="layout.isWide ? 'frd-link-text-wide' : ''" :style="linkTextStyle">查看完整条款</text>
+      </view>
+      <view class="frd-btn" :class="layout.isWide ? 'frd-btn-wide' : ''" :style="buttonStyle" @click="onConfirm">
+        <text class="frd-btn-text" :class="layout.isWide ? 'frd-btn-text-wide' : ''" :style="buttonTextStyle">{{ confirmLabel }}</text>
+      </view>
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed, onUnmounted, ref, watch } from "vue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtRichText from "@/uni_modules/qt-ui/components/qt-rich-text/qt-rich-text.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { openInBrowser } from "@/services/app-native";
+import type { DisclaimerNotice } from "@/stores/disclaimer";
+
+const layout = useQtLayout();
+const theme = useThemeStore();
+
+const props = defineProps<{
+  visible: boolean;
+  notice: DisclaimerNotice | null;
+}>();
+
+const emit = defineEmits<{
+  /** 读满秒数后点了「我知道了」 */
+  accepted: [];
+}>();
+
+/**
+ * 宽屏宽度走统一浮层契约（QT_SHEET_WIDTH.modal = 560），窄屏 620rpx，
+ * 与 qt-notice-splash / qt-upgrade-popup 同一套尺寸口径。
+ *
+ * 卡片底色与遮罩都从主题取（`sheetSurface` / `scrim`），不写死在 <style> 里：
+ * 深色皮肤下写死 #ffffff 会得到一张白卡片压在暗界面上。
+ */
+const cardStyle = computed((): string => {
+  const width = !layout.isWide ? "width:620rpx;" : "width:" + qtSheetWidth("modal") + "px;";
+  return width + "background-color:" + theme.skin.sheetSurface + ";";
+});
+const maskStyle = computed((): string => "background-color:" + theme.skin.scrim + ";");
+
+/**
+ * 正文区尺寸：照抄 qt-notice-splash 的口径 —— 窄屏 `max-height`（内容短时卡片自然收窄），
+ * 宽屏给**确定高度**（scroll-view 在 Vapor 宽屏下 max-height 不保证形成可滚动区块，
+ * 内容一长就会把确认键顶出屏幕）。
+ */
+const contentStyle = computed((): string => {
+  if (!layout.isWide) return "margin-top:24rpx;margin-bottom:4rpx;max-height:760rpx;";
+  return "height:360px;margin-top:14px;";
+});
+
+const active = computed((): boolean => props.visible && props.notice != null);
+const title = computed((): string => {
+  const n = props.notice;
+  if (n == null || n.title.length == 0) return "使用前请先阅读";
+  return n.title;
+});
+const content = computed((): string => (props.notice != null ? props.notice!.content : ""));
+const hasUrl = computed((): boolean => {
+  const url = props.notice != null ? props.notice!.url : "";
+  return url.indexOf("http://") == 0 || url.indexOf("https://") == 0;
+});
+
+/**
+ * 标题字号跟全局缩放（class 里的 34rpx/20px 只是基准值，内联覆盖才生效）。
+ * 行高也按同倍率走：class 的 48rpx/28px 小于 1.4 倍缩放后的字形高度，
+ * 不联动的话「很大」档标题上下会被裁一行（同页头 tab 的行高联动先例）。
+ */
+const titleStyle = computed((): string => {
+  const s = fontScale.scale;
+  const line = layout.isWide
+    ? "line-height:" + Math.round(28 * s * 100) / 100 + "px;"
+    : "line-height:" + Math.round(48 * s * 100) / 100 + "rpx;";
+  return ("color:" + theme.skin.text + ";") + qtFontDual(34, 20) + line;
+});
+const linkTextStyle = computed((): string => ("color:" + theme.skin.accent + ";") + qtFontDual(24, 15));
+
+/**
+ * 读秒。`<= 0` 表示后台没设读秒（或设成 0），确认键立即可点。
+ * 秒数上限在 stores/disclaimer.ts 的 pickDisclaimer 里已夹到 0..60，这里直接用。
+ */
+const left = ref(0);
+let timer: number | null = null;
+
+function clearTimer(): void {
+  if (timer != null) {
+    clearInterval(timer);
+    timer = null;
+  }
+}
+
+/** 每次打开都重新读秒：关于页「重新查看」也要重新读满 */
+function startCountdown(): void {
+  clearTimer();
+  const seconds = props.notice != null ? props.notice!.readSeconds : 0;
+  left.value = seconds;
+  if (seconds <= 0) return;
+  timer = setInterval(() => {
+    const cur = left.value;
+    if (cur <= 1) {
+      left.value = 0;
+      clearTimer();
+      return;
+    }
+    left.value = cur - 1;
+  }, 1000);
+}
+
+const confirmLabel = computed((): string => {
+  if (left.value > 0) return "请阅读（" + left.value + "s）";
+  return "我知道了";
+});
+
+/** 未读满时按钮置灰（不置灰的话用户会一直点，以为坏了） */
+const buttonStyle = computed((): string => {
+  if (left.value > 0) return "background-color:" + theme.skin.surfaceStrong + ";";
+  return "background-color:" + theme.skin.accent + ";";
+});
+const buttonTextStyle = computed((): string => {
+  const color = left.value > 0 ? theme.skin.textMuted : theme.skin.onAccent;
+  return ("color:" + color + ";") + qtFontDual(26, 15);
+});
+
+function onConfirm(): void {
+  if (left.value > 0) return;
+  emit("accepted");
+}
+
+function onOpenUrl(): void {
+  const url = props.notice != null ? props.notice!.url : "";
+  if (url.indexOf("http://") != 0 && url.indexOf("https://") != 0) return;
+  openInBrowser(url);
+}
+
+// 弹窗出现（且声明已到手）才起读秒；关闭时立刻停表
+watch(
+  active,
+  (v: boolean) => {
+    if (v) {
+      startCountdown();
+    } else {
+      clearTimer();
+    }
+  },
+  { immediate: true }
+);
+
+// 定时器句柄必须清：丢了句柄等于没清理，回调会在已销毁的组件实例上触发
+onUnmounted(() => {
+  clearTimer();
+});
+</script>
+
+<style>
+/* 遮罩与卡片底色都走内联（maskStyle / cardStyle），这里不再写死颜色：
+   深色皮肤下写死白底会得到一张白卡片压在暗界面上 */
+.frd-mask {
+  position: fixed;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  justify-content: center;
+  align-items: center;
+  /* 999：与各全屏弹层同级；本组件挂在框架层 slot 之后，同层时压在页面弹窗之上 */
+  z-index: 999;
+}
+.frd-card {
+  width: 620rpx;
+  max-height: 1100rpx;
+  border-radius: 32rpx;
+  padding: 40rpx 40rpx 32rpx;
+  overflow: hidden;
+}
+.frd-title {
+  font-size: 34rpx;
+  font-weight: 700;
+  line-height: 48rpx;
+  text-align: center;
+}
+.frd-content {
+  margin-top: 24rpx;
+}
+.frd-link {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  margin-top: 20rpx;
+}
+.frd-link-text {
+  margin-left: 10rpx;
+  font-size: 24rpx;
+}
+.frd-btn {
+  height: 72rpx;
+  justify-content: center;
+  align-items: center;
+  border-radius: 36rpx;
+  margin-top: 28rpx;
+}
+.frd-btn-text {
+  font-size: 26rpx;
+  font-weight: 600;
+}
+
+/* Vapor 宽屏：px 覆盖 rpx。弹窗限宽走 qtSheetWidth 内联，避免在 1600x900 上占满整屏 */
+.frd-card-wide {
+  max-height: 560px;
+  border-radius: 16px;
+  padding: 24px 24px 20px;
+}
+.frd-title-wide {
+  font-size: 20px;
+  line-height: 28px;
+}
+.frd-content-wide {
+  margin-top: 14px;
+}
+.frd-link-wide {
+  margin-top: 12px;
+}
+.frd-link-text-wide {
+  margin-left: 6px;
+  font-size: 15px;
+}
+.frd-btn-wide {
+  height: 44px;
+  border-radius: 22px;
+  margin-top: 16px;
+}
+.frd-btn-text-wide {
+  font-size: 15px;
+}
+</style>

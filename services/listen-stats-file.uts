@@ -1,0 +1,139 @@
+/** 听歌报告公共存档。Android 直读写需要「所有文件访问」；其它端明确降级。 */
+import { readTextFile, writeTextFile, renamePath, remove } from "@/uni_modules/qt-js-engine";
+import { queryPermissionStates } from "@/uni_modules/qt-app-native";
+// #ifdef APP-ANDROID
+import * as QtJsEngine from "@/uni_modules/qt-js-engine";
+// 旧自定义基座的代理可能没有新增接口。先复制导出，避免打包器静态解析缺失的命名导出。
+const optionalEngine = Object.assign({}, QtJsEngine) as { publicDataDir?: () => string };
+// #endif
+
+export function listenStatsPath(): string {
+  // #ifdef APP-ANDROID
+  const getDirectory = optionalEngine.publicDataDir;
+  if (typeof getDirectory != "function") return "";
+  try {
+    const dir = getDirectory();
+    return dir.length > 0 ? dir + "/listen-stats.json" : "";
+  } catch (_) {
+    return "";
+  }
+  // #endif
+  // #ifndef APP-ANDROID
+  return "";
+  // #endif
+}
+
+export function canWriteListenStats(): boolean {
+  // #ifdef APP-ANDROID
+  const states = queryPermissionStates([
+    "android.permission.MANAGE_EXTERNAL_STORAGE",
+    "android.permission.WRITE_EXTERNAL_STORAGE",
+  ]);
+  for (let i = 0; i < states.length; i++) {
+    if (states[i].applicable && !states[i].unknown && states[i].granted) return true;
+  }
+  // #endif
+  return false;
+}
+
+export type ListenStatsRead = { ok: boolean; text: string; missing: boolean };
+
+export function readListenStatsFile(): Promise<ListenStatsRead> {
+  return readText(listenStatsPath());
+}
+
+/** 通用文本读（主存档与快照共用）；文件不存在算 ok+空串。 */
+function readText(path: string): Promise<ListenStatsRead> {
+  if (path.length == 0 || !canWriteListenStats()) return Promise.resolve({ ok: false, text: "", missing: false });
+  return new Promise<ListenStatsRead>((resolve) => {
+    readTextFile(path, (ok: boolean, text: string, error: string) => {
+      const missing = !ok && (error.indexOf("ENOENT") >= 0 || error.indexOf("No such file") >= 0 || error.indexOf("not exist") >= 0);
+      resolve({ ok: ok || missing, text: ok ? text : "", missing });
+    });
+  });
+}
+
+/** 先写同目录临时文件，再改名替换。写入中断时保留上一份完整存档。 */
+export async function writeListenStatsFile(text: string): Promise<boolean> {
+  return writeTextAtomic(listenStatsPath(), text);
+}
+
+/** 原子写：临时文件 + rename，任何一步失败都不动原文件。 */
+async function writeTextAtomic(path: string, text: string): Promise<boolean> {
+  if (path.length == 0 || !canWriteListenStats()) return false;
+  const temp = path + ".tmp";
+  const written = await new Promise<boolean>((resolve) => {
+    writeTextFile(temp, text, (ok: boolean, _value: string, _error: string) => resolve(ok));
+  });
+  if (!written) return false;
+  return await new Promise<boolean>((resolve) => {
+    renamePath(temp, path, (ok: boolean, _value: string, _error: string) => resolve(ok));
+  });
+}
+
+/**
+ * 已备份的日明细（`listen-stats-archive` 与 `listen-stats-archive.N`）。
+ *
+ * 单独文件而不是塞进主存档：主存档每记一次播放就要整体重写，快照是只增不删的历史，
+ * 混在一起会让每次落盘都重写整年数据。备份后的文件不参与启动加载，只是留存给年终统计用。
+ */
+export function listenStatsArchivePath(index: number = 0): string {
+  const path = listenStatsPath();
+  if (path.length == 0) return "";
+  return index == 0 ? path + ".archive" : path + ".archive." + index;
+}
+
+export function canUseListenStatsArchive(): boolean {
+  return listenStatsArchivePath().length > 0 && canWriteListenStats();
+}
+
+/** 读某一份备份；文件不存在返回 ok+空串（首次运行是正常情况，不是错误）。 */
+export function readListenStatsArchive(index: number = 0): Promise<ListenStatsRead> {
+  return readText(listenStatsArchivePath(index));
+}
+
+/** 同主存档：先写临时文件再改名，避免写一半丢历史。 */
+export function writeListenStatsArchive(text: string, index: number = 0): Promise<boolean> {
+  return writeTextAtomic(listenStatsArchivePath(index), text);
+}
+
+/**
+ * 备份分片的日期索引（`listen-stats.json.archive.index`）。
+ *
+ * 为什么需要它：备份攒成几十片之后，查「近 30 天」或「某一年」时不该把所有分片
+ * 都读进内存。索引只记每片覆盖的日期区间，据此能直接挑出要读的那几片。
+ *
+ * **它只是缓存，不是真相**：读不到、解析失败、或与实际分片对不上时一律退回
+ * 「逐片全读」，所以索引坏掉最多慢一点，不会算错数据。写索引失败同理，
+ * 不影响这次备份本身是否成功。
+ */
+export function listenStatsArchiveIndexPath(): string {
+  const path = listenStatsPath();
+  if (path.length == 0) return "";
+  return path + ".archive.index";
+}
+
+export function readListenStatsArchiveIndex(): Promise<ListenStatsRead> {
+  return readText(listenStatsArchiveIndexPath());
+}
+
+export function writeListenStatsArchiveIndex(text: string): Promise<boolean> {
+  return writeTextAtomic(listenStatsArchiveIndexPath(), text);
+}
+
+export async function removeListenStatsArchiveIndex(): Promise<boolean> {
+  const path = listenStatsArchiveIndexPath();
+  if (path.length == 0 || !canWriteListenStats()) return false;
+  return await new Promise<boolean>((resolve) => {
+    remove(path, (ok: boolean, _value: string, _error: string) => resolve(ok));
+  });
+}
+
+/** 删除某一份备份（备份内容已并入新文件、确认写成功之后才调）。 */
+export async function removeListenStatsArchive(index: number): Promise<boolean> {
+  const path = listenStatsArchivePath(index);
+  if (path.length == 0 || !canWriteListenStats()) return false;
+  return await new Promise<boolean>((resolve) => {
+    remove(path, (ok: boolean, _value: string, _error: string) => resolve(ok));
+  });
+}

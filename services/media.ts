@@ -228,7 +228,8 @@ export async function clearPlaylistCover(pid: string, platform: string): Promise
   );
 }
 
-/** 让 uni.chooseImage 走一张压缩图（头像/封面都够用，省流量） */
+/** 让 uni.chooseImage 走一张压缩图（头像/封面/背景都够用，省流量）。
+ * 只取一张：count 固定为 1，并且即便个别平台忽略 count 回了多张，也只认第一张。 */
 export function chooseImage(): Promise<string> {
   return new Promise((resolve, reject) => {
     uni.chooseImage({

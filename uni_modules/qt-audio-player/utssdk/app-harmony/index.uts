@@ -1,3 +1,4 @@
+import systemDateTime from '@ohos.systemDateTime'
 /**
  * qt-audio-player 鸿蒙端原生实现（HarmonyOS Next / ArkTS）
  *
@@ -48,6 +49,7 @@ import type {
 	AudioPlaylistItem,
 	AudioResolveRequestCallback,
 	AudioTrackChangedCallback,
+	AudioRatingRequestCallback,
 } from '../interface.uts'
 
 // ==================== 常量 ====================
@@ -71,6 +73,11 @@ const SPEED_MAX = 2.0
 /** 推给系统播控的队列窗口上限（当前曲目附近这么多首）。
  *  系统卡片只展示当前曲目附近几首，推全量在长队列下每次都要跨 IPC 传上千个对象 */
 const QUEUE_PUSH_LIMIT = 13
+
+/** 桌面歌词未启用：setDesktopLyricVisible 早于 enableDesktopLyric 时抛（d.ts :5636） */
+const LYRIC_ERR_NOT_ENABLED = 6600110
+/** 设备/系统不支持桌面歌词（d.ts :5645）。收到它就把能力判定为不支持，不再重试 */
+const LYRIC_ERR_NOT_SUPPORTED = 6600111
 
 // ==================== 适配层（薄封装集中区） ====================
 // 把原生调用集中在此处：签名或版本差异只需改这几处，不必在业务逻辑里到处找调用点。
@@ -107,8 +114,13 @@ function nearestSpeed(speed: number): media.PlaybackSpeed {
 /**
  * 组装 AVSession 元数据。
  * AVMetadata 是**具名字段接口**（不是键值对数组）：{ assetId, title?, artist?, album?,
- * duration?: number, mediaImage?: image.PixelMap | string }。
+ * duration?: number, mediaImage?: image.PixelMap | string, lyric?, singleLyricText? }。
  * 注意 setAVMetadata 是**整体覆盖**：任何一次调用都必须给全字段，只补 mediaImage 会把标题清空。
+ *
+ * lyric / singleLyricText 是系统桌面歌词的**唯一**数据来源（应用自己不画窗）：
+ *  - lyric = 整首 LRC（带时间轴），系统自行按进度对齐——这是主通道；
+ *  - singleLyricText = 当前行纯文本（无时间前缀），给不消费 lyric 的系统版本兜底。
+ * 两者都必须每次带上，否则逐行更新 singleLyricText 时会把整首 lyric 清空。
  */
 function buildMetadata(assetId: string, title: string, artist: string, album: string,
 	cover: string, durationMs: number, coverImage?: image.PixelMap): avSession.AVMetadata {
@@ -128,6 +140,18 @@ function buildMetadata(assetId: string, title: string, artist: string, album: st
 	} else if (cover.length > 0) {
 		m.mediaImage = cover
 	}
+	// 歌词：默认不写空串 —— AVMetadata 是具名接口，写了空串等于「明确告诉系统这首没词」，
+	// 而**第一次**推送时确实没什么可说，省略才是「不提供」。
+	//
+	// 但一旦我们对某个字段表过态（dirty），之后每次都必须原样带上（哪怕空串）：
+	// 否则从「有词」切到「纯音乐」时字段被省略、系统保留着上一首的值，
+	// 桌面歌词会继续滚上一首的词 / 停在上一首的最后一行。
+	if (gLyricLrcDirty) {
+		m.lyric = gLyricLrc
+	}
+	if (gLyricLineDirty) {
+		m.singleLyricText = gLyricLine
+	}
 	return m
 }
 
@@ -144,6 +168,36 @@ let gSession: avSession.AVSession | null = null
 let gWantAgent: WantAgent | null = null
 /** 长时任务是否已启动：startBackgroundRunning 可重入但重复调用会报错，用标志兜住 */
 let gBackgroundRunning = false
+
+// ---- 桌面歌词状态（鸿蒙 = 系统渲染，见文件末尾导出区说明） ----
+/** 本机是否支持桌面歌词。isDesktopLyricSupported 是异步的，所以**初始按不支持**：
+ *  宁可让设置页晚 100ms 才允许打开，也不能在 API 23 以下的设备上谎报支持
+ *  （那些设备上 enableDesktopLyric 根本不存在，谎报会让开关永远打开却什么都不显示） */
+let gLyricSupported = false
+/** 用户是否想要桌面歌词（意图）。会话是按需创建的（首播才建），
+ *  用户完全可能先开开关再开始播放，所以意图必须寄存，等会话就绪再落地 */
+let gLyricWantOn = false
+/** 系统侧桌面歌词窗当前是否可见：由 setDesktopLyricVisible 的结果与系统显隐回调共同维护 */
+let gLyricVisible = false
+/** 锁定态（锁住后桌面歌词窗不可拖动） */
+let gLyricLocked = false
+/** 整首 LRC：交给系统自行按播放进度对齐时间轴，比逐行推送更稳（后台/息屏也不掉行） */
+let gLyricLrc = ''
+/** 是否对「整首歌词」表过态（pushLyricLrc 调过至少一次）。
+ *  表过态之后 buildMetadata 每次都会带上 lyric —— 哪怕是空串。
+ *  原因：具名接口省略字段 = 「不提供」，系统会保留上一次的值；从「有词」切到
+ *  「纯音乐」时若省略，桌面歌词会继续滚上一首的歌词。 */
+let gLyricLrcDirty = false
+/** 当前行（AVMetadata.singleLyricText）：系统没消费 lyric 时的兜底，逐行变化时更新 */
+let gLyricLine = ''
+/** 同 gLyricLrcDirty：表过态之后每次原样带上 singleLyricText（含空串），
+ *  否则换到「纯音乐 / 暂无歌词」时系统会留着上一首的最后一行 */
+let gLyricLineDirty = false
+/** 是否已经问过系统「支不支持桌面歌词」：isDesktopLyricSupported 是异步的，
+ *  没问出来之前 audioLyricShow 只能乐观放行（真不支持时由系统回调/下次对账纠正） */
+let gLyricProbed = false
+/** 是否已对本会话调过 enableDesktopLyric(true)。会话销毁时复位（新会话要重开） */
+let gLyricEnabled = false
 
 /** 播放队列（本文件自己维护——AVPlayer 没有时间线概念） */
 let gItems: AudioPlaylistItem[] = []
@@ -214,6 +268,8 @@ let cbTime: AudioPlayerTimeCallback | null = null
 let cbError: AudioPlayerErrorCallback | null = null
 let cbResolve: AudioResolveRequestCallback | null = null
 let cbTrack: AudioTrackChangedCallback | null = null
+/** 桌面歌词窗显隐变化（鸿蒙由系统派发，见 onDesktopLyricVisibilityChanged） */
+let cbLyricWindow: AudioPlayerStateCallback | null = null
 
 // ==================== 事件派发 ====================
 // play / pause / waiting / canplay 四个是**边沿触发**：只有状态真的翻转才通知 JS，
@@ -259,6 +315,20 @@ function fireWaiting(): void {
 
 function firePrev(): void { cbPrev?.() }
 function fireNext(): void { cbNext?.() }
+
+/** 桌面歌词窗显隐变化：系统回调 → JS。只在真的翻转时才报（系统可能重复派发同值） */
+function fireLyricWindowChanged(on: boolean): void {
+	if (gLyricVisible == on) return
+	notifyLyricWindow(on)
+}
+
+/** 无条件派发显隐。仅用于「乐观放行后又被系统否掉」的纠正：那条路径上
+ *  gLyricVisible 从未被置真，走 fireLyricWindowChanged 会被去重吃掉，
+ *  服务层就会永远停在「已开启」而实际什么都不显示 */
+function notifyLyricWindow(on: boolean): void {
+	gLyricVisible = on
+	cbLyricWindow?.(on)
+}
 
 function fireError(message: string): void {
 	console.log('[QT Audio H] ' + message)
@@ -411,6 +481,10 @@ function ensureSession(): void {
 			} catch (e) {
 				console.log('[QT Audio H] activate 抛错: ' + (e != null ? e.toString() : 'unknown'))
 			}
+			// 桌面歌词能力探测 + 落地用户意图（用户完全可能先开开关再开始播放）。
+			// 必须放在这里而不是 audioLyricShow 里：那时会话还不存在，接口根本没法调。
+			// 探测是异步的，绝不能 await/阻塞这个回调（会让 activate 之后的元数据推送延迟）
+			probeLyricSupport(session)
 			// 会话建好后补一次元数据/状态：首播时元数据可能早于会话就绪
 			applySessionMetadata()
 			applySessionPlaybackState()
@@ -491,6 +565,21 @@ function bindSessionListeners(session: avSession.AVSession): void {
 			// 不能让 JS 走「提前结束」的容错分支
 			loadIndex(idx, 0.0, true, false)
 		})
+		// 系统侧桌面歌词显隐变化（用户在系统设置/控制中心关掉桌面歌词、或系统自行收起）。
+		// 这是**具名方法**而非 session.on('...') 字符串事件（d.ts:633 onDesktopLyricVisibilityChanged）。
+		// 单独套一层 try/catch：API 23 以下的设备根本没有这个方法，抛错不能连累上面
+		// 已经注册好的播控监听（那些是媒体键的核心通路）
+		try {
+			session.onDesktopLyricVisibilityChanged((visible: boolean) => {
+				gLyricVisible = visible
+				// 意图跟随系统真相：系统没显示就是没显示，否则下次建会话 syncLyricState
+				// 会把窗又拉回来，出现「开关显示关着、歌词却自己冒出来」
+				gLyricWantOn = visible
+				cbLyricWindow?.(visible)
+			})
+		} catch (e) {
+			console.log('[QT Audio H] 桌面歌词显隐监听注册失败: ' + (e != null ? e.toString() : 'unknown'))
+		}
 	} catch (e) {
 		console.log('[QT Audio H] 会话监听注册失败: ' + (e != null ? e.toString() : 'unknown'))
 	}
@@ -512,8 +601,14 @@ function currentItem(): AudioPlaylistItem | null {
 	return null
 }
 
-/** 把当前曲目元数据写进会话（标题/歌手/专辑/封面/时长/assetId） */
-function applySessionMetadata(): void {
+/**
+ * 把当前曲目元数据写进会话（标题/歌手/专辑/封面/时长/assetId）。
+ *
+ * lyricOnly = true 表示「只是歌词变了，别的都没变」：跳过队列推送与封面下载。
+ * 逐行推送歌词会高频调用本函数，若不跳过封面，gCoverLoadingFor 在封面失败时
+ * 会被 releaseCoverSlot 复位，于是每换一行就重下一次封面 —— 必须挡住。
+ */
+function applySessionMetadata(lyricOnly: boolean = false): void {
 	const session = gSession
 	if (session == null) return
 	const item = currentItem()
@@ -536,14 +631,36 @@ function applySessionMetadata(): void {
 		console.log('[QT Audio H] setAVMetadata 抛错: ' + (e != null ? e.toString() : 'unknown'))
 	}
 	// 队列信息：控制中心/锁屏可展示「上下曲」，也支持 skipToQueueItem
-	pushSessionQueue(session)
+	// lyricOnly 时跳过：换一行歌词推一次整条队列纯属浪费（队列只在换歌/重推时变）
+	if (!lyricOnly) pushSessionQueue(session)
 	// 封面：异步加载，加载完成后校验 mediaId 未变才写回（避免快速切歌写错封面）。
 	// 用 gCoverLoadingFor 去重：applySessionMetadata 会被 setTitle/Singer/Album/Cover
 	// 连调 4 次，不去重就会对同一张封面并发下 4 个 HTTP 请求
-	if (cover.length > 0 && assetId.length > 0 && gCoverLoadingFor != assetId) {
+	if (!lyricOnly && cover.length > 0 && assetId.length > 0 && gCoverLoadingFor != assetId) {
 		gCoverLoadingFor = assetId
 		loadCoverIntoSession(session, cover, assetId)
 	}
+}
+
+/**
+ * 逐行歌词推送：写 gLyricLine 后只重发元数据。
+ *
+ * 为什么不走 setAVMetadata 之外的路：AVMetadata 是系统读歌词的唯一入口，
+ * singleLyricText 只能整体覆盖式重发（系统没有「只更新一行」的接口）。
+ */
+function pushLyricLine(line: string): void {
+	if (gLyricLine == line) return
+	gLyricLine = line
+	gLyricLineDirty = true
+	applySessionMetadata(true)
+}
+
+/** 整首 LRC 推送：交给系统按进度自行对齐时间轴（后台/息屏不掉行） */
+function pushLyricLrc(lrc: string): void {
+	if (gLyricLrcDirty && gLyricLrc == lrc) return
+	gLyricLrc = lrc
+	gLyricLrcDirty = true
+	applySessionMetadata(true)
 }
 
 /** 正在下载封面的 assetId（去重用；下载结束/失败都要复位，否则该曲不再尝试封面） */
@@ -789,6 +906,147 @@ function releaseSession(): void {
 		session.destroy()
 	} catch (e) {
 		// 忽略
+	}
+	// 桌面歌词窗是**会话的附属物**：会话没了窗就没了（与安卓端不同——那边是我们自绘的
+	// 悬浮窗，停播后仍留在屏幕上）。所以这里复位「已 enable」，下次建会话必须重新 enable。
+	//
+	// 但**用户意图（gLyricWantOn / gLyricVisible）刻意保留**：鸿蒙上这个开关的语义是
+	// 「播放时显示桌面歌词」这个偏好，跟安卓一致。若在这里撤销意图并广播 false，JS 侧
+	// 开关会被关掉，用户每次停止播放都要重新打开一次——那不是真相，只是实现细节泄漏。
+	// 真正该撤销意图的场合只有一个：系统自己把桌面歌词关了
+	// （onDesktopLyricVisibilityChanged(false)，那是用户的显式操作）。
+	gLyricEnabled = false
+}
+
+// ==================== 桌面歌词（鸿蒙 = 系统渲染） ====================
+// 与安卓端的**根本差异**：安卓的桌面歌词是本应用自绘的 TYPE_APPLICATION_OVERLAY 悬浮窗，
+// 字体/颜色/宽度/描边/阴影/对齐/背景全部由我们控制；鸿蒙的桌面歌词**由系统渲染**，
+// 应用只能通过 AVSession 声明「要桌面歌词」「现在显示哪一行」，样式一律不可控。
+// 这不涉及 SYSTEM_FLOAT_WINDOW（那个权限确实只给系统应用）——普通应用也能用桌面歌词，
+// 只是画不了自己的窗、也就改不了样式。故 audioLyricSet* 系列是**诚实的空实现**，
+// 不是没做完：系统不提供任何样式入口，写进去只会是「假装生效」。
+
+/** 与系统 avSession.DesktopLyricState 结构一致。本地声明的原因：HBuilderX 自带的 d.ts
+ *  是 API 12，还没有这个类型，直接写 avSession.DesktopLyricState 会在 UTS 转译期
+ *  就报「找不到名字」；结构相同，DevEco 侧按具名接口做结构化匹配 */
+interface QtDesktopLyricState {
+	isLocked: boolean
+}
+
+/**
+ * 把「用户想要桌面歌词」这一意图落到当前会话上。幂等，可重复调用。
+ *
+ * 顺序不能反：setDesktopLyricVisible 早于 enableDesktopLyric 会抛 6600110
+ * （ERR_CODE_DESKTOP_LYRIC_NOT_ENABLED），所以必须 enable 在前、visible 在后。
+ */
+function syncLyricState(): void {
+	const session = gSession
+	if (session == null) return
+	if (!gLyricSupported) {
+		// 探测已明确判定不支持：不发无效调用，直接把「开着却什么都不显示」的开关拉回来。
+		// 用 notifyLyricWindow 而不是 fireLyricWindowChanged：这条纠正路径上
+		// gLyricVisible 已被乐观置真，走去重会被吃掉（见 notifyLyricWindow 注释）
+		if (gLyricProbed && gLyricWantOn) notifyLyricWindow(false)
+		return
+	}
+	if (gLyricEnabled) {
+		applyLyricVisible()
+		return
+	}
+	gLyricEnabled = true
+	try {
+		session.enableDesktopLyric(true).then(() => {
+			applyLyricVisible()
+		}).catch((err: BusinessError) => {
+			gLyricEnabled = false
+			handleLyricError(err, 'enableDesktopLyric')
+		})
+	} catch (e) {
+		gLyricEnabled = false
+		console.log('[QT Audio H] enableDesktopLyric 抛错: ' + (e != null ? e.toString() : 'unknown'))
+	}
+}
+
+/** 显隐下发。与 enable 分开：enable 是异步的，完成前发 visible 会抛 6600110 */
+function applyLyricVisible(): void {
+	const session = gSession
+	if (session == null) return
+	const want = gLyricWantOn
+	try {
+		session.setDesktopLyricVisible(want).then(() => {
+			// 系统确认后才落本地真相（乐观值只用于 UI 即时反馈）。
+			// 不派发回调：JS 侧本来就是发起方，它自己知道意图；
+			// 回调通道留给「系统侧变化」与「乐观放行被否掉」两种纠正场景
+			gLyricVisible = want
+		}).catch((err: BusinessError) => {
+			handleLyricError(err, 'setDesktopLyricVisible')
+		})
+	} catch (e) {
+		console.log('[QT Audio H] setDesktopLyricVisible 抛错: ' + (e != null ? e.toString() : 'unknown'))
+	}
+}
+
+/**
+ * 桌面歌词接口的统一错误出口。
+ * 6600110 / 6600111 是**语义性**失败（未启用 / 不支持），必须纠正状态；
+ * 其余（6600101 会话服务异常、6600102 会话不存在）按瞬时故障处理，不动用户意图。
+ */
+function handleLyricError(err: BusinessError, where: string): void {
+	const code = err != null ? err.code : -1
+	console.log('[QT Audio H] ' + where + ' 失败 code=' + code.toString())
+	if (code == LYRIC_ERR_NOT_SUPPORTED) {
+		gLyricSupported = false
+		gLyricProbed = true
+		gLyricEnabled = false
+		// 无条件纠正：用户看到的是「开关开着但什么都不显示」
+		notifyLyricWindow(false)
+		return
+	}
+	if (code == LYRIC_ERR_NOT_ENABLED) {
+		// 与本文件的调用顺序不一致（理论上不会走到）：复位 enable 标志，
+		// 下一次 syncLyricState 会重新 enable 再 visible
+		gLyricEnabled = false
+		return
+	}
+}
+
+/**
+ * 探测本机是否支持桌面歌词，并把用户意图落地到新会话上。
+ *
+ * 为什么挂在会话出生点：isDesktopLyricSupported 是**命名空间级**函数（不是会话方法），
+ * 但 enableDesktopLyric / setDesktopLyricVisible 都是会话方法，没有会话什么都做不了；
+ * 而会话是按需创建的（首播才建），所以「探测 + 落地意图」只能放在这里。
+ *
+ * 绝不能 await / 阻塞 createAVSession 的回调：那会把紧随其后的元数据推送一起推迟，
+ * 首播时锁屏卡片会晚一拍才出现曲目信息。故这里全程 .then/.catch，本文件也没有 async。
+ */
+function probeLyricSupport(session: avSession.AVSession): void {
+	// 探测过一次就够了（能力是设备/系统属性，不随会话变），只需把意图补到新会话上
+	if (gLyricProbed) {
+		syncLyricState()
+		return
+	}
+	try {
+		avSession.isDesktopLyricSupported().then((supported: boolean) => {
+			gLyricProbed = true
+			gLyricSupported = supported
+			if (!supported) {
+				// 用户先开了开关、设备却不支持：把开关拉回来，别让它空转
+				if (gLyricWantOn) notifyLyricWindow(false)
+				return
+			}
+			syncLyricState()
+		}).catch((err: BusinessError) => {
+			// 探测失败（老版本根本没有这个接口）：按不支持处理，但**不**纠正用户意图——
+			// 探测失败不等于能力不存在，宁可让开关保持原样，也不误关
+			gLyricProbed = true
+			gLyricSupported = false
+			console.log('[QT Audio H] 桌面歌词能力探测失败 code=' + (err != null ? err.code.toString() : '?'))
+		})
+	} catch (e) {
+		gLyricProbed = true
+		gLyricSupported = false
+		console.log('[QT Audio H] 桌面歌词能力探测抛错: ' + (e != null ? e.toString() : 'unknown'))
 	}
 }
 
@@ -1371,6 +1629,9 @@ export function audioPlay(): void {
 		artist: gSinger,
 		album: gAlbum,
 		coverUrl: gCoverUrl,
+		// ArkTS 把可选+可空的 duration 当必填校验（Android/Kotlin 端可选），单曲链路
+		// 进原生时没有已知时长，显式传 null 通过鸿蒙编译
+		duration: null,
 	}
 	gItems = [item]
 	gIndex = -1
@@ -1688,6 +1949,11 @@ export function audioClearCache(): boolean {
 	return false
 }
 
+/** 鸿蒙端无磁盘缓存，占用恒为 0（与 audioClearCache 同口径，UI 据此显示「无缓存」） */
+export function audioCacheSize(): number {
+	return 0
+}
+
 /** 单曲缓存精准清除：鸿蒙端无缓存，恒 false（上层据此跳过自愈路径） */
 export function audioEvictSongCache(mediaId: string): boolean {
 	return false
@@ -1727,38 +1993,90 @@ export function audioSetEqualizerBands(levelsDb: number[]): void {
 	// 空实现：见上
 }
 
-// ==================== 导出：桌面歌词（鸿蒙不支持） ====================
-// 安卓端桌面歌词是 TYPE_APPLICATION_OVERLAY 悬浮窗。鸿蒙的悬浮窗
-// （ohos.permission.SYSTEM_FLOAT_WINDOW）**只对系统应用开放**，普通应用无法在其他
-// 应用之上绘制，因此这一整套能力在鸿蒙上没有可行实现：
-// 替代方向是「实况窗（Live View）」或在媒体通知里展示歌词行，都属于后续轮次的产品决策。
-// 这里全部按「无能力」返回，让 services/desktop-lyric.uts 走既有的能力探测降级，
-// 绝不在调用点抛异常（那会让设置页整块崩掉）。
+// ==================== 导出：桌面歌词（鸿蒙 = 系统渲染） ====================
+// 与安卓端的根本差异见上方「桌面歌词（鸿蒙 = 系统渲染）」一节：安卓是我们自绘悬浮窗，
+// 鸿蒙是系统渲染、应用只提供文本。所以：
+//   · 能落地的（显示/隐藏/当前行/整首 LRC/锁定）全部真实实现；
+//   · 落不了地的（字体/颜色/字重/宽度/描边/阴影/对齐/背景）保持**诚实的空实现**——
+//     系统不提供任何样式入口，写进去只会是「假装生效」；
+//   · 任何调用都不抛异常（设置页整块依赖这些函数，抛了会白屏）。
 
+/** 鸿蒙不需要悬浮窗权限：桌面歌词由系统绘制，不涉及 SYSTEM_FLOAT_WINDOW。
+ *  返回 true 让设置页直接进入「可开启」状态，不再弹安卓那套授权引导。 */
 export function audioLyricHasOverlayPermission(): boolean {
-	return false
+	return true
 }
 
+/** 无权限可申请。返回 true = 「已就绪」，与 hasOverlayPermission 语义一致，
+ *  避免调用方把 false 解读成「拉起设置页失败」而反复提示用户手动前往。 */
 export function audioLyricRequestOverlayPermission(): boolean {
-	return false
+	return true
 }
 
+/**
+ * 开启桌面歌词。
+ *
+ * 这里**不能**等能力探测的结果（探测是异步的、首播前根本没会话）：本函数被
+ * DesktopLyricService.enable() 同步调用，返回 false 会让它不启动跟词，那样即使设备
+ * 支持也永远推不出歌词。故乐观返回 true，真正不支持时由 notifyLyricWindow(false)
+ * 把开关拉回来（见 syncLyricState / handleLyricError）。
+ *
+ * 唯一的例外是「探测已明确判定不支持」——那就不必假装，直接返回 false。
+ */
 export function audioLyricShow(): boolean {
-	return false
+	gLyricWantOn = true
+	gLyricVisible = true
+	if (gLyricProbed && !gLyricSupported) {
+		// 设备/系统不支持：不要假装开启（否则开关亮着、屏幕上什么都没有）
+		gLyricWantOn = false
+		gLyricVisible = false
+		notifyLyricWindow(false)
+		return false
+	}
+	syncLyricState()
+	return true
 }
 
 export function audioLyricHide(): void {
+	gLyricWantOn = false
+	gLyricVisible = false
+	// 没 enable 过就没什么可隐藏的；enable 在途时也交给 applyLyricVisible 处理，
+	// 它会以调用当刻的 gLyricWantOn 为准
+	if (gLyricEnabled) applyLyricVisible()
 }
 
 export function audioLyricIsShowing(): boolean {
-	return false
+	return gLyricVisible
 }
 
+/**
+ * 推送当前歌词行。
+ * 译文参数在鸿蒙上无处安放：系统的桌面歌词窗是**单行**文本，没有第二行的概念，
+ * 所以这里只取正文（与安卓端「正文 + 译文两行」不同，这是平台能力差异，不是遗漏）。
+ */
 export function audioLyricUpdate(line: string, translation: string): void {
+	pushLyricLine(line)
 }
 
 export function audioLyricSetLocked(locked: boolean): void {
+	gLyricLocked = locked
+	const session = gSession
+	if (session == null) return
+	// 桌面歌词窗的「锁定」= 鼠标/触摸穿透，由系统状态对象承载（d.ts setDesktopLyricState）
+	try {
+		const state: QtDesktopLyricState = { isLocked: locked }
+		session.setDesktopLyricState(state).catch((err: BusinessError) => {
+			handleLyricError(err, 'setDesktopLyricState')
+		})
+	} catch (e) {
+		console.log('[QT Audio H] setDesktopLyricState 抛错: ' + (e != null ? e.toString() : 'unknown'))
+	}
 }
+
+// ---- 以下为系统不提供的样式能力：保持空实现，不做「假装生效」 ----
+// 安卓端这些值会写进我们自绘窗的 Paint/LayoutParams；鸿蒙的歌词窗由系统绘制，
+// 应用侧没有任何字体/颜色/宽度/描边/阴影/对齐/背景入口。设置页里这些控件在鸿蒙上
+// 应视为「本平台不适用」（见 pages/desktop-lyric/index.uvue），而不是「改了没反应」。
 
 export function audioLyricSetFontSp(main: number, tr: number): void {
 }
@@ -1784,6 +2102,46 @@ export function audioLyricSetAlign(align: string): void {
 export function audioLyricSetBackground(mode: string, colorArgb: number, opacity: number): void {
 }
 
-/** 桌面歌词窗口显隐变化回调：鸿蒙上永远不会触发，保留签名仅为跨平台类型一致 */
+/**
+ * 桌面歌词窗显隐变化回调。
+ * 两个来源都会走到这里：系统侧变化（用户在控制中心/系统设置里关掉）与
+ * 「乐观放行后被系统否掉」的纠正。
+ */
 export function audioOnLyricWindowChanged(callback: AudioPlayerStateCallback | null): void {
+	cbLyricWindow = callback
 }
+
+/**
+ * 推送整首 LRC（带时间轴）。
+ *
+ * 与 audioLyricUpdate 的「当前行」并存，两者服务不同的系统实现：
+ *  - lyric = 整首 LRC，系统按自己的时间轴滚动/对齐。主通道，后台与息屏都稳；
+ *  - singleLyricText = 当前行纯文本，给不消费 lyric 的系统版本兜底。
+ *
+ * **注意时间轴口径差异**：本行文本是我们按用户设置的歌词偏移（useLyricOffsetStore）
+ * 算出来的，而 lyric 是原始时间戳 —— 偏移非 0 时，系统按 lyric 自渲染的进度会比
+ * 应用内歌词差一个偏移量。这是平台能力的固有取舍（应用无法干预系统歌词窗的滚动），
+ * 不是缺陷：偏移为 0（绝大多数用户）时两者完全一致。
+ *
+ * 必须追加在文件**最末尾**：UTS 插件的导出 methodId 按声明顺序生成，插在中间会让
+ * 其后所有导出整体错位（同 app-android/index.uts 末尾的同类注释）。
+ */
+export function audioLyricSetLrc(lrc: string): void {
+	pushLyricLrc(lrc)
+}
+
+// ==================== 系统收藏（红心 ♡）====================
+// 鸿蒙端空实现：AVSession 播控中心没有收藏按钮，这里保留与安卓端完全一致的签名，
+// 让 services/audio-player.uts 的跨端调用不需要再分平台。仍须追加在文件**最末尾**
+// （methodId 顺序，同上文 audioLyricSetLrc 的说明）。
+let cbRating: AudioRatingRequestCallback | null = null
+
+/** 注册系统收藏请求回调（鸿蒙端不会触发，仅保存引用） */
+export function audioOnSetRating(callback: AudioRatingRequestCallback | null): void {
+	cbRating = callback
+}
+
+/** 回写红心状态（鸿蒙端空实现，签名对齐安卓端） */
+export function audioSetLiked(mediaId: string, liked: boolean): void {
+}
+export function audioMonotonicTime(): number { return systemDateTime.getUptime(systemDateTime.TimeType.STARTUP, false) }

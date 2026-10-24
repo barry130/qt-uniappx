@@ -12,10 +12,50 @@
 import { apiRequest, parseJsonToUtso, resolveUrl } from "./http";
 import { getPlayUrlByEngineResult, invokeSource } from "./source-engine";
 import type { PlayUrlLine } from "./source-engine";
-import { activeMetaPack, ensureLocalStateRestored } from "./source-bundle-fs";
+import { activeMetaPack, ensureLocalStateRestored, packs } from "./source-bundle-fs";
+import type { SourcePackMeta } from "./source-bundle-fs";
+import { ttlRead, ttlReadUtso, ttlWrite } from "./ttl-store";
 import { isLoggedIn } from "./auth";
 import { qtDiag } from "./diag";
+import { logErrV, logWarn } from "./logger";
 import type { Playlist, Song, Artist, Album } from "@/types/music";
+import { mergeAggregateSongs } from "./aggregate-merge";
+import type { AggregateSongBatch } from "./aggregate-merge";
+
+
+/**
+ * URL 是否指向 QMC 加密容器（扩展名判定，不联网）。
+ *
+ * 与 qt-sources/src/actions/play-guard.ts 的 isEncryptedMediaUrl 同口径，宿主侧
+ * 防御性兜底：老音源包会直接给出加密地址（mflac/mgg/qmc/tkm），播放器/下载器
+ * 拿它当普通音频会静默失败——这里在进播放器/下载器之前拦掉，按内容失败处理
+ * （换下一首/不落盘）。新包已在 play-guard 拦截，走不到这里。
+ */
+const ENCRYPTED_MEDIA_EXTS: string[] = [
+  "mflc", "mflac",
+  "mflac0", "mflac1", "mflac2", "mflac3", "mflac4", "mflac5",
+  "mgg", "mgg0", "mgg1", "mgga", "mggh", "mggl",
+  "mmp4",
+  "qmc0", "qmc1", "qmc2", "qmc3", "qmc4", "qmc5", "qmc6", "qmc7", "qmc8",
+  "qmcflac", "qmcogg",
+  "tkm", "bkcmp3", "bkcflac",
+];
+
+export function isEncryptedMediaUrl(url: string): boolean {
+  if (url.length == 0) return false;
+  let path = url;
+  const q = path.indexOf("?");
+  if (q >= 0) path = path.substring(0, q);
+  const h = path.indexOf("#");
+  if (h >= 0) path = path.substring(0, h);
+  const dot = path.lastIndexOf(".");
+  if (dot < 0) return false;
+  const ext = path.substring(dot + 1).toLowerCase();
+  for (let i = 0; i < ENCRYPTED_MEDIA_EXTS.length; i++) {
+    if (ext == ENCRYPTED_MEDIA_EXTS[i]) return true;
+  }
+  return false;
+}
 
 /**
  * 内容失败（音源没这首 / 未装播放包）的异常文案。弱网走另一句「网络较慢，正在重试」。
@@ -156,10 +196,19 @@ export type SourceRegistry = { sources: RegistrySource[]; qualities: RegistryQua
  */
 export const DEFAULT_SEARCH_PAGE_MAX = 50;
 /**
- * 音质档位的高低序（数组序 = 高到低；与包侧 QUALITIES 的声明序一致）。
- * clampQualityFor 的「最接近一档」推断用它。
+ * 音质档位的高低序（**高→低**），从清单的全局 qualities 派生。
+ *
+ * 包侧 `QUALITIES` 按「低→高」声明（qt-sources/src/registry.ts 写明数组序 =
+ * 从低到高，因为 play-guard 的 qualityLadder() 直接反转它），故这里取反。
+ * 不再硬编码表：包加新档位后硬编码表会与之脱节（见 registryQualities 的注释）。
  */
-const QUALITY_RANKS: string[] = ["flac", "320", "128"];
+function qualityRanksOf(qualities: RegistryQuality[]): string[] {
+  const ranks: string[] = [];
+  for (let i = qualities.length - 1; i >= 0; i--) {
+    ranks.push((qualities[i] as RegistryQuality).id);
+  }
+  return ranks;
+}
 export type Banner = {
   id: string;
   picUrl: string;
@@ -211,6 +260,15 @@ export class MusicApi {
    * 时又退回请求档。
    */
   private urlActualQuality = new Map<string, string>();
+  /**
+   * 每条播放地址的**实测字节数**（cacheKey 同 urlCache；缺失 = 包没测出来）。
+   *
+   * 音源包取链时会用 Range 预检量到文件总字节数（`PlayUrlResult.size`），
+   * 播放页的「xxx kbps」就靠它 ÷ 时长算出来（口径同 qt-pc 的
+   * `measured_bitrate_kbps`）。**必须跟地址同生命周期**：地址复用 10 分钟、
+   * 换包后整表清空，字节数留着就会配到另一条地址上，算出假码率。
+   */
+  private urlSize = new Map<string, number>();
   private lyricCache = new UTSJSONObject();
   /** 播放地址缓存的存活键 FIFO（容量上限见 URL_CACHE_CAP，写入序淘汰最旧） */
   private urlCacheKeys: string[] = [];
@@ -247,6 +305,15 @@ export class MusicApi {
    * 响应把正在跑的分页改成「零个源」）。取不到时为空数组，调用方自行兜底。
    */
   private registrySources: RegistrySource[] = [];
+  /**
+   * 清单里的全局音质档位（与 registrySources 同一次解析产出）。
+   *
+   * clampQualityFor 要按「档位高低」推断最接近的一档，必须知道包声明的**全部**
+   * 档位及其高低序；只存 sources 时那份 qualities 是局部变量、用完即弃，
+   * 于是钳位只能退回去查硬编码表——2026-10 加 `flac24bit` 后正因此让
+   * 「母带 24bit」的下载一路掉到「标准 128k」。
+   */
+  private registryQualities: RegistryQuality[] = [];
   /**
    * 清单是否已过期（音源包变更后由 clearPlayUrlCache 置位，成功重取后清位）。
    *
@@ -294,6 +361,33 @@ export class MusicApi {
     }
     this.dataCache.set(key, value);
     this.dataCacheAt.set(key, Date.now());
+  }
+
+  // ==================== 本地持久缓存（TTL，跨启动） ====================
+  // 与上面 60s 内存缓存互补：内存层保「同一次会话里来回切页面」的秒开，
+  // 持久层保「杀进程重进」也不重拉。键里带音源包指纹——换包/升级包即整体失效。
+  private static readonly TTL_1H = 60 * 60 * 1000;
+  private static readonly TTL_12H = 12 * 60 * 60 * 1000;
+  private static readonly TTL_7D = 7 * 24 * 60 * 60 * 1000;
+
+  /** 音源包指纹（id@versionCode 逗号连接）。不复用 source-update 的
+   *  packsFingerprint 是为了避免与该模块互相 import 形成环；这里只需
+   * 「包集合或版本变化 → 键变化」这一性质，公式内部一致即可。 */
+  private packFp(): string {
+    const list = packs();
+    const parts: string[] = [];
+    for (let i = 0; i < list.length; i++) {
+      const p = list[i] as SourcePackMeta;
+      parts.push(p.id + "@" + p.versionCode.toString());
+    }
+    return parts.join(",");
+  }
+
+  /** 读持久缓存并同步回填内存层（命中持久层时内存层也秒开）；调用方自行 as 收窄 */
+  private ttlHit(key: string, ttlMs: number, memoryKey: string): any | null {
+    const stored = ttlRead(key, ttlMs);
+    if (stored != null) this.dataSet(memoryKey, stored);
+    return stored;
   }
 
   private cacheGet(cache: UTSJSONObject, key: string): string {
@@ -359,6 +453,7 @@ export class MusicApi {
     this.urlCacheAt.set(key, 0);
     this.urlLine.set(key, "");
     this.urlActualQuality.set(key, "");
+    this.urlSize.delete(key);
     const at = this.urlCacheKeys.indexOf(key);
     if (at >= 0) this.urlCacheKeys.splice(at, 1);
   }
@@ -375,6 +470,7 @@ export class MusicApi {
     this.urlCacheAt = new Map<string, number>();
     this.urlLine = new Map<string, string>();
     this.urlActualQuality = new Map<string, string>();
+    this.urlSize = new Map<string, number>();
     this.urlCacheKeys = [];
     // 列表短缓存一并清掉：未装数据包期间 engineInvoke 会给空应答，而 latest/
     // recommendations 等会把这份空列表 dataSet 进 60s 短缓存；不清的话用户装完包
@@ -501,6 +597,7 @@ export class MusicApi {
       if (sources.length == 0) return null;
       // 只在成功时改写进程内缓存：失败/瞬态空响应不改写，正在跑的分页不会被改成零源
       this.registrySources = sources;
+      this.registryQualities = qualities;
       // 重取成功才清脏位；失败（返回 null）保留脏位，下次 ensureRegistry 再试
       this.registryStale = false;
       return { sources, qualities };
@@ -581,13 +678,17 @@ export class MusicApi {
     for (let i = 0; i < supported.length; i++) {
       if (supported[i] == wanted) return wanted;
     }
-    const wantedRank = QUALITY_RANKS.indexOf(wanted);
+    const ranks = qualityRanksOf(this.registryQualities);
+    // 档位序为空（清单还没装好/旧包没给）＝对高低一无所知，此时不动请求值：
+    // 与「未声明就不动」同一保守口径，宁可原样发出去让包侧按线路能力兜底。
+    if (ranks.length == 0) return wanted;
+    const wantedRank = ranks.indexOf(wanted);
     if (wantedRank < 0) return supported[0];
     // 向下降：可用档里取 ≤ 想要排名的最高一档
     let best = "";
     let bestRank = -1;
     for (let i = 0; i < supported.length; i++) {
-      const rank = QUALITY_RANKS.indexOf(supported[i]);
+      const rank = ranks.indexOf(supported[i]);
       if (rank < 0) continue;
       if (rank <= wantedRank && rank > bestRank) {
         best = supported[i];
@@ -597,9 +698,9 @@ export class MusicApi {
     if (bestRank >= 0) return best;
     // 想要的档位以下没有可用档 → 取最接近的更高一档
     let up = "";
-    let upRank = QUALITY_RANKS.length;
+    let upRank = ranks.length;
     for (let i = 0; i < supported.length; i++) {
-      const rank = QUALITY_RANKS.indexOf(supported[i]);
+      const rank = ranks.indexOf(supported[i]);
       if (rank < 0) continue;
       if (rank < upRank) {
         up = supported[i];
@@ -722,6 +823,12 @@ export class MusicApi {
    * 各平台自身的歌单分类。返回 { id, name, group } 列表，id 为该平台筛选歌单时使用的取值。
    */
   async playlistCategories(source: Source): Promise<UTSJSONObject[]> {
+    // 歌单分类：本地持久缓存 7 天（分类集合基本不变，是最稳定的一份数据）。
+    // 读必须走 ttlReadUtso：调用方拿 UTSJSONObject 用 .get 取字段，而普通
+    // JSON.parse 读出的是无 .get 的纯对象（真机已踩：item.get is not a function）。
+    const ttlKey = "plcats:" + this.packFp() + ":" + source;
+    const stored = ttlReadUtso(ttlKey, MusicApi.TTL_7D) as UTSJSONObject[] | null;
+    if (stored != null && stored.length > 0) return stored;
     const args = new UTSJSONObject();
     args.set("source", source);
     const response = await this.engineInvoke("playlistCategories", args);
@@ -737,6 +844,7 @@ export class MusicApi {
       category.set("group", group != null ? this.strOf(group) : null);
       categories.push(category);
     }
+    if (categories.length > 0) ttlWrite(ttlKey, categories);
     return categories;
   }
 
@@ -747,6 +855,11 @@ export class MusicApi {
     const cacheKey = "rec:" + source + ":" + (category != null ? category : "") + ":" + (page != null ? page : 1) + ":" + sortId;
     const hit = this.dataGet(cacheKey);
     if (hit != null) return hit as Playlist[];
+    // 歌单广场列表（含对应 tag/排序的每一页）：本地持久缓存 12 小时。
+    // 翻页维度已含在键里（source/category/page/sort 逐页各存一条），互不覆盖。
+    const ttlKey = "rec:" + this.packFp() + ":" + cacheKey;
+    const stored = this.ttlHit(ttlKey, MusicApi.TTL_12H, cacheKey) as Playlist[] | null;
+    if (stored != null && stored.length > 0) return stored;
     const args = new UTSJSONObject();
     args.set("source", source);
     args.set("category", category != null && category.length > 0 ? category : null);
@@ -760,6 +873,7 @@ export class MusicApi {
       lists.push(this.playlistFromContract(raw[i] as UTSJSONObject, source));
     }
     this.dataSet(cacheKey, lists);
+    if (lists.length > 0) ttlWrite(ttlKey, lists);
     return lists;
   }
 
@@ -788,6 +902,10 @@ export class MusicApi {
     const cacheKey = "charts:" + currentSource;
     const hit = this.dataGet(cacheKey);
     if (hit != null) return hit as Chart[];
+    // 排行榜列表：本地持久缓存 12 小时（键带音源包指纹，换包即失效）
+    const ttlKey = "charts:" + this.packFp() + ":" + currentSource;
+    const stored = this.ttlHit(ttlKey, MusicApi.TTL_12H, cacheKey) as Chart[] | null;
+    if (stored != null && stored.length > 0) return stored;
     const args = new UTSJSONObject();
     args.set("source", currentSource);
     const response = await this.engineInvoke("charts", args);
@@ -798,11 +916,15 @@ export class MusicApi {
       charts.push(this.chartFromContract(raw[i] as UTSJSONObject));
     }
     this.dataSet(cacheKey, charts);
+    if (charts.length > 0) ttlWrite(ttlKey, charts);
     return charts;
   }
 
   /** 四源榜单合并（单源失败 bundle 内跳过） */
   async allCharts(): Promise<Chart[]> {
+    const ttlKey = "allcharts:" + this.packFp();
+    const stored = ttlRead(ttlKey, MusicApi.TTL_12H) as Chart[] | null;
+    if (stored != null && stored.length > 0) return stored;
     const response = await this.engineInvoke("allCharts", new UTSJSONObject());
     const raw = response.get("list") as UTSJSONObject[] | null;
     const charts: Chart[] = [];
@@ -810,7 +932,31 @@ export class MusicApi {
     for (let i = 0; i < raw.length; i++) {
       charts.push(this.chartFromContract(raw[i] as UTSJSONObject));
     }
+    // 「全部源都成功」才进缓存：部分源失败时 bundle 会跳过该源的榜单，
+    // 把残缺结果缓存 12h 会让缺的源半天都补不回来。判据 = 声明支持榜单的
+    // 在线源里，每一个 platform 都在结果里出现过
+    if (charts.length > 0 && await this.allChartsComplete(charts)) {
+      ttlWrite(ttlKey, charts);
+    }
     return charts;
+  }
+
+  private async allChartsComplete(charts: Chart[]): Promise<boolean> {
+    const sources = await this.onlineRegistrySources();
+    for (let i = 0; i < sources.length; i++) {
+      const src = sources[i] as RegistrySource;
+      if (src.charts === false) continue;
+      const platform = src.id as string;
+      let found = false;
+      for (let c = 0; c < charts.length; c++) {
+        if ((charts[c] as Chart).platform == platform) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) return false;
+    }
+    return true;
   }
 
   /**
@@ -832,7 +978,7 @@ export class MusicApi {
       try {
         batches.push(await this.latest(source.id as Source, perSource, pageOffset));
       } catch (e) {
-        console.error("[QT Latest] " + source.id, e);
+        logErrV("QT Latest", "源 " + source.id + " 拉取失败", e);
         // 失败源保留空位，交错节奏不因个别源失败而错位
         batches.push([]);
       }
@@ -884,16 +1030,16 @@ export class MusicApi {
     }
   }
 
-  async hotWords(source?: Source): Promise<string[]> {
+  /**
+   * 热门搜索（跨源聚合）：bundle 内多源并发合并、去重、按源顺序封顶 30 条。
+   * 取代按源的热词——搜索页的「热门搜索」不再跟随当前音源，切源不重拉。
+   */
+  /** 跨源热词合并（封顶 30 条）。sources=null 不限；传聚合白名单时包内只并勾选的源
+   *  （数据包 v7+ 支持 sources 入参，旧包忽略该参数——退化为全源，可接受） */
+  async allHotWords(sources: string[] | null): Promise<string[]> {
     const args = new UTSJSONObject();
-    args.set("source", sourceName(source));
-    const response = await this.engineInvoke("hotWords", args);
-    return this.wordsOf(response);
-  }
-
-  /** 四源热词合并（封顶 30 条，bundle 内去重） */
-  async allHotWords(): Promise<string[]> {
-    const response = await this.engineInvoke("allHotWords", new UTSJSONObject());
+    if (sources != null) args["sources"] = sources;
+    const response = await this.engineInvoke("allHotWords", args);
     return this.wordsOf(response);
   }
 
@@ -934,25 +1080,108 @@ export class MusicApi {
     page: number,
     size: number
   ): Promise<Song[]> {
+    const batches = await this.allSearchBatches(keyword, page, size);
+    const all: Song[] = [];
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      for (let c = 0; c < batch.songs.length; c++) {
+        all.push(batch.songs[c]);
+      }
+    }
+    return all;
+  }
+
+  /**
+   * 四源聚合搜索——保留批次结构（searchAll 的内部形态）。
+   * 供 `searchMerged` 降级路径使用：旧包没有 searchMerged 入口时，
+   * app 侧用 mergeAggregateSongs 自己合并去重排序。
+   */
+  async allSearchBatches(
+    keyword: string,
+    page: number,
+    size: number
+  ): Promise<AggregateSongBatch[]> {
     const args = new UTSJSONObject();
     args.set("keyword", keyword);
     args.set("page", page);
     args.set("size", size);
     const response = await this.engineInvoke("searchAll", args);
-    const batches = response.get("batches") as UTSJSONObject[] | null;
-    const all: Song[] = [];
-    if (batches == null) return all;
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i] as UTSJSONObject;
+    const rawBatches = response.get("batches") as UTSJSONObject[] | null;
+    const batches: AggregateSongBatch[] = [];
+    if (rawBatches == null) return batches;
+    for (let i = 0; i < rawBatches.length; i++) {
+      const batch = rawBatches[i] as UTSJSONObject;
       const platform = this.strOf(batch.get("source"));
       if (platform.length == 0) continue;
       const raw = batch.get("list") as UTSJSONObject[] | null;
-      if (raw == null) continue;
-      for (let c = 0; c < raw.length; c++) {
-        all.push(this.songFromContract(raw[c] as UTSJSONObject, platform));
+      const songs: Song[] = [];
+      if (raw != null) {
+        for (let c = 0; c < raw.length; c++) {
+          songs.push(this.songFromContract(raw[c] as UTSJSONObject, platform));
+        }
+      }
+      batches.push({ source: platform, songs });
+    }
+    return batches;
+  }
+
+  /**
+   * 聚合搜索——跨源合并去重、按相关性排序的单列表（v7 数据包入口 `searchMerged`）。
+   *
+   * 优先走包内合并（唯一真源，服务端排序）；包没有该入口 / 调用抛错时降级为
+   * searchAll 拿批次 + mergeAggregateSongs 本地合并（规则与包内逐字一致）。
+   * `full` 表示各源原始页是否有取满 size 的（= 大概率还有下一页），
+   * 调用方据此决定是否继续翻页（避免上游不认 page 参数时空转）。
+   *
+   * @param sources 聚合白名单（null = 全部音源，见 services/aggregate-sources.ts）
+   * @param preferSource 当前音源 id：完全同分时优先保留它（播放更顺）
+   */
+  async searchMerged(
+    keyword: string,
+    page: number,
+    size: number,
+    sources: string[] | null,
+    preferSource: string
+  ): Promise<{ songs: Song[]; full: boolean }> {
+    if (activeMetaPack() != null) {
+      try {
+        const args = new UTSJSONObject();
+        args.set("keyword", keyword);
+        args.set("page", page);
+        args.set("size", size);
+        if (sources != null && sources.length > 0) args.set("sources", sources);
+        if (preferSource.length > 0) args.set("preferSource", preferSource);
+        const response = await this.engineInvoke("searchMerged", args);
+        const raw = response.get("list") as UTSJSONObject[] | null;
+        const songs: Song[] = [];
+        if (raw != null) {
+          for (let i = 0; i < raw.length; i++) {
+            const item = raw[i] as UTSJSONObject;
+            // list 元素是 {source, song}：song 按它真正所属的音源映射，别用 preferSource
+            const itemSource = this.strOf(item.get("source"));
+            const songRaw = item.get("song") as UTSJSONObject | null;
+            if (songRaw == null) continue;
+            const songSource = itemSource.length > 0 ? itemSource : preferSource;
+            songs.push(this.songFromContract(songRaw, songSource));
+          }
+        }
+        const fullRaw = response.get("full");
+        const full = fullRaw != null && fullRaw.toString() == "true";
+        return { songs, full };
+      } catch (err) {
+        logWarn("MusicApi", "searchMerged 入口不可用，降级本地合并: " + (err instanceof Error ? err.message : String(err)));
       }
     }
-    return all;
+    // 降级路径：searchAll 拿批次（单源失败跳过），app 侧自己合
+    const batches = await this.allSearchBatches(keyword, page, size);
+    let full = false;
+    for (let i = 0; i < batches.length; i++) {
+      if (batches[i].songs.length >= size) full = true;
+    }
+    return {
+      songs: mergeAggregateSongs(batches, keyword, preferSource, -1),
+      full,
+    };
   }
 
   async searchPlaylists(
@@ -1086,6 +1315,10 @@ export class MusicApi {
 
   async chartDetail(chart: Chart): Promise<Song[]> {
     const s = chart.platform;
+    // 榜单全部歌曲：本地持久缓存 12 小时（预览/详情共用一份；键带包指纹）
+    const ttlKey = "chartdetail:" + this.packFp() + ":" + s + ":" + chart.id;
+    const stored = ttlRead(ttlKey, MusicApi.TTL_12H) as Song[] | null;
+    if (stored != null && stored.length > 0) return stored;
     const chartArg = new UTSJSONObject();
     chartArg.set("id", chart.id);
     chartArg.set("platform", chart.platform);
@@ -1096,7 +1329,9 @@ export class MusicApi {
     args.set("source", s);
     args.set("chart", chartArg);
     const response = await this.engineInvoke("chartDetail", args);
-    return this.songsOf(response, s);
+    const songs = this.songsOf(response, s);
+    if (songs.length > 0) ttlWrite(ttlKey, songs);
+    return songs;
   }
 
   /**
@@ -1323,7 +1558,15 @@ export class MusicApi {
     cacheKey: string
   ): Promise<{ url: string; crossTarget: Song | null }> {
     const cached = this.urlCacheGet(cacheKey);
-    if (cached.length > 0) return { url: cached, crossTarget: null };
+    if (cached.length > 0) {
+      // 老音源包污染过的加密缓存：不交付，清掉让下面的取链重新跑（新包已在
+      // play-guard 拦截，正常不会出现；这是升级过渡期的兜底）。
+      if (isEncryptedMediaUrl(cached)) {
+        this.urlCacheRemove(cacheKey);
+      } else {
+        return { url: cached, crossTarget: null };
+      }
+    }
     // 取链只走音源引擎：仓库不内置任何音源包（数据包/播放包都由用户在设置页
     // 从链接或本地文件安装，已装包的更新走 manifest/自管探测）后启动预热装载；
     // 取不到（未安装/线路全灭/装载失败）就报错，不再回退 TS 原型链——两套实现难维护，
@@ -1331,11 +1574,20 @@ export class MusicApi {
     // 失败性质、命中线路与跨源目标歌都随这次调用的返回值带回，不经全局标记：
     // 取链是并发的，全局标记会被别的调用串味（见 isContentFailError 的说明）。
     const result = await getPlayUrlByEngineResult(song, quality);
+    // 加密档兜底：老音源包会直接给出 mflac/mgg/qmc 加密地址（新包已在 play-guard
+    // 拦截），宿主无解密契约——不缓存、按内容失败处理（store 换下一首）。
+    if (isEncryptedMediaUrl(result.url)) {
+      throw new Error(CONTENT_FAIL_MESSAGE);
+    }
     if (result.url.length > 0) {
       this.urlCacheSet(cacheKey, result.url);
       // 实测档位与地址同生命周期（空串 = 未重标，保持原值不清空）
       if (result.actualQuality.length > 0) {
         this.urlActualQuality.set(cacheKey, result.actualQuality);
+      }
+      // 实测字节数同理，只增不清：老包不返回 size（null）时保留上一次测到的值
+      if (result.size != null && result.size > 0) {
+        this.urlSize.set(cacheKey, result.size as number);
       }
       // 命中线路与地址一起记：管理端要看「这条地址是音源包里哪条源取到的」，
       // 而地址会被复用 10 分钟，线路必须跟着地址走
@@ -1386,6 +1638,34 @@ export class MusicApi {
   actualQualityOf(song: Song, quality: string = "320"): string {
     const v = this.urlActualQuality.get(song.platform + ":" + song.id + ":" + quality);
     return v != null ? v : "";
+  }
+
+  /**
+   * 某首歌某个音质「最近一次取链实测出的文件字节数」（未知返回 0）。
+   * 与地址同缓存同生命周期（见 urlSize）。
+   */
+  actualSizeOf(song: Song, quality: string = "320"): number {
+    const v = this.urlSize.get(song.platform + ":" + song.id + ":" + quality);
+    return v != null ? v : 0;
+  }
+
+  /**
+   * 当前播放的**实际码率**（kbps，算不出来返回 0，调用方整行不显示）。
+   *
+   * 口径与 qt-pc 的 `measured_bitrate_kbps`（engine.rs:3225）逐条一致：
+   * `kbps = round(字节数 × 8 ÷ 秒数 ÷ 1000)`。**宁可空着，也不写个 0 kbps
+   * 冒充「码率极低」** —— 所以字节数、时长任一缺失或算成 0 都返回 0。
+   *
+   * 数据来源是音源包取链时的 Range 预检（`PlayUrlResult.size`），不是从
+   * 流逝的字节里估算：流式播放拿不到 Content-Length 时这个值就是 0，属正常。
+   */
+  actualBitrateOf(song: Song, quality: string = "320"): number {
+    const size = this.actualSizeOf(song, quality);
+    if (size <= 0) return 0;
+    const sec = song.duration;
+    if (!(sec > 0)) return 0;
+    const kbps = Math.round((size * 8) / sec / 1000);
+    return kbps > 0 ? kbps : 0;
   }
 
   /**
@@ -1822,6 +2102,56 @@ export class MusicApi {
       return "";
     }
   }
+
+  /**
+   * 清空全部歌词缓存（设置页「清除缓存」页用）。
+   *
+   * 歌词缓存不是单表：同一首歌按 `platform:id` 存了四段（主词 / `:tr` 译文 /
+   * `:wbw` 逐字 / `:roma` 罗马音），另有两张旁路表必须一起清：
+   * ① `lyricAsked` 是「这个入口问过了」的标记（空结果也算问过，见其字段注释），
+   *    只清 `lyricCache` 的话，60s 内这些歌仍会被判为「已问过」而直接返回空；
+   * ② `lyricInflight` 是并发去重表，留着会让正在取词的歌把旧 Promise 复用给
+   *    新调用方。两张表都是 Map，直接 delete 即可。
+   */
+  clearLyricCache(): void {
+    this.lyricCache = new UTSJSONObject();
+    this.lyricAsked.clear();
+    this.lyricInflight.clear();
+  }
+
+  /**
+   * 播放地址缓存的存活条目数（设置页「清除缓存」展示用）。
+   *
+   * 口径是 `urlCacheKeys` 而不是 `UTSJSONObject.keys(urlCache).length`：被淘汰/作废的
+   * 条目在 urlCache 里只留一个空串墓碑（UTSJSONObject 删不掉键，见 urlCacheRemove 的
+   * 注释），按对象键数统计会把墓碑也算进去，长会话下数字会明显偏大且永不下降。
+   */
+  playUrlCacheCount(): number {
+    return this.urlCacheKeys.length;
+  }
+
+  /**
+   * 歌词缓存的存活条目数（设置页「清除缓存」展示用）。
+   *
+   * 只数非空值：同一首歌按 `platform:id` 存四段（主词 / `:tr` / `:wbw` / `:roma`），
+   * 每段都占一条键，所以这个数字是「歌词数据条数」而不是「缓存了多少首歌」——
+   * 界面上就写「N 条」，不折算成歌曲数，避免给出一个用户无法对账的估算值。
+   */
+  lyricCacheCount(): number {
+    let count = 0;
+    const keys = UTSJSONObject.keys(this.lyricCache);
+    for (let i = 0; i < keys.length; i++) {
+      if (this.cacheGet(this.lyricCache, keys[i] as string).length > 0) count++;
+    }
+    return count;
+  }
+
+  /** 清理本地音乐数据时同时移除手选歌词来源及其内存副本。 */
+  resetLyricPicks(): void {
+    uni.removeStorageSync(LYRIC_PICK_KEY);
+    this.lyricPickCache = {};
+    this.clearLyricCache();
+  }
 }
 
 export const musicApi = new MusicApi();
@@ -1914,7 +2244,7 @@ export const accountApi = new AccountApi();
  */
 export function persistUserRoles(user: UTSJSONObject | null): void {
   if (user == null) {
-    console.log("[Roles] persistUserRoles: user 为空");
+    logWarn("Roles", "persistUserRoles: user 为空");
     return;
   }
   const roles = user.get("roles");
@@ -1947,19 +2277,27 @@ function cachedStringList(key: string): string[] {
   return out;
 }
 
-/** 一组已授予码是否满足轻听管理员：精确新码、超管、层级通配、旧扁平码兜底 */
-function codesGrantQtAdmin(granted: string[]): boolean {
-  const required = "admin:qt:admin";
+/**
+ * 一组已授予码是否覆盖目标权限码：精确匹配、超管 `*:*:*`、层级通配
+ * （`user:ai:*` / `admin:*` 按段前缀覆盖，对齐后端 PermissionChecker）。
+ * isQtAdmin 与 canUseMusicAssistant 共用。
+ */
+function codesGrant(granted: string[], required: string): boolean {
   for (let i = 0; i < granted.length; i++) {
     const g = granted[i];
-    if (g == required || g == "qt_admin" || g == "*:*:*") return true;
-    // 层级通配对齐后端 PermissionChecker：admin:qt:* / admin:* 按段前缀覆盖
+    if (g == required || g == "*:*:*") return true;
     if (g.length > 2 && g.substring(g.length - 2) == ":*") {
       const prefix = g.substring(0, g.length - 1);
       if (required.startsWith(prefix)) return true;
     }
   }
   return false;
+}
+
+/** 一组已授予码是否满足轻听管理员：精确新码、超管、层级通配、旧扁平码兜底 */
+function codesGrantQtAdmin(granted: string[]): boolean {
+  if (granted.indexOf("qt_admin") >= 0) return true;
+  return codesGrant(granted, "admin:qt:admin");
 }
 
 /**
@@ -1976,4 +2314,23 @@ export function isQtAdmin(): boolean {
     codesGrantQtAdmin(cachedStringList("qt-permissions")) ||
     codesGrantQtAdmin(cachedStringList("qt-roles"))
   );
+}
+
+/** 音乐助手权限码，与后端 `AiPlugin.PERM_MUSIC_USE`、qt-pc 端 `MUSIC_ASSISTANT_PERM` 同一个字符串 */
+export const MUSIC_ASSISTANT_PERM = "user:ai:music:use";
+
+/**
+ * 当前账号能否使用音乐助手（「我的」总览入口显隐用；未登录 = 无权限）。
+ *
+ * 后端 /api/v1/app/ai/agents 已按 accessService.permitted() 过滤过智能体：
+ * MUSIC 类型未单独配 permission_code 时兜底要求这个码，没这个码的账号请求
+ * 回来就是空列表。前端提前用同一个码把入口藏掉，避免「点进去只看到一句
+ * 没有可用助手」（与 qt-pc 侧边栏 canUseMusicAssistant 同一判定，两端口径一致）。
+ */
+export function canUseMusicAssistant(): boolean {
+  // 权限缓存只代表「最后一次成功登录的账号」：qt-permissions 仅在手动退出登录时
+  // 清理，token 过期/被踢下线后会残留 —— 不先验登录态，未登录也会按旧账号权限
+  // 显示入口（同 isQtAdmin 的教训）。
+  if (!isLoggedIn()) return false;
+  return codesGrant(cachedStringList("qt-permissions"), MUSIC_ASSISTANT_PERM);
 }

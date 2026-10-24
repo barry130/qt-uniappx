@@ -1,94 +1,300 @@
 <template>
-  <qt-page-frame :max-width="1280">
-    <view class="page" :class="layout.isWide ? 'page-wide' : ''">
-      <view class="body" :class="layout.isWide ? 'body-wide' : ''">
-        <view class="hero" :class="layout.isWide ? 'hero-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';box-shadow:0 12rpx 32rpx ' + themeStore.skin.shadow + ';'" @click="playAll">
-          <view class="hero-icon" :class="layout.isWide ? 'hero-icon-wide' : ''" :style="'background-color:rgba(255,255,255,0.26);'">
-            <QtIcon name="play" :size="layout.isWide ? 20 : 30" :color="themeStore.skin.onAccent" />
+  <!-- 标题栏动作与歌单详情同款（窄屏专用，宽屏没有标题栏）：
+       - header-actions：搜索 + 三点（数据没加载完不渲染）
+       - header-title-visible：静态不显示标题，滚到操作条吸顶后才显示「每日推荐」
+       - header-searching：点搜索图标原地把标题栏换成搜索框 -->
+  <qt-page-frame
+    width-kind="detail"
+    title="每日新歌"
+    :header-title-visible="titleVisible"
+    :header-actions="headerActions"
+    :header-searching="searchOpen"
+    :header-search-value="searchQuery"
+    header-search-placeholder="搜索标题 / 歌手 / 专辑"
+    @headerAction="onHeaderAction"
+    @headerSearchInput="onHeaderSearchInput"
+    @headerSearchClose="closeSearch"
+  >
+  <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']"
+    ><!-- 每日推荐（2026-10-19 起与歌单详情页 pages/playlist/index.uvue 同一套模板）：
+         宽屏「左栏信息 + 右栏歌曲列表」主从双栏、竖屏列表内 hero + 吸顶操作条、
+         歌曲行统一 qt-song-row-lite。与歌单详情的两处差异：
+         ①每日推荐不是歌单，不提供「收藏歌单」红心；
+         ②没有歌单封面，详情图片取第一首歌曲的图片（displayPicUrl）。
+          宽屏操作（播放全部 / 加入队列 / 批量，含选择态批量条）全住左栏封面块，
+          列表顶不再有操作条 —— 对齐 qt-pc 的页头管理，悬浮条要么全收要么全留。 -->
+    <scroll-view v-if="layout.isWide" class="wide-left" direction="vertical" :show-scrollbar="false">
+      <view class="whero" :style="'background-color:' + themeStore.skin.surfaceStrong + ';border-color:' + themeStore.skin.border + ';'">
+        <!-- 加载中：左栏整块换骨架（封面 + 标题 + 两行简介 + 数量行），与歌单详情页同构 -->
+        <QtSkeleton v-if="loading" tone="cover" width="238px" height="238px" radius="12px" />
+        <image v-else class="whero-cover" :src="displayPicUrl" mode="aspectFill" />
+        <template v-if="loading">
+          <view class="wsk-l1"><QtSkeleton tone="line" width="160px" height="18px" radius="4px" /></view>
+          <view class="wsk-l2"><QtSkeleton tone="line" width="220px" height="13px" radius="4px" /></view>
+          <view class="wsk-l3"><QtSkeleton tone="line" width="190px" height="13px" radius="4px" /></view>
+          <view class="wsk-l4"><QtSkeleton tone="line" width="90px" height="12px" radius="4px" /></view>
+          <!-- 操作区骨架：播放全部（44px、圆角 22px）+ 加入队列/批量两等分（40px、圆角 20px） -->
+          <view class="wsk-l5"><QtSkeleton tone="block" width="238px" height="44px" radius="22px" /></view>
+          <view class="wsk-l6">
+            <QtSkeleton tone="block" width="114px" height="40px" radius="20px" />
+            <view class="wsk-l6-gap"><QtSkeleton tone="block" width="114px" height="40px" radius="20px" /></view>
           </view>
-          <view class="hero-copy" :class="layout.isWide ? 'hero-copy-wide' : ''">
-            <text class="hero-title" :class="layout.isWide ? 'hero-title-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">播放全部</text>
-            <text class="hero-sub" :class="layout.isWide ? 'hero-sub-wide' : ''" :style="'color:' + heroSubColor + ';'">每日精选 · 共 {{ songs.length }} 首</text>
+        </template>
+        <template v-else>
+        <text class="whero-title" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(18)" :max-lines="2">每日新歌</text>
+        <text class="whero-desc" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(13)" :max-lines="6">每天为你精选的新歌</text>
+        <text class="whero-count" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(12)">共 {{ songs.length }} 首</text>
+        <!-- 操作区（宽屏专用，对齐 qt-pc 的页头管理）：封面下方统一管理播放与批量。
+             常规态：播放全部 + 加入队列/批量；选择态原地换成 column 批量条，
+             列表顶不再有任何操作条（外框不随状态切换变化，零跳动） -->
+        <view class="whero-actions">
+          <qt-batch-bar
+            v-if="selecting"
+            layout="column"
+            :count="selectedCount"
+            :total="visibleSongs.length"
+            @toggle="toggleSelectAll"
+            @download="onBatchDownload"
+            @collect="openBatchCollect"
+            @cancel="exitSelect"
+          />
+          <template v-else>
+          <view class="whero-play" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="playAll">
+            <QtIcon name="play" :size="16" :color="themeStore.skin.accent" />
+            <text class="whero-play-text" :style="('color:' + themeStore.skin.accent + ';') + qtFontPx(13)">播放全部</text>
           </view>
-          <view class="hero-end" :class="layout.isWide ? 'hero-end-wide' : ''" :style="'background-color:rgba(255,255,255,0.18);'" @click.stop="playShuffle">
-            <QtIcon name="shuffle" :size="layout.isWide ? 16 : 24" :color="themeStore.skin.onAccent" />
+          <view class="whero-acts">
+            <view class="whero-act" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="enqueueAll">
+              <QtIcon name="list" :size="16" :color="themeStore.skin.iconMuted" />
+              <text class="whero-act-text" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(13)">加入队列</text>
+            </view>
+            <view class="whero-act whero-act-gap" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="enterSelect">
+              <QtIcon name="check" :size="16" :color="themeStore.skin.iconMuted" />
+              <text class="whero-act-text" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(13)">批量</text>
+            </view>
+          </view>
+          <!-- 宽屏没有框架标题栏，搜索与三点排序的入口只能落在左栏操作区；
+               与窄屏标题栏右侧那两个按钮同语义（数据没加载完不渲染） -->
+          <view v-if="songs.length > 0" class="whero-tools">
+            <view class="whero-tool" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="toggleWideSearch">
+              <QtIcon name="search" :size="16" :color="themeStore.skin.iconMuted" />
+            </view>
+            <view class="whero-tool whero-tool-gap" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="openMoreMenu">
+              <QtIcon name="more-vert" :size="16" :color="themeStore.skin.iconMuted" />
+            </view>
+          </view>
+          </template>
+        </view>
+        </template>
+      </view>
+    </scroll-view>
+    <list-view id="daily-scroll" class="scroll" direction="vertical" :scroll-top="scrollTop" @scroll="onListScroll">
+      <!-- 竖屏 hero：加载中也保留同一个 .hero 外框（同样的内边距 / 圆角 / 边框），
+           内部换骨架。歌单详情页同款处理，首屏不会先冒出一列「加载中」 -->
+      <list-item v-if="!layout.isWide" class="hero-item">
+        <view class="hero" :style="'background-color:' + themeStore.skin.surfaceStrong + ';border-color:' + themeStore.skin.border + ';'">
+          <QtSkeleton v-if="loading" tone="cover" width="200rpx" height="200rpx" radius="20rpx" />
+          <image v-else class="cover" :src="displayPicUrl" mode="aspectFill" />
+          <view class="hero-info">
+            <template v-if="loading">
+              <QtSkeleton tone="line" width="320rpx" height="34rpx" radius="10rpx" />
+              <view class="hsk-l2"><QtSkeleton tone="line" width="252rpx" height="22rpx" /></view>
+              <view class="hsk-l3"><QtSkeleton tone="line" width="120rpx" height="20rpx" /></view>
+            </template>
+            <template v-else>
+            <text class="title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(35, 20)" :max-lines="2">每日新歌</text>
+            <text class="desc" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 14)" :max-lines="3">每天为你精选的新歌</text>
+            <text class="playcount" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 13)">共 {{ songs.length }} 首</text>
+            </template>
           </view>
         </view>
-
-        <scroll-view
-          class="scroll" :class="[layout.isWide ? 'scroll-wide' : '']"
-          direction="vertical"
-          :show-scrollbar="false"
-          :scroll-top="scrollTop"
-          @scroll="onListScroll"
-        >
-          <view class="list-shell" :class="layout.isWide ? 'list-shell-wide' : ''">
-            <view v-if="loading && songs.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
-              <qt-loading :visible="true" />
-            </view>
-            <view class="song-grid">
-              <view
-                v-for="song in songs"
-                :key="song.id + song.platform"
-                class="song-card" :class="layout.isWide ? 'song-card-wide' : ''"
-                :style="'width:' + songCardWidth + 'px;background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'"
-                @click="play(song)"
-              >
-                <image class="song-cover" :class="layout.isWide ? 'song-cover-wide' : ''" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
-                <view class="song-info" :class="layout.isWide ? 'song-info-wide' : ''">
-                  <text class="song-name" :class="layout.isWide ? 'song-name-wide' : ''" :style="'color:' + themeStore.skin.text + ';'" :max-lines="1">{{ song.name }}</text>
-                  <text class="song-meta" :class="layout.isWide ? 'song-meta-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';'" :max-lines="1">{{ song.singer }}{{ song.album.length > 0 ? " · " + song.album : "" }}</text>
-                </view>
-                <view class="song-play" :class="layout.isWide ? 'song-play-wide' : ''" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click.stop="play(song)">
-                  <QtIcon name="play" :size="24" :color="themeStore.skin.accent" />
-                </view>
-                <view class="song-more" :class="layout.isWide ? 'song-more-wide' : ''" @click.stop="openSheet(song)">
-                  <QtIcon name="more" :size="26" :color="themeStore.skin.textMuted" />
-                </view>
-              </view>
-            </view>
-            <view v-if="!loading && songs.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
-              <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="'color:' + themeStore.skin.textSubtle + ';'">今日推荐暂时为空</text>
+      </list-item>
+      <!-- 操作条骨架（窄屏专用；宽屏操作区骨架在左栏 whero 里）：加载中 sticky-header
+           里挂着 v-if 是空的，单列一条 list-item 放在 hero 与歌曲骨架之间，位置与真实操作条一致 -->
+      <list-item v-if="loading && !layout.isWide" class="head-skel-item">
+        <view class="list-head" :style="'background-color:' + themeStore.skin.surfaceStrong + ';border-color:' + themeStore.skin.border + ';'">
+          <QtSkeleton tone="line" width="150rpx" height="24rpx" radius="8rpx" />
+          <view class="head-actions">
+            <QtSkeleton tone="block" width="158rpx" height="60rpx" radius="30rpx" />
+            <view class="hsk-gap"><QtSkeleton tone="block" width="158rpx" height="60rpx" radius="30rpx" /></view>
+            <view class="hsk-gap"><QtSkeleton tone="circle" width="60rpx" height="60rpx" /></view>
+          </view>
+        </view>
+      </list-item>
+      <!-- 搜索输入框：只在宽屏出现（窄屏由框架标题栏原地变成搜索框，不占列表一行）。
+           宽屏没有标题栏，入口在左栏封面块的搜索图标，点开后才在列表顶长出这一行 -->
+      <list-item v-if="layout.isWide && searchOpen && !loading && songs.length > 0" class="search-item">
+        <view class="search-row" :class="layout.isWide ? 'search-row-wide' : ''">
+          <view class="search-field" :class="layout.isWide ? 'search-field-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'">
+            <QtIcon name="search" :size="layout.isWide ? 12 : 22" :color="themeStore.skin.textMuted" />
+            <input
+              class="search-input" :class="layout.isWide ? 'search-input-wide' : ''"
+              :value="searchQuery"
+              @input="onSearchInput"
+              placeholder="搜索标题 / 歌手 / 专辑"
+              :placeholder-class="layout.isWide ? 'search-ph-wide' : 'search-ph'"
+              :style="'color:' + themeStore.skin.text + ';'"
+            />
+            <view v-if="filtering" class="search-clear" :class="layout.isWide ? 'search-clear-wide' : ''" @click="closeSearch">
+              <QtIcon name="close" :size="layout.isWide ? 12 : 22" :color="themeStore.skin.textMuted" />
             </view>
           </view>
-        </scroll-view>
-      </view>
-
-      <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
-      <QtActionSheet v-model:visible="sheetVisible" :title="sheetTitle()" :actions="sheetActions" @select="onSheetSelect" />
-      <MiniPlayer />
-    </view>
+        </view>
+      </list-item>
+      <list-item v-if="loading" class="sk-item">
+        <QtSkeletonList kind="song" :rows="SKELETON_ROWS" />
+      </list-item>
+      <!-- sticky-section + sticky-header：操作条滚到列表顶部后原生钉住（section 覆盖全部歌曲，
+           故一直吸到列表末尾）。窄屏专用 —— 宽屏的操作（含选择态批量条）都在左栏封面块里，
+           列表顶不再有操作条（对齐 qt-pc：要么全收进左栏，要么全保留，不混搭） -->
+      <sticky-section>
+      <sticky-header>
+        <!-- id="pl-head"：供页面量出「操作条自然位置距列表顶多少」，作为标题栏
+             显示标题的阈值（滚到本条吸顶固定时才出现「每日推荐」，见 onListScroll） -->
+        <view v-if="!loading && !layout.isWide" id="pl-head" class="list-head" :style="'background-color:' + themeStore.skin.surfaceStrong + ';border-color:' + themeStore.skin.border + ';'">
+          <!-- 选择态：整条操作条换成批量管理条。高度同为 96rpx（见 qt-batch-bar 头注释），
+               外框仍由 .list-head 提供，所以切进切出不会有任何跳动 -->
+          <qt-batch-bar
+            v-if="selecting"
+            :count="selectedCount"
+            :total="visibleSongs.length"
+            size="md"
+            @toggle="toggleSelectAll"
+            @download="onBatchDownload"
+            @collect="openBatchCollect"
+            @cancel="exitSelect"
+          />
+          <template v-else>
+          <text :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 14)">{{ countText }}</text>
+          <view class="head-actions">
+            <view class="head-btn" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="enqueueAll">
+              <QtIcon name="list" :size="28" :color="themeStore.skin.iconMuted" /><text class="head-btn-text" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(24, 14)">加入队列</text>
+            </view>
+            <view class="play-all" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="playAll">
+              <QtIcon name="play" :size="28" :color="themeStore.skin.accent" /><text class="play-all-text" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(24, 14)">播放全部</text>
+            </view>
+            <!-- 批量入口：窄屏只留图标（三个带文字的按钮 + 歌曲数在 750rpx 里已经满了，
+                 再塞一个文字按钮会把「歌曲 N 首」挤到换行）；宽屏的批量入口带文字、在左栏封面块里 -->
+            <view class="head-batch" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="enterSelect">
+              <QtIcon name="check" :size="28" :color="themeStore.skin.iconMuted" />
+            </view>
+          </view>
+          </template>
+        </view>
+      </sticky-header>
+      <list-item
+        v-for="song in visibleSongs"
+        :key="song.platform + ':' + song.id"
+        class="song-item" :class="layout.isWide ? 'song-item-wide' : ''"
+      >
+        <!-- 行点击完全交给组件自己（@play / @select），宿主不在这层 list-item 上再绑 @click：
+             歌单详情页那样双层处理会让一次点击把 play 触发两遍（组件发一次、冒泡到
+             list-item 再来一次），这里只留组件一条通路，选择态也不会「勾上又播放」 -->
+        <qt-song-row-lite :song="song" :use-picker="true" :selecting="selecting" :selected="isSelected(qtSongKey(song))" @play="play(song)" @more="openSheet" @pick="onPick" @select="onRowSelect(song)" />
+      </list-item>
+      </sticky-section>
+      <!-- 空态必须留在 sticky-section 外：鸿蒙端约束 section 只能有「一个 sticky-header +
+           一个 v-for list-item」两个直接子节点，多塞一个空态 list-item 会编译失败
+           （Android 端不检查，但一处模板两端正跑，按更严的约束写） -->
+      <list-item v-if="!loading && songs.length == 0" class="empty-item" :class="layout.isWide ? 'empty-item-wide' : ''">
+        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(26, 15)">今日推荐暂时为空</text>
+      </list-item>
+      <!-- 搜索无结果：与「今日推荐为空」区分开 -->
+      <list-item v-if="!loading && filtering && visibleSongs.length == 0" class="empty-item" :class="layout.isWide ? 'empty-item-wide' : ''">
+        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(26, 15)">没有匹配的歌曲</text>
+      </list-item>
+    </list-view>
+    <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+    <QtActionSheet v-model:visible="sheetVisible" :title="sheetTitle()" :actions="sheetActions" @select="onSheetSelect" />
+    <!-- 三点菜单：单项「更改歌曲排序方式」，点击后打开排序面板 -->
+    <QtActionSheet
+      v-model:visible="moreMenuVisible"
+      title="列表操作"
+      :actions="moreMenuActions"
+      @select="onMoreMenuSelect"
+    />
+    <QtSortPanel
+      v-model:visible="sortSheetVisible"
+      :sort-key="sortKey"
+      :sort-desc="sortDesc"
+      @select="onSortKeySelect"
+      @desc="onSortDescSelect"
+    />
+    <!-- 单曲收藏面板（行内红心，选歌单）：与歌单详情页同一组件、同一套同名冲突确认 -->
+    <QtPlaylistPicker
+      v-model:visible="showPicker"
+      :song="currentSong"
+      :playlists="player.pickerPlaylists()"
+      :selected-ids="getSelectedPlaylistIds(currentSong)"
+      :anchor-top="pickerAnchorTop"
+      title="加入 / 移出歌单"
+      @confirm="handlePickerConfirm"
+    />
+    <!-- 批量收藏面板：与单曲面板同一个组件，走 batchMode 分支。刻意不复用同一个实例 ——
+         单曲面板带「确定提交整份勾选」的状态机，混进批量语义会互相污染。 -->
+    <QtPlaylistPicker
+      v-model:visible="batchPickerVisible"
+      :song="null"
+      :playlists="player.pickerPlaylists()"
+      :selected-ids="batchCheckedIds"
+      :batch-mode="true"
+      title="收藏到歌单"
+      :subtitle="'已选 ' + selectedCount + ' 首'"
+      @toggle="onBatchToggle"
+      @create="onBatchCreate"
+    />
+  </view>
   </qt-page-frame>
 </template>
 <script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { onShow } from "@dcloudio/uni-app";
-import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
-import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
+import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
+import QtSkeleton from "@/uni_modules/qt-ui/components/qt-skeleton/qt-skeleton.uvue";
+import QtSongRowLite from "@/uni_modules/qt-ui/components/qt-song-row-lite/qt-song-row-lite.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtSortPanel from "@/uni_modules/qt-ui/components/qt-sort-panel/qt-sort-panel.uvue";
+import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import QtBatchBar from "@/uni_modules/qt-ui/components/qt-batch-bar/qt-batch-bar.uvue";
+import QtPlaylistPicker from "@/uni_modules/qt-ui/components/qt-playlist-picker/qt-playlist-picker.uvue";
+import { qtSongKey, useBatchSelect } from "@/uni_modules/qt-ui/composables/use-batch-select";
+import { useBatchActions } from "@/composables/use-batch-actions";
 import { useSongSheet } from "@/composables/use-song-sheet";
+import { useTrackSearch } from "@/composables/use-track-search";
 import { musicApi } from "@/services/music-api";
 import { packsFingerprint, SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
 import { usePlayerStore } from "@/stores/player";
 import { useSourceStore } from "@/stores/source";
-import { useThemeStore, qtOnAccentRgba } from "@/uni_modules/qt-ui/stores/theme";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
-import type { Song } from "@/types/music";
+import type { Playlist, Song } from "@/types/music";
 import type { Source } from "@/services/music-api";
+import { qtFontPx, qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { collectDupMessage, type CollectDupConflict } from "@/services/collect-dup";
+import { qtConfirm } from "@/services/confirm";
+import { logMsgErr } from "@/services/logger";
 
 const player = usePlayerStore();
 const sourceStore = useSourceStore();
 const themeStore = useThemeStore();
 const layout = useQtLayout();
 
+// 回到顶部
 const scrollTop = ref(0);
 const showBackToTop = ref(false);
+// 吸顶操作条用 list-view 原生 sticky-header 实现，无需测量和覆盖层
 function onListScroll(e: any) {
   const st = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
   showBackToTop.value = st > 600;
+  // 滚过操作条的自然位置 → 它已经吸顶固定 → 标题栏露出「每日推荐」。
+  // headOffset 未量到（-1）时一律不显示，宁可晚一点出现也不提前闪。
+  if (!layout.isWide && headOffset.value >= 0) {
+    headScrolled.value = st >= headOffset.value;
+  }
 }
 function backToTop() {
   scrollTop.value = scrollTop.value == 0 ? 1 : 0;
@@ -97,35 +303,242 @@ function backToTop() {
 
 const { sheetVisible, sheetActions, openSheet, onSheetSelect, sheetTitle } = useSongSheet();
 const songs = ref<Song[]>([]);
-const loading = ref(false);
+// 初值 true：首次加载在 onMounted/onShow 里发起，首帧若按 false 渲染会先闪一下空态文案
+const loading = ref(true);
+/** 骨架行数：一屏约摸这么多行，只做占位 */
+const SKELETON_ROWS = 6;
+
+/**
+ * 详情图片：每日推荐没有歌单封面，取第一首歌曲的图片
+ * （与歌单详情页本地歌单无独立封面时的兜底同一思路，见 player.playlistDisplayPic）。
+ */
+const displayPicUrl = computed((): string => {
+  const list = songs.value;
+  return list.length > 0 ? list[0].picUrl : "";
+});
+
+// ==================== 批量下载 / 批量收藏 ====================
+// 与歌单详情页同一套：选择态用 qt-ui 的 useBatchSelect，业务动作走 use-batch-actions。
+const {
+  selecting,
+  count: selectedCount,
+  keys: selectedKeys,
+  enter: enterSelect,
+  exit: exitSelect,
+  isSelected,
+  toggle: toggleSelect,
+  toggleAll,
+} = useBatchSelect();
+const batch = useBatchActions();
+const batchPickerVisible = ref(false);
+
+// ==================== 列表内搜索 ====================
+// 口径照抄 PC 侧 filterTracks（多词 AND，查 标题/歌手/专辑），见 composables/use-track-search
+const {
+  query: searchQuery,
+  visible: filteredSongs,
+  filtering,
+  onInput: trackSearchInput,
+  clear: clearSearch,
+} = useTrackSearch(() => songs.value);
+
+/** 实时过滤是 visibleSongs 的整组换血：先回顶再写词，停在滚动深处时
+ *  list-view 会整段丢渲染（搜索页 L871 注释与排行榜页均有实证） */
+function onSearchInput(e: InputEvent): void {
+  trackSearchInput(e);
+  backToTop();
+}
+
+/**
+ * 搜索态开关：窄屏是框架标题栏原地变成搜索框（静态只显示图标，不占列表行），
+ * 宽屏没有标题栏，因此点左栏封面块里的搜索图标后，才在列表顶长出那一行输入框。
+ */
+const searchOpen = ref(false);
+
+/** 排序键：none = 接口原顺序（默认）；其余按名称排，只在前端对最终结果排 */
+const sortKey = ref("none");
+/** 排序方向：false = 正序（默认），true = 倒序；仅在 sortKey != "none" 时有意义 */
+const sortDesc = ref(false);
+
+/**
+ * 列表最终渲染源 = 搜索结果 →（可选）前端排序。
+ * 排序作用在过滤后的可见集合上，与「播放全部 / 全选 / 批量」吃的是同一份数据，
+ * 不会出现「看到的顺序」和「播出去的顺序」不一致。
+ */
+const visibleSongs = computed<Song[]>(() => {
+  const list = filteredSongs.value;
+  const key = sortKey.value;
+  if (key == "none" || list.length < 2) return list;
+  const out = list.slice();
+  out.sort((a: Song, b: Song): number => {
+    let primary = 0;
+    if (key == "name") primary = a.name.localeCompare(b.name, "zh-Hans-CN");
+    else if (key == "album") primary = a.album.localeCompare(b.album, "zh-Hans-CN");
+    else primary = a.singer.localeCompare(b.singer, "zh-Hans-CN");
+    // 主键相同的相邻项再按歌名兜底，保证顺序稳定（同 qt-pc 的 sort 口径）
+    if (primary != 0) return primary;
+    return a.name.localeCompare(b.name, "zh-Hans-CN");
+  });
+  // 倒序：完整序（主键 + 歌名兜底）已确定，直接反转即可
+  if (sortDesc.value) out.reverse();
+  return out;
+});
+
+/**
+ * 标题栏右侧动作：搜索 + 三点。
+ * 数据没加载完不渲染任何按钮 —— 与歌单详情页「只有所有数据全部加载完成才能操作」同口径。
+ */
+const headerActions = computed<string[]>(() => {
+  if (loading.value || songs.value.length == 0) return [];
+  return ["search", "more-vert"];
+});
+
+/**
+ * 标题栏是否显示「每日推荐」：静态不显示（同歌单详情页），只有当列表滚到操作条
+ * （sticky-header「播放全部」那条）吸顶固定后，才把标题露出来。
+ * 阈值是量出来的（headOffset），不是估算。
+ */
+const headOffset = ref(-1);
+const headScrolled = ref(false);
+const titleVisible = computed<boolean>(() => headScrolled.value);
+
+// 量「操作条自然位置距列表顶多少」：吸顶前它跟着内容走，吸顶后钉在列表顶不动，
+// 所以滚过这个距离就是「已经固定」。只量一次（宽屏没有标题栏，不量）。
+let headAlive = true;
+let headTimers: number[] = [];
+function clearHeadTimers(): void {
+  for (let i = 0; i < headTimers.length; i++) clearTimeout(headTimers[i]);
+  headTimers = [];
+}
+function retryMeasureHead(attempt: number): void {
+  if (!headAlive || attempt >= 5) return;
+  headTimers.push(
+    setTimeout(() => { measureHeadOffset(attempt + 1); }, 300) as number
+  );
+}
+function measureHeadOffset(attempt: number): void {
+  if (!headAlive || layout.isWide) return;
+  if (loading.value || songs.value.length == 0) { retryMeasureHead(attempt); return; }
+  uni.createSelectorQuery()
+    .select("#daily-scroll")
+    .boundingClientRect((listRect: UniNodeInfo) => {
+      const listTop = listRect != null ? listRect.top : 0;
+      // 嵌套一次新查询拿操作条位置：不链式 select，避免 Vapor 下多节点链的未知行为
+      uni.createSelectorQuery()
+        .select("#pl-head")
+        .boundingClientRect((headRect: UniNodeInfo) => {
+          if (headRect != null && headRect.height > 0) {
+            headOffset.value = Math.max(0, Math.round(headRect.top - listTop));
+            return;
+          }
+          retryMeasureHead(attempt);
+        })
+        .exec();
+    })
+    .exec();
+}
+
+function openSearch(): void {
+  if (loading.value || songs.value.length == 0) return;
+  searchOpen.value = true;
+}
+function closeSearch(): void {
+  searchOpen.value = false;
+  clearSearch();
+}
+/** 宽屏左栏的搜索图标：点一下开、再点一下收（收的时候一并清关键词） */
+function toggleWideSearch(): void {
+  if (searchOpen.value) closeSearch();
+  else openSearch();
+}
+/** 框架标题栏搜索框输入（窄屏；宽屏输入框直接走 onSearchInput 包装）。
+ *  实时过滤是整组换血——先回顶再写词（见 onSearchInput 注释） */
+function onHeaderSearchInput(value: string): void {
+  backToTop();
+  searchQuery.value = value;
+}
+function onHeaderAction(name: string): void {
+  if (name == "search") { openSearch(); return; }
+  if (name == "more-vert") { openMoreMenu(); return; }
+}
+
+// ==================== 三点弹单项菜单，再进排序面板（与歌单详情同款） ====================
+const moreMenuVisible = ref(false);
+const moreMenuActions = computed((): SheetAction[] => [{ name: "更改歌曲排序方式" }]);
+function openMoreMenu(): void {
+  if (loading.value || songs.value.length == 0) return;
+  moreMenuVisible.value = true;
+}
+function onMoreMenuSelect(_action: SheetAction, _index: number): void {
+  moreMenuVisible.value = false;
+  sortSheetVisible.value = true;
+}
+
+const sortSheetVisible = ref(false);
+function onSortKeySelect(key: string): void {
+  // 排序 = visibleSongs 整组换血：先回顶再改 key，否则停在深处时
+  // list-view 会整段丢渲染（搜索页 L871 注释与排行榜页均有实证）
+  backToTop();
+  sortKey.value = key;
+  if (key == "none") sortDesc.value = false;
+}
+function onSortDescSelect(desc: boolean): void {
+  backToTop();
+  sortDesc.value = desc;
+}
+
+/** 操作条左侧计数：过滤态显示「显示 M / N 首」（与 PC 侧文案一致） */
+const countText = computed(() =>
+  filtering.value
+    ? "显示 " + visibleSongs.value.length + " / " + songs.value.length + " 首"
+    : "歌曲 " + songs.value.length + " 首"
+);
+
+/**
+ * 被筛掉的歌退出批量范围（同 PC 侧 retainTrackSelection），
+ * 否则「已选 N 首」里混着看不见的歌，批量操作会作用到用户没在看的行上。
+ */
+watch(visibleSongs, (list: Song[]) => {
+  const keys = selectedKeys.value;
+  if (keys.length == 0) return;
+  const keep: string[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const key = qtSongKey(list[i]);
+    if (keys.indexOf(key) >= 0) keep.push(key);
+  }
+  if (keep.length != keys.length) selectedKeys.value = keep;
+});
+
+/** 当前勾选的歌曲，按列表顺序（批量下载 / 收藏都以它为准） */
+const selectedSongs = computed<Song[]>(() => {
+  const out: Song[] = [];
+  const list = songs.value;
+  for (let i = 0; i < list.length; i++) {
+    if (isSelected(qtSongKey(list[i]))) out.push(list[i]);
+  }
+  return out;
+});
+
+/** 批量面板里哪些歌单显示已勾：整批歌都在里面才算（全在即点下去是取消收藏） */
+const batchCheckedIds = computed<string[]>(() => {
+  const out: string[] = [];
+  const selected = selectedSongs.value;
+  if (selected.length == 0) return out;
+  const lists = player.pickerPlaylists();
+  for (let i = 0; i < lists.length; i++) {
+    if (batch.isFullyCollected(lists[i].id, selected)) out.push(lists[i].id);
+  }
+  return out;
+});
+
+// 单曲收藏面板（行内红心 → 选歌单）：与歌单详情页同一套状态与同名冲突确认
+const showPicker = ref(false);
+const currentSong = ref<Song | null>(null);
+const pickerAnchorTop = ref(-1);
+
 let loadedSource = "";
 /** 上次加载时的包态指纹：音源包安装/更新/卸载/启停后变化，整页重拉 */
 let loadedPackFp = "";
-
-// 强调色上的次级文字：onAccent 按透明度弱化一档（深色 onAccent / 白色 onAccent 都成立）
-const heroSubColor = computed((): string => qtOnAccentRgba(themeStore.skin, 0.78));
-
-/**
- * 歌曲卡宽：竖屏固定单列满宽（横向信息更舒展）；
- * 宽屏按内容区实宽推列数（目标卡宽约 330px，2–4 列），列宽一并扣除每卡 margin-right（含末卡）防换行。
- */
-const dailyInner = computed((): number => {
-  if (layout.isWide) {
-    const frame = layout.windowWidth < 1280 ? layout.windowWidth : 1280;
-    return frame - 64; // body-wide 16×2 + list-shell-wide 16×2
-  }
-  const win = layout.windowWidth;
-  return win - win * (48 / 750); // list-shell 24rpx×2
-});
-const dailyCols = computed((): number => {
-  if (!layout.isWide) return 1;
-  const cols = Math.round(dailyInner.value / 330);
-  return Math.min(4, Math.max(2, cols));
-});
-const songCardWidth = computed((): number => {
-  const gap = layout.isWide ? 12 : layout.windowWidth * (14 / 750);
-  return Math.max(150, Math.floor((dailyInner.value - gap * dailyCols.value) / dailyCols.value));
-});
 
 // 加载序号：快速切音源时旧响应晚到不得覆盖新音源数据（写回前比对）
 let loadSeq = 0;
@@ -141,11 +554,13 @@ async function load(): Promise<void> {
     if (seq !== loadSeq) return;
     songs.value = list;
   } catch (error) {
-    console.error("[QT Music Daily]", sourceStore.current, error);
+    logMsgErr("[QT Music Daily] " + sourceStore.current, error);
     if (seq !== loadSeq) return;
-    uni.showToast({ title: "每日推荐加载失败", icon: "none" });
+    qtShowToast({ title: "每日新歌加载失败", icon: "none" });
   } finally {
-    if (seq === loadSeq) loading.value = false;
+    if (seq === loadSeq) {
+      loading.value = false;
+    }
   }
 }
 
@@ -168,32 +583,156 @@ async function play(song: Song): Promise<void> {
     song.url = await musicApi.playUrl(song, player.quality);
     player.playSingle(song);
   } catch (_) {
-    uni.showToast({ title: "该歌曲暂时无法播放", icon: "none" });
+    qtShowToast({ title: "该歌曲暂时无法播放", icon: "none" });
   }
 }
 
 async function playAll(): Promise<void> {
-  if (songs.value.length == 0) return;
-  const first = songs.value[0];
+  // 播放全部吃**可见集合**：搜索过滤后只播筛出来的这些（同 PC 侧 playQueue(visibleSongs)）
+  const list = visibleSongs.value;
+  if (list.length == 0) return;
+  const first = list[0];
   try {
     first.url = await musicApi.playUrl(first, player.quality);
-    await player.play(first, songs.value);
+    await player.play(first, list);
   } catch (_) {
-    uni.showToast({ title: "暂时无法播放全部", icon: "none" });
+    qtShowToast({ title: "暂时无法播放全部", icon: "none" });
   }
 }
 
-function playShuffle(): void {
-  if (songs.value.length == 0) return;
-  const idx = Math.floor(Math.random() * songs.value.length);
-  const pick = songs.value[idx];
-  if (pick != null) play(pick);
+/** 加入队列：把当前可见的推荐追加到播放队列（与歌单详情页的操作条同一组按钮） */
+function enqueueAll(): void {
+  const list = visibleSongs.value;
+  if (list.length == 0) return;
+  player.enqueueMany(list);
+}
+
+/** 行内勾选（组件 @select，含点中勾选框本身） */
+function onRowSelect(song: Song): void {
+  toggleSelect(qtSongKey(song));
+}
+
+/** 全选 / 取消全选：以当前**可见**列表为准（筛掉的行不该被全选带上） */
+function toggleSelectAll(): void {
+  const all: string[] = [];
+  const list = visibleSongs.value;
+  for (let i = 0; i < list.length; i++) all.push(qtSongKey(list[i]));
+  toggleAll(all);
+}
+
+function onBatchDownload(): void {
+  batch.batchDownload(selectedSongs.value);
+}
+
+function openBatchCollect(): void {
+  if (selectedSongs.value.length == 0) return;
+  batchPickerVisible.value = true;
+}
+
+function findPlaylistById(playlistId: string): Playlist | null {
+  const lists = player.pickerPlaylists();
+  for (let i = 0; i < lists.length; i++) {
+    if (lists[i].id == playlistId) return lists[i];
+  }
+  return null;
+}
+
+function onBatchToggle(playlistId: string): void {
+  const selected = selectedSongs.value;
+  if (selected.length == 0) return;
+  const target = findPlaylistById(playlistId);
+  if (target == null) return;
+  // 每日推荐不是任何歌单的「当前页」，增删都不会让本页列表变样，
+  // 所以不需要像歌单详情页那样刷新列表 / 退出选择态
+  batch.toggleCollect(target, selected);
+}
+
+function onBatchCreate(name: string): void {
+  const selected = selectedSongs.value;
+  if (selected.length == 0) return;
+  batch.createAndCollect(selected, name);
+}
+
+function onPick(song: Song, event: any): void {
+  currentSong.value = song;
+  // 取点击坐标作为下拉面板展开锚点
+  if (event != null && event.detail != null) {
+    pickerAnchorTop.value = event.detail.y;
+  } else if (event != null && event.touches != null && event.touches.length > 0) {
+    pickerAnchorTop.value = event.touches[0].clientY;
+  } else {
+    pickerAnchorTop.value = -1;
+  }
+  showPicker.value = true;
+}
+
+function getSelectedPlaylistIds(song: Song | null): string[] {
+  if (song == null) return [];
+  return player.pickerSelectedIds(song);
+}
+
+function handlePickerConfirm(selectedIds: string[]): void {
+  const song = currentSong.value;
+  if (song == null) return;
+  // 收藏前查「同名不同源」：有冲突的歌单先弹确认，确认了才真的加
+  const currentIds = player.pickerSelectedIds(song);
+  const addIds: string[] = [];
+  for (let i = 0; i < selectedIds.length; i++) {
+    if (currentIds.indexOf(selectedIds[i]) < 0) addIds.push(selectedIds[i]);
+  }
+  const check = player.collectDupConflicts(song, addIds);
+  if (check.conflicts.length == 0) {
+    finishPickerSelection(song, selectedIds);
+    return;
+  }
+  const finalIds: string[] = [];
+  for (let i = 0; i < check.passed.length; i++) finalIds.push(check.passed[i]);
+  for (let i = 0; i < selectedIds.length; i++) {
+    const id = selectedIds[i];
+    if (addIds.indexOf(id) < 0 && check.passed.indexOf(id) < 0) finalIds.push(id);
+  }
+  confirmDups(song, check.conflicts, finalIds);
+}
+
+/** 依次弹冲突确认，确认的歌单 id 追加进 pendingIds，全部问完才提交 */
+function confirmDups(song: Song, conflicts: CollectDupConflict[], pendingIds: string[]): void {
+  if (conflicts.length == 0) {
+    finishPickerSelection(song, pendingIds);
+    return;
+  }
+  const first = conflicts[0];
+  const rest: CollectDupConflict[] = [];
+  for (let i = 1; i < conflicts.length; i++) rest.push(conflicts[i]);
+  qtConfirm({
+    title: '同名歌曲提示',
+    content: collectDupMessage(first.playlistName, first.dups),
+    confirmText: '继续收藏',
+    cancelText: '取消',
+  }).then((ok: boolean) => {
+    const ids: string[] = [];
+    for (let i = 0; i < pendingIds.length; i++) ids.push(pendingIds[i]);
+    if (ok) ids.push(first.playlistId);
+    confirmDups(song, rest, ids);
+  });
+}
+
+function finishPickerSelection(song: Song, selectedIds: string[]): void {
+  // 统一由 store 处理：按歌单 pid 增删（同步服务器）。
+  // 每日推荐不是任何歌单的详情页，列表不会因收藏增删而变样，无需刷新。
+  const changed = player.applyPickerSelection(song, selectedIds);
+  qtShowToast({
+    title: changed ? '已更新收藏' : '未做更改',
+    icon: 'none'
+  });
 }
 
 onMounted(() => {
   sourceStore.restore();
   ensureLoad();
   uni.$on(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
+  // 数据到位后量一次「操作条距列表顶多少」，作为标题栏露出标题的阈值。
+  // 直接量不到（首帧还没渲染出 #pl-head）时由 measureHeadOffset 自己重试。
+  measureHeadOffset(0);
 });
 onShow(() => {
   sourceStore.restore();
@@ -201,53 +740,87 @@ onShow(() => {
 });
 onUnmounted(() => {
   uni.$off(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
+  // 量吸顶阈值用 createSelectorQuery：页面原生 UniPage 反注册后再 .exec()
+  // 会抛 "UTS instance N is not registered"，必须停掉重试并置存活标志
+  headAlive = false;
+  clearHeadTimers();
 });
 </script>
 
 <style>
 .page { flex: 1; min-height: 0; }
-.body { flex: 1; min-height: 0; }
-/* 页头：跟随皮肤强调色的可点条（换肤即变，不再写死深色），
-   与首页顶部 hero 的「强调色底 + 白字」形态保持一致。
-   左侧播放圆 + 右侧随机播放圆都用半透明白，保证任何强调色上都成立。 */
-.hero { flex-direction: row; align-items: center; margin: 20rpx 24rpx 0; padding: 0 28rpx; height: 132rpx; border-radius: 26rpx; }
-.hero-icon { width: 76rpx; height: 76rpx; border-radius: 38rpx; background-color: rgba(255,255,255,0.26); align-items: center; justify-content: center; }
-.hero-copy { flex: 1; min-width: 0; margin-left: 22rpx; }
-.hero-title { font-size: 30rpx; font-weight: 700; }
-.hero-sub { margin-top: 6rpx; font-size: 22rpx; }
-.hero-end { width: 64rpx; height: 64rpx; border-radius: 32rpx; background-color: rgba(255,255,255,0.18); align-items: center; justify-content: center; }
-.scroll { flex: 1; min-height: 0; margin-top: 20rpx; }
-.list-shell { padding: 0 24rpx 40rpx; }
-.song-grid { flex-direction: row; flex-wrap: wrap; }
-.song-card { height: 124rpx; margin-bottom: 14rpx; margin-right: 14rpx; padding: 0 18rpx; flex-direction: row; align-items: center; border-width: 1px; border-radius: 20rpx; }
-.song-cover { width: 86rpx; height: 86rpx; border-radius: 14rpx; }
-.song-info { flex: 1; min-width: 0; margin-left: 18rpx; }
-.song-name { font-size: 27rpx; font-weight: 600; text-overflow: ellipsis; }
-.song-meta { margin-top: 7rpx; font-size: 22rpx; text-overflow: ellipsis; }
-/* 行内播放按钮：与首页新歌速递同款——accentSoft 圆底 + accent 图标，尺寸一致（64rpx 圆）。
-   卡片本身可点播放，圆钮只是视觉锚点；更多按钮不再做白圆，用裸次级图标避免一排三个圆。 */
-.song-play { width: 64rpx; height: 64rpx; margin-left: 12rpx; align-items: center; justify-content: center; border-radius: 32rpx; }
-.song-more { width: 56rpx; height: 64rpx; margin-left: 8rpx; align-items: center; justify-content: center; }
-.empty { height: 260rpx; align-items: center; justify-content: center; }
+.scroll { flex: 1; min-height: 0; }
+/* list-item 不支持 margin，用 padding */
+.hero-item { padding: 0; }
+.hero { padding: 40rpx 32rpx; flex-direction: row; border-width: 1px; border-style: solid; border-radius: 24rpx; }
+.cover { width: 200rpx; height: 200rpx; border-radius: 20rpx; background-color: rgba(255, 255, 255, 0.2); }
+.hero-info { flex: 1; margin-left: 26rpx; justify-content: center; }
+.title { font-size: 35rpx; font-weight: 600; }
+.desc { margin-top: 18rpx; font-size: 23rpx; }
+.playcount { margin-top: 12rpx; font-size: 22rpx; }
+.list-head { height: 96rpx; padding: 0 32rpx; flex-direction: row; justify-content: space-between; align-items: center; font-size: 25rpx; border-width: 1px; border-style: solid; border-radius: 24rpx; }
+.head-actions { flex-direction: row; align-items: center; }
+.play-all { height: 60rpx; padding: 0 24rpx; border-radius: 30rpx; flex-direction: row; justify-content: center; align-items: center; margin-left: 18rpx; }
+.play-all-text { margin-left: 10rpx; font-size: 24rpx; font-weight: 500; }
+.head-btn { height: 60rpx; padding: 0 24rpx; border-radius: 30rpx; flex-direction: row; justify-content: center; align-items: center; border-width: 1px; border-style: solid; }
+/* 批量入口：窄屏只放图标，靠 16rpx 内边距凑成 60rpx 圆钮；宽屏才有文字 */
+.head-batch { height: 60rpx; padding: 0 16rpx; border-radius: 30rpx; flex-direction: row; justify-content: center; align-items: center; border-width: 1px; border-style: solid; margin-left: 18rpx; }
+.head-btn-text { margin-left: 10rpx; font-size: 24rpx; font-weight: 500; }
+/* 骨架独占一条 list-item（QtSkeletonList 用法二），list-item 不支持 margin，padding 归零 */
+.sk-item { padding: 0; flex-direction: column; }
+/* 操作条骨架沿用 .list-head 的外框，只是内容换成灰块 */
+.head-skel-item { padding: 0; }
+/* hero 骨架行间距：逐个对齐真实节点的 margin-top（简介 18rpx / 数量行 12rpx） */
+.hsk-l2 { margin-top: 18rpx; }
+.hsk-l3 { margin-top: 12rpx; }
+/* 操作条里按钮之间的间距：真实 .play-all / .head-batch 都是 margin-left: 18rpx */
+.hsk-gap { margin-left: 18rpx; }
+.song-item { height: 128rpx; }
+/* 搜索行：整行不吃 list-item 的 padding（list-item 不支持 margin，间距只能靠内边距） */
+.search-item { padding: 0; }
+.search-row { flex-direction: row; align-items: center; padding: 16rpx 32rpx 0; }
+.search-field { flex: 1; min-width: 0; flex-direction: row; align-items: center; padding: 10rpx 18rpx; border-radius: 30rpx; border-width: 1px; border-style: solid; }
+.search-input { flex: 1; min-width: 0; margin-left: 12rpx; font-size: 26rpx; height: 40rpx; }
+.search-ph { color: #9aa1b1; font-size: 26rpx; }
+.search-clear { width: 44rpx; height: 44rpx; align-items: center; justify-content: center; flex-shrink: 0; }
+.empty-item { padding: 120rpx 0; justify-content: center; align-items: center; }
 .empty-text { font-size: 26rpx; }
 
-.page-wide { padding-bottom: 0; }
-.body-wide { padding: 12px 16px 0; }
-.hero-wide { margin: 12px 16px 0; padding: 0 20px; height: 76px; border-radius: 14px; }
-.hero-icon-wide { width: 48px; height: 48px; border-radius: 24px; }
-.hero-copy-wide { margin-left: 14px; }
-.hero-end-wide { width: 38px; height: 38px; border-radius: 19px; }
-.scroll-wide { margin-top: 10px; }
-.list-shell-wide { padding: 0 16px 24px; }
-.hero-title-wide { font-size: 16px; }
-.hero-sub-wide { margin-top: 3px; font-size: 12px; }
-.song-card-wide { height: 62px; margin-bottom: 8px; margin-right: 12px; padding: 0 10px; border-radius: 12px; }
-.song-cover-wide { width: 40px; height: 40px; border-radius: 8px; }
-.song-info-wide { margin-left: 10px; }
-.song-name-wide { font-size: 14px; }
-.song-meta-wide { margin-top: 3px; font-size: 11px; }
-.song-play-wide { width: 32px; height: 32px; border-radius: 16px; }
-.song-more-wide { width: 30px; height: 32px; }
-.empty-wide { height: 180px; }
+.song-item-wide { height: 82px; }
+.search-row-wide { padding-top: 10px; padding-left: 24px; padding-right: 24px; }
+.search-field-wide { padding-top: 6px; padding-bottom: 6px; padding-left: 12px; padding-right: 12px; border-radius: 16px; }
+.search-input-wide { margin-left: 8px; font-size: 14px; height: 22px; }
+.search-ph-wide { color: #9aa1b1; font-size: 14px; }
+.search-clear-wide { width: 24px; height: 24px; }
+.empty-item-wide { padding-top: 72px; padding-bottom: 72px; }
 .empty-text-wide { font-size: 15px; }
+/* 宽屏左栏操作区：封面下方统一管理播放与批量（对齐 qt-pc 页头），列表顶无操作条 */
+.whero-actions { margin-top: 14px; flex-direction: column; align-self: stretch; }
+.whero-play { height: 44px; border-radius: 22px; flex-direction: row; justify-content: center; align-items: center; }
+.whero-play-text { margin-left: 8px; font-size: 13px; font-weight: 500; }
+.whero-acts { margin-top: 10px; flex-direction: row; }
+/* 宽屏左栏工具行：搜索 + 三点排序入口（窄屏同语义按钮在框架标题栏右侧） */
+.whero-tools { margin-top: 10px; flex-direction: row; align-self: flex-end; }
+.whero-tool { width: 40px; height: 40px; border-radius: 20px; align-items: center; justify-content: center; border-width: 1px; border-style: solid; }
+.whero-tool-gap { margin-left: 10px; }
+.whero-act { flex: 1; height: 40px; border-radius: 20px; flex-direction: row; justify-content: center; align-items: center; border-width: 1px; border-style: solid; }
+.whero-act-gap { margin-left: 10px; }
+.whero-act-text { margin-left: 6px; font-size: 13px; }
+
+/* 宽屏左右布局：左栏推荐信息 + 右栏歌曲列表（竖屏保持上下），与歌单详情页同构 */
+.page-wide { flex-direction: row; align-items: stretch; padding: 16px 20px 0; }
+.wide-left { width: 272px; flex-shrink: 0; margin-right: 16px; padding-bottom: 16px; }
+.whero { padding: 16px; flex-direction: column; border-width: 1px; border-style: solid; border-radius: 16px; }
+.whero-cover { width: 238px; height: 238px; border-radius: 12px; background-color: rgba(255, 255, 255, 0.2); }
+.whero-title { margin-top: 14px; font-size: 18px; font-weight: 600; }
+.whero-desc { margin-top: 8px; font-size: 13px; line-height: 20px; }
+.whero-count { margin-top: 6px; font-size: 12px; }
+/* 左栏骨架行的间距：逐个对齐真实节点的 margin-top（标题 14 / 简介 8 / 简介行距 4 / 数量行 6 / 操作区 14 / 组内 10） */
+.wsk-l1 { margin-top: 14px; }
+.wsk-l2 { margin-top: 8px; }
+.wsk-l3 { margin-top: 4px; }
+.wsk-l4 { margin-top: 6px; }
+.wsk-l5 { margin-top: 14px; }
+.wsk-l6 { margin-top: 10px; flex-direction: row; }
+.wsk-l6-gap { margin-left: 10px; }
 </style>

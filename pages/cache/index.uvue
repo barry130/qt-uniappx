@@ -1,0 +1,587 @@
+<template>
+  <qt-page-frame width-kind="flow">
+  <view class="page">
+    <scroll-view class="list" :class="layout.isWide ? 'list-wide' : ''" direction="vertical" :show-scrollbar="false">
+      <view class="total" :class="layout.isWide ? 'total-wide' : ''">
+        <text class="total-value" :class="layout.isWide ? 'total-value-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(56, 32)">{{ totalText }}</text>
+        <text class="total-label" :class="layout.isWide ? 'total-label-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13)">缓存占用</text>
+        <text class="total-hint" :class="layout.isWide ? 'total-hint-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">占用仅统计音乐播放缓存；本地数据、设置和登录状态可单独勾选清理。</text>
+      </view>
+
+      <!-- 宽屏两列（≥1280）：左列是「可重新获取的缓存」4 行（默认勾选），
+           右列是「需主动勾选」4 行（本地数据 / 设置 / 登录状态）。8 行单列在 1920 下
+           每行右侧空出 600px；按行数对半分，两列各 4 行。 -->
+      <view v-if="twoColumn" class="cols" :style="colsStyle">
+        <view class="col" :style="colStyle">
+          <view class="group group-wide group-col" :style="groupStyle">
+            <view
+              v-for="(item, index) in itemsLeft"
+              :key="item.id"
+              class="cell cell-wide"
+              :class="index == itemsLeft.length - 1 ? 'cell-no-border' : ''"
+              :style="cellStyle"
+              @click="toggle(item.id)" :hover-class="layout.isWide ? 'cell-hover' : 'none'"
+            >
+              <QtIcon class="cell-icon cell-icon-wide" :name="item.icon" :size="36" :color="item.color" />
+              <view class="cell-main">
+                <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ item.label }}</text>
+                <text class="cell-desc cell-desc-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">{{ item.desc }}</text>
+              </view>
+              <text class="cell-size cell-size-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(26, 15)">{{ itemSize(item.id) }}</text>
+              <view class="cell-right">
+                <view
+                  class="checkbox checkbox-wide"
+                  :style="isChecked(item.id) ? ('background-color:' + theme.skin.accent + ';border-color:' + theme.skin.accent + ';') : ('border-color:' + theme.skin.border + ';')"
+                >
+                  <QtIcon v-if="isChecked(item.id)" name="check" :size="12" :color="theme.skin.onAccent" />
+                </view>
+              </view>
+            </view>
+          </view>
+        </view>
+        <view class="col col-right" :style="colStyle">
+          <view class="group group-wide group-col" :style="groupStyle">
+            <view
+              v-for="(item, index) in itemsRight"
+              :key="item.id"
+              class="cell cell-wide"
+              :class="index == itemsRight.length - 1 ? 'cell-no-border' : ''"
+              :style="cellStyle"
+              @click="toggle(item.id)" :hover-class="layout.isWide ? 'cell-hover' : 'none'"
+            >
+              <QtIcon class="cell-icon cell-icon-wide" :name="item.icon" :size="36" :color="item.color" />
+              <view class="cell-main">
+                <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ item.label }}</text>
+                <text class="cell-desc cell-desc-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">{{ item.desc }}</text>
+              </view>
+              <text class="cell-size cell-size-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(26, 15)">{{ itemSize(item.id) }}</text>
+              <view class="cell-right">
+                <view
+                  class="checkbox checkbox-wide"
+                  :style="isChecked(item.id) ? ('background-color:' + theme.skin.accent + ';border-color:' + theme.skin.accent + ';') : ('border-color:' + theme.skin.border + ';')"
+                >
+                  <QtIcon v-if="isChecked(item.id)" name="check" :size="12" :color="theme.skin.onAccent" />
+                </view>
+              </view>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 竖屏 / 中等宽度：单列（原样） -->
+      <view v-else>
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view
+          v-for="(item, index) in items"
+          :key="item.id"
+          class="cell"
+          :class="[layout.isWide ? 'cell-wide' : '', index == items.length - 1 ? 'cell-no-border' : '']"
+          :style="cellStyle"
+          @click="toggle(item.id)" :hover-class="layout.isWide ? 'cell-hover' : 'none'"
+        >
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" :name="item.icon" :size="36" :color="item.color" />
+          <view class="cell-main">
+            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ item.label }}</text>
+            <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">{{ item.desc }}</text>
+          </view>
+          <text class="cell-size" :class="layout.isWide ? 'cell-size-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(26, 15)">{{ itemSize(item.id) }}</text>
+          <view class="cell-right">
+            <view
+              class="checkbox"
+              :class="layout.isWide ? 'checkbox-wide' : ''"
+              :style="isChecked(item.id) ? ('background-color:' + theme.skin.accent + ';border-color:' + theme.skin.accent + ';') : ('border-color:' + theme.skin.border + ';')"
+            >
+              <QtIcon v-if="isChecked(item.id)" name="check" :size="layout.isWide ? 12 : 22" :color="theme.skin.onAccent" />
+            </view>
+          </view>
+        </view>
+      </view>
+      </view>
+
+      <view class="action" :class="layout.isWide ? 'action-wide' : ''">
+        <qt-button :label="submitText" variant="primary" size="md" :disabled="!canSubmit" @click="submit" />
+      </view>
+
+      <view class="hint">
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">已下载歌曲及下载记录始终保留。清理本地音乐数据不会删除云端数据；勾选登录状态会退出登录，勾选应用设置会恢复默认设置。</text>
+      </view>
+    </scroll-view>
+  </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import { useQtTwoColumn } from "@/uni_modules/qt-ui/composables/use-qt-columns";
+import { qtSplitTwoColumn } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { computed, onUnmounted, ref } from "vue";
+import { onShow } from "@dcloudio/uni-app";
+import { audioPlayer } from "@/services/audio-player";
+import { isHarmonyOs } from "@/services/app-native";
+import { musicApi } from "@/services/music-api";
+import { clearSourceSwitchCache, sourceSwitchCacheStat } from "@/services/source-switch";
+import { ttlClearAll as clearTtlCache, ttlCount as ttlEntryCount } from "@/services/ttl-store";
+import { formatFileSize } from "@/services/upgrade";
+import { usePlayerStore } from "@/stores/player";
+import { useDownloadsStore, DOWNLOAD_CONCURRENCY_DEFAULT } from "@/stores/downloads";
+import { useLyricOffsetStore } from "@/stores/lyric-offset";
+import { useDislikesStore } from "@/stores/dislikes";
+import { useSourceStore } from "@/stores/source";
+import { useListenStatsStore } from "@/stores/listen-stats";
+import { clearCachedMe } from "@/services/user-cache";
+import { qtConfirm } from "@/services/confirm";
+import { desktopLyric } from "@/services/desktop-lyric";
+import { usePlayerBarStore } from "@/stores/player-bar";
+import { qtFontDual, useFontScaleStore } from "@/uni_modules/qt-ui/stores/font-scale";
+
+/** 宽屏两列（≥1280）：布局档位、列宽与两列容器留白全部来自公共口径 */
+const { layout, twoColumn, colStyle, colsStyle } = useQtTwoColumn();
+const theme = useThemeStore();
+const player = usePlayerStore();
+const downloads = useDownloadsStore();
+const dislikes = useDislikesStore();
+const lyricOffset = useLyricOffsetStore();
+const sourceStore = useSourceStore();
+const listenStats = useListenStatsStore();
+/** 清除本地数据后延迟跳转登录页的定时器：页面卸载时必须清掉，避免在已注销的实例上触发回调 */
+let clearDataTimer: number | null = null;
+
+const groupStyle = computed<string>(() => "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";");
+const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
+
+/** 一条可清除的缓存。id 是清除分支的判据，与 clearItem 里的分支一一对应。 */
+type CacheItem = {
+  id: string;
+  label: string;
+  desc: string;
+  icon: string;
+  color: string;
+};
+
+const items: CacheItem[] = [
+  {
+    id: "audio",
+    label: "音乐播放缓存",
+    desc: "在线播放时落盘的音频文件（安卓有磁盘缓存，鸿蒙不占此项）",
+    icon: "download",
+    color: "#4fb186",
+  },
+  {
+    id: "playUrl",
+    label: "播放地址接口缓存",
+    desc: "各平台解析出的播放链接，10 分钟内复用同一份",
+    icon: "play",
+    color: "#6d8fd6",
+  },
+  {
+    id: "source",
+    label: "音源缓存",
+    desc: "换源候选与音源包清单缓存，清除后换源重新解析",
+    icon: "refresh",
+    color: "#9b82d9",
+  },
+  {
+    id: "ttl",
+    label: "榜单与歌单缓存",
+    desc: "排行榜、歌单广场列表与分类的 12 小时 / 7 天本地缓存，清除后下次打开重新拉取",
+    icon: "list",
+    color: "#6d8fd6",
+  },
+  {
+    id: "lyric",
+    label: "歌词缓存",
+    desc: "已取到的歌词、翻译、逐字与罗马音数据",
+    icon: "list",
+    color: "#d99b3f",
+  },
+  { id: "stats", label: "听歌统计", desc: "累计次数、听歌时长、日榜、歌手/音源 Top 与最近播放（不动收藏和歌单）", icon: "trending", color: "#4fb186" },
+  { id: "localData", label: "本地音乐数据", desc: "收藏、歌单、播放与搜索记录、听歌统计、扫描结果及歌词偏移（不删除云端数据）", icon: "music", color: "#6d8fd6" },
+  { id: "settings", label: "应用设置", desc: "恢复外观、字号、播放、下载、桌面歌词及扫描规则的默认设置", icon: "sliders", color: "#9b82d9" },
+  { id: "account", label: "登录状态", desc: "清除本机账号信息并退出登录", icon: "lock", color: "#d97b66" },
+];
+
+/**
+ * 两列切分：按顺序对半分（8 项 → 左 4 / 右 4）。
+ * 分组只有一组，所以只能按**行**切，不能按组分；顺序切保证键盘/阅读顺序与视觉一致。
+ */
+const itemsSplit = qtSplitTwoColumn<CacheItem>(items);
+const itemsLeft: CacheItem[] = itemsSplit[0];
+const itemsRight: CacheItem[] = itemsSplit[1];
+
+/** 默认只清可重新获取的缓存；本地数据、设置与登录状态需要主动勾选。 */
+const checked = ref<string[]>(["audio", "playUrl", "source", "ttl", "lyric"]);
+const busy = ref(false);
+
+/**
+ * 各缓存的实时占用。四个值分开存而不是拼一个对象：Vapor 下模板只对 ref 的
+ * 顶层读写做依赖收集，塞进普通对象再整体替换，`itemSize()` 里的读取不会触发重渲染。
+ *
+ * 只有音乐播放缓存是真实磁盘字节；其余三项是内存表，能如实报出来的只有条目数。
+ * 不把它们折算成「约 N KB」这种估算值 —— 那是编出来的数字，用户无法对账。
+ */
+const audioBytes = ref<number>(0);
+const playUrlCount = ref<number>(0);
+const sourceGroups = ref<number>(0);
+const sourceSongs = ref<number>(0);
+const ttlCount = ref<number>(0);
+const lyricCount = ref<number>(0);
+const statsSongCount = ref<number>(0);
+
+/** 重新统计各项占用（进页面、清完缓存后都要重算） */
+function refreshSizes(): void {
+  audioBytes.value = audioPlayer.cacheSize();
+  playUrlCount.value = musicApi.playUrlCacheCount();
+  const stat = sourceSwitchCacheStat();
+  sourceGroups.value = stat.groups;
+  sourceSongs.value = stat.songs;
+  ttlCount.value = ttlEntryCount();
+  lyricCount.value = musicApi.lyricCacheCount();
+  statsSongCount.value = listenStats.songs.length;
+}
+
+/** 单项占用的展示文案（行尾那列） */
+function itemSize(id: string): string {
+  if (id == "audio") {
+    // 鸿蒙原生没有音频磁盘缓存（audioCacheSize 恒返回 0），写「0 KB」会让人
+    // 以为缓存被清空了，直接说明平台不支持
+    if (isHarmonyOs()) return "无缓存";
+    return audioBytes.value > 0 ? formatFileSize(audioBytes.value) : "0 KB";
+  }
+  if (id == "playUrl") return playUrlCount.value + " 条";
+  if (id == "source") return sourceGroups.value + " 组 · " + sourceSongs.value + " 首";
+  if (id == "ttl") return ttlCount.value + " 条";
+  if (id == "lyric") return lyricCount.value + " 条";
+  if (id == "stats") return statsSongCount.value > 0 ? statsSongCount.value + " 首" : "无记录";
+  return "";
+}
+
+/**
+ * 顶部大字：磁盘缓存总占用。只算音乐播放缓存 —— 另外三项在内存里，
+ * 没有可展示的字节数，硬凑进这个数字就是假的（页面下方有一行说明）。
+ */
+const totalText = computed<string>(() => {
+  if (isHarmonyOs()) return "0 KB";
+  return audioBytes.value > 0 ? formatFileSize(audioBytes.value) : "0 KB";
+});
+
+function isChecked(id: string): boolean {
+  return checked.value.indexOf(id) >= 0;
+}
+
+function toggle(id: string): void {
+  if (busy.value) return;
+  if (isChecked(id)) {
+    checked.value = checked.value.filter((item: string): boolean => item != id);
+  } else {
+    checked.value = [...checked.value, id];
+  }
+}
+
+/** 提交按钮文案：没勾选时说明原因（按钮同时置灰，见 qt-button 的 disabled 不发 click） */
+const submitText = computed<string>(() => {
+  if (busy.value) return "正在清理…";
+  if (checked.value.length == 0) return "请选择要清除的内容";
+  return "清除所选内容（" + checked.value.length + "）";
+});
+const canSubmit = computed<boolean>(() => checked.value.length > 0 && !busy.value);
+
+/**
+ * 清除单项。返回 false 表示清除失败（会汇总进提示里）。
+ *
+ * 音乐播放缓存是唯一有失败可能的项（磁盘文件可能被占用）；其余三项都是内存表，
+ * 调用即成功。鸿蒙侧原生没有音频磁盘缓存（audioClearCache 恒返回 false），
+ * 所以那一项在鸿蒙直接按成功处理，否则每次都会误报「清除失败」。
+ */
+async function clearItem(id: string): Promise<boolean> {
+  if (id == "audio") {
+    if (isHarmonyOs()) return true;
+    // 先停掉前端播放状态（若在播放），保持界面与原生一致，再清磁盘缓存
+    if (player.playing) player.stop();
+    return audioPlayer.clearAudioCache();
+  }
+  if (id == "playUrl") {
+    musicApi.clearPlayUrlCache();
+    return true;
+  }
+  if (id == "source") {
+    clearSourceSwitchCache();
+    return true;
+  }
+  if (id == "ttl") {
+    clearTtlCache();
+    return true;
+  }
+  if (id == "lyric") {
+    musicApi.clearLyricCache();
+    return true;
+  }
+  if (id == "stats") {
+    await listenStats.clearOnly();
+    // 统计与最近播放是同一份收听数据的两种看法，一起清才不会留下
+    // 「统计归零、但最近播放还在」的反直觉状态（与 PC 端 clear_listen_stats 同口径）。
+    player.clearHistory();
+    return true;
+  }
+  if (id == "localData") {
+    await player.resetLocalData();
+    dislikes.reset();
+    lyricOffset.reset();
+    musicApi.resetLyricPicks();
+    removeKeys(["qt-default-fav-playlist", "qt-player-progress", "qt-search-history", "qt-local-audio-v1"]);
+    return true;
+  }
+  if (id == "settings") {
+    resetSettings();
+    return true;
+  }
+  if (id == "account") {
+    removeKeys(["qt-token", "qt-access-token", "qt-refresh-token", "qt-token-expiry", "qt-user-id", "qt-nickname", "qt-email", "qt-avatar", "qt-roles", "qt-permissions", "qt-notice-first-login"]);
+    clearCachedMe();
+    return true;
+  }
+  return false;
+}
+
+function submit(): void {
+  if (!canSubmit.value) return;
+  const ids = checked.value.slice();
+  const labels: string[] = [];
+  for (let i = 0; i < items.length; i++) {
+    if (ids.indexOf(items[i].id) >= 0) labels.push(items[i].label);
+  }
+  const effects = ids.indexOf("account") >= 0 ? "清理后将退出登录。" : "";
+  qtConfirm({
+    title: "清除所选内容",
+    content: "将清除：" + labels.join("、") + "。" + effects + "已下载歌曲和下载记录保留，本地数据与设置清理后不可恢复，确定继续？",
+    confirmText: "清除",
+    danger: true,
+  }).then((ok: boolean) => {
+    if (ok && !busy.value) clearSelected(ids);
+  });
+}
+
+async function clearSelected(ids: string[]): Promise<void> {
+  busy.value = true;
+  let failed = 0;
+  let signedOut = false;
+  for (let i = 0; i < ids.length; i++) {
+    try {
+      if (!await clearItem(ids[i])) failed++;
+      else if (ids[i] == "account") signedOut = true;
+    } catch (_) { failed++; }
+  }
+  refreshSizes();
+  qtShowToast({ title: failed == 0 ? "已清除所选内容" : failed + " 项清除失败，请稍后重试", icon: "none" });
+  if (signedOut) {
+    clearDataTimer = setTimeout(() => { uni.reLaunch({ url: "/pages/login/index" }); }, 600) as number;
+  } else {
+    busy.value = false;
+  }
+}
+
+onShow(() => {
+  // 每次进页面重算：音频缓存可能在别处（播放、下载、设置里改上限）发生了变化，
+  // 页面实例却是复用的，不重算就会一直显示上次进页面时的旧数字
+  refreshSizes();
+});
+function removeKeys(keys: string[]): void {
+  for (let i = 0; i < keys.length; i++) uni.removeStorageSync(keys[i]);
+}
+
+function resetSettings(): void {
+  // 只移除设置键：下载记录、下载任务、账号和本地音乐数据各自保留。
+  const keys = uni.getStorageInfoSync().keys;
+  const settingsKeys = ["qt-source", "qt-ui-theme-v2", "qt-theme-dark", "qt-ui-skin", "qt-ui-font-scale", "qt-player-bar-visible", "qt-playback-rate", "qt-audio-cache-limit", "qt-concurrent-play-mode", "qt-eq-enabled", "qt-eq-bands", "qt-playback-volume", "qt-playback-muted", "qt-local-rule-min-seconds", "qt-local-rule-min-size-mb", "qt-local-include-system", "qt-local-delete-file-v1"];
+  for (let i = 0; i < keys.length; i++) {
+    if (settingsKeys.indexOf(keys[i]) >= 0 || keys[i].startsWith("qt-desktop-lyric-") || (keys[i].startsWith("qt-download-") && keys[i] != "qt-download-tasks")) uni.removeStorageSync(keys[i]);
+  }
+  sourceStore.setSource("wyy");
+  audioPlayer.setConcurrentMode(0);
+  audioPlayer.setMuted(false);
+  audioPlayer.setVolume(1.0);
+  audioPlayer.changeRate(1.0);
+  audioPlayer.setEqualizerEnabled(false);
+  audioPlayer.setEqualizerBands([0, 0, 0, 0, 0]);
+  audioPlayer.setCacheLimitMb(audioPlayer.getCacheLimitMb());
+  player.mode = "sequence";
+  player.syncRepeatMode();
+  player.setQuality("320");
+  player.setSleep(0);
+  downloads.concurrency = DOWNLOAD_CONCURRENCY_DEFAULT;
+  downloads.downloadQuality = "320";
+  downloads.downloadNameFormat = "artist";
+  downloads.downloadCover = false;
+  downloads.downloadLyric = false;
+  downloads.deleteFileOnRemove = true;
+  downloads.customDir = "";
+  theme.resetAll();
+  useFontScaleStore().setTier("normal");
+  usePlayerBarStore().reset();
+  desktopLyric.disable();
+  // 原生侧另有持久化配置，删除 JS 设置后需把默认值同步下发。
+  desktopLyric.setLocked(desktopLyric.isLocked());
+  desktopLyric.setFontSp(desktopLyric.getFontSp());
+  desktopLyric.setColor(desktopLyric.getColor());
+  desktopLyric.setTypefaceIndex(desktopLyric.getTypefaceIndex());
+  desktopLyric.setWidthPct(desktopLyric.getWidthPct());
+  desktopLyric.setStrokeEnabled(desktopLyric.getStrokeEnabled());
+  desktopLyric.setStrokeWidth(desktopLyric.getStrokeWidth());
+  desktopLyric.setShadowEnabled(desktopLyric.getShadowEnabled());
+  desktopLyric.setAlign(desktopLyric.getAlign());
+  desktopLyric.setBackgroundMode(desktopLyric.getBackgroundMode());
+  desktopLyric.setBackgroundColor(desktopLyric.getBackgroundColor());
+  desktopLyric.setBackgroundOpacity(desktopLyric.getBackgroundOpacity());
+}
+
+onUnmounted(() => {
+  if (clearDataTimer != null) {
+    clearTimeout(clearDataTimer);
+    clearDataTimer = null;
+  }
+});
+</script>
+
+<style>
+.page {
+  flex: 1;
+}
+.list {
+  flex: 1;
+  padding: 16rpx 0 40rpx;
+}
+.list-wide {
+  padding: 12px 0 24px;
+}
+.group {
+  margin-top: 20rpx;
+  margin-left: 24rpx;
+  margin-right: 24rpx;
+  border-radius: 24rpx;
+  overflow: hidden;
+
+  border-width: 1px; border-style: solid;
+
+}
+/* 顶部总占用：仿网易云「存储空间」的大字 + 一行说明 */
+.total {
+  margin-top: 36rpx;
+  padding: 0 48rpx;
+  align-items: center;
+}
+.total-value {
+  font-size: 56rpx;
+  font-weight: 600;
+}
+.total-label {
+  margin-top: 4rpx;
+  font-size: 24rpx;
+}
+.total-hint {
+  margin-top: 12rpx;
+  /* 父级是 align-items:center，不给宽度的话 <text> 会缩成内容宽、长句不换行；
+     Vapor 禁 max-width，这里用 width:100% 撑满后配合 text-align 居中 */
+  width: 100%;
+  font-size: 22rpx;
+  line-height: 30rpx;
+  text-align: center;
+}
+.cell {
+  min-height: 96rpx;
+  padding: 16rpx 32rpx;
+  flex-direction: row;
+  align-items: center;
+  border-bottom-width: 1px; border-bottom-style: solid;
+}
+/* 桌面指针反馈：只在宽屏启用 */
+.cell-hover {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+.cell-no-border {
+  border-bottom-width: 0;
+}
+.cell-icon {
+  margin-right: 20rpx;
+}
+.cell-main {
+  flex: 1;
+}
+.cell-title {
+
+  font-size: 28rpx;
+  font-weight: 500;
+}
+.cell-desc {
+  margin-top: 6rpx;
+  font-size: 22rpx;
+  line-height: 30rpx;
+}
+/* 行尾占用：放在勾选框左侧，右对齐贴着勾选框 */
+.cell-size {
+  margin-right: 20rpx;
+  font-size: 26rpx;
+  text-align: right;
+}
+.cell-right {
+  flex-direction: row;
+  align-items: center;
+}
+/* 勾选框：仓库内没有 checkbox 组件，与「本地音乐」多选同一套写法 */
+.checkbox {
+  width: 44rpx;
+  height: 44rpx;
+  border-radius: 22rpx;
+  /* border-style 必须显式写，否则 Vapor 下边框不绘制（未选中态会完全看不见） */
+  border-style: solid;
+  border-width: 2px;
+  align-items: center;
+  justify-content: center;
+}
+.action {
+  margin-top: 28rpx;
+  margin-left: 24rpx;
+  margin-right: 24rpx;
+}
+.hint {
+  margin-top: 18rpx;
+  padding: 0 40rpx;
+}
+.hint-text {
+  font-size: 22rpx;
+  line-height: 32rpx;
+}
+/* 宽屏下 rpx 会随窗口放大膨胀，固定 px 尺寸 */
+.group-wide { margin-top: 14px; margin-left: 24px; margin-right: 24px; border-radius: 14px; }
+.total-wide { margin-top: 20px; padding: 0 32px; }
+.total-value-wide { font-size: 32px; }
+.total-label-wide { margin-top: 2px; font-size: 13px; }
+.total-hint-wide { margin-top: 8px; font-size: 12px; line-height: 18px; }
+.cell-wide { min-height: 64px; padding: 10px 24px; }
+.cell-title-wide { font-size: 17px; }
+.cell-desc-wide { margin-top: 4px; font-size: 13px; line-height: 18px; }
+.cell-size-wide { margin-right: 14px; font-size: 15px; }
+.cell-icon-wide { margin-right: 10px; }
+.checkbox-wide { width: 24px; height: 24px; border-radius: 12px; }
+.action-wide { margin-top: 16px; margin-left: 24px; margin-right: 24px; }
+.hint-text-wide { font-size: 12px; line-height: 18px; }
+/* 两列：列内纵向堆叠、顶端对齐（默认 stretch 会把右列拉高露出分组底色）。
+   必须放在 .group-wide 之后：两者同优先级，靠源码顺序覆盖它那套单列的 24px 外边距。 */
+.cols {
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: center;
+}
+.col {
+  flex-direction: column;
+}
+.col-right {
+  margin-left: 16px;
+}
+/* 两列里的分组不再带左右外边距：列宽已经把 24px 留白与 16px 间距算进去了 */
+.group-col {
+  margin-left: 0;
+  margin-right: 0;
+}
+</style>

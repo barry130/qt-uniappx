@@ -1,0 +1,920 @@
+<!--
+  骨架屏列表：一屏与真实列表同形同位的占位行 + 一条扫光带。
+
+  ── 为什么收成一个组件 ──────────────────────────────────────────────────────
+  pages/playlists/index.uvue 是仓库里唯一已落地的骨架屏，结构是
+  「.sk-host(relative) ⊃ [真实行…, 骨架层(abs, v-if)]」，骨架层里挂一条
+  QtSkeletonShine。逐页复制这段结构要重复十几次，而且每页的行高/封面尺寸一旦和
+  真实行漂移，浮现时就会「跳一下」。这里把「骨架层 + 扫光」收成一个组件，页面只给：
+  形状（kind）、行数（rows）、已浮现块数（revealed）、是否已盖到真实内容上
+  （lifted）、光带是否可见（shining）。
+
+  ── 为什么行形状用 kind 枚举，而不是让页面传一堆尺寸 ────────────────────────
+  骨架必须和真实行同形同位，尺寸只能跟着真实行走。八种真实行的尺寸写死在组件里，
+  每一条都标注它对齐的是哪个 class；改真实行时按注释同步，比让十几个页面各自
+  维护一份尺寸更不容易漂。
+
+  ── 为什么不用 qt-skeleton 基元 ────────────────────────────────────────────
+  基元只能走行内 style 传尺寸，一屏 8 行 × 4 块就是 32 个实例、32 条样式串；而
+  这些尺寸在组件内部是静态的，用扁平 class 更省、也更好和真实行对齐。只有跟随
+  皮肤的底色（封面 / 文本行 / 卡片边框）走行内 style。
+
+  ── 三种用法（按容器类型三选一，详见 docs/design.md §6.17）─────────────────
+  1) scroll-view / 非虚拟列表 → 整层覆盖 + 错峰浮现（页面侧 .sk-host 必须 position:relative）
+    <view class="sk-host">
+      <view v-for="(song, i) in songs" :style="reveal.itemStyle(i)">…</view>
+      <QtSkeletonList
+        v-if="skeletonOn"
+        kind="song"
+        :rows="skeletonRows"
+        :revealed="reveal.revealedCount.value"
+        :lifted="skeletonLifted"
+        :shining="shining"
+      />
+    </view>
+  2) list-view / list-item → 骨架独占一条 list-item，全用默认值，数据到了整条换掉
+    <list-item v-if="loading && items.length == 0" class="sk-item">
+      <QtSkeletonList kind="notice" :rows="6" />
+    </list-item>
+  3) 多块独立数据源逐块上屏（首页）→ 逐块 v-if，不进 overlay、不做错峰；
+     放进 row / row+wrap 容器时必须包一层满宽容器，否则百分比宽度与换行失准
+    <view v-if="loading && songs.length == 0" class="sk-fill">
+      <QtSkeletonList kind="row" :rows="8" :columns="2" />
+    </view>
+-->
+<template>
+  <view class="qt-skl" :class="rootClass">
+    <!-- 通知行：图标 + 单行标题 + 箭头（对齐 pages/notice/list 的 .n-item）。
+         2026-10-22 起真实卡片只剩标题一行（正文预览与时间戳都去掉了），骨架同步只留一条线 -->
+    <view v-if="kind == 'notice'" class="qt-skl-col">
+      <view
+        v-for="i in rows"
+        :key="'qt-skl-n-' + i"
+        class="qt-skl-nrow"
+        :class="cls('qt-skl-nrow')"
+        :style="rowStyle(i - 1) + noticeSurface"
+      >
+        <view class="qt-skl-nicon" :class="cls('qt-skl-nicon')" :style="coverSurface" />
+        <view class="qt-skl-nbody">
+          <view class="qt-skl-nl1" :class="cls('qt-skl-nl1')" :style="lineSurface" />
+        </view>
+        <view class="qt-skl-chev" :class="cls('qt-skl-chev')" :style="lineSurface" />
+      </view>
+    </view>
+
+    <!-- 纯文本块：详情页正文 / 歌词段落（对齐 .notice-body / .fb-body 里的文字行） -->
+    <view v-else-if="kind == 'text'" class="qt-skl-col">
+      <view
+        v-for="i in rows"
+        :key="'qt-skl-t-' + i"
+        class="qt-skl-tx"
+        :class="cls('qt-skl-tx') + textWidthClass(i - 1)"
+        :style="rowStyle(i - 1) + lineSurface"
+      />
+    </view>
+
+    <!-- 反馈卡片：类型徽标 + 标题 + 内容行 + 脚注行（对齐 pages/feedback 的 .fb-item） -->
+    <view v-else-if="kind == 'feedback'" class="qt-skl-col">
+      <view
+        v-for="i in rows"
+        :key="'qt-skl-f-' + i"
+        class="qt-skl-frow"
+        :class="cls('qt-skl-frow')"
+        :style="rowStyle(i - 1) + cardSurface"
+      >
+        <view class="qt-skl-fhead">
+          <view class="qt-skl-fbadge" :class="cls('qt-skl-fbadge')" :style="lineSurface" />
+          <view class="qt-skl-ftitle" :class="cls('qt-skl-ftitle')" :style="lineSurface" />
+          <view class="qt-skl-fbadge" :class="cls('qt-skl-fbadge')" :style="lineSurface" />
+        </view>
+        <view class="qt-skl-fbody" :class="cls('qt-skl-fbody')" :style="lineSurface" />
+        <view class="qt-skl-ffoot">
+          <view class="qt-skl-ftime" :class="cls('qt-skl-ftime')" :style="lineSurface" />
+          <view class="qt-skl-fpub" :class="cls('qt-skl-fpub')" :style="lineSurface" />
+        </view>
+      </view>
+    </view>
+
+    <!-- 纵向卡片：方形封面在上、两行文字在下（对齐首页横向歌单架 / 宽屏歌单网格） -->
+    <view v-else-if="kind == 'tile'" class="qt-skl-col" :class="colClass">
+      <view
+        v-for="i in rows"
+        :key="'qt-skl-tl-' + i"
+        class="qt-skl-trow"
+        :class="cls('qt-skl-trow')"
+        :style="rowStyle(i - 1)"
+      >
+        <view class="qt-skl-tcover" :class="cls('qt-skl-tcover')" :style="coverSurface + tileCoverStyle" />
+        <view class="qt-skl-tl1" :class="cls('qt-skl-tl1')" :style="lineSurface" />
+        <view class="qt-skl-tl2" :class="cls('qt-skl-tl2')" :style="lineSurface" />
+      </view>
+    </view>
+
+    <!-- 榜单卡：卡头标题行 + 左封面右三行歌（对齐 pages/chart 的 QQ 式 .rank-card） -->
+    <view v-else-if="kind == 'rank'" class="qt-skl-col" :class="colClass">
+      <view
+        v-for="i in rows"
+        :key="'qt-skl-rk-' + i"
+        class="qt-skl-rk"
+        :class="cls('qt-skl-rk')"
+        :style="rowStyle(i - 1) + cardSurface"
+      >
+        <view class="qt-skl-rk-head">
+          <view class="qt-skl-rk-title" :class="cls('qt-skl-rk-title')" :style="lineSurface" />
+          <view class="qt-skl-rk-desc" :class="cls('qt-skl-rk-desc')" :style="lineSurface" />
+        </view>
+        <view class="qt-skl-rk-body">
+          <view class="qt-skl-rk-cover" :class="cls('qt-skl-rk-cover')" :style="coverSurface" />
+          <view class="qt-skl-rk-songs">
+            <view v-for="s in 3" :key="'qt-skl-rks-' + i + '-' + s" class="qt-skl-rk-song" :class="cls('qt-skl-rk-song')">
+              <view class="qt-skl-rk-idx" :class="cls('qt-skl-rk-idx')" :style="lineSurface" />
+              <view class="qt-skl-rk-line" :class="cls('qt-skl-rk-line')" :style="lineSurface" />
+            </view>
+          </view>
+        </view>
+      </view>
+    </view>
+
+    <!-- 媒体行：封面 + 两行文本（+ 尾部控件），song / card / chart / row 共用骨架 -->
+    <view v-else class="qt-skl-col" :class="colClass">
+      <view
+        v-for="i in rows"
+        :key="'qt-skl-m-' + i"
+        class="qt-skl-mrow"
+        :class="cls('qt-skl-mrow')"
+        :style="rowStyle(i - 1) + cardSurface"
+      >
+        <view class="qt-skl-cover" :class="cls('qt-skl-cover')" :style="coverSurface" />
+        <view class="qt-skl-info">
+          <view class="qt-skl-l1" :class="cls('qt-skl-l1')" :style="lineSurface" />
+          <view class="qt-skl-l2" :class="cls('qt-skl-l2')" :style="lineSurface" />
+        </view>
+        <view v-if="kind == 'song'" class="qt-skl-ico" :class="cls('qt-skl-ico')" :style="lineSurface" />
+        <view v-if="kind == 'song'" class="qt-skl-ico" :class="cls('qt-skl-ico')" :style="lineSurface" />
+        <view v-if="kind == 'row'" class="qt-skl-ico" :class="cls('qt-skl-ico')" :style="lineSurface" />
+        <view v-if="kind == 'card'" class="qt-skl-round" :class="cls('qt-skl-round')" :style="lineSurface" />
+        <view v-if="kind == 'card'" class="qt-skl-more" :class="cls('qt-skl-more')" :style="lineSurface" />
+        <view v-if="kind == 'chart'" class="qt-skl-chev" :class="cls('qt-skl-chev')" :style="lineSurface" />
+      </view>
+    </view>
+
+    <!-- 整层只挂一条光带：多挂会各自计时，扫光不同步 -->
+    <QtSkeletonShine :visible="shining" />
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed } from "vue";
+import QtSkeletonShine from "@/uni_modules/qt-ui/components/qt-skeleton-shine/qt-skeleton-shine.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtRevealFadeStyle } from "@/uni_modules/qt-ui/composables/use-qt-reveal";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+
+const props = withDefaults(defineProps<{
+  /** 骨架形状：tile 竖卡 / row 扁平行 / song 歌曲行 / card 卡片行 / chart 榜单行 / rank 榜单卡 / notice 通知行 / feedback 反馈卡 / text 文本段落 */
+  kind?: "tile" | "row" | "song" | "card" | "chart" | "rank" | "notice" | "feedback" | "text";
+  /** 骨架行数，必须等于真实首屏行数 */
+  rows?: number;
+  /** 已浮现的块数（来自页面的 useQtReveal），第 i 块在 i < revealed 时淡出 */
+  revealed?: number;
+  /** 数据已到达：骨架层脱离文档流，盖在真实内容上 */
+  lifted?: boolean;
+  /** 扫光带是否可见（骨架已盖到内容上时应关掉） */
+  shining?: boolean;
+  /** 网格行的每块宽度（px）；0 表示整行铺满，仅 card / chart / tile 用 */
+  cardWidth?: number;
+  /** tile 的横向间距（px）；0 表示用形状自带间距 */
+  gap?: number;
+  /** tile 是否单行不换行（横向滑动的歌单架）；默认换行网格 */
+  nowrap?: boolean;
+  /** 每行分几列（宽屏新歌那种 50% 定宽两列）；0/1 表示整行铺满 */
+  columns?: number;
+}>(), {
+  kind: "song",
+  rows: 6,
+  revealed: 0,
+  lifted: false,
+  shining: true,
+  cardWidth: 0,
+  gap: 0,
+  nowrap: false,
+  columns: 0,
+});
+
+const layout = useQtLayout();
+const themeStore = useThemeStore();
+
+const kindValue = computed((): string => props.kind != null ? props.kind! : "song");
+
+const rootClass = computed((): string => props.lifted ? "qt-skl-lifted" : "");
+
+/** card / chart / rank 的真实行是 flex-wrap 网格，骨架层必须是同一种布局才能对齐 */
+const isGrid = computed((): boolean => kindValue.value == "card" || kindValue.value == "chart" || kindValue.value == "rank");
+
+/**
+ * 容器排布：tile 默认换行网格，`nowrap` 时单行（首页横向歌单架）；
+ * 其余形状单列，但 `columns > 1` 时也要换行（宽屏新歌两列）。
+ */
+const colClass = computed((): string => {
+  if (kindValue.value == "tile") return props.nowrap ? "qt-skl-col-tile-nowrap" : "qt-skl-col-tile";
+  if (props.columns > 1 || isGrid.value) return "qt-skl-col-grid";
+  return "";
+});
+
+/** tile 的方形封面边长跟随 cardWidth（真实卡面就是「封面 = 卡宽」），未给则用默认 */
+const tileCoverStyle = computed((): string => props.cardWidth > 0
+  ? "width:" + props.cardWidth + "px;height:" + props.cardWidth + "px;"
+  : "");
+
+/** 拼「基础 class + 形状 class + 宽屏 class」三件套，宽屏规则写在后面以覆盖尺寸 */
+function cls(base: string): string {
+  const k = kindValue.value;
+  return base + " " + base + "-" + k + (layout.isWide ? " " + base + "-" + k + "-wide" : "");
+}
+
+/** 文本段落行宽按 3 拍循环，避免整块等宽看着像表格 */
+function textWidthClass(index: number): string {
+  const m = index % 3;
+  if (m == 0) return " qt-skl-tx-w0";
+  if (m == 1) return " qt-skl-tx-w1";
+  return " qt-skl-tx-w2";
+}
+
+function rowStyle(index: number): string {
+  let extra = "";
+  if (props.cardWidth > 0 && (kindValue.value == "card" || kindValue.value == "chart" || kindValue.value == "rank" || kindValue.value == "tile")) {
+    extra = "width:" + props.cardWidth + "px;";
+  }
+  // tile 的横向间距由页面给（首页歌单架的间距是按窗口宽算出来的），其余形状用自带 margin
+  if (props.gap > 0 && kindValue.value == "tile") {
+    extra += "margin-right:" + props.gap + "px;";
+  }
+  // 多列：宽屏新歌是 50% 定宽两列（.wide-song-row），骨架按同一比例切
+  if (props.columns > 1) {
+    extra += "width:" + (100 / props.columns) + "%;";
+  }
+  return qtRevealFadeStyle(index >= props.revealed, extra);
+}
+
+// 底色跟随皮肤：行内 style 由 store 拼，明暗两套不用各写一份 class
+const coverSurface = computed((): string => "background-color:" + themeStore.skin.coverPlaceholder + ";");
+const lineSurface = computed((): string => "background-color:" + (themeStore.dark ? "rgba(255,255,255,0.16)" : "rgba(25,29,38,0.18)") + ";");
+/** 半透明卡片底色：通知行与反馈卡片同一套（对齐 .n-item / .fb-item 的明暗两版） */
+const noticeSurface = computed((): string => themeStore.dark
+  ? "background-color:rgba(255,255,255,0.08);border-color:rgba(255,255,255,0.12);"
+  : "background-color:rgba(255,255,255,0.62);border-color:rgba(255,255,255,0.6);");
+const cardSurface = computed((): string => {
+  const k = kindValue.value;
+  if (k == "card") return "background-color:" + themeStore.skin.surface + ";border-color:" + themeStore.skin.border + ";";
+  if (k == "chart") return "background-color:" + (themeStore.dark ? "#212734" : "#f6f7f9") + ";";
+  // rank：对齐 pages/chart 的 .rank-card 明暗两版（白卡描边 / 深卡描边）
+  if (k == "rank") return themeStore.dark
+    ? "background-color:#212734;border-color:#2a2f3a;"
+    : "background-color:#ffffff;border-color:#e6e8ee;";
+  if (k == "feedback") return noticeSurface.value;
+  // row：只有一条分隔线，与首页 .song-row（下）/ .wide-chart-row（上）一致，两个色都给出
+  if (k == "row") return "border-bottom-color:" + themeStore.skin.divider + ";border-top-color:" + themeStore.skin.divider + ";";
+  // song：列表行本身透明，只有一条上分隔线
+  return "border-top-color:" + themeStore.skin.divider + ";";
+});
+</script>
+
+<style>
+/* 骨架层只管定位与透明度，形状全部由下面的行 class 决定 */
+.qt-skl {
+  position: relative;
+  flex-direction: column;
+  pointer-events: none;
+}
+.qt-skl-lifted {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+}
+.qt-skl-col {
+  flex-direction: column;
+}
+.qt-skl-col-grid {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+/* tile 两种排布：换行网格（宽屏歌单网格）/ 单行不换行（横向滑动的歌单架） */
+.qt-skl-col-tile {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.qt-skl-col-tile-nowrap {
+  flex-direction: row;
+  flex-wrap: nowrap;
+}
+
+/* 纵向卡片 tile：封面在上、两行文字在下 ───────────────────────────────── */
+.qt-skl-trow {
+  flex-direction: column;
+  flex-shrink: 0;
+}
+/* 宽屏换行网格的块间距对齐真实卡（.wide-playlist-card 是 12px / 14px）。
+   首页竖屏歌单架走 nowrap 并显式传 gap，行内 margin-right 会覆盖这里，互不影响 */
+.qt-skl-trow-tile-wide {
+  margin-right: 12px;
+  margin-bottom: 14px;
+}
+.qt-skl-tcover {
+  border-radius: 16rpx;
+}
+/* 未传 cardWidth 时的兜底尺寸；传了就由行内 style 覆盖成「封面 = 卡宽」 */
+.qt-skl-tcover-tile {
+  width: 240rpx;
+  height: 240rpx;
+}
+.qt-skl-tcover-tile-wide {
+  width: 132px;
+  height: 132px;
+  border-radius: 10px;
+}
+.qt-skl-tl1 {
+  margin-top: 12rpx;
+  border-radius: 8rpx;
+}
+.qt-skl-tl1-tile {
+  height: 30rpx;
+}
+.qt-skl-tl1-tile-wide {
+  height: 16px;
+  border-radius: 5px;
+}
+.qt-skl-tl2 {
+  margin-top: 8rpx;
+  border-radius: 8rpx;
+}
+.qt-skl-tl2-tile {
+  height: 22rpx;
+  width: 62%;
+}
+.qt-skl-tl2-tile-wide {
+  height: 13px;
+  border-radius: 5px;
+}
+
+/* ── 媒体行：song / card / chart ─────────────────────────────────────────── */
+
+/* song 对齐 uni_modules/qt-ui/components/qt-song-row-lite 的 .lite-row */
+.qt-skl-mrow {
+  flex-direction: row;
+  align-items: center;
+}
+.qt-skl-mrow-song {
+  height: 128rpx;
+  padding: 0 32rpx;
+  border-top-width: 1px;
+  border-top-style: solid;
+}
+.qt-skl-mrow-song-wide {
+  height: 82px;
+  padding-left: 24px;
+  padding-right: 24px;
+}
+/* card 对齐 pages/daily/index.uvue 的 .song-card（底色/边框色由行内 style 给） */
+.qt-skl-mrow-card {
+  height: 124rpx;
+  margin-bottom: 14rpx;
+  margin-right: 14rpx;
+  padding: 0 18rpx;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 20rpx;
+}
+.qt-skl-mrow-card-wide {
+  height: 62px;
+  margin-bottom: 8px;
+  margin-right: 12px;
+  padding: 0 10px;
+  border-radius: 12px;
+}
+/* chart 对齐 pages/chart/index.uvue 的 .chart-row（底色由行内 style 给） */
+.qt-skl-mrow-chart {
+  height: 116rpx;
+  margin-bottom: 12rpx;
+  padding: 0 14rpx;
+  border-radius: 16rpx;
+}
+.qt-skl-mrow-chart-wide {
+  height: 54px;
+  margin-right: 12px;
+  border-radius: 12px;
+}
+
+/* rank 对齐 pages/chart/index.uvue 的 .rank-card（底色/描边由行内 cardSurface 给） */
+.qt-skl-rk {
+  width: 100%;
+  padding: 20rpx 24rpx 24rpx;
+  margin-bottom: 20rpx;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 24rpx;
+}
+.qt-skl-rk-wide {
+  padding: 12px 14px 14px;
+  margin-bottom: 12px;
+  margin-right: 12px;
+  border-radius: 14px;
+}
+.qt-skl-rk-head {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+.qt-skl-rk-title {
+  width: 180rpx;
+  height: 40rpx;
+  border-radius: 10rpx;
+}
+.qt-skl-rk-title-wide {
+  width: 96px;
+  height: 21px;
+  border-radius: 5px;
+}
+.qt-skl-rk-desc {
+  flex: 1;
+  min-width: 0;
+  height: 28rpx;
+  margin-left: 16rpx;
+  border-radius: 8rpx;
+}
+.qt-skl-rk-desc-wide {
+  height: 15px;
+  margin-left: 8px;
+  border-radius: 4px;
+}
+.qt-skl-rk-body {
+  margin-top: 20rpx;
+  flex-direction: row;
+  align-items: center;
+}
+.qt-skl-rk-body-wide {
+  margin-top: 10px;
+}
+.qt-skl-rk-cover {
+  width: 148rpx;
+  height: 148rpx;
+  border-radius: 16rpx;
+  flex-shrink: 0;
+}
+.qt-skl-rk-cover-wide {
+  width: 84px;
+  height: 84px;
+  border-radius: 10px;
+}
+.qt-skl-rk-songs {
+  flex: 1;
+  min-width: 0;
+  margin-left: 24rpx;
+}
+.qt-skl-rk-songs-wide {
+  margin-left: 12px;
+}
+.qt-skl-rk-song {
+  height: 50rpx;
+  flex-direction: row;
+  align-items: center;
+}
+.qt-skl-rk-song-wide {
+  height: 28px;
+}
+.qt-skl-rk-idx {
+  width: 40rpx;
+  height: 26rpx;
+  border-radius: 6rpx;
+  flex-shrink: 0;
+}
+.qt-skl-rk-idx-wide {
+  width: 22px;
+  height: 13px;
+  border-radius: 3px;
+}
+.qt-skl-rk-line {
+  flex: 1;
+  min-width: 0;
+  height: 26rpx;
+  margin-left: 12rpx;
+  border-radius: 6rpx;
+}
+.qt-skl-rk-line-wide {
+  height: 13px;
+  margin-left: 6px;
+  border-radius: 3px;
+}
+
+/* 封面尺寸逐一对齐真实行 */
+.qt-skl-cover {
+  flex-shrink: 0;
+}
+.qt-skl-cover-song {
+  width: 88rpx;
+  height: 88rpx;
+  border-radius: 12rpx;
+  margin-right: 22rpx;
+}
+.qt-skl-cover-song-wide {
+  width: 58px;
+  height: 58px;
+  border-radius: 10px;
+  margin-right: 16px;
+}
+.qt-skl-cover-card {
+  width: 86rpx;
+  height: 86rpx;
+  border-radius: 14rpx;
+  margin-right: 18rpx;
+}
+.qt-skl-cover-card-wide {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  margin-right: 10px;
+}
+.qt-skl-cover-chart {
+  width: 82rpx;
+  height: 82rpx;
+  border-radius: 12rpx;
+  margin-right: 16rpx;
+}
+.qt-skl-cover-chart-wide {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  margin-right: 10px;
+}
+/* row 对齐 pages/home/index.uvue 的 .song-row / .chart-row：无灰底卡片，
+   只有一条下分隔线（颜色由行内 style 给），尾部一枚播放键 */
+.qt-skl-mrow-row {
+  height: 136rpx;
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+}
+/* 宽屏真实行的分隔线在上（.wide-chart-row 是 border-top），竖屏在下（.song-row / .chart-row
+   是 border-bottom）。首页宽屏三处用 row 有两处是榜单，所以宽屏按「上边框」对齐 */
+.qt-skl-mrow-row-wide {
+  height: 54px;
+  border-bottom-width: 0;
+  border-top-width: 1px;
+  border-top-style: solid;
+}
+.qt-skl-cover-row {
+  width: 92rpx;
+  height: 92rpx;
+  border-radius: 14rpx;
+  margin-right: 22rpx;
+}
+.qt-skl-cover-row-wide {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  margin-right: 10px;
+}
+.qt-skl-l1-row {
+  height: 28rpx;
+  width: 300rpx;
+}
+.qt-skl-l1-row-wide {
+  height: 16px;
+  width: 220px;
+  border-radius: 5px;
+}
+.qt-skl-l2-row {
+  height: 22rpx;
+  width: 180rpx;
+  margin-top: 10rpx;
+}
+.qt-skl-l2-row-wide {
+  height: 13px;
+  width: 140px;
+  margin-top: 6px;
+  border-radius: 5px;
+}
+.qt-skl-ico-row {
+  width: 64rpx;
+  height: 64rpx;
+  border-radius: 32rpx;
+  margin-left: 12rpx;
+}
+.qt-skl-ico-row-wide {
+  width: 28px;
+  height: 28px;
+  border-radius: 14px;
+  margin-left: 10px;
+}
+
+.qt-skl-info {
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* 文本行高度对齐真实字号：song 29rpx/17px 与 23rpx/14px，card 27/14 与 22/11 */
+.qt-skl-l1 {
+  border-radius: 8rpx;
+}
+.qt-skl-l1-song {
+  height: 26rpx;
+  width: 300rpx;
+}
+.qt-skl-l1-song-wide {
+  height: 15px;
+  width: 220px;
+  border-radius: 5px;
+}
+.qt-skl-l1-card {
+  height: 26rpx;
+  width: 220rpx;
+}
+.qt-skl-l1-card-wide {
+  height: 15px;
+  width: 150px;
+  border-radius: 5px;
+}
+.qt-skl-l1-chart {
+  height: 26rpx;
+  width: 300rpx;
+}
+.qt-skl-l1-chart-wide {
+  height: 15px;
+  width: 220px;
+  border-radius: 5px;
+}
+.qt-skl-l2 {
+  border-radius: 8rpx;
+}
+.qt-skl-l2-song {
+  height: 22rpx;
+  width: 190rpx;
+  margin-top: 12rpx;
+}
+.qt-skl-l2-song-wide {
+  height: 13px;
+  width: 140px;
+  margin-top: 7px;
+  border-radius: 5px;
+}
+.qt-skl-l2-card {
+  height: 21rpx;
+  width: 140rpx;
+  margin-top: 8rpx;
+}
+.qt-skl-l2-card-wide {
+  height: 13px;
+  width: 100px;
+  margin-top: 4px;
+  border-radius: 5px;
+}
+.qt-skl-l2-chart {
+  height: 21rpx;
+  width: 180rpx;
+  margin-top: 6rpx;
+}
+.qt-skl-l2-chart-wide {
+  height: 13px;
+  width: 140px;
+  margin-top: 3px;
+  border-radius: 5px;
+}
+
+/* 尾部控件：song 心上/更多两枚图标，card 播放键 + 更多，chart 箭头 */
+.qt-skl-ico,
+.qt-skl-round,
+.qt-skl-more,
+.qt-skl-chev {
+  flex-shrink: 0;
+}
+.qt-skl-ico-song {
+  width: 40rpx;
+  height: 40rpx;
+  border-radius: 20rpx;
+  margin-left: 16rpx;
+}
+.qt-skl-ico-song-wide {
+  width: 24px;
+  height: 24px;
+  border-radius: 12px;
+  margin-left: 12px;
+}
+.qt-skl-round-card {
+  width: 64rpx;
+  height: 64rpx;
+  border-radius: 32rpx;
+  margin-left: 12rpx;
+}
+.qt-skl-round-card-wide {
+  width: 32px;
+  height: 32px;
+  border-radius: 16px;
+  margin-left: 10px;
+}
+.qt-skl-more-card {
+  width: 56rpx;
+  height: 64rpx;
+  border-radius: 10rpx;
+  margin-left: 8rpx;
+}
+.qt-skl-more-card-wide {
+  width: 30px;
+  height: 32px;
+  border-radius: 6px;
+  margin-left: 6px;
+}
+.qt-skl-chev-chart {
+  width: 36rpx;
+  height: 24rpx;
+  border-radius: 8rpx;
+  margin-left: 12rpx;
+}
+.qt-skl-chev-chart-wide {
+  width: 18px;
+  height: 14px;
+  border-radius: 5px;
+  margin-left: 8px;
+}
+
+/* ── 通知行：对齐 pages/notice/list 的 .n-item（2026-10-22 起真实卡片压成单行：
+      只有图标 + 标题一行 + 箭头，正文行与时间戳都去掉了，骨架同步只留一条文字线） ── */
+.qt-skl-nrow {
+  flex-direction: row;
+  align-items: center;
+  border-width: 1px;
+  border-style: solid;
+}
+.qt-skl-nrow-notice {
+  margin: 20rpx 24rpx 0;
+  padding: 18rpx 24rpx;
+  border-radius: 20rpx;
+}
+.qt-skl-nrow-notice-wide {
+  margin: 14px 24px 0;
+  padding: 12px 16px;
+  border-radius: 14px;
+}
+.qt-skl-nicon {
+  flex-shrink: 0;
+}
+.qt-skl-nicon-notice {
+  width: 56rpx;
+  height: 56rpx;
+  border-radius: 16rpx;
+}
+.qt-skl-nicon-notice-wide {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+}
+.qt-skl-nbody {
+  flex: 1;
+  flex-direction: column;
+}
+.qt-skl-nbody-notice {
+  margin-left: 18rpx;
+}
+.qt-skl-nbody-notice-wide {
+  margin-left: 10px;
+}
+.qt-skl-nl1 {
+  border-radius: 8rpx;
+}
+.qt-skl-nl1-notice {
+  height: 28rpx;
+  width: 320rpx;
+}
+.qt-skl-nl1-notice-wide {
+  height: 16px;
+  width: 220px;
+  border-radius: 5px;
+}
+.qt-skl-chev-notice {
+  width: 32rpx;
+  height: 32rpx;
+  border-radius: 16rpx;
+  margin-left: 12rpx;
+}
+.qt-skl-chev-notice-wide {
+  width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  margin-left: 8px;
+}
+
+/* ── 反馈卡片：对齐 pages/feedback 的 .fb-item ───────────────────────────── */
+.qt-skl-frow {
+  flex-direction: column;
+  border-width: 1px;
+  border-style: solid;
+}
+.qt-skl-frow-feedback {
+  margin: 20rpx 24rpx 0;
+  padding: 28rpx 24rpx;
+  border-radius: 20rpx;
+}
+.qt-skl-frow-feedback-wide {
+  margin: 14px 24px 0;
+  padding: 20px;
+  border-radius: 14px;
+}
+.qt-skl-fhead {
+  flex-direction: row;
+  align-items: center;
+}
+.qt-skl-fbadge {
+  flex-shrink: 0;
+  border-radius: 8rpx;
+}
+.qt-skl-fbadge-feedback {
+  width: 88rpx;
+  height: 28rpx;
+}
+.qt-skl-fbadge-feedback-wide {
+  width: 52px;
+  height: 16px;
+  border-radius: 5px;
+}
+.qt-skl-ftitle {
+  flex: 1;
+  border-radius: 8rpx;
+}
+.qt-skl-ftitle-feedback {
+  height: 26rpx;
+  margin-left: 14rpx;
+  margin-right: 14rpx;
+}
+.qt-skl-ftitle-feedback-wide {
+  height: 15px;
+  margin-left: 8px;
+  margin-right: 8px;
+  border-radius: 5px;
+}
+.qt-skl-fbody {
+  border-radius: 8rpx;
+}
+.qt-skl-fbody-feedback {
+  height: 22rpx;
+  width: 420rpx;
+  margin-top: 14rpx;
+}
+.qt-skl-fbody-feedback-wide {
+  height: 14px;
+  width: 260px;
+  margin-top: 8px;
+  border-radius: 5px;
+}
+.qt-skl-ffoot {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+.qt-skl-ftime,
+.qt-skl-fpub {
+  border-radius: 8rpx;
+}
+.qt-skl-ftime-feedback {
+  height: 20rpx;
+  width: 140rpx;
+  margin-top: 14rpx;
+}
+.qt-skl-ftime-feedback-wide {
+  height: 12px;
+  width: 80px;
+  margin-top: 8px;
+  border-radius: 5px;
+}
+.qt-skl-fpub-feedback {
+  height: 20rpx;
+  width: 76rpx;
+  margin-top: 14rpx;
+}
+.qt-skl-fpub-feedback-wide {
+  height: 12px;
+  width: 44px;
+  margin-top: 8px;
+  border-radius: 5px;
+}
+
+/* ── 文本段落：详情页正文行 ─────────────────────────────────────────────── */
+.qt-skl-tx {
+  border-radius: 8rpx;
+}
+.qt-skl-tx-text {
+  height: 26rpx;
+  margin-bottom: 18rpx;
+}
+.qt-skl-tx-text-wide {
+  height: 15px;
+  margin-bottom: 12px;
+  border-radius: 5px;
+}
+.qt-skl-tx-w0 {
+  width: 100%;
+}
+.qt-skl-tx-w1 {
+  width: 92%;
+}
+.qt-skl-tx-w2 {
+  width: 64%;
+}
+</style>

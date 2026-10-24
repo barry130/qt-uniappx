@@ -1,0 +1,220 @@
+<!--
+  骨架屏扫光带：整个页面所有骨架共用的一道柔和斜向光带。
+
+  设计要点：
+  - 一个页面只挂一个实例，绝对铺满骨架容器，由容器的 overflow:hidden 裁掉溢出部分。
+    绝不要每个骨架块挂一个 —— 那样每条光带的相位各自独立，看起来是一堆闪烁的碎片。
+  - 光带本身是一张内嵌 PNG（services/skeleton-shine.ts），横向是升余弦 alpha 渐变，
+    纵向无变化，所以纵向拉伸不会失真；「柔和」来自贴图自带的 alpha，「斜向」来自
+    rotate()，两者互不干扰。
+  - 亮度分两段定标：贴图峰值是**全主题上限**，track 的 opacity 负责**主题差异**。
+    光带是白色，压在深色页面上是「白 vs 深底」，对比度是浅色下的四倍多，同一张贴图在
+    深色主题里会亮得刺眼（用户 2026-10 反馈「扫光感觉太亮」即此）。所以强度按主题给：
+    浅色 0.78、深色 0.48（合成模型见 shots/contrast-model.py）。这件事不能用改贴图来
+    做——贴图只有一份，压到深色够暗时浅色就看不见了。
+  - 位移用 UniElement.animate()（原生层动画，渲染线程驱动），与 qt-loading /
+    qt-notice-bar 同一套机制。为什么不用 CSS @keyframes：仓库里 @keyframes 与
+    animation 属性的使用数为 0，没有可参照的真机结论。
+  - 位移距离在运行时用 getBoundingClientRect() 量出来换算成 px，与
+    qt-notice-bar.uvue 完全一致。为什么不用 translateX 百分比：关键帧里的百分比
+    位移没有真机先例，而 px 位移有两个已验证的调用点。
+  - 为什么斜向不写进 keyframes：animate() 的 transform 关键帧会整体覆盖元素的
+    transform 样式，所以 rotate 留在子节点（band）上、translateX 打在父节点
+    （track）上，两者不会互相顶掉。
+  - 为什么不用 fill:"backwards"：IUniElement.d.ts:3022 的 UniAnimationOptionFill 里
+    "backwards" 在 android / ios 上都是 unixVer "x"，即 App 端未支持。这里用
+    iterations:Infinity，本来也不需要 fill。
+
+  用法（放在骨架容器最后一个子节点，容器需 position:relative）：
+    <view class="sk-layer">
+      <view v-for="ri in rows" :style="skeletonStyle(ri - 1)">…骨架行…</view>
+      <QtSkeletonShine :visible="showSkeleton" />
+    </view>
+-->
+<template>
+  <view class="qt-skeleton-shine" :class="visible ? 'qt-skeleton-shine-on' : 'qt-skeleton-shine-off'" ref="wrapRef">
+    <view class="qt-skeleton-shine-track" :style="trackStyle" ref="trackRef">
+      <image class="qt-skeleton-shine-band" :style="bandStyle" :src="shineSrc" mode="scaleToFill" />
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, nextTick, onMounted, onBeforeUnmount } from "vue";
+import { SHINE_SRC } from "@/uni_modules/qt-ui/services/skeleton-shine";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+
+const props = defineProps<{
+  /** 是否可见；与骨架同步淡出，所以骨架淡出期间不要立刻卸载本组件 */
+  visible?: boolean;
+  /** 单次从左到右扫过的周期（毫秒），默认 1500 */
+  duration?: number;
+  /** 光带倾角（度），默认 20 */
+  angle?: number;
+}>();
+
+const wrapRef = ref<UniElement | null>(null);
+const trackRef = ref<UniElement | null>(null);
+let anim: UniAnimation | null = null;
+let retryTimer: number = 0;
+let retryLeft = 4;
+
+const shineSrc = SHINE_SRC;
+/** 光带宽度占容器宽度的比例，必须与 .qt-skeleton-shine-track 的 width 一致 */
+const BAND_RATIO = 0.4;
+
+const themeStore = useThemeStore();
+/**
+ * 扫光强度（track 的整体 opacity）：贴图峰值 0.95 在浅色下对比度约 16%、在深色下约 67%，
+ * 后者是「白色扫过深底」，亮得刺眼。两个值按 shots/contrast-model.py 的合成模型定：
+ * 浅色 0.78 → 约 12%，深色 0.48 → 约 32%——都还在「一眼能看出在加载」的区间内
+ * （当年 0.70 贴图 + 0.08 块底色只有 6.7%，用户反馈「完全看不出来」，不要压到那附近）。
+ */
+const SHINE_OPACITY_LIGHT = 0.78;
+const SHINE_OPACITY_DARK = 0.48;
+
+const periodMs = computed((): number => {
+  const ms = props.duration;
+  return ms != null && ms > 0 ? ms : 1500;
+});
+const bandStyle = computed((): string => {
+  const deg = props.angle;
+  return "transform:rotate(" + (deg != null ? deg : 20) + "deg);";
+});
+/**
+ * 强度打在 track（普通 view）上，不打在 band（image）上：行内 opacity 在仓库里的先例
+ * 全是 view（qt-loading.uvue:39-44 的 wrapStyle、pages/player 的叠加层），image 上没有
+ * 先例。track 与 wrap 的 opacity 是相乘关系，所以显隐淡出（wrap 的 -on/-off）照旧生效。
+ */
+const trackStyle = computed((): string => {
+  const strength = themeStore.dark ? SHINE_OPACITY_DARK : SHINE_OPACITY_LIGHT;
+  return "opacity:" + strength + ";";
+});
+
+/**
+ * 启动扫光。容器宽度/高度在挂载当帧可能还是 0（列表项尚未完成布局），此时稍后重试。
+ *
+ * 位移范围不能凭经验给：光带绕自身中心旋转后，它的水平投影宽度是
+ * bandW*cos(a) + height*sin(a)，其中 height 项往往比 bandW 还大。
+ * 所以这里按几何算出「完全离开左右边界」的精确位移，既不会提前露出，
+ * 也不会在两端空转一段看不到光的时间。
+ */
+function startSweep(): void {
+  const track = trackRef.value;
+  const wrap = wrapRef.value;
+  if (track == null || wrap == null || anim != null) return;
+  let width = 0;
+  let height = 0;
+  try {
+    const rect = (wrap as any).getBoundingClientRect();
+    width = Number(rect.width);
+    height = Number(rect.height);
+  } catch (_) {
+    width = 0;
+    height = 0;
+  }
+  if (!(width > 0)) {
+    if (retryLeft > 0) {
+      retryLeft = retryLeft - 1;
+      retryTimer = setTimeout(() => {
+        startSweep();
+      }, 120) as number;
+    }
+    return;
+  }
+  const bandWidth = width * BAND_RATIO;
+  const deg = props.angle != null ? props.angle : 20;
+  const rad = (deg * Math.PI) / 180;
+  // 旋转后光带的水平半宽
+  const halfSpan = (bandWidth * Math.cos(rad) + height * Math.sin(rad)) / 2;
+  // track 左边缘的位移：让光带中心分别落在左右边界之外。
+  // 全部以 vp 计算（getBoundingClientRect 的单位）。
+  const fromVp = -(bandWidth / 2 + halfSpan);
+  const toVp = width - bandWidth / 2 + halfSpan;
+  // ==== vp → px ====
+  // getBoundingClientRect() 返回 vp，但 animate() 关键帧里的 "Npx" 是物理像素。
+  // 不换算的话光带只会走完屏幕的 1/pixelRatio（实测 1280 宽的机器上只到 x≈723）。
+  // 参照 @dcloudio/uni-app-x-vapor-runtime 的 polyfill/getWindowInfo.ets:37
+  // （pixelRatio: vp2px(1)）与 dom/UniNativePage.ets:800-801
+  // （字符串 px 偏移由运行时自己 vp2px 后才使用）。
+  // 绝不写死倍率：不同设备、不同模拟器参数下都不一样。
+  let ratio = 1;
+  try {
+    const info = uni.getWindowInfo();
+    const r = Number(info.pixelRatio);
+    if (r > 0) ratio = r;
+  } catch (_) {}
+  const from = fromVp * ratio;
+  const to = toVp * ratio;
+  try {
+    anim = track.animate(
+      [{ transform: "translateX(" + from + "px)" }, { transform: "translateX(" + to + "px)" }],
+      {
+        duration: periodMs.value,
+        iterations: Infinity,
+        easing: "linear",
+      }
+    );
+  } catch (_) {
+    // 通用 UI 组件不依赖 app 层 logger；扫光起不来只是少一个装饰，静默降级
+  }
+}
+
+function stopSweep(): void {
+  if (retryTimer != 0) {
+    clearTimeout(retryTimer);
+    retryTimer = 0;
+  }
+  if (anim != null) {
+    try {
+      anim!.cancel();
+    } catch (_) {}
+  }
+  anim = null;
+}
+
+onMounted(() => {
+  // 等元素挂载完成后启动原生扫光
+  nextTick(() => {
+    startSweep();
+  });
+});
+
+onBeforeUnmount(() => {
+  stopSweep();
+});
+</script>
+
+<style>
+.qt-skeleton-shine {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 10;
+  /* 时长与 use-qt-reveal 的 QT_REVEAL_TRANSITION 保持一致，都写 0.32s 字面量：
+     仓库两条 transition 先例（qt-loading.uvue:43、pages/download/index.uvue:222）
+     用的都是秒制字面量，`320ms` 没有先例。 */
+  transition: opacity 0.32s ease-out;
+}
+.qt-skeleton-shine-on {
+  opacity: 1;
+}
+.qt-skeleton-shine-off {
+  opacity: 0;
+}
+.qt-skeleton-shine-track {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 40%;
+  height: 100%;
+}
+.qt-skeleton-shine-band {
+  width: 100%;
+  height: 100%;
+}
+</style>

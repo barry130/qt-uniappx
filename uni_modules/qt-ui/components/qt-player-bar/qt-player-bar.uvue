@@ -1,0 +1,377 @@
+<!--
+  宽屏常驻底部播放栏（期 5）
+  ------------------------------------------------------------------
+  改造前宽屏只有一个 72px 的浮动圆球（qt-mini-player），和主流桌面音乐软件
+  （Spotify / Apple Music / 网易云 PC / QQ 音乐 PC）差得最远的一点就是它：
+  桌面上播放状态必须常驻、必须能直接看到进度、必须一次点击就能拖到任意位置，
+  而不是先点球展开一条 360px 的小条再点进去。
+
+  结构：左（封面 + 曲名/歌手）→ 中（上一首 / 播放暂停 / 下一首）→ 右（进度 + 时间）。
+  整条固定贴底，左侧让开 rail 宽度（rail 是 position:fixed，会盖住底栏左端）。
+
+  挂载点：qt-page-frame 统一挂（与 rail、toast-host 同一策略），不再逐页 import。
+  宽屏下 qt-mini-player 的浮动球不再渲染，避免两套播放控制并存。
+-->
+<template>
+  <view v-if="visible" class="pbar" :style="barStyle" @click.stop="openPlayerPage">
+    <view class="pbar-left" :style="leftStyle" @click.stop="openPlayerPage">
+      <image
+        class="pbar-cover"
+        :class="narrow ? 'pbar-cover-narrow' : ''"
+        :style="'background-color:' + theme.skin.coverPlaceholder + ';'"
+        :src="cover"
+        mode="aspectFill"
+      />
+      <view class="pbar-copy" :style="copyStyle">
+        <text class="pbar-title" :style="'color:' + theme.skin.text + ';' + qtFontPx(14)" :max-lines="1">{{ title }}</text>
+        <text class="pbar-artist" :style="'color:' + theme.skin.textMuted + ';' + qtFontPx(12)" :max-lines="1">{{ artist }}</text>
+      </view>
+    </view>
+
+    <view class="pbar-controls">
+      <view class="pbar-btn" hover-class="pbar-btn-hover" @click.stop="prevTrack">
+        <QtIcon name="skip-back" :size="18" :color="theme.skin.icon" />
+      </view>
+      <view
+        class="pbar-btn pbar-btn-main"
+        hover-class="pbar-btn-hover"
+        :style="'background-color:' + theme.skin.accent + ';'"
+        @click.stop="togglePlay"
+      >
+        <QtIcon :name="playing ? 'pause' : 'play'" :size="18" :color="theme.skin.onAccent" />
+      </view>
+      <view class="pbar-btn" hover-class="pbar-btn-hover" @click.stop="nextTrack">
+        <QtIcon name="skip-forward" :size="18" :color="theme.skin.icon" />
+      </view>
+    </view>
+
+    <view
+      class="pbar-progress"
+      @click.stop="() => {}"
+      @touchstart="onTouchStart"
+      @touchmove="onTouchMove"
+      @touchend="onTouchEnd"
+      @touchcancel="onTouchEnd"
+    >
+      <text class="pbar-time" :style="'color:' + theme.skin.textSubtle + ';' + qtFontPx(11)">{{ posText }}</text>
+      <view class="pbar-track" :style="'background-color:' + theme.skin.divider + ';'">
+        <view class="pbar-fill" :style="fillStyle"></view>
+        <view class="pbar-thumb" :style="thumbStyle"></view>
+      </view>
+      <text class="pbar-time" :style="'color:' + theme.skin.textSubtle + ';' + qtFontPx(11)">{{ durText }}</text>
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed, ref, onMounted, onUnmounted, watch } from "vue";
+import { usePlayerStore } from "@/stores/player";
+import { useQtLayout, qtRailWidth } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontPx } from "@/uni_modules/qt-ui/stores/font-scale";
+import { QT_PLAYER_BAR_HEIGHT_PX } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
+
+const player = usePlayerStore();
+const layout = useQtLayout();
+const theme = useThemeStore();
+
+/**
+ * 只在宽屏且有当前歌曲时出现。
+ * 竖屏继续用原来的浮动球（拇指可达区在下方，贴底通栏会挡住列表且不好按）。
+ */
+const visible = computed((): boolean => layout.isWide && player.current != null);
+
+/** 底栏顶端要让开 rail：rail 是 fixed 的，压在最上层，不让开会盖住封面 */
+const barStyle = computed((): string => {
+  return "left:" + qtRailWidth() + "px;height:" + QT_PLAYER_BAR_HEIGHT_PX + "px;background-color:" + theme.skin.surfaceInset + ";border-top-color:" + theme.skin.divider + ";";
+});
+
+/**
+ * 窄宽屏（medium 档，600–899dp：横屏手机 / 车机矮窗）必须收窄左侧歌曲块。
+ *
+ * 桌面口径里左侧固定 300px（封面 44 + 文案 232），progress 区吃剩余宽度；
+ * 但 medium 档窗口只有 600–900dp，减掉 64px 图标 rail 后可用不足 840dp，
+ * 300px 的左侧块 + 132px 的控制键 + 两侧时间（42×2）会把进度条压成 0 宽，
+ * 真机表现是右侧总时长被裁掉、滑块无处可显示。窄档改用 168px 并缩封面。
+ */
+const narrow = computed((): boolean => layout.windowWidth < 900);
+const leftStyle = computed((): string => "width:" + (narrow.value ? 168 : 300) + "px;");
+const copyStyle = computed((): string => "width:" + (narrow.value ? 108 : 232) + "px;");
+
+const title = computed((): string => {
+  const cur = player.current;
+  return cur != null ? cur.name : "";
+});
+const artist = computed((): string => {
+  const cur = player.current;
+  return cur != null ? cur.singer : "";
+});
+const cover = computed((): string => {
+  const cur = player.current;
+  return cur != null ? cur.picUrl : "";
+});
+const playing = computed((): boolean => player.playing);
+
+/** 拖动预览值（秒）；-1 表示未在拖动，直接用 store 进度 */
+const dragValue = ref(-1);
+const displayProgress = computed((): number => {
+  if (dragValue.value >= 0) return dragValue.value;
+  return player.progress;
+});
+const ratio = computed((): number => {
+  const d = player.duration;
+  if (d <= 0) return 0;
+  return Math.max(0, Math.min(1, displayProgress.value / d));
+});
+
+const fillStyle = computed((): string => "width:" + Math.round(ratio.value * 100) + "%;background-color:" + theme.skin.accent + ";");
+/**
+ * 滑块位置必须算成 px，不能写 `calc(50% - 5px)`：
+ * 本仓 qt-back-to-top.uvue 头部注释已记录，calc()/env() 在该 Vapor 版本不生效
+ * （会退回 0，滑块永远贴在轨道最左）。所以先用选择器量出轨道实际宽度，
+ * 再按比例换算成 px；量不到时用兜底宽度，滑块仍然跟随进度。
+ */
+const thumbStyle = computed((): string => {
+  const w = trackW.value > 0 ? trackW.value : fallbackWidth();
+  const left = Math.round(ratio.value * w) - 5;
+  return "left:" + left + "px;border-color:" + theme.skin.accent + ";";
+});
+
+function formatTime(sec: number): string {
+  if (sec < 0 || !isFinite(sec)) return "0:00";
+  const total = Math.floor(sec);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return m + ":" + (s < 10 ? "0" + s : "" + s);
+}
+const posText = computed((): string => formatTime(displayProgress.value));
+const durText = computed((): string => formatTime(player.duration));
+
+function togglePlay(): void {
+  player.toggle();
+}
+function prevTrack(): void {
+  player.previous();
+}
+function nextTrack(): void {
+  player.next(false);
+}
+function openPlayerPage(): void {
+  try {
+    const pages = getCurrentPages();
+    if (pages.length > 0) {
+      const top = pages[pages.length - 1];
+      const route = top.route;
+      if (route != null && route == "pages/player/index") return;
+    }
+  } catch (_) {}
+  uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/player/index" });
+}
+
+/**
+ * 进度条几何：轨道宽度/左边距靠实测，失败时按窗口宽度兜底。
+ * 底栏高度固定 64px、padding 也固定，兜底值可以精确算出来，
+ * 不会出现「测不到就完全不能拖」的退化（同 player 页 measureProgTrackRetry 的思路）。
+ */
+let trackLeft = 0;
+let trackWidth = 0;
+let dragging = false;
+let measureRetry = 0;
+
+/**
+ * 实测到的轨道宽度（响应式，供滑块 px 定位用）。
+ * 单独存一份是因为 trackWidth 是普通变量，改变不会触发重渲染，
+ * 而滑块位置要靠它算 px —— 不响应式的话首帧会落在兜底宽度算出的位置。
+ */
+const trackW = ref(0);
+
+function measureTrack(attempt: number): void {
+  const query = uni.createSelectorQuery();
+  query
+    .select(".pbar-track")
+    .boundingClientRect((rect: UniNodeInfo) => {
+      if (rect != null && rect.width > 0) {
+        trackLeft = rect.left;
+        trackWidth = rect.width;
+        trackW.value = rect.width;
+        measureRetry = 0;
+        return;
+      }
+      if (attempt < 3) {
+        measureRetry = setTimeout(() => {
+          measureTrack(attempt + 1);
+        }, 120) as unknown as number;
+      }
+    })
+    .exec();
+}
+
+/**
+ * 挂载后量一次真实宽度，并在窗口尺寸/是否有歌曲变化时重量。
+ * 底栏随「有没有当前歌曲」挂载/卸载，宽度也会跟着变（进度区是 flex:1）。
+ */
+onMounted(() => {
+  measureTrack(0);
+});
+onUnmounted(() => {
+  // 布局变化触发的延迟测量若跨过销毁时点，会对已卸载节点空跑一次，显式清掉
+  if (measureTimer != null) {
+    clearTimeout(measureTimer);
+    measureTimer = null;
+  }
+});
+let measureTimer: number | null = null;
+watch(
+  () => [layout.windowWidth, layout.windowHeight, player.current != null],
+  () => {
+    trackW.value = 0;
+    measureTimer = setTimeout(() => {
+      measureTrack(0);
+    }, 60) as unknown as number;
+  }
+);
+
+/** 兜底几何：进度区从 rail 之后约 240px 起，宽度约窗口减 rail 减 300 */
+function fallbackWidth(): number {
+  const win = uni.getWindowInfo();
+  return Math.max(120, win.windowWidth - qtRailWidth() - 300);
+}
+
+function seekFromClientX(clientX: number): void {
+  if (player.duration <= 0) return;
+  let width = trackWidth;
+  let left = trackLeft;
+  if (width <= 0) {
+    width = fallbackWidth();
+    left = qtRailWidth() + 240;
+  }
+  const frac = Math.max(0, Math.min(1, (clientX - left) / width));
+  dragValue.value = frac * player.duration;
+}
+
+function onTouchStart(event: UniTouchEvent): void {
+  const touch = event.touches[0];
+  if (touch == null) return;
+  dragging = true;
+  measureTrack(0);
+  seekFromClientX(touch.clientX);
+}
+function onTouchMove(event: UniTouchEvent): void {
+  if (!dragging) return;
+  const touch = event.touches[0];
+  if (touch == null) return;
+  seekFromClientX(touch.clientX);
+}
+function onTouchEnd(): void {
+  if (!dragging) return;
+  dragging = false;
+  const target = dragValue.value;
+  dragValue.value = -1;
+  if (target >= 0) player.seek(target);
+}
+</script>
+
+<style>
+.pbar {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  z-index: 940;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 16px;
+  padding-right: 20px;
+  border-top-width: 1px;
+  border-top-style: solid;
+}
+.pbar-left {
+  flex-direction: row;
+  align-items: center;
+  width: 300px;
+  flex-shrink: 0;
+}
+.pbar-cover {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+}
+/* 窄档（medium：横屏手机 / 车机矮窗）封面同步缩小，与 leftStyle 的 168px 配套 */
+.pbar-cover-narrow {
+  width: 36px;
+  height: 36px;
+  border-radius: 7px;
+}
+.pbar-copy {
+  flex-direction: column;
+  justify-content: center;
+  margin-left: 12px;
+  width: 232px;
+  overflow: hidden;
+}
+.pbar-title {
+  font-weight: 600;
+  line-height: 19px;
+}
+.pbar-artist {
+  margin-top: 2px;
+  line-height: 16px;
+}
+.pbar-controls {
+  flex-direction: row;
+  align-items: center;
+  margin-left: 8px;
+  margin-right: 16px;
+  flex-shrink: 0;
+}
+.pbar-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 16px;
+  justify-content: center;
+  align-items: center;
+  margin-left: 8px;
+}
+.pbar-btn-hover {
+  background-color: rgba(127, 127, 127, 0.18);
+}
+.pbar-btn-main {
+  width: 36px;
+  height: 36px;
+  border-radius: 18px;
+  margin-left: 12px;
+  margin-right: 4px;
+}
+.pbar-progress {
+  flex: 1;
+  flex-direction: row;
+  align-items: center;
+}
+.pbar-time {
+  width: 42px;
+  text-align: center;
+}
+.pbar-track {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  margin-left: 8px;
+  margin-right: 8px;
+  position: relative;
+}
+.pbar-fill {
+  height: 4px;
+  border-radius: 2px;
+}
+.pbar-thumb {
+  position: absolute;
+  top: -3px;
+  width: 10px;
+  height: 10px;
+  border-radius: 5px;
+  border-width: 2px;
+  border-style: solid;
+  background-color: #ffffff;
+}
+</style>

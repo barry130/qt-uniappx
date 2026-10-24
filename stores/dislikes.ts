@@ -90,10 +90,13 @@ class DislikesStore {
     uni.$emit(DISLIKES_CHANGED_EVENT);
   }
 
-  /** 清空内存态（存储键由调用方删除，见设置页「清除全部数据」） */
+  /** 全量复位（「清除全部数据」用）：内存与持久化一起清，否则重启 restore() 会复活 */
   reset(): void {
     this.rules = [];
     this.nextId = 1;
+    try {
+      uni.removeStorageSync(DISLIKES_KEY);
+    } catch (_) {}
   }
 
   hasRules(): boolean {

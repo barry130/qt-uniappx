@@ -15,6 +15,7 @@ import {
 } from "@/services/notice";
 import { unreadCountOf } from "@/services/notice-read";
 import { isLoggedIn } from "@/services/auth";
+import { isDisclaimerNotice } from "@/stores/disclaimer";
 
 /** 开屏“今日不显示”存储 key */
 function SplashHideKey(id: number): string {
@@ -90,6 +91,10 @@ class NoticeStore {
     // 用户会以为“点了没反应”，只能再点一次。
     const seen = new Set<string>();
     for (const s of splashes) {
+      // 免责声明由 qt-first-run-disclaimer 独占展示（带读秒门禁、遮罩不可点），
+      // 不能混进这条「可勾今天不显示」的开屏队列，否则同一条公告会弹两次，
+      // 而且用户在普通开屏里勾了「今天不显示」就把声明一起跳过了。
+      if (isDisclaimerNotice(s)) continue;
       if (this.isHiddenToday(s.id)) continue;
       if ((s.firstLoginOnly ?? 0) == 1) {
         if (!(isLoggedIn() && isFirstLogin())) continue;
@@ -160,6 +165,15 @@ class NoticeStore {
       // 消息中心拉取失败时保守显示候选总数
       this.unreadCount = total;
     }
+  }
+
+  /**
+   * 用调用方已经拿到的消息中心列表直接重算未读数（零请求）。
+   * 页面自己刚拉过同一份列表时必须走这个——再走 refreshUnread 会把
+   * unread-count + message/center 原样再打一遍，进一次消息中心三个请求。
+   */
+  applyUnreadList(list: Notice[]): void {
+    this.unreadCount = unreadCountOf(list);
   }
 
   /** 拉取消息中心列表（已读状态由前端缓存判断） */

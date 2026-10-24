@@ -1,64 +1,75 @@
 <template>
-  <qt-page-frame :max-width="760">
+  <qt-page-frame width-kind="list">
   <view class="page" :class="layout.isWide ? 'page-wide' : ''">
     <!-- 顶部：概览 + 清空 / 批量管理 -->
     <view class="summary" :class="layout.isWide ? 'summary-wide' : ''" :style="cardStyle">
-      <text class="sub" :class="layout.isWide ? 'sub-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ selecting ? ('已选 ' + selectedKeys.length + ' 首') : ('共 ' + historySongs.length + ' 首播放记录') }}</text>
+      <text class="sub" :class="layout.isWide ? 'sub-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13)">{{ selecting ? ('已选 ' + selectedKeys.length + ' 首') : ('共 ' + historySongs.length + ' 首播放记录') }}</text>
       <view class="summary-acts" :class="layout.isWide ? 'summary-acts-wide' : ''">
         <template v-if="!selecting">
           <text
             v-if="historySongs.length > 0"
             class="act-link" :class="layout.isWide ? 'act-link-wide' : ''"
-            :style="'color:' + theme.skin.textSubtle + ';'" @click="clearHistory"
+            :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(24, 13)" @click="clearHistory"
           >清空记录</text>
           <text
             v-if="historySongs.length > 0"
             class="act-link" :class="layout.isWide ? 'act-link-wide' : ''"
-            :style="'color:' + theme.skin.accent + ';'" @click="toggleSelect"
+            :style="('color:' + theme.skin.accent + ';') + qtFontDual(24, 13)" @click="toggleSelect"
           >管理</text>
         </template>
         <template v-else>
           <text
             class="act-link" :class="layout.isWide ? 'act-link-wide' : ''"
-            :style="'color:' + theme.skin.textMuted + ';'" @click="toggleSelectAll"
+            :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13)" @click="toggleSelectAll"
           >{{ allSel ? "取消全选" : "全选" }}</text>
           <text
             class="act-link" :class="layout.isWide ? 'act-link-wide' : ''"
-            :style="'color:' + theme.skin.textSubtle + ';'" @click="toggleSelect"
+            :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(24, 13)" @click="toggleSelect"
           >取消</text>
           <view
             v-if="selectedKeys.length > 0"
             class="danger-btn" :class="layout.isWide ? 'danger-btn-wide' : ''"
             :style="'background-color:' + theme.skin.danger + ';'"
             @click="confirmBatchRemove"
-          ><text class="danger-btn-text" :class="layout.isWide ? 'danger-btn-text-wide' : ''" :style="'color:#ffffff;'">移除（{{ selectedKeys.length }}）</text></view>
+          ><text class="danger-btn-text" :class="layout.isWide ? 'danger-btn-text-wide' : ''" :style="('color:#ffffff;') + qtFontDual(23, 13)">移除（{{ selectedKeys.length }}）</text></view>
         </template>
       </view>
     </view>
 
     <list-view class="scroll" :class="layout.isWide ? 'scroll-wide' : ''" direction="vertical" :scroll-top="scrollTop" @scroll="onListScroll">
       <list-item
-        v-for="song in historySongs"
-        :key="song.id + song.platform"
+        v-for="pair in pairs"
+        :key="pair.key"
         class="row-item" :class="layout.isWide ? 'row-item-wide' : ''"
       >
-        <SongRow :song="song" :showBadge="true" :inHistory="true" :selecting="selecting" :selected="selecting && isSel(song)" @play="onRowTap(song)" />
+        <!-- 一行最多两首：宽度全部由脚本算好内联下发（禁 max-width:100%）。 -->
+        <view class="pair" :class="twoColumn ? 'pair-wide' : ''">
+          <view class="cell" :style="cellStyle">
+            <SongRow :song="pair.left" :showBadge="true" :inHistory="true" :selecting="selecting" :selected="selecting && isSel(pair.left)" @play="onRowTap(pair.left)" />
+          </view>
+          <!-- 右格容器恒渲染（两列时），只有内容按 hasRight 决定：
+               保持「一个 list-item = 两个格」的结构签名恒定，复用池不会错配。
+               奇数条数时最后一行的右格是空白位，宽度仍占满，行宽不塌陷。 -->
+          <view v-if="twoColumn" class="cell-right" :style="rightCellStyle">
+            <SongRow v-if="pair.hasRight" :song="pair.right" :showBadge="true" :inHistory="true" :selecting="selecting" :selected="selecting && isSel(pair.right)" @play="onRowTap(pair.right)" />
+          </view>
+        </view>
       </list-item>
       <list-item v-if="historySongs.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
-        <text class="empty-text" :style="'color:' + theme.skin.textMuted + ';'">还没有播放过歌曲</text>
-        <text class="link" :class="layout.isWide ? 'link-wide' : ''" :style="'color:' + theme.skin.accent + ';'" @click="discover">去发现音乐</text>
+        <text class="empty-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(26, 14)">还没有播放过歌曲</text>
+        <text class="link" :class="layout.isWide ? 'link-wide' : ''" :style="('color:' + theme.skin.accent + ';') + qtFontDual(26, 15)" @click="discover">去发现音乐</text>
       </list-item>
       <!-- 让位固定悬浮的 MiniPlayer，避免最后一行被遮住 -->
       <list-item class="foot-space" :class="layout.isWide ? 'foot-space-wide' : ''"></list-item>
     </list-view>
     <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
-    <MiniPlayer />
   </view>
   </qt-page-frame>
 </template><script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
+import { qtConfirm } from "@/services/confirm";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import SongRow from "@/uni_modules/qt-ui/components/qt-song-row/qt-song-row.uvue";
-import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import { ref, computed } from "vue";
 import { usePlayerStore } from "@/stores/player";
@@ -66,6 +77,9 @@ import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { musicApi } from "@/services/music-api";
 import type { Song } from "@/types/music";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { useQtSongColumns, qtSongPairs } from "@/uni_modules/qt-ui/composables/use-qt-song-columns";
+import { qtSwitchTab } from "@/uni_modules/qt-ui/composables/qt-nav";
 
 const player = usePlayerStore();
 const layout = useQtLayout();
@@ -77,6 +91,14 @@ const cardStyle = computed<string>(() =>
 );
 
 const historySongs = computed<Song[]>(() => player.history);
+
+/**
+ * 两列列切分：宽屏下「一个 list-item = 两首歌」。
+ * pagePadPx 传 26，必须与 .page-wide 的左右 padding 一致（否则 cell 宽会比可用宽度
+ * 多出几像素，右列被裁掉）。
+ */
+const { twoColumn, cellStyle, rightCellStyle } = useQtSongColumns(26, "list");
+const pairs = computed(() => qtSongPairs(historySongs.value, twoColumn.value));
 
 // ==================== 批量移除 ====================
 // 只移除播放记录，不删本地文件（本地歌曲的记录同样只删记录）
@@ -127,18 +149,17 @@ function confirmBatchRemove(): void {
     if (selectedKeys.value.indexOf(rowKey(list[i])) >= 0) picked.push(list[i]);
   }
   if (picked.length == 0) return;
-  uni.showModal({
+    qtConfirm({
     title: "移除播放记录",
     content: "确定移除选中的 " + picked.length + " 首播放记录吗？",
     confirmText: "移除",
-    confirmColor: theme.skin.danger,
-    success: (res) => {
-      if (!res.confirm) return;
+    danger: true,
+  }).then((ok: boolean) => {
+      if (!ok) return;
       player.removeHistoryMany(picked);
-      uni.showToast({ title: "已移除 " + picked.length + " 首", icon: "none" });
+      qtShowToast({ title: "已移除 " + picked.length + " 首", icon: "none" });
       selectedKeys.value = [];
       selecting.value = false;
-    },
   });
 }
 
@@ -162,26 +183,25 @@ async function play(song: Song): Promise<void> {
     }
     player.playSingle(song);
   } catch (_) {
-    uni.showToast({ title: "该歌曲暂时无法播放", icon: "none" });
+    qtShowToast({ title: "该歌曲暂时无法播放", icon: "none" });
   }
 }
 
 function clearHistory(): void {
-  uni.showModal({
+    qtConfirm({
     title: "清空最近播放",
     content: "确定清空全部播放记录吗？",
     confirmText: "清空",
-    confirmColor: theme.skin.danger,
-    success: (res) => {
-      if (res.confirm) {
+    danger: true,
+  }).then((ok: boolean) => {
+      if (ok) {
         player.clearHistory();
       }
-    },
   });
 }
 
 function discover(): void {
-  uni.switchTab({ url: "/pages/home/index" });
+  qtSwitchTab("/pages/home/index");
 }
 </script>
 
@@ -200,7 +220,7 @@ function discover(): void {
   align-items: center;
   justify-content: space-between;
   padding: 24rpx 28rpx;
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
   border-radius: 24rpx;
 }
 .summary-wide {
@@ -211,12 +231,6 @@ function discover(): void {
   font-size: 24rpx;
 }
 .sub-wide {
-  font-size: 13px;
-}
-.clear-link {
-  font-size: 24rpx;
-}
-.clear-link-wide {
   font-size: 13px;
 }
 .summary-acts {
@@ -274,12 +288,7 @@ function discover(): void {
 .empty-wide {
   padding: 80px 0 40px;
 }
-.empty-text {
-  font-size: 26rpx;
-}
-.empty-text-wide {
-  font-size: 15px;
-}
+/* .empty-text 无样式：字号由模板内联 qtFontDual(26, 14) 输出，避免 class 与实际渲染分叉 */
 .link {
   margin-top: 16rpx;
   font-size: 26rpx;
@@ -295,5 +304,20 @@ function discover(): void {
 }
 .foot-space-wide {
   height: 80px;
+}
+
+/* 两列列切分容器：一行两个 cell，宽度由脚本算好内联下发 */
+.pair {
+  flex-direction: column;
+}
+.pair-wide {
+  flex-direction: row;
+  align-items: center;
+}
+.cell {
+  flex-direction: column;
+}
+.cell-right {
+  flex-direction: column;
 }
 </style>

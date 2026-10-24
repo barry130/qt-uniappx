@@ -24,7 +24,18 @@
 			android:foregroundServiceType="mediaPlayback">
 			<intent-filter>
 				<action android:name="androidx.media3.session.MediaSessionService" />
+				<!-- 旧版 MediaBrowserCompat 客户端（车机 / 部分蓝牙与手表）按此 action 绑定会话 -->
+				<action android:name="android.media.browse.MediaBrowserService" />
 				<action android:name="android.intent.action.MEDIA_BUTTON" />
+				<!-- vivo 原子通知/媒体卡片：vivo 的 MainApplication 用
+				     queryIntentServices("com.vivo.musicwidgetmix.support.service", 0x40)
+				     扫全机填「合作方控制器白名单」，命中才给我们派 CooperateController
+				     （其余控制器把 support_event 硬编码成 7，收藏键的 0x40 位永远为空 →
+				     系统卡片的心形置灰、点了没反应）。该扫描不校验权限与签名。
+				     扫描结果**在开机那一刻缓存**：换包名 / 重装 / 新装之后必须重启手机
+				     才会重新扫到我们（2026-10-20 实证：改包名后心形置灰、点击无回调，
+				     重启手机即恢复正常；排查时先 reboot，别先去改代码）。 -->
+				<action android:name="com.vivo.musicwidgetmix.support.service" />
 			</intent-filter>
 		</service>
 		<!-- 桌面小部件：APPWIDGET_UPDATE 由系统在小部件绑定/更新时下发；

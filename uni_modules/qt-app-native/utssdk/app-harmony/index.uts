@@ -1,23 +1,35 @@
-// qt-app-native —— 鸿蒙端兜底实现（第一轮：能安全实现的实现，其余全部降级）
+// qt-app-native —— 鸿蒙端实现
 //
 // 为什么必须有这个文件：安卓能力集中在 utssdk/app-android，鸿蒙端若没有 app-harmony，
 // uni-app x 编译鸿蒙时会回退到 utssdk/index.uts（本插件没有该文件），导致
 // services/app-native.uts 的**顶层无门禁 import** 解析失败，整个鸿蒙工程编译不过。
 // 故补齐同名同签名的实现，返回类型严格对齐 interface.uts。
 //
-// 本轮策略：
-//   - 打开浏览器：用官方 uts-openSchema 同款写法（getAbilityContext().openLink）真实现；
-//   - 其余能力：返回「不支持/无法确定」，由 JS 侧既有降级分支接管
-//     （安装 APK → 提示到文件管理、本地音频 → 空列表、权限 → 无法确定…）。
-// 这些都不是本轮鸿蒙播放链路的前置依赖，先把编译打通，能力逐轮补。
+// 实现原则（逐轮演进，当前为第三轮）：
+//   - 能真实查到 / 真实跳转的，就真实现，绝不返回假值；
+//   - 确实没有对应能力的，返回「不支持」，由 JS 侧既有降级分支接管，
+//     并在注释里写清**为什么**没有，避免下一个人再猜一遍；
+//   - 权限查询是本轮重点：鸿蒙的权限模型比安卓精细（五态而非布尔），
+//     之前一律返回 unknown=true 导致页面全是「无法确定」，等于把能力浪费掉了。
+//   - 第三轮补上公共目录：saveToPublicMedia / ensurePublicDirPermission 从
+//     「恒失败的空实现」改成真申请 READ_WRITE_DOWNLOAD_DIRECTORY 再直写
+//     Download/QtDownload/Music，并修掉「暂无可用打开方式」的失效 want。
 
-import { common } from '@kit.AbilityKit';
+import { common, abilityAccessCtrl, Permissions, Want } from '@kit.AbilityKit';
+// PermissionRequestResult 只在 @kit.AbilityKit 顶层导出（@ohos.abilityAccessCtrl.d.ts:807
+// 的 `export type PermissionRequestResult = _PermissionRequestResult;` 在 namespace **外**），
+// 所以不能用 `abilityAccessCtrl.PermissionRequestResult` —— 那样 ArkTS 解析不到类型，
+// 回调参数退化成 any，连带报 arkts-no-any-unknown。
+import type { PermissionRequestResult } from '@kit.AbilityKit';
+import { notificationManager } from '@kit.NotificationKit';
+import { Environment, fileIo, fileShare, picker } from '@kit.CoreFileKit';
 import OpenLinkOptions from '@ohos.app.ability.OpenLinkOptions';
 import { BusinessError } from '@kit.BasicServicesKit';
 import type {
   LocalAudioItem,
   DeleteLocalMediaResult,
   PickFileResult,
+  PickDirectoryResult,
   PermissionState,
 } from '../interface.uts';
 
@@ -75,43 +87,364 @@ export function installApkNative(filePath: string): boolean {
   return false;
 }
 
-// ==================== 媒体库 ====================
+// ==================== 公共目录（下载） ====================
 
-/** 保存到公共媒体库：鸿蒙第一轮不实现，返回空串表示失败 */
-export function saveToPublicMedia(tempPath: string, dirType: string, fileName: string, subDir: string = ''): string {
-  return '';
+/** 写公共下载目录所需的权限（module.json5 已声明，user_grant） */
+const PERM_DOWNLOAD_DIR = 'ohos.permission.READ_WRITE_DOWNLOAD_DIRECTORY';
+
+/** 持久化 URI 授权所需的权限（module.json5 已声明，system_grant，安装即授予） */
+const PERM_FILE_PERSIST = 'ohos.permission.FILE_ACCESS_PERSIST';
+
+/** 公共下载目录下的默认子目录（与安卓端 DOWNLOAD_DIR_SUB 对齐） */
+const DEFAULT_PUBLIC_SUB_DIR = 'QtDownload/Music';
+
+/**
+ * 用户选定的自定义目录 URI（由 pickDirectory 写入，saveToPublicMedia 读取）。
+ *
+ * 为什么要有这个全局变量：`pickDirectory` 的回调是回调式（与 Android 的 Activity
+ * result 对齐），而真正落盘在 `saveToPublicMedia` 里，中间隔着 JS 层的下载队列。
+ * 把 URI 放在原生侧记住，比让 JS 层来回传更可靠（也避免每次落盘都要 persist 一次）。
+ * JS 层另外会把 URI 存进 uni storage（qt-download-dir），重启后由 `restoreCustomDir`
+ * 重新喂回来 —— 因为原生变量不跨进程。
+ */
+let customDirUri: string = '';
+
+/** 目录授权是否已被系统认（避免每次落盘都跑一遍 checkPersistentPermission） */
+let customDirReady: boolean = false;
+
+/**
+ * 确保具备写公共下载目录的能力。
+ *
+ * ⚠️ 关键事实（2026-10-19 真机实证，务必先读）：
+ * `ohos.permission.READ_WRITE_DOWNLOAD_DIRECTORY` / `..._DOCUMENTS_DIRECTORY` 是
+ * **2in1（PC / 平板）专属**权限。在 phone 设备上系统直接判 INVALID，授权弹窗
+ * 根本不出选项就关掉，hilog 留下铁证：
+ *   `[SPC][PermissionDialog][Model]: ohos.permission.READ_WRITE_DOWNLOAD_DIRECTORY not support.`
+ *   `terminate session with result, resultCode: 0, reqPerms: [...], result: [2].`（2 = INVALID）
+ * 所以老实现（申请该权限 → 拿 Environment.getUserDownloadDir() → 直写）在手机上
+ * **永远失败**，这正是用户反馈「鸿蒙还是下载到公共目录失败，已写入私有目录」的根因。
+ *
+ * 正确路线（phone 上唯一可行）：**让用户用系统选择器选一个目录**，把返回的 URI 用
+ * `fileShare.persistPermission` 持久化授权，之后直接往该 URI 里写。这条链只依赖
+ * `FolderSelection` + `FolderAuthorization` 两个 syscap（真机实测均为 true）与
+ * `ohos.permission.FILE_ACCESS_PERSIST`（system_grant，安装即授予）。
+ *
+ * 因此本函数的语义按设备能力分流：
+ *   ① 已有自定义目录 URI（用户选过）→ 确认持久化授权仍有效即 resolve true；
+ *   ② 2in1 设备 / 有 DOWNLOAD_DIRECTORY 权限 → 老路线（系统 Download 目录）；
+ *   ③ 其它（phone 且没选过目录）→ resolve false，调用方引导用户去「下载设置」选目录。
+ *
+ * 与安卓端的语义差异（interface.uts 里已写明）：安卓 10+ 走 MediaStore 无需权限、
+ * 恒 resolve true；鸿蒙 phone 必须由用户显式选目录，这是平台模型决定的。
+ */
+export function ensurePublicDirPermission(): Promise<boolean> {
+  return new Promise<boolean>((resolve: (value: boolean) => void, reject: (err: any) => void) => {
+    // ① 用户选过目录：确认授权还活着就直接放行
+    if (customDirUri.length > 0) {
+      if (customDirReady) {
+        resolve(true);
+        return;
+      }
+      activateCustomDir().then((ok: boolean) => {
+        customDirReady = ok;
+        resolve(ok);
+      });
+      return;
+    }
+    // ② 老路线：仅 2in1 有意义，phone 上 requestPermissionsFromUser 会拿到 INVALID
+    try {
+      const ctx = UTSHarmony.getUIAbilityContext() as common.UIAbilityContext;
+      if (ctx == null) {
+        resolve(false);
+        return;
+      }
+      const mgr = abilityAccessCtrl.createAtManager();
+      if (mgr.getSelfPermissionStatus(PERM_DOWNLOAD_DIR as Permissions) == 0) {
+        resolve(true);
+        return;
+      }
+      mgr.requestPermissionsFromUser(ctx, [PERM_DOWNLOAD_DIR as Permissions])
+        .then((result: PermissionRequestResult) => {
+          const auth: Array<number> = result.authResults;
+          // 0 = 已授权；2 = INVALID（phone 上必然是这个），都按「不可用」处理，
+          // 由调用方引导用户去选目录，不要在这里弹「被拒绝」误导用户。
+          const granted = auth.length > 0 && auth[0] == 0;
+          console.log('[AppNative] 下载目录权限申请结果: ' + (granted ? '已授权' : '不可用/被拒绝'));
+          resolve(granted);
+        })
+        .catch((err: BusinessError) => {
+          console.log('[AppNative] 下载目录权限申请失败: ' + err.code + ' ' + err.message);
+          resolve(false);
+        });
+    } catch (e) {
+      console.log('[AppNative] 下载目录权限检查异常');
+      resolve(false);
+    }
+  });
 }
 
-/** 申请公共目录权限：鸿蒙沙箱模型不同，无需此权限，返回 false（调用方据此走降级） */
-export function ensurePublicDirPermission(): boolean {
-  return false;
+/**
+ * 用 fileShare.activatePermission 复活自定义目录的持久化授权。
+ *
+ * 为什么需要这一步：`persistPermission` 授予的是**跨重启有效**的 URI 授权，但每次
+ * 进程启动后仍需 `activatePermission` 把它激活一次（官方 API 语义），否则访问会
+ * 抛 13900012（Permission denied）。这也是把 URI 存进 uni storage 的原因。
+ */
+function activateCustomDir(): Promise<boolean> {
+  return new Promise<boolean>((resolve: (value: boolean) => void, reject: (err: any) => void) => {
+    if (customDirUri.length == 0) {
+      resolve(false);
+      return;
+    }
+    try {
+      const policy: fileShare.PolicyInfo = {
+        uri: customDirUri,
+        operationMode: fileShare.OperationMode.READ_MODE | fileShare.OperationMode.WRITE_MODE
+          | fileShare.OperationMode.CREATE_MODE,
+      };
+      fileShare.activatePermission([policy])
+        .then(() => {
+          resolve(true);
+        })
+        .catch((err: BusinessError) => {
+          console.log('[AppNative] 激活目录授权失败: ' + err.code + ' ' + err.message);
+          resolve(false);
+        });
+    } catch (e) {
+      resolve(false);
+    }
+  });
+}
+
+/**
+ * 把用户选定的目录 URI 告诉原生层（JS 侧从 storage 读回来后调用）。
+ * 空串表示恢复默认（公共 Download 目录）。
+ */
+export function setCustomDirUri(uri: string): void {
+  customDirUri = uri;
+  customDirReady = false;
+}
+
+/** 当前是否已选自定义目录（供设置页展示） */
+export function hasCustomDirUri(): boolean {
+  return customDirUri.length > 0;
+}
+
+/**
+ * 把临时文件写入公共目录。
+ *
+ * 两条落盘路线（按优先级）：
+ *   ① **用户选定的自定义目录**（customDirUri 非空）：往该 URI 下写。这是 phone 上
+ *      唯一能写到「公共目录」的路径 —— 见 ensurePublicDirPermission 顶部的实证注释。
+ *      实现要点：`fileIo.openSync(uri, READ_WRITE)` 需要目录已存在且授权有效；文件
+ *      本身用 `fileIo.openSync(fileUri, CREATE|READ_WRITE)` 建好后 `copyFileSync`。
+ *   ② 默认路线：`<公共 Download>/QtDownload/Music`（仅 2in1 设备拿得到，phone 上
+ *      `Environment.getUserDownloadDir()` 抛 201，直接降级）。
+ *
+ * resolve 真实路径或 URI（调用方会存进下载记录并用于「打开文件」）；任一步失败
+ * resolve 空字符串，由调用方降级到私有目录。
+ */
+export function saveToPublicMedia(tempPath: string, dirType: string, fileName: string, subDir: string = '', absDir: string = ''): Promise<string> {
+  return new Promise<string>((resolve: (value: string) => void, reject: (err: any) => void) => {
+    // uni.downloadFile 的 tempFilePath 可能是 file:// 前缀，fileIo 只认绝对路径
+    let src = tempPath;
+    if (src.indexOf('file://') == 0) src = src.substring(7);
+    // ① 自定义目录（phone 上的正路）
+    if (customDirUri.length > 0) {
+      saveToCustomDir(src, fileName).then((saved: string) => {
+        resolve(saved);
+      });
+      return;
+    }
+    // ② 默认公共 Download 目录（2in1）
+    ensurePublicDirPermission().then((granted: boolean) => {
+      if (!granted) {
+        console.log('[AppNative] 无下载目录权限，跳过公共目录写入');
+        resolve('');
+        return;
+      }
+      try {
+        // 鸿蒙没有独立的公共 Music 目录接口（Environment 只有 Download/Desktop/Document），
+        // dirType='music' 也落到 Download 下，保持一个入口、路径可预期
+        const base = Environment.getUserDownloadDir();
+        if (base.length == 0) {
+          resolve('');
+          return;
+        }
+        const sub = subDir.length > 0 ? subDir : DEFAULT_PUBLIC_SUB_DIR;
+        const dir = base + '/' + sub;
+        if (!fileIo.accessSync(dir)) {
+          fileIo.mkdirSync(dir, true);
+        }
+        const dest = dir + '/' + fileName;
+        if (fileIo.accessSync(dest)) {
+          fileIo.unlinkSync(dest);
+        }
+        fileIo.copyFileSync(src, dest);
+        console.log('[AppNative] 已写入公共目录: ' + dest);
+        resolve(dest);
+      } catch (e) {
+        console.log('[AppNative] 写入公共目录失败: ' + (e != null ? e.toString() : 'unknown'));
+        resolve('');
+      }
+    });
+  });
+}
+
+/**
+ * 往用户选定的目录 URI 里写一个文件。
+ *
+ * 关键点：目录 URI（file://docs/storage/... 或 file://media/...）不能直接拼文件名，
+ * 必须用 `fileIo.openSync(uri, ...)` 建出目标文件再 copy —— 这也是为什么需要
+ * `CREATE_MODE` 授权。`fileUri.getUriFromPath` 用来把普通路径转 URI，反之亦然。
+ *
+ * 失败（授权过期 / 目录被删 / 只读）一律 resolve 空串，让调用方降级到私有目录。
+ */
+function saveToCustomDir(src: string, fileName: string): Promise<string> {
+  return new Promise<string>((resolve: (value: string) => void, reject: (err: any) => void) => {
+    activateCustomDir().then((ok: boolean) => {
+      if (!ok) {
+        console.log('[AppNative] 自定义目录授权失效');
+        resolve('');
+        return;
+      }
+      try {
+        // 目录 URI 直接拼文件名：DocumentViewPicker 返回的 URI 是不带尾部斜杠的目录
+        // （形如 file://docs/storage/Users/currentUser/Download），拼之前补一个。
+        // 文件名里的中文/空格由系统按 URI 规则接受，无需额外编码（真机验证过）。
+        const destUri = customDirUri + (customDirUri.endsWith('/') ? '' : '/') + fileName;
+        const file = fileIo.openSync(destUri, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE);
+        fileIo.closeSync(file);
+        fileIo.copyFileSync(src, destUri);
+        console.log('[AppNative] 已写入自定义目录: ' + destUri);
+        resolve(destUri);
+      } catch (e) {
+        console.log('[AppNative] 写入自定义目录失败: ' + (e != null ? e.toString() : 'unknown'));
+        resolve('');
+      }
+    });
+  });
 }
 
 // ==================== 设置页跳转 ====================
 
-/** 打开系统通知设置：鸿蒙第一轮不实现（播放器用 notificationManager 自行申请） */
-export function openNotificationSettings(): boolean {
-  return false;
+/**
+ * 拉起系统「应用详情」设置页（本应用）。
+ *
+ * 鸿蒙的权限开关**不在**独立页面里，而是统一挂在 设置 → 应用 → 应用管理 → 本应用 的
+ * 「权限」分区下；通知开关也在同一个页面。所以这里跳应用详情页是通用兜底。
+ *
+ * ⚠️ 老实现用的是 `wantConstant.ACTION_APPLICATION_DETAILS_SETTINGS`
+ * （'ohos.settings.application.details'，SDK 里标注 `@deprecated since 9`）+ entities
+ * ['entity.system.default']，在本机 ROM（Mate 90 Pro1 / API 26）上**必然失败**：
+ *   aa start -A ohos.settings.application.details -e entity.system.default --ps bundleName com.qt.music
+ *   → error: failed to start ability. Error Code:10103101
+ *     Failed to find a matching application for implicit launch.
+ * 表现就是用户点「权限管理 / 下载目录」后弹出「暂无可用打开方式」（实测 dump 到的
+ * 那个系统对话框文本）。加不加 entities、加不加 uri 都一样，这个 action 在本 ROM 上
+ * 完全没有接收方。
+ *
+ * 现在改用系统设置应用真正注册的隐式匹配（逐条在设备上验证过）：
+ *   action='ohos.want.action.viewData' + uri='application_info_entry'
+ *   + parameters.pushParams=<bundleName>
+ * → aa start 成功，dump 到 Setting.AppDetail / Setting.AppDetail.AppAllowAccessGroup.<包名>
+ *   / Setting.AppDetail.AppNetworkGroup，即本应用的详情页（权限、通知开关都在里面）。
+ * 注意 pushParams 必须**带**，否则会落到应用列表页（Setting.Application）而不是详情页。
+ *
+ * bundleName 从 `ctx.abilityInfo.bundleName` 取，不硬编码——多包名（调试/正式）时不会跳错。
+ */
+function startAppDetailsSettings(): boolean {
+  try {
+    const ctx = UTSHarmony.getUIAbilityContext() as common.UIAbilityContext;
+    if (ctx == null) return false;
+    // parameters 直接写成嵌套对象字面量：Want.parameters 的声明类型是
+    // `Record<string, Object>`（@ohos.app.ability.Want.d.ts:161），而 ArkTS 对
+    // Record 类型的字面量是**允许**的，编译器能按声明类型校验，不会退化成
+    // UTSJSONObject（UTS 只在类型无法推断时才把字面量转成 UTSJSONObject）。
+    // 不用 UTSJSONObject + as Record：Record 写法在 UTS 里只保证 web 端，
+    // 强转反而多一层不确定性。
+    const want: Want = {
+      action: 'ohos.want.action.viewData',
+      uri: 'application_info_entry',
+      parameters: { pushParams: ctx.abilityInfo.bundleName },
+    } as Want;
+    ctx.startAbility(want).then(() => {
+      console.log('[AppNative] 已打开应用详情设置页');
+    }).catch((err: BusinessError) => {
+      console.log('[AppNative] 打开应用详情设置失败: ' + err.code + ' ' + err.message);
+    });
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
-/** 是否忽略电池优化：鸿蒙无此概念，恒 true（避免 JS 反复提示用户去设置里放行后台） */
+/**
+ * 打开系统通知设置。
+ *
+ * 鸿蒙没有「通知设置页」这种独立页面，但 `notificationManager.requestEnableNotification(ctx)`
+ * 会直接弹出系统的「是否允许通知」授权框——比跳设置页更直接，且是官方推荐路径
+ * （@ohos.notificationManager.d.ts:854，API 12 起带 context 的重载）。
+ * 已授权时该调用会静默 resolve，不打扰用户。
+ *
+ * 注意：它必须在 UI 线程调用；本函数由页面点击触发，满足条件。
+ */
+export function openNotificationSettings(): boolean {
+  try {
+    const ctx = UTSHarmony.getUIAbilityContext() as common.UIAbilityContext;
+    if (ctx == null) return false;
+    notificationManager.requestEnableNotification(ctx)
+      .then(() => {
+        console.log('[AppNative] 通知授权请求已完成');
+      })
+      .catch((err: BusinessError) => {
+        // 1600004 = 用户已拒绝且不再询问；此时只能引导去设置页
+        console.log('[AppNative] requestEnableNotification 失败: ' + err.code + ' ' + err.message);
+        startAppDetailsSettings();
+      });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/** 查询通知总开关是否打开（isNotificationEnabledSync，API 12 起同步接口） */
+export function isNotificationEnabled(): boolean {
+  try {
+    return notificationManager.isNotificationEnabledSync();
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * 是否忽略电池优化：鸿蒙**没有**这个概念，恒 true。
+ *
+ * 安卓的「电池优化白名单」（Doze 豁免）在鸿蒙上不存在；鸿蒙对应的机制是
+ * 「长时任务」（backgroundTaskManager + backgroundModes: audioPlayback），
+ * 本项目已在 module.json5 声明，由系统在播放期间保活，**不需要用户手动放行**。
+ * 因此恒 true = 「无需用户处理」，而不是「查询失败」——调用方据此跳过引导弹窗。
+ */
 export function isIgnoringBatteryOptimizations(): boolean {
   return true;
 }
 
-/** 打开电池优化设置：鸿蒙无此页面 */
+/** 打开电池优化设置：鸿蒙无此页面，返回 false（调用方提示无此设置） */
 export function openBatteryOptimizationSettings(): boolean {
   return false;
 }
 
-/** 打开自启动设置：鸿蒙无此页面 */
+/**
+ * 打开自启动设置：鸿蒙的「应用启动管理」没有独立 action，落在应用详情页里，
+ * 故跳应用详情设置页。
+ */
 export function openAutoStartSettings(): boolean {
-  return false;
+  return startAppDetailsSettings();
 }
 
-/** 打开应用详情设置：鸿蒙第一轮不实现 */
+/** 打开应用详情设置页 */
 export function openAppDetailsSettings(): boolean {
-  return false;
+  return startAppDetailsSettings();
 }
 
 // ==================== 本地音频 ====================
@@ -124,6 +457,36 @@ export function scanLocalAudio(onResult: (items: LocalAudioItem[]) => void): voi
 /** 删除本地媒体：恒全部失败（无本地库可删） */
 export function deleteLocalMedia(items: LocalAudioItem[]): DeleteLocalMediaResult {
   return { deleted: 0, pending: 0, failed: items.length } as DeleteLocalMediaResult;
+}
+
+/**
+ * 按文件绝对路径批量删除（下载管理用）。
+ *
+ * 下载文件都是本应用写入的：公共下载目录（Download/QtDownload/Music）在下载时已持有
+ * READ_WRITE_DOWNLOAD_DIRECTORY，私有目录文件本就无限制，因此直接 unlinkSync 即可，
+ * 不需要再走权限申请。路径可能是 file:// 前缀（与 saveToPublicMedia 同规则，剥掉再删）。
+ * 权限被用户事后在系统设置里撤回时，公共目录文件会删失败，计入 failed 由调用方提示。
+ */
+export function deleteMediaByPath(paths: string[]): DeleteLocalMediaResult {
+  const result: DeleteLocalMediaResult = { deleted: 0, pending: 0, failed: 0 } as DeleteLocalMediaResult;
+  for (let i = 0; i < paths.length; i++) {
+    let p = paths[i];
+    if (p == null || p.length == 0) {
+      result.failed++;
+      continue;
+    }
+    if (p.indexOf('file://') == 0) p = p.substring(7);
+    try {
+      if (fileIo.accessSync(p)) {
+        fileIo.unlinkSync(p);
+      }
+      result.deleted++;
+    } catch (e) {
+      console.log('[AppNative] 按路径删除失败 ' + p + ': ' + (e != null ? e.toString() : 'unknown'));
+      result.failed++;
+    }
+  }
+  return result;
 }
 
 // ==================== 窗口/权限 ====================
@@ -147,18 +510,202 @@ export function pickJsFile(onResult: (result: PickFileResult) => void): void {
 }
 
 /**
- * 查询权限状态：鸿蒙第一轮不实现，统一返回 unknown=true。
- * 页面据此显示「无法确定」而不是「未授权」——不谎报未授权，避免误导用户去系统里找。
+ * 选择下载目录（phone 上的正路）。
+ *
+ * 为什么这是唯一可行的方案：`ohos.permission.READ_WRITE_DOWNLOAD_DIRECTORY` 在 phone
+ * 上是 INVALID（见 ensurePublicDirPermission 顶部实证），`Environment.getUserDownloadDir()`
+ * 必然抛 201，所以「直接写系统 Download」在手机上根本不存在。系统给出的替代品就是
+ * **Picker 选目录 + 持久化 URI 授权**：
+ *   `DocumentViewPicker.select({ selectMode: FOLDER })` → 拿到目录 URI
+ *   → `fileShare.persistPermission([{uri, READ|WRITE|CREATE}])` 持久化
+ *   → 之后 saveToPublicMedia 往该 URI 里写。
+ * 这条链依赖的 `FolderSelection` / `FolderAuthorization` 两个 syscap 真机实测均为 true。
+ *
+ * 老注释里「仅 2-in-1 支持」的说法是错的：那是 API 11 的旧限制，当前 ROM（API 26）
+ * 手机上选文件夹是支持的 —— 以 syscap 实测为准，不要以文档旧版为准。
+ */
+export function pickDirectory(onResult: (result: PickDirectoryResult) => void): void {
+  try {
+    const ctx = UTSHarmony.getUIAbilityContext() as common.UIAbilityContext;
+    if (ctx == null) {
+      onResult({ ok: false, path: '', name: '', message: '无法获取应用上下文' } as PickDirectoryResult);
+      return;
+    }
+    const options: picker.DocumentSelectOptions = {
+      maxSelectNumber: 1,
+      selectMode: picker.DocumentSelectMode.FOLDER,
+    };
+    const viewPicker = new picker.DocumentViewPicker(ctx);
+    viewPicker.select(options)
+      .then((uris: Array<string>) => {
+        if (uris.length == 0) {
+          onResult({ ok: false, path: '', name: '', message: '已取消选择' } as PickDirectoryResult);
+          return;
+        }
+        const uri = uris[0];
+        const policy: fileShare.PolicyInfo = {
+          uri: uri,
+          operationMode: fileShare.OperationMode.READ_MODE | fileShare.OperationMode.WRITE_MODE
+            | fileShare.OperationMode.CREATE_MODE,
+        };
+        fileShare.persistPermission([policy])
+          .then(() => {
+            customDirUri = uri;
+            customDirReady = true;
+            // 目录名取 URI 最后一段（file://docs/storage/.../Download → Download）
+            let name = uri;
+            const slash = uri.lastIndexOf('/');
+            if (slash >= 0) name = uri.substring(slash + 1);
+            if (name.length == 0) name = uri;
+            onResult({ ok: true, path: uri, name: name, message: '' } as PickDirectoryResult);
+          })
+          .catch((err: BusinessError) => {
+            console.log('[AppNative] 持久化目录授权失败: ' + err.code + ' ' + err.message);
+            onResult({
+              ok: false,
+              path: '',
+              name: '',
+              message: '目录授权失败（' + err.code + '），请重试',
+            } as PickDirectoryResult);
+          });
+      })
+      .catch((err: BusinessError) => {
+        console.log('[AppNative] 选择目录失败: ' + err.code + ' ' + err.message);
+        // 用户取消时系统抛 13900042 / 13900020，按取消处理不打扰用户
+        const msg = err.code == 13900042 || err.code == 13900020 ? '已取消选择' : ('选择目录失败（' + err.code + '）');
+        onResult({ ok: false, path: '', name: '', message: msg } as PickDirectoryResult);
+      });
+  } catch (e) {
+    console.log('[AppNative] 选择目录异常: ' + (e != null ? e.toString() : 'unknown'));
+    onResult({ ok: false, path: '', name: '', message: '当前设备不支持选择目录' } as PickDirectoryResult);
+  }
+}
+
+// ==================== 权限状态查询 ====================
+
+/** 查询失败/接口不可用时的哨兵值（与 PermissionStatus 的 0..3 不重叠） */
+const STATUS_UNAVAILABLE = -99;
+
+/**
+ * 查一个权限在本机的授权状态。
+ *
+ * 用 `AtManager.getSelfPermissionStatus(permissionName)`（API 20 新增）而不是老牌的
+ * `checkAccessTokenSync(tokenID, name)`：前者无需先取 accessTokenId，且返回**五态**
+ * （PermissionStatus）而非布尔，能区分「用户拒绝」「尚未询问」「系统版本不适用」
+ * 「被设备策略限制」——这正是页面需要的信息。安卓端只有布尔，这里能力更强。
+ *
+ * ⚠️ 这里**不能**写 `(mgr as any)`：UTS 把 `any` 转成 ArkTS 的 `Object`，而 ArkTS 禁止
+ * 对 Object 做动态属性访问，DevEco 会直接报
+ * `error: Property 'getSelfPermissionStatus' does not exist on type 'Object'`（已实测）。
+ * HBuilderX 自带的 UTS d.ts 只到 API 12、没有这个方法，但 UTS 阶段只做转译不做严格
+ * 成员校验，真正的类型校验发生在 DevEco —— 而 DevEco SDK（本机 26.0.0）有这个方法的声明，
+ * 所以直接写类型化调用即可通过。若运行时方法缺失（旧设备），catch 返回哨兵值，
+ * 页面显示「无法确定」而不是谎报未授权。
+ *
+ * @returns 0=已授权 1=未决定 -1=已拒绝 2=不适用 3=受限制 -99=查不到
+ */
+function selfPermissionStatus(permission: string): number {
+  try {
+    const mgr = abilityAccessCtrl.createAtManager();
+    const st = mgr.getSelfPermissionStatus(permission as Permissions) as number;
+    return st;
+  } catch (e) {
+    return STATUS_UNAVAILABLE;
+  }
+}
+
+/**
+ * 查询权限状态。
+ *
+ * 五态到 PermissionState 的映射（页面的四个展示态由 applicable/granted/unknown 组合出来）：
+ *   0  GRANTED         → applicable=true  granted=true  unknown=false → 「已授权」
+ *   1  NOT_DETERMINED  → applicable=true  granted=false unknown=false → 「未授权」（可申请）
+ *  -1  DENIED          → applicable=true  granted=false unknown=false → 「未授权」（可申请）
+ *   2  INVALID         → applicable=false granted=false unknown=false → 「系统版本不适用」
+ *   3  RESTRICTED      → applicable=false granted=false unknown=false → 「系统版本不适用」
+ *  -99 查询异常        → applicable=true  granted=false unknown=true  → 「无法确定」
+ *
+ * 注意 applicable=false 的两态都**不是**错误：INVALID 表示该权限在当前系统版本/设备上
+ * 没有对应能力（例如车机音频权限在手机上），RESTRICTED 表示被设备管理策略限制，
+ * 两者都不该引导用户去系统里找开关。
  */
 export function queryPermissionStates(ids: string[]): PermissionState[] {
   const out: PermissionState[] = [];
   for (let i = 0; i < ids.length; i++) {
-    out.push({ id: ids[i], applicable: false, granted: false, unknown: true } as PermissionState);
+    const id = ids[i];
+    const st = selfPermissionStatus(id);
+    let applicable = true;
+    let granted = false;
+    let unknown = false;
+    if (st == 0) {
+      granted = true;
+    } else if (st == 1 || st == -1) {
+      // 未决定 / 已拒绝：都属于「可申请」，交给页面显示未授权并允许跳设置
+      granted = false;
+    } else if (st == 2 || st == 3) {
+      applicable = false;
+    } else {
+      unknown = true;
+    }
+    out.push({ id: id, applicable: applicable, granted: granted, unknown: unknown } as PermissionState);
   }
   return out;
 }
 
-/** 打开权限设置页：鸿蒙第一轮不实现 */
+/**
+ * 打开权限设置（权限管理页点击某一项时调用）。
+ *
+ * 按权限的**当前状态**分三条路走，保证点了一定有反应（用户反馈的
+ * 「权限管理下载目录等点击提示暂无可用打开方式」就是这里兜底跳转失败导致的，
+ * 见 startAppDetailsSettings 的注释）：
+ *
+ *   1. 未决定（NOT_DETERMINED）→ `requestPermissionsFromUser` 拉**真正的授权弹窗**。
+ *      这是唯一能让用户当场授权的路径，也是「下载目录」这类 user_grant 权限
+ *      第一次点击时该走的路。
+ *   2. 已拒绝（DENIED）→ `requestPermissionOnSetting`：鸿蒙专门为「弹窗不能再弹」
+ *      提供的直达权限设置对话框（@ohos.abilityAccessCtrl.d.ts:465，API 9 起），
+ *      官方文档明确说它就是替代「引导用户去系统设置手动授权」的路径。
+ *      ⚠️ 它要求该权限**之前被 requestPermissionsFromUser 问过**，否则抛 12100001；
+ *      这正是为什么第 1 步必须先走真实申请，而不是一上来就调它。
+ *   3. 其它（system_grant 已授权 / 不适用 / 查不到）→ 直接跳应用详情页。
+ *      系统级权限没有开关，跳过去看的是应用详情，符合用户预期。
+ *
+ * 返回 true 表示「已受理并已发起跳转」；context 不可用或调用抛异常返回 false，
+ * 由调用方提示「无法打开系统设置，请手动在应用权限页开启」。
+ */
 export function openPermissionSettings(id: string): boolean {
-  return false;
+  try {
+    const ctx = UTSHarmony.getUIAbilityContext() as common.UIAbilityContext;
+    if (ctx == null) return false;
+    const list: Permissions[] = [id as Permissions];
+    const mgr = abilityAccessCtrl.createAtManager();
+    const st = selfPermissionStatus(id);
+    if (st == 1) {
+      mgr.requestPermissionsFromUser(ctx, list)
+        .then((result: PermissionRequestResult) => {
+          const auth: Array<number> = result.authResults;
+          console.log('[AppNative] 权限申请 ' + id + ' 结果: ' + (auth.length > 0 ? auth[0].toString() : '空'));
+        })
+        .catch((err: BusinessError) => {
+          console.log('[AppNative] 权限申请失败: ' + err.code + ' ' + err.message);
+          startAppDetailsSettings();
+        });
+      return true;
+    }
+    if (st == -1) {
+      mgr.requestPermissionOnSetting(ctx, list)
+        .then((res: Array<abilityAccessCtrl.GrantStatus>) => {
+          console.log('[AppNative] requestPermissionOnSetting 完成: ' + res.length);
+        })
+        .catch((err: BusinessError) => {
+          // 未声明的权限 / 该 ROM 不支持该接口时走到这里，兜底跳应用详情页
+          console.log('[AppNative] requestPermissionOnSetting 失败: ' + err.code + ' ' + err.message);
+          startAppDetailsSettings();
+        });
+      return true;
+    }
+    return startAppDetailsSettings();
+  } catch (e) {
+    return false;
+  }
 }

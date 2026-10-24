@@ -1,0 +1,44 @@
+<!--
+  应用内底部操作表宿主（全站一个实例，挂在 qt-page-frame）。
+  配方同 qt-confirm-host：services/action-sheet.ts 持全局状态与 Promise 兑现，
+  本组件只把 itemList 映射成 qt-action-sheet 的 actions 渲染，不持有任何定时器。
+  凡代码里调 uni.showActionSheet 都会被 tools/check-toast.mjs 拦下，必须改走本宿主。
+-->
+<template>
+  <qt-action-sheet
+    :visible="st.visible.value"
+    :title="st.title.value"
+    :actions="actions"
+    :selected-index="st.selectedIndex.value"
+    @select="onSelect"
+    @close="onCancel"
+  />
+</template>
+
+<script lang="ts" setup>
+import { computed } from "vue";
+import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import { qtActionSheetState, qtActionSheetPick, qtActionSheetCancel } from "@/services/action-sheet";
+
+const st = qtActionSheetState();
+
+const actions = computed((): SheetAction[] => {
+  const out: SheetAction[] = [];
+  const list = st.items.value;
+  for (let i = 0; i < list.length; i++) {
+    out.push({ name: list[i] });
+  }
+  return out;
+});
+
+function onSelect(_action: SheetAction, index: number): void {
+  qtActionSheetPick(index);
+}
+function onCancel(): void {
+  qtActionSheetCancel();
+}
+</script>
+
+<style>
+</style>

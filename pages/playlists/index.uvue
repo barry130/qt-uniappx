@@ -1,49 +1,69 @@
 <template>
-  <qt-page-frame :max-width="960">
-  <view class="page" :class="layout.isWide ? 'page-wide' : ''">
-    <!-- 排序标签：数据包声明了多个排序选项（v5 契约）时才展示；
-         只声明一项（如网易云只有「最热」）或未声明排序的音源不渲染 -->
-    <view v-if="sorts.length > 1" class="sort-bar" :class="layout.isWide ? 'sort-bar-wide' : ''">
+  <qt-page-frame width-kind="grid" :header-actions="headerActions" @headerAction="onHeaderAction">
+  <view class="page">
+    <!-- 排序与分类都已收进标题栏宫格的下拉面板（手机档页首不再留独立操作行）；
+         宽屏端分类仍折行平铺，排序条也保留在页首 -->
+    <view v-if="sorts.length > 1 && layout.isWide" class="sort-bar" :class="layout.isWide ? 'sort-bar-wide' : ''">
       <view
         v-for="s in sorts"
         :key="s.id"
         class="sort-tag" :class="[layout.isWide ? 'sort-tag-wide' : '', selectedSort == s.id ? 'sort-tag-on' : '']"
+        :style="sortTagStyle(s.id)"
         @click="selectSort(s.id)"
       >
         <text
           class="sort-text" :class="[layout.isWide ? 'sort-text-wide' : '', selectedSort == s.id ? 'sort-text-on' : '']"
-          >{{ s.name }}</text
+           :style="qtFontDual(24, 13) + sortTextStyle(s.id)">{{ s.name }}</text
         >
       </view>
     </view>
 
-    <!-- 分类标签：固定两行铺排，整体可左右滑动 -->
-    <scroll-view
-      v-if="categories.length > 1"
-      class="cat-scroll" :class="layout.isWide ? 'cat-scroll-wide' : ''"
-      direction="horizontal"
-      :show-scrollbar="false"
+    <!-- 分类标签：手机端固定两行铺排、整体可左右滑动；
+         宽屏端标签按内容列宽自动折成若干行，不再横向滚动（桌面滚动条全局关闭，
+         溢出部分没有任何操作线索，等于把末尾分类藏起来） -->
+    <view
+      v-if="categories.length > 1 && layout.isWide"
+      class="cat-rows cat-rows-wide"
+      :style="'width:' + rowsWidth + 'px;'"
     >
-      <view class="cat-rows" :class="layout.isWide ? 'cat-rows-wide' : ''" :style="'width:' + rowsWidth + 'px;'">
-        <view v-for="(row, rowIndex) in categoryRows" :key="rowIndex" class="cat-row" :class="layout.isWide ? 'cat-row-wide' : ''">
-          <view
-            v-for="cell in row"
-            :key="cell.id"
-            class="cat-tag" :class="[layout.isWide ? 'cat-tag-wide' : '', selectedCategory == cell.id ? 'cat-tag-on' : '']"
-            
-            :style="'width:' + cell.width + 'px;'"
-            @click="selectCategory(cell.id)"
+      <view v-for="(row, rowIndex) in visibleCategoryRows" :key="rowIndex" class="cat-row cat-row-wide">
+        <view
+          v-for="cell in row"
+          :key="cell.id"
+          class="cat-tag cat-tag-wide" :class="selectedCategory == cell.id ? 'cat-tag-on' : ''"
+          :style="'width:' + cell.width + 'px;' + catTagStyle(cell.id)"
+          :hover-class="'cat-tag-hover'"
+          @click="selectCategory(cell.id)"
+        >
+          <text
+            class="cat-text cat-text-wide" :class="selectedCategory == cell.id ? 'cat-text-on' : ''"
+            :max-lines="1"
+            :style="qtFontDual(25, 14) + catTextStyle(cell.id)">{{ cell.name }}</text
           >
-            <text
-              class="cat-text" :class="[layout.isWide ? 'cat-text-wide' : '', selectedCategory == cell.id ? 'cat-text-on' : '']"
-              
-              :max-lines="1"
-              >{{ cell.name }}</text
-            >
-          </view>
         </view>
       </view>
-    </scroll-view>
+      <view v-if="categoryRows.length > CAT_WIDE_ROWS" class="cat-more-row">
+        <view
+          class="cat-more" :hover-class="'cat-tag-hover'"
+          :style="'border-color:' + theme.skin.divider + ';'"
+          @click="toggleCatExpand()"
+        >
+          <text
+            class="cat-more-text" :max-lines="1"
+            :style="qtFontDual(24, 13) + 'color:' + theme.skin.textMuted + ';'"
+          >{{
+            catExpanded ? "收起分类" : "全部分类（" + categories.length + "）"
+          }}</text>
+          <QtIcon
+            :name="catExpanded ? 'arrow-up' : 'arrow-down'"
+            :size="layout.isWide ? 12 : 22"
+            :color="theme.skin.textMuted"
+          />
+        </view>
+      </view>
+    </view>
+    <!-- 分类（手机档）：标签两行占屏太狠，收进标题栏宫格图标的弹窗；
+         宽屏端仍按内容列宽折行平铺（那里空间够，且有「全部分类」展开） -->
 
     <!-- 用 list-view + list-item 承载卡片（App 端原生复用回收）：
          之前是整页 scroll-view + flex-wrap 网格，加载到 150+ 条时所有卡片
@@ -54,6 +74,7 @@
          避免原生侧对多段子节点的分组影响触底事件。 -->
     <list-view
       id="pl-scroll"
+      :key="'plv-' + columns"
       class="scroll"
       direction="vertical"
       :lower-threshold="200"
@@ -63,69 +84,180 @@
       @scrollend="onListScroll"
       @scrolltolower="onScrollToLower"
     >
-      <!-- 头部条目：上留白 + 首屏骨架（占位尺寸与真实卡片一致，避免加载完时布局跳动） -->
+      <!-- 头部条目：上留白 + 首屏（骨架 / 首屏真实行）。
+           骨架与真实行放在同一个 list-item 里，为的是两件事：
+           ① 高度由同一处撑起 —— 骨架 HEAD_ROWS 行、真实行也是 HEAD_ROWS 行，形状一致，
+              数据到达时头部条目高度几乎不变，下面的内容不会被顶动；
+           ② 骨架是后写的兄弟节点，天然画在真实行之上，交叉淡出时不会
+              被后面的 list-item 盖住（跨 list-item 的层级无法保证）。
+           骨架整层只此一处，光带也只挂这一处，绝不每块骨架各挂一条。 -->
       <list-item class="head-item">
-        <view class="head-inner" :class="layout.isWide ? 'head-inner-wide' : ''">
+        <view class="head-inner">
           <view class="pad-top" :class="layout.isWide ? 'pad-top-wide' : ''" />
-          <view
-            v-if="playlists.length == 0 && loading"
-            class="grid-row-inner" :class="layout.isWide ? 'grid-row-inner-wide' : ''"
-          >
+          <view class="sk-host">
+            <!-- 首屏真实行：与骨架同形同位，未浮现时 opacity:0 -->
             <view
-              v-for="n in skeletonCount"
-              :key="'sk' + n"
-              class="card" :class="layout.isWide ? 'card-wide' : ''"
-              :style="cardStyle"
+              v-for="(row, rowIndex) in headRows"
+              :key="'hr' + rowIndex"
+              class="grid-row-inner" :class="layout.isWide ? 'grid-row-inner-wide' : ''"
             >
-              <view class="sk-cover" :class="layout.isWide ? 'sk-cover-wide' : ''" :style="coverStyle"></view>
-              <view class="sk-line" :class="layout.isWide ? 'sk-line-wide' : ''"></view>
-              <view class="sk-line sk-line-short" :class="layout.isWide ? 'sk-line-short-wide' : ''"></view>
+              <view
+                v-for="item in row"
+                :key="item.platform + ':' + item.id"
+                class="card" :class="layout.isWide ? 'card-wide' : ''"
+                :style="headItemStyle(rowIndex)"
+                :hover-class="layout.isWide ? 'card-hover' : 'none'"
+                @click="openPlaylist(item)"
+              >
+                <view class="cover-wrap" :style="coverStyle">
+                  <image class="cover" :style="coverStyle" :src="item.picUrl" mode="aspectFill" />
+                  <view v-if="item.playCount.length > 0" class="cover-badge" :class="layout.isWide ? 'cover-badge-wide' : ''">
+                    <QtIcon name="headset" :size="layout.isWide ? 11 : 20" color="#ffffff" />
+                    <text class="cover-badge-text" :class="layout.isWide ? 'cover-badge-text-wide' : ''" :style="qtFontDual(20, 11)">{{ formatBigCount(item.playCount) }}</text>
+                  </view>
+                </view>
+                <text class="name" :class="layout.isWide ? 'name-wide' : ''" :max-lines="2" :style="qtFontDual(26, 15) + 'color:' + theme.skin.text + ';'">{{ item.name }}</text>
+              </view>
+            </view>
+            <!-- 骨架层：数据到达后脱离文档流盖在真实行上，随真实行逐行淡出 -->
+            <view
+              v-if="skeletonOn"
+              class="sk-layer" :class="skeletonLifted ? 'sk-layer-lifted' : ''"
+            >
+              <view
+                v-for="ri in skeletonRowCount"
+                :key="'skr' + ri"
+                class="grid-row-inner" :class="layout.isWide ? 'grid-row-inner-wide' : ''"
+                :style="revealSkeletonStyle(ri - 1)"
+              >
+                <view
+                  v-for="ci in columns"
+                  :key="'sk' + ri + '-' + ci"
+                  class="card" :class="layout.isWide ? 'card-wide' : ''"
+                  :style="cardStyle"
+                >
+                  <view class="sk-cover" :class="layout.isWide ? 'sk-cover-wide' : ''" :style="coverStyle"></view>
+                  <view class="sk-line" :class="layout.isWide ? 'sk-line-wide' : ''"></view>
+                  <view class="sk-line sk-line-short" :class="layout.isWide ? 'sk-line-short-wide' : ''"></view>
+                </view>
+              </view>
+              <!-- 整页共用一道柔和的斜向光带，1.5s 从左扫到右 -->
+              <QtSkeletonShine :visible="shining" />
             </view>
           </view>
         </view>
       </list-item>
-      <list-item v-for="(row, rowIndex) in playlistRows" :key="'r' + rowIndex" class="grid-row">
+      <list-item v-for="(row, tailIndex) in tailRows" :key="'r' + tailIndex" class="grid-row">
         <view class="grid-row-inner" :class="layout.isWide ? 'grid-row-inner-wide' : ''">
           <view
             v-for="item in row"
             :key="item.platform + ':' + item.id"
             class="card" :class="layout.isWide ? 'card-wide' : ''"
-            :style="cardStyle"
+            :style="tailItemStyle(tailIndex)"
+            :hover-class="layout.isWide ? 'card-hover' : 'none'"
             @click="openPlaylist(item)"
           >
-            <image class="cover" :style="coverStyle" :src="item.picUrl" mode="aspectFill" />
-            <text class="name" :class="layout.isWide ? 'name-wide' : ''" :max-lines="2">{{ item.name }}</text>
+            <view class="cover-wrap" :style="coverStyle">
+              <image class="cover" :style="coverStyle" :src="item.picUrl" mode="aspectFill" />
+              <view v-if="item.playCount.length > 0" class="cover-badge" :class="layout.isWide ? 'cover-badge-wide' : ''">
+                <QtIcon name="headset" :size="layout.isWide ? 11 : 20" color="#ffffff" />
+                <text class="cover-badge-text" :class="layout.isWide ? 'cover-badge-text-wide' : ''" :style="qtFontDual(20, 11)">{{ formatBigCount(item.playCount) }}</text>
+              </view>
+            </view>
+            <text class="name" :class="layout.isWide ? 'name-wide' : ''" :max-lines="2" :style="qtFontDual(26, 15) + 'color:' + theme.skin.text + ';'">{{ item.name }}</text>
           </view>
         </view>
       </list-item>
       <!-- 尾部条目：空态 / 加载中 / 已加载全部，底部留白也由它承担 -->
       <list-item class="foot-item">
         <view class="foot-inner" :class="layout.isWide ? 'foot-inner-wide' : ''">
-          <text v-if="playlists.length == 0 && !loading" class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''">暂无歌单</text>
+          <text v-if="playlists.length == 0 && !loading" class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="qtFontDual(27, 16)">暂无歌单</text>
           <qt-loading v-else-if="loadingMore" :visible="true" :size="44" />
-          <text v-else-if="!hasMore" class="foot-text" :class="layout.isWide ? 'foot-text-wide' : ''">已加载全部</text>
+          <text v-else-if="!hasMore" class="foot-text" :class="layout.isWide ? 'foot-text-wide' : ''" :style="qtFontDual(24, 14)">已加载全部</text>
         </view>
       </list-item>
     </list-view>
     <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+    <!-- 全部分类面板：点标题栏宫格后从标题栏下方自上而下展开（不用底部弹窗）；
+         遮罩点击关闭，分类多时面板内部滚动，打开时自动滚到当前分类 -->
+    <view
+      v-if="catPanelVisible"
+      class="cat-mask" :class="catPanelOpen ? 'cat-mask-open' : ''"
+      :style="'background-color:' + theme.skin.scrim + ';'"
+      @click="closeCatPanel"
+    ></view>
+    <view
+      v-if="catPanelVisible"
+      class="cat-panel" :class="catPanelOpen ? 'cat-panel-open' : ''"
+      :style="catPanelStyle"
+    >
+      <!-- 排序行：常驻面板顶部（切排序不打断选分类），多音源只声明一项时不显示 -->
+      <view v-if="sorts.length > 1" class="cat-sort-row" :class="layout.isWide ? 'cat-sort-row-wide' : ''">
+        <view
+          v-for="s in sorts"
+          :key="s.id"
+          class="sort-tag" :class="[layout.isWide ? 'sort-tag-wide' : '', selectedSort == s.id ? 'sort-tag-on' : '']"
+          :style="sortTagStyle(s.id)"
+          @click="selectSort(s.id)"
+        >
+          <text
+            class="sort-text" :class="[layout.isWide ? 'sort-text-wide' : '', selectedSort == s.id ? 'sort-text-on' : '']"
+             :style="qtFontDual(24, 13) + sortTextStyle(s.id)">{{ s.name }}</text
+          >
+        </view>
+      </view>
+      <scroll-view
+        class="cat-scroll-area"
+        :style="'max-height:' + catPanelMaxHeight + 'px;'"
+        :scroll-into-view="catScrollAnchor"
+        :show-scrollbar="false"
+      >
+        <view class="cat-grid" :style="'padding:' + (layout.isWide ? '16px 20px 20px' : '10px 14px 16px') + ';'">
+          <view
+            v-for="(cat, i) in categories"
+            :key="cat.id"
+            :id="'cat-cell-' + i"
+            class="cat-cell" :class="[layout.isWide ? 'cat-cell-wide' : '', selectedCategory == cat.id ? 'cat-cell-on' : '']"
+            :style="'width:' + catCellWidth + 'px;' + catCellLayout(i) + catCellStyle(cat.id)"
+            @click="onCatCellTap(cat.id)"
+          >
+            <text
+              class="cat-cell-text" :class="selectedCategory == cat.id ? 'cat-cell-text-on' : ''"
+              :max-lines="1"
+              :style="qtFontDual(26, 14) + catCellTextStyle(cat.id)"
+            >{{ cat.name }}</text>
+          </view>
+        </view>
+      </scroll-view>
+    </view>
   </view>
   </qt-page-frame>
 </template>
 <script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import { musicApi } from "@/services/music-api";
+import { formatBigCount } from "@/services/format";
 import { packsFingerprint, SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
 import { useSourceStore } from "@/stores/source";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useSourceRegistryStore } from "@/stores/source-registry";
 import type { RegistrySort } from "@/services/music-api";
 import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import QtSkeletonShine from "@/uni_modules/qt-ui/components/qt-skeleton-shine/qt-skeleton-shine.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtContentWidth, qtColumnCount, QT_MIN_COLUMN_WIDTH } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { useQtReveal } from "@/uni_modules/qt-ui/composables/use-qt-reveal";
 import { qtTrackError } from "@/uni_modules/qt-stat";
 import type { Playlist } from "@/types/music";
 import type { Source } from "@/services/music-api";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { logMsgErr } from "@/services/logger";
+import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
 
 type PlaylistCategory = {
   id: string;
@@ -140,6 +272,10 @@ type CategoryCell = {
 };
 
 const ROW_COUNT = 2;
+/** 头部条目承载的真实行数：与骨架行数一致，数据到达前后头部高度不变。
+ *  取 4 是因为竖屏首屏实际能放下 4 行（3 列 + 封面 1:1）；取 2 时骨架只铺到
+ *  首屏上四成，下面一大片空白，看上去不像「正在加载」而像「加载坏了」。 */
+const HEAD_ROWS = 4;
 const CAT_FONT_RPX = 25;
 const CAT_PAD_RPX = 56; // 左右内边距合计
 const CAT_GAP_RPX = 14;
@@ -151,13 +287,35 @@ const selectedCategory = ref("");
 const sorts = computed((): RegistrySort[] => sourceRegistry.playlistSorts(sourceStore.current));
 /** 选中的排序 id（包侧 playlistSorts 声明的 id 原样透传；空串 = 各平台默认） */
 const selectedSort = ref("");
-const loading = ref(false);
+/**
+ * 初值为 true：onMounted 里的 ensureLoad() 要等分类请求回来才发歌单请求，
+ * 若初值为 false，首帧到那一刻之间骨架是关着的，正好闪一下白。
+ */
+const loading = ref(true);
 const loadingMore = ref(false);
 const hasMore = ref(true);
 const page = ref(1);
 const sourceStore = useSourceStore();
 const sourceRegistry = useSourceRegistryStore();
+// 排序选项就绪/变化后，若当前选中值不在选项里（典型：注册表晚于首次赋值就绪，
+// selectedSort 停在空串——排序 chips 会全部没有高亮），回退到第一项。
+// 注意必须放在 sourceRegistry 声明之后：immediate 首次执行会同步读 sorts，
+// 放前面会踩 TDZ（真机 ReferenceError: Cannot access 'sourceRegistry' before initialization）。
+watch(sorts, (list) => {
+  if (list.length == 0) return;
+  let ok = false;
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].id == selectedSort.value) ok = true;
+  }
+  if (!ok) selectedSort.value = list[0].id;
+}, { immediate: true });
 const layout = useQtLayout();
+const theme = useThemeStore();
+const reveal = useQtReveal();
+// setup 阶段就进入「全部未浮现」：useQtReveal 的初值是「全可见」哨兵（为了不改造的
+// 页面行为不变），而本页首帧就要显示骨架。若等到 onMounted 才 reset，首帧渲染出的
+// 骨架层透明度是 0 —— 正好闪一下白，与「不闪白」直接冲突。
+reveal.resetReveal();
 const screenWidth = ref(375);
 
 // 回到顶部
@@ -253,6 +411,15 @@ function backToTop() {
   scrollTop.value = scrollTop.value == 0 ? 1 : 0;
   showBackToTop.value = false;
 }
+/**
+ * 整组换血前先回顶：list-view 停在滚动深处时整组替换数组会整段丢渲染
+ * （大块空白带，搜索页 L871 注释与排行榜页均有实证），回顶后替换安全。
+ * 切分类/切排序/换音源触发 load() 前调用。
+ */
+function resetListScroll() {
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  showBackToTop.value = false;
+}
 let loadedSource = "";
 /** 上次加载时的包态指纹：音源包安装/更新/卸载/启停后变化，分类+列表整页重拉 */
 let loadedPackFp = "";
@@ -260,33 +427,43 @@ let loadedPackFp = "";
 /** 1rpx 对应的 px 值 */
 const unit = computed((): number => screenWidth.value / 750);
 
+/** 栅格行可用宽（px）：宽屏取内容列宽减 `.grid-row-inner-wide` 的左右 20px */
+const gridInnerWidth = computed((): number => {
+  if (!layout.isWide) return screenWidth.value - 24 * 2;
+  const w = qtContentWidth("grid") - 40;
+  return w > 0 ? w : 0;
+});
+/** 宽屏卡间距（px），与 .grid-row-inner-wide 的内边距口径一致 */
+const gridGap = computed((): number => layout.isWide ? 14 : 12);
+
 const columns = computed((): number => {
-  // 宽屏（>=720px 或横屏）走 isWide 分支，下面只覆盖竖屏手机区间
-  if (layout.isWide) return 5;
+  // 宽屏列数由「最小卡宽」推导，不再写死 5 列。
+  // 改造前固定 5 列 + 卡宽写死 140px：1920px 窗口里 5×140 的卡片贴左排开，
+  // 右侧空掉一多半内容列，而且内容列本身还是被旧 qt-page-frame 拉到 1360。
+  if (layout.isWide) return qtColumnCount(gridInnerWidth.value, QT_MIN_COLUMN_WIDTH.card, gridGap.value, 8);
   const width = screenWidth.value;
-  if (width >= 560) return 4;
-  // 360~560px 的主流手机统一 3 列，封面约 92~128px。
+  // 手机档统一最多 3 列（2026-10-24 用户反馈「一行 4 个有点拥挤」，QQ 音乐手机端也是 3 列）：
+  // >=560 的平板竖屏同样只排 3 列，不再有 4 列档。
   // 旧逻辑要 width>=420 才有 3 列，360~412px 的常见机型只能排 2 列、卡片过大。
   // 只有极窄屏（<340px）才退回 2 列，避免卡片窄到 <78px。
   if (width >= 340) return 3;
   return 2;
 });
 const cardWidth = computed((): number => {
-  if (layout.isWide) return 140;
-  const gap = 12;
-  const available = screenWidth.value - 24 * 2 - gap * columns.value;
-  return Math.floor(available / columns.value);
+  const cols = columns.value;
+  const gap = gridGap.value;
+  const w = Math.floor((gridInnerWidth.value - gap * cols) / cols);
+  if (!layout.isWide) return w;
+  // 上限 200：再宽封面就抢了歌单名的主视觉，一行也放不下更多卡
+  return w > 200 ? 200 : (w > 96 ? w : 96);
 });
 const cardStyle = computed(
   (): string =>
-    "width:" + cardWidth.value + "px;margin-right:" + (layout.isWide ? 14 : 12) + "px;margin-bottom:" + (layout.isWide ? 14 : 18) + "px;"
+    "width:" + cardWidth.value + "px;margin-right:" + gridGap.value + "px;margin-bottom:" + (layout.isWide ? 14 : 18) + "px;"
 );
 const coverStyle = computed(
   (): string => "width:" + cardWidth.value + "px;height:" + cardWidth.value + "px;"
 );
-
-/** 骨架屏占位卡数量：铺满两行即可 */
-const skeletonCount = computed((): number => columns.value * 2);
 
 /**
  * 把歌单切成「一行 columns 张」的行数组。
@@ -305,40 +482,147 @@ const playlistRows = computed((): Playlist[][] => {
 });
 
 /**
+ * 骨架屏占位行数：固定与头部条目承载的真实行数一致。
+ * 两处行数必须相等，否则数据到达、骨架从文档流切到绝对定位的那一刻，
+ * 头部条目高度会变，下面所有内容整体位移 —— 这正是「整页不跳动」要防的。
+ */
+const skeletonRowCount = computed((): number => {
+  const real = playlistRows.value.length;
+  // 数据少于 HEAD_ROWS 行（冷门分类）时，骨架也跟着收窄：此时骨架已切到绝对定位，
+  // 收窄不会推动页面，反而避免多出来的骨架行盖在「已加载全部」上。
+  if (real > 0 && real < HEAD_ROWS) return real;
+  return HEAD_ROWS;
+});
+
+/** 头部条目承载首屏前 HEAD_ROWS 行真实卡片，与骨架同形同位 */
+const headRows = computed((): Playlist[][] => playlistRows.value.slice(0, HEAD_ROWS));
+/** 其余行仍走 list-item 复用池 */
+const tailRows = computed((): Playlist[][] => playlistRows.value.slice(HEAD_ROWS));
+/**
+ * 骨架层是否挂载。两种时候要挂：
+ * ① 还在加载（loading 且尚无数据）—— 首帧到数据到达之间的全部时间；
+ * ② 数据已到但还在错峰浮现 —— 骨架正靠 transition 淡出，这时候卸载等于硬切。
+ * 不能只写「列表为空」：请求真的返回空结果时骨架会一直杵在那儿，和「暂无歌单」打架。
+ */
+const skeletonOn = computed(
+  (): boolean => reveal.revealing.value || (loading.value && playlists.value.length == 0)
+);
+/** 数据已到：骨架层脱离文档流盖在真实行上，高度改由真实行撑起 */
+const skeletonLifted = computed((): boolean => playlists.value.length > 0);
+/** 光带只在骨架还盖着真实内容时扫；数据一到就随骨架一起淡出 */
+const shining = computed((): boolean => skeletonOn.value && !skeletonLifted.value);
+
+/** 真实首屏第 rowIndex 行的卡片样式（尺寸 + 浮现透明度） */
+function headItemStyle(rowIndex: number): string {
+  return reveal.itemStyle(rowIndex, cardStyle.value);
+}
+
+/**
+ * 尾部行的卡片样式：只给尺寸，不给错峰透明度。
+ * 尾部行走 list-item 原生复用池，滚动中会不断重建；错峰透明度挂在重建中的
+ * 行上会出现「占位但透明」的空白行（真机实测），所以错峰只保留在首屏头部条目里。
+ */
+function tailItemStyle(_tailIndex: number): string {
+  return cardStyle.value;
+}
+
+/** 骨架第 index 行的透明度：与同序号的真实行互补，同时淡出/淡入 */
+function revealSkeletonStyle(index: number): string {
+  return reveal.skeletonStyle(index);
+}
+
+/**
  * 把分类按预估宽度贪心分配到固定行数里，让每行长度尽量接近。
  * 中文按一个字宽计算，非中文按 0.6 字宽估算。
  */
 const categoryRows = computed((): CategoryCell[][] => {
+  const items = categories.value;
+  if (layout.isWide) {
+    // 宽屏：一行铺满可用宽度就换行，行数由数据量决定。
+    // 不再横向滚动——桌面滚动条全局关闭，溢出等于把末尾分类藏起来，
+    // 而自动换行让「有多少分类」一眼可数。
+    const gap = 14;
+    const avail = catAvailWidth.value;
+    const wideRows: CategoryCell[][] = [];
+    let current: CategoryCell[] = [];
+    let used = 0;
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index];
+      const cell: CategoryCell = {
+        id: item.id,
+        name: item.name,
+        width: textWidthPx(item.name),
+      };
+      if (current.length > 0 && used + cell.width > avail) {
+        wideRows.push(current);
+        current = [];
+        used = 0;
+      }
+      current.push(cell);
+      used += cell.width + gap;
+    }
+    if (current.length > 0) wideRows.push(current);
+    return wideRows;
+  }
   const rows: CategoryCell[][] = [];
   const widths: number[] = [];
   for (let index = 0; index < ROW_COUNT; index++) {
     rows.push([]);
     widths.push(0);
   }
-  const items = categories.value;
   for (let index = 0; index < items.length; index++) {
     const item = items[index];
     const cell: CategoryCell = {
       id: item.id,
       name: item.name,
-      width: layout.isWide
-        ? textWidthPx(item.name)
-        : Math.ceil(textWidthRpx(item.name) * unit.value),
+      width: Math.ceil(textWidthRpx(item.name) * unit.value),
     };
     // 选出当前最短的一行，保证两行长度均衡
     let target = 0;
     for (let r = 1; r < ROW_COUNT; r++) if (widths[r] < widths[target]) target = r;
     rows[target].push(cell);
-    widths[target] += cell.width + (layout.isWide ? 14 : Math.ceil(CAT_GAP_RPX * unit.value));
+    widths[target] += cell.width + Math.ceil(CAT_GAP_RPX * unit.value);
   }
   return rows;
 });
 
+/**
+ * 宽屏下分类标签的折行阈值：内容列宽减去左右内边距（.cat-rows-wide 的 24px×2）。
+ * 标签宽度按 textWidthPx 预估，折行时用这个值判断「还能不能再塞一个」。
+ * 注意它只用于折行判断——容器宽度是 rowsWidth（= 内容列宽，padding 由 CSS 提供），
+ * 两者混用会让每一行的最后一个标签被容器裁掉（真机实测裁掉约 72 物理 px）。
+ */
+const catAvailWidth = computed((): number => {
+  const w = qtContentWidth("grid") - 48;
+  return w > 320 ? w : 320;
+});
+
+/** 宽屏默认展示的分类行数，超出部分折叠（真机 5 行会把首屏卡片挤到画面外） */
+const CAT_WIDE_ROWS = 3;
+const catExpanded = ref(false);
+
+/** 宽屏实际渲染的分类行：折叠态只取前 CAT_WIDE_ROWS 行 */
+const visibleCategoryRows = computed((): CategoryCell[][] => {
+  const rows = categoryRows.value;
+  if (!layout.isWide || catExpanded.value || rows.length <= CAT_WIDE_ROWS) return rows;
+  const out: CategoryCell[][] = [];
+  for (let index = 0; index < CAT_WIDE_ROWS; index++) out.push(rows[index]);
+  return out;
+});
+
+function toggleCatExpand() {
+  catExpanded.value = !catExpanded.value;
+}
+
 /** 两行中较长的一行决定滚动内容总宽 */
 const rowsWidth = computed((): number => {
-  // 宽屏下 rpx 仍按窗口宽度换算（1rpx≈1.42dp），标签行会被放大近 3 倍，
-  // 因此宽屏改用固定 px 间距与尾部留白，避免横向列表溢出可视区数倍
-  const gap = layout.isWide ? 14 : Math.ceil(CAT_GAP_RPX * unit.value);
+  // 宽屏：标签自动折行、容器就是内容列宽本身（左右 padding 24px 由 CSS 提供），
+  // 不能返回 catAvailWidth（那已经减过 padding，再叠加会裁掉行尾标签）
+  if (layout.isWide) {
+    const w = qtContentWidth("grid");
+    return w > 320 ? w : 320;
+  }
+  const gap = Math.ceil(CAT_GAP_RPX * unit.value);
   let max = 0;
   const rows = categoryRows.value;
   for (let r = 0; r < rows.length; r++) {
@@ -346,7 +630,7 @@ const rowsWidth = computed((): number => {
     for (let c = 0; c < rows[r].length; c++) sum += rows[r][c].width + gap;
     if (sum > max) max = sum;
   }
-  return max + (layout.isWide ? 28 : Math.ceil(28 * unit.value));
+  return max + Math.ceil(28 * unit.value);
 });
 
 /** 预估标签宽度（rpx），避免依赖 flex-wrap 在原生端的换行行为 */
@@ -374,8 +658,56 @@ function categoryFromRaw(item: UTSJSONObject): PlaylistCategory {
   const name = item.get("name");
   return {
     id: id != null ? id.toString() : "",
-    name: name != null ? name.toString() : "",
+    name: decodeHtmlEntities(name != null ? name.toString() : ""),
   };
+}
+
+/**
+ * 数据包侧的分类名偶尔带着未解码的 HTML 实体（真机见「R&#38;B」应为「R&B」）。
+ * UTS 的 replace 对回调替换支持不稳，手写扫描：命名实体取表，数字/十六进制取码点。
+ */
+function decodeHtmlEntities(input: string): string {
+  if (input.indexOf("&") == -1) return input;
+  const named: Map<string, string> = new Map();
+  named.set("amp", "&");
+  named.set("lt", "<");
+  named.set("gt", ">");
+  named.set("quot", '"');
+  named.set("apos", "'");
+  named.set("nbsp", " ");
+  let out = "";
+  let i = 0;
+  while (i < input.length) {
+    const ch = input.charAt(i);
+    if (ch != "&") {
+      out += ch;
+      i++;
+      continue;
+    }
+    const semi = input.indexOf(";", i + 1);
+    if (semi == -1 || semi - i > 10) {
+      out += ch;
+      i++;
+      continue;
+    }
+    const body = input.substring(i + 1, semi);
+    let decoded: string | null = null;
+    if (body.length > 1 && (body.charAt(0) == "#" || body.charAt(0) == "x" || body.charAt(0) == "X")) {
+      const digits = body.charAt(0) == "#" ? body.substring(1) : body.substring(1);
+      const code = parseInt(digits, body.charAt(0) == "#" ? 10 : 16);
+      if (!isNaN(code) && code > 0 && code <= 0x10ffff) decoded = String.fromCharCode(code);
+    } else if (named.has(body)) {
+      decoded = named.get(body)!;
+    }
+    if (decoded == null) {
+      out += ch;
+      i++;
+    } else {
+      out += decoded!;
+      i = semi + 1;
+    }
+  }
+  return out;
 }
 
 async function loadCategories(source: Source): Promise<void> {
@@ -384,7 +716,10 @@ async function loadCategories(source: Source): Promise<void> {
   const next: PlaylistCategory[] = [{ id: "", name: "全部" }];
   for (let index = 0; index < raw.length; index++) {
     const category = categoryFromRaw(raw[index] as UTSJSONObject);
-    if (category.id.length > 0 && category.name.length > 0) next.push(category);
+    if (category.id.length == 0 || category.name.length == 0) continue;
+    // 「全部」由上面那条空 id 合成项承担：包侧再给一个同义项会出现两个「全部」
+    if (category.name == "全部" || category.name == "全部歌单") continue;
+    next.push(category);
   }
   if (seq !== categorySeq) return;
   categories.value = next;
@@ -397,6 +732,8 @@ let categorySeq = 0;
 
 async function load(): Promise<void> {
   const seq = ++loadSeq;
+  // 切分类/排序/音源的整组换血：先回顶再换数据（见 resetListScroll 注释）
+  resetListScroll();
   loading.value = true;
   page.value = 1;
   hasMore.value = true;
@@ -409,13 +746,16 @@ async function load(): Promise<void> {
     );
     if (seq !== loadSeq) return;
     playlists.value = list;
+    // 数据已到：骨架随即开始逐行淡出，真实行按同一节拍自上而下淡入。
+    // 计数单位是「行」不是「张」—— 一行内的卡片同属一块，一起浮现
+    reveal.startReveal(playlistRows.value.length);
     // 各平台单页条数不同（网易云/QQ 30 条、酷狗 20 条），
     // 因此只用“空结果”判定到底，不按固定页长推断
     if (list.length == 0) hasMore.value = false;
   } catch (error) {
-    console.error("[QT Music Playlists Load]", sourceStore.current, selectedCategory.value, error);
+    logMsgErr("[QT Music Playlists Load] " + sourceStore.current + " " + selectedCategory.value, error);
     if (seq !== loadSeq) return;
-    uni.showToast({ title: "歌单加载失败", icon: "none" });
+    qtShowToast({ title: "歌单加载失败", icon: "none" });
   } finally {
     if (seq === loadSeq) loading.value = false;
   }
@@ -460,8 +800,8 @@ async function loadMore(): Promise<void> {
     // 整页都是已有项，说明该接口不再返回新数据
     if (added == 0) hasMore.value = false;
   } catch (error) {
-    console.error("[QT Music Playlists More]", sourceStore.current, page.value, error);
-    uni.showToast({ title: "加载更多失败，请重试", icon: "none" });
+    logMsgErr("[QT Music Playlists More] " + sourceStore.current + " p" + page.value, error);
+    qtShowToast({ title: "加载更多失败，请重试", icon: "none" });
   } finally {
     loadingMore.value = false;
   }
@@ -478,14 +818,21 @@ async function ensureLoad(): Promise<void> {
   const sortList = sorts.value;
   selectedSort.value = sortList.length > 0 ? sortList[0].id : "";
   playlists.value = [];
+  // 必须先回到「全部未浮现」：否则 revealedCount 还停在上一轮的全可见哨兵上，
+  // 清空列表后骨架会被判为「已浮现」而整层透明，重载期间就是一片空白
+  reveal.resetReveal();
+  // 也要在这里就点亮 loading：下面 await 分类请求期间还没有人把 loading 置真，
+  // 而骨架层的显示条件里有 loading 这一项 —— 漏掉这一句，切音源时从清空列表到
+  // load() 真正开跑之间会有一段空窗，骨架不显示，正好闪一下白
+  loading.value = true;
   categories.value = [{ id: "", name: "全部" }];
   // 作废在途的旧音源分类请求（loadCategories 写回前按序号比对）
   categorySeq++;
   try {
     await loadCategories(source as Source);
   } catch (error) {
-    console.error("[QT Music Playlist Categories]", source, error);
-    if (loadedSource == source) uni.showToast({ title: "分类加载失败", icon: "none" });
+    logMsgErr("[QT Music Playlist Categories] " + source, error);
+    if (loadedSource == source) qtShowToast({ title: "分类加载失败", icon: "none" });
   }
   if (loadedSource !== source) return;
   await load();
@@ -495,19 +842,107 @@ function selectCategory(category: string): void {
   if (selectedCategory.value == category) return;
   selectedCategory.value = category;
   playlists.value = [];
+  reveal.resetReveal();
   load();
 }
+
+// ==================== 全部分类面板（标题栏宫格图标，自上而下展开） ====================
+
+/** 标题栏宫格图标：点开全部分类面板（手机档分类标签已收编到这里） */
+const headerActions = ["grid"];
+const catPanelVisible = ref(false);
+/** 展开态：先挂载（收起位）再下一帧置 true，才有 translateY 的过渡 */
+const catPanelOpen = ref(false);
+const catScrollAnchor = ref("");
+let catPanelTimer: number | null = null;
+const catPanelStyle = computed((): string => {
+  return "background-color:" + theme.skin.surface + ";";
+});
+/** 面板内滚动区上限：留出遮罩下方能看见一点页面的余量（QQ 音乐同款观感） */
+const catPanelMaxHeight = computed((): number => {
+  return Math.floor(layout.windowHeight * 0.66);
+});
+const CAT_GRID_COLS = 3;
+const CAT_GRID_GAP_PX = 10;
+/** 三列等宽格子：内容宽 − 左右 padding − 两个列间距 */
+const catCellWidth = computed((): number => {
+  const padX = layout.isWide ? 20 : 14;
+  const inner = qtContentWidth("grid") - padX * 2 - CAT_GRID_GAP_PX * (CAT_GRID_COLS - 1);
+  return Math.floor(inner / CAT_GRID_COLS);
+});
+function catCellLayout(i: number): string {
+  // 间距走内联：每行末列去掉右间距，否则 3 列净宽算不下会被挤成 2 列
+  const mr = i % CAT_GRID_COLS == CAT_GRID_COLS - 1 ? 0 : CAT_GRID_GAP_PX;
+  return "margin-right:" + mr + "px;margin-bottom:" + CAT_GRID_GAP_PX + "px;";
+}
+function catCellStyle(id: string): string {
+  const on = selectedCategory.value == id;
+  if (on) return "background-color:" + theme.skin.accent + ";";
+  return "background-color:" + theme.skin.surfaceMuted + ";";
+}
+function catCellTextStyle(id: string): string {
+  const on = selectedCategory.value == id;
+  if (on) return "color:" + theme.skin.onAccent + ";";
+  return "color:" + theme.skin.text;
+}
+const catSelectedIndex = computed((): number => {
+  for (let i = 0; i < categories.value.length; i++) {
+    if (categories.value[i].id == selectedCategory.value) return i;
+  }
+  return -1;
+});
+function openCatPanel(): void {
+  if (catPanelTimer != null) {
+    clearTimeout(catPanelTimer);
+    catPanelTimer = null;
+  }
+  catPanelVisible.value = true;
+  catPanelOpen.value = false;
+  // 打开时当前分类超过一屏（约两行 × 5）才需要滚到位
+  const idx = catSelectedIndex.value;
+  catScrollAnchor.value = idx > 8 ? "cat-cell-" + idx : "";
+  catPanelTimer = setTimeout(() => {
+    catPanelOpen.value = true;
+    catPanelTimer = null;
+  }, 16) as unknown as number;
+}
+function closeCatPanel(): void {
+  if (!catPanelVisible.value) return;
+  if (catPanelTimer != null) {
+    clearTimeout(catPanelTimer);
+    catPanelTimer = null;
+  }
+  catPanelOpen.value = false;
+  catPanelTimer = setTimeout(() => {
+    catPanelVisible.value = false;
+    catScrollAnchor.value = "";
+    catPanelTimer = null;
+  }, 220) as unknown as number;
+}
+function onHeaderAction(_name: string): void {
+  // 宫格按钮 = 开关：第一次点展开全部分类，再点一次收起
+  if (catPanelVisible.value) closeCatPanel();
+  else openCatPanel();
+}
+function onCatCellTap(id: string): void {
+  selectCategory(id);
+  closeCatPanel();
+}
+onUnmounted(() => {
+  if (catPanelTimer != null) clearTimeout(catPanelTimer);
+});
 
 /** 切换排序（v5 契约：id 原样透传给包侧 recommendations），重新拉第一页 */
 function selectSort(sortId: string): void {
   if (selectedSort.value == sortId) return;
   selectedSort.value = sortId;
   playlists.value = [];
+  reveal.resetReveal();
   load();
 }
 
 function openPlaylist(list: Playlist): void {
-  uni.navigateTo({
+  uni.navigateTo({ animationType: qtNavAnimation(),
     url: "/pages/playlist/index?id=" + encodeURIComponent(list.id) + "&platform=" + encodeURIComponent(list.platform),
   });
 }
@@ -544,6 +979,28 @@ onUnmounted(() => {
   viewportTimers = [];
   uni.$off(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
 });
+
+/**
+ * 分类/排序胶囊配色（内联，跟随皮肤）。
+ *
+ * 之所以从 CSS 搬到这里：CSS 里写死的 rgba(255,255,255,0.85) 只适合浅色皮肤，
+ * 深色皮肤下 71 个胶囊折成三行横跨整个内容列，成为整页最亮的一块。
+ * 选中态用 accent + onAccent，未选中态用 surfaceStrong + textMuted。
+ */
+function sortTagStyle(id: string): string {
+  if (selectedSort.value == id) return "background-color:" + theme.skin.accent + ";border-color:" + theme.skin.accent + ";";
+  return "background-color:" + theme.skin.surfaceStrong + ";border-color:" + theme.skin.border + ";";
+}
+function sortTextStyle(id: string): string {
+  return "color:" + (selectedSort.value == id ? theme.skin.onAccent : theme.skin.textMuted) + ";";
+}
+function catTagStyle(id: string): string {
+  if (selectedCategory.value == id) return "background-color:" + theme.skin.accent + ";border-color:" + theme.skin.accent + ";";
+  return "background-color:" + theme.skin.surfaceStrong + ";border-color:" + theme.skin.border + ";";
+}
+function catTextStyle(id: string): string {
+  return "color:" + (selectedCategory.value == id ? theme.skin.onAccent : theme.skin.textMuted) + ";";
+}
 </script>
 
 <style>
@@ -567,22 +1024,11 @@ onUnmounted(() => {
   border-radius: 26rpx;
   align-items: center;
   justify-content: center;
-  background-color: rgba(255, 255, 255, 0.85);
-  border-width: 1px;
-  border-color: rgba(16, 22, 38, 0.06);
-}
-.sort-tag-on {
-  background-color: #6c5ce7;
-  border-color: #6c5ce7;
+  border-width: 1px; border-style: solid;
 }
 .sort-text {
-  color: #596173;
   font-size: 24rpx;
   font-weight: 500;
-}
-.sort-text-on {
-  color: #ffffff;
-  font-weight: 600;
 }
 .cover-load {
   position: absolute;
@@ -599,20 +1045,53 @@ onUnmounted(() => {
   flex-direction: row;
   align-items: center;
   background-color: rgba(255, 255, 255, 0.62);
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
   border-color: rgba(255, 255, 255, 0.6);
 }
-.title {
-  color: #191d26;
-  font-size: 40rpx;
-  font-weight: 700;
+/* ===== 全部分类下拉面板（手机档，自上而下展开） ===== */
+.cat-mask {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  opacity: 0;
+  transition: opacity 0.2s ease-out;
+  /* 与面板同一个 0.2s 节奏，淡入即可；点它关闭 */
 }
-.cat-scroll {
-  height: 190rpx;
-  flex-grow: 0;
-  flex-shrink: 0;
-  background-color: rgba(255, 255, 255, 0.4);
+.cat-mask-open { opacity: 1; }
+.cat-panel {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  transform: translateY(-101%);
+  transition: transform 0.2s ease-out;
+  border-radius: 0 0 24rpx 24rpx;
+  overflow: hidden;
+  z-index: 20;
 }
+.cat-panel-open { transform: translateY(0); }
+.cat-scroll-area { flex-grow: 0; flex-shrink: 0; }
+.cat-sort-row {
+  padding: 14px 14px 4px;
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.cat-sort-row-wide { padding: 16px 20px 6px; }
+.cat-grid {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.cat-cell {
+  height: 56px;
+  border-radius: 12px;
+  align-items: center;
+  justify-content: center;
+}
+.cat-cell-wide { height: 44px; border-radius: 10px; }
+.cat-cell-text { font-size: 26rpx; }
+.cat-cell-text-on { font-weight: 600; }
 .cat-rows {
   height: 190rpx;
   padding: 16rpx 28rpx;
@@ -630,23 +1109,12 @@ onUnmounted(() => {
   border-radius: 32rpx;
   align-items: center;
   justify-content: center;
-  background-color: rgba(255, 255, 255, 0.85);
-  border-width: 1px;
-  border-color: rgba(16, 22, 38, 0.06);
-}
-.cat-tag-on {
-  background-color: #6c5ce7;
-  border-color: #6c5ce7;
+  border-width: 1px; border-style: solid;
 }
 .cat-text {
-  color: #596173;
   font-size: 25rpx;
   font-weight: 500;
   text-align: center;
-}
-.cat-text-on {
-  color: #ffffff;
-  font-weight: 600;
 }
 /* list-view 需要明确的高度小于内容高度才会滚动（flex:1 + min-height:0 限定在可视区内） */
 .scroll {
@@ -673,25 +1141,71 @@ onUnmounted(() => {
 .pad-top {
   height: 16rpx;
 }
+/* 骨架宿主：真实首屏行与骨架层共用这一个定位容器。
+   两者行数相同（HEAD_ROWS），所以骨架脱离文档流的那一刻高度不变。
+   注意：列表不足 2 行时头部会矮一行，下方内容上移 —— 各平台单页 20~30 条，
+   实际取到的行数总在 3 行以上，这个边界不额外兜底。 */
+.sk-host {
+  position: relative;
+  flex-direction: column;
+}
+/* 骨架层：默认参与文档流，负责在无数据期间撑起头部高度。
+   position:relative 是给内部那道绝对定位的光带当定位基准的 ——
+   否则光带会往上找到 .sk-host，脱离骨架层的实际高度。 */
+.sk-layer {
+  position: relative;
+  flex-direction: column;
+  pointer-events: none;
+}
+/* 数据到达：骨架让出文档流，盖在真实行上方原地淡出（高度改由真实行撑起） */
+.sk-layer-lifted {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+}
+/* 卡片走 QQ 音乐同款扁平形态：无底无框，封面即卡面，歌单名裸排在封面下 */
 .card {
-  background-color: rgba(255, 255, 255, 0.72);
-  border-width: 1px;
-  border-color: rgba(255, 255, 255, 0.7);
-  border-radius: 22rpx;
-  overflow: hidden;
+  overflow: visible;
+}
+.cover-wrap {
+  position: relative;
 }
 .cover {
   background-color: #e6e8ec;
+  border-radius: 12rpx;
+  overflow: hidden;
 }
+.cover-badge {
+  position: absolute;
+  left: 8rpx;
+  top: 8rpx;
+  flex-direction: row;
+  align-items: center;
+  padding: 4rpx 12rpx;
+  background-color: rgba(0, 0, 0, 0.35);
+  border-radius: 999rpx;
+}
+.cover-badge-wide {
+  left: 4px;
+  top: 4px;
+  padding: 1px 7px;
+}
+.cover-badge-text {
+  margin-left: 4rpx;
+  color: #ffffff;
+  font-size: 20rpx;
+}
+.cover-badge-text-wide { margin-left: 3px; font-size: 11px; }
 /* 骨架屏占位：与 .cover/.name 尺寸对齐，用半透明灰以兼容深浅两种底 */
 .sk-cover {
-  background-color: rgba(25,29,38,0.08);
+  background-color: rgba(25,29,38,0.18);
   border-radius: 16rpx;
 }
 .sk-line {
   height: 22rpx;
   margin: 14rpx 16rpx 0;
-  background-color: rgba(25,29,38,0.08);
+  background-color: rgba(25,29,38,0.18);
   border-radius: 8rpx;
 }
 .sk-line-short {
@@ -703,8 +1217,7 @@ onUnmounted(() => {
 .sk-line-wide { height: 13px; border-radius: 7px; }
 .sk-line-short-wide { width: 96px; }
 .name {
-  margin: 14rpx 16rpx 18rpx;
-  color: #191d26;
+  margin: 12rpx 4rpx 0;
   font-size: 26rpx;
   font-weight: 500;
   text-overflow: ellipsis;
@@ -730,20 +1243,48 @@ onUnmounted(() => {
 /* 宽屏：px 覆盖 rpx，避免宽屏下按窗口比例放大 */
 
 .bar-wide { padding-top: 14px; padding-left: 24px; padding-right: 24px; padding-bottom: 10px; }
-.title-wide { font-size: 20px; }
 .sort-bar-wide { padding: 10px 24px 0; }
 .sort-tag-wide { height: 26px; padding-left: 12px; padding-right: 12px; margin-right: 10px; border-radius: 13px; }
 .sort-text-wide { font-size: 13px; }
-.cat-scroll-wide { height: 104px; }
-.cat-rows-wide { height: 104px; padding-top: 14px; padding-left: 24px; padding-right: 24px; padding-bottom: 6px; }
-.cat-row-wide { height: 34px; margin-bottom: 8px; }
-.cat-tag-wide { height: 32px; margin-right: 14px; border-radius: 16px; }
+.cat-rows-wide {
+  /* 必须显式 height:auto：基础规则 .cat-rows 写死 height:190rpx（竖屏两行滚动区），
+     而宽屏下 1rpx 会被放大到 1.7 倍（windowWidth_dp/750），190rpx ≈ 324dp。
+     宽屏行数由数据决定，若继续继承这个固定高度，分类区下方会留一条 165dp 的死区，
+     正好把首屏卡片推到画面外。 */
+  height: auto;
+  padding-top: 14px;
+  padding-left: 24px;
+  padding-right: 24px;
+  padding-bottom: 10px;
+  flex-direction: column;
+}
+/* 分类折叠开关：只在宽屏且行数超限时出现 */
+.cat-more-row {
+  flex-direction: row;
+  justify-content: center;
+  padding-top: 2px;
+}
+.cat-more {
+  height: 32px;
+  padding-left: 14px;
+  padding-right: 14px;
+  flex-direction: row;
+  align-items: center;
+  border-radius: 16px;
+  border-width: 1px; border-style: solid;
+}
+/* 桌面指针反馈：只在宽屏渲染的这个分支上生效 */
+.cat-tag-hover { background-color: rgba(127, 127, 127, 0.16); }
+.cat-row-wide { height: 40px; margin-bottom: 0; flex-direction: row; align-items: center; }
+.cat-tag-wide { height: 32px; margin-right: 14px; margin-bottom: 8px; border-radius: 16px; }
 .cat-text-wide { font-size: 14px; }
 .grid-row-inner-wide { padding-left: 20px; padding-right: 20px; }
 .foot-inner-wide { height: 52px; padding-bottom: 24px; }
 .pad-top-wide { height: 14px; }
 .card-wide { border-radius: 12px; }
-.name-wide { margin-top: 8px; margin-left: 10px; margin-right: 10px; margin-bottom: 12px; font-size: 15px; }
+/* 桌面指针反馈：只在宽屏启用 */
+.card-hover { background-color: rgba(255, 255, 255, 0.06); }
+.name-wide { margin-top: 7px; margin-left: 2px; margin-right: 2px; margin-bottom: 12px; font-size: 15px; }
 .empty-text-wide { font-size: 16px; }
 .foot-text-wide { font-size: 14px; }
 </style>

@@ -1,33 +1,91 @@
 <template>
-  <qt-page-frame :max-width="1280">
+  <qt-page-frame
+    width-kind="detail"
+    :header-chip-texts="sourceLabels"
+    :header-chip-actives="sourceActives"
+    @headerChipTap="onChipTap"
+  >
     <view class="page">
-      <!-- 榜单来源标签必须保留，切换时只筛选当前来源的榜单。 -->
-      <view class="source-row" :class="[layout.isWide ? 'source-row-wide' : '', themeStore.dark ? 'source-row-dark' : '']">
-        <qt-segmented :list="sourceLabels" v-model="sourceIndex" @change="onSourceChange" />
-      </view>
-
-      <scroll-view id="chart-scroll" :key="sourceIndex" class="scroll" direction="vertical" :show-scrollbar="false" :scroll-top="scrollTop" @scroll="onListScroll">
-        <view v-if="loading" class="loading" :class="layout.isWide ? 'loading-wide' : ''"><qt-loading :visible="true" /></view>
-        <view v-else class="chart-grid" :class="layout.isWide ? 'chart-grid-wide' : ''" :style="gridStyle" id="chart-grid">
-          <view
-            v-for="chart in filteredCharts"
-            :key="chart.id + chart.platform"
-            class="chart-row"
-            :class="[layout.isWide ? 'chart-row-wide' : '', themeStore.dark ? 'chart-row-dark' : '']"
-            :style="layout.isWide ? 'width:' + chartCardWidth + 'px;' : ''"
-            @click="openChart(chart)"
-          >
-            <image class="chart-cover" :class="layout.isWide ? 'chart-cover-wide' : ''" :src="chart.picUrl" mode="aspectFill" />
-            <view class="chart-info" :class="layout.isWide ? 'chart-info-wide' : ''">
-              <text class="chart-name" :class="[layout.isWide ? 'chart-name-wide' : '', themeStore.dark ? 'chart-name-dark' : '']" :max-lines="1">{{ chart.name }}</text>
-              <text class="chart-meta" :class="[layout.isWide ? 'chart-meta-wide' : '', themeStore.dark ? 'chart-meta-dark' : '']" :max-lines="1">{{ chart.description || "热门榜单" }}</text>
+      <!-- 单条滚动区 + 无 key 的 v-for 是唯一在 Vapor 下被反复验证可靠的渲染方式
+           （换数据只做按索引原地 diff）。切音源走页内切换，安全配方来自搜索页实证：
+           **先回顶、再整组换 filteredCharts**——停在滚动深处整组替换会整段丢渲染
+           （keyed diff / v-if 重挂 / 每源常驻 v-show 或内联 display 也都会丢渲染，
+           均被真机否决），回顶后替换从未失败。每个音源的滚动位置由
+           services/chart-tabs.ts 记忆，切换/重进后 restoreScroll() 落位。 -->
+      <scroll-view id="chart-scroll" class="scroll" direction="vertical" :show-scrollbar="false" :scroll-top="scrollTop" @scroll="onListScroll">
+        <view class="chart-grid" :class="layout.isWide ? 'chart-grid-wide' : ''" :style="gridStyle">
+          <!-- 骨架与真实行同处一个 relative 宿主：骨架层盖在上面，逐行透明度互补 -->
+          <view class="sk-host">
+            <view
+              v-for="(chart, chartIndex) in filteredCharts"
+              class="rank-card"
+              :class="[layout.isWide ? 'rank-card-wide' : '', themeStore.dark ? 'rank-card-dark' : '']"
+              :style="chartRowStyle(chartIndex)"
+              :hover-class="layout.isWide ? 'rank-card-hover' : 'none'"
+              @click="openChart(chart)"
+            >
+              <!-- 卡头：榜单名 + 更新说明（包侧 description 常带「每周四更新」这类话术） -->
+              <view class="rank-head">
+                <text class="rank-name" :class="[layout.isWide ? 'rank-name-wide' : '', themeStore.dark ? 'rank-name-dark' : '']" :max-lines="1" :style="qtFontDual(32, 17)">{{ chart.name }}</text>
+                <text class="rank-meta" :class="[layout.isWide ? 'rank-meta-wide' : '', themeStore.dark ? 'rank-meta-dark' : '']" :max-lines="1" :style="qtFontDual(24, 13)">{{ previewMeta(chartIndex) }}</text>
+              </view>
+              <!-- 卡身：左侧封面（点它进榜单详情），右侧前三名（点歌直接播） -->
+              <view class="rank-body" :class="layout.isWide ? 'rank-body-wide' : ''">
+                <view class="rank-cover-wrap" :class="layout.isWide ? 'rank-cover-wrap-wide' : ''" @click.stop="openChart(chart)">
+                  <image class="rank-cover" :class="layout.isWide ? 'rank-cover-wide' : ''" :src="chart.picUrl" mode="aspectFill" />
+                  <view class="rank-play">
+                    <QtIcon name="play" :size="layout.isWide ? 16 : 34" color="#ffffff" />
+                  </view>
+                </view>
+                <view class="rank-songs" :class="layout.isWide ? 'rank-songs-wide' : ''">
+                  <!-- 前三名不用 v-for、不在模板绑对象、不用 v-if/v-else 分支：这三样在
+                       Vapor 下都会让该行文本不渲染或渲染中断（v-if 分支实测两种都不出）。
+                       单文本节点 + 返回 string 的纯函数，与卡头「共 N 首」同款，实测可更新 -->
+                  <view
+                    class="rank-song"
+                    :class="layout.isWide ? 'rank-song-wide' : ''"
+                    @click.stop="onPreviewTap(chartIndex, 0)"
+                  >
+                    <text class="rank-idx" :class="[layout.isWide ? 'rank-idx-wide' : '', themeStore.dark ? 'rank-idx-dark' : '']" :style="qtFontDual(26, 13)">1</text>
+                    <text class="rank-song-name" :class="[layout.isWide ? 'rank-song-name-wide' : '', themeStore.dark ? 'rank-song-name-dark' : '']" :max-lines="1" :style="qtFontDual(26, 13)">{{ previewSongLine(chartIndex, 0) }}</text>
+                  </view>
+                  <view
+                    class="rank-song"
+                    :class="layout.isWide ? 'rank-song-wide' : ''"
+                    @click.stop="onPreviewTap(chartIndex, 1)"
+                  >
+                    <text class="rank-idx" :class="[layout.isWide ? 'rank-idx-wide' : '', themeStore.dark ? 'rank-idx-dark' : '']" :style="qtFontDual(26, 13)">2</text>
+                    <text class="rank-song-name" :class="[layout.isWide ? 'rank-song-name-wide' : '', themeStore.dark ? 'rank-song-name-dark' : '']" :max-lines="1" :style="qtFontDual(26, 13)">{{ previewSongLine(chartIndex, 1) }}</text>
+                  </view>
+                  <view
+                    class="rank-song"
+                    :class="layout.isWide ? 'rank-song-wide' : ''"
+                    @click.stop="onPreviewTap(chartIndex, 2)"
+                  >
+                    <text class="rank-idx" :class="[layout.isWide ? 'rank-idx-wide' : '', themeStore.dark ? 'rank-idx-dark' : '']" :style="qtFontDual(26, 13)">3</text>
+                    <text class="rank-song-name" :class="[layout.isWide ? 'rank-song-name-wide' : '', themeStore.dark ? 'rank-song-name-dark' : '']" :max-lines="1" :style="qtFontDual(26, 13)">{{ previewSongLine(chartIndex, 2) }}</text>
+                  </view>
+                </view>
+              </view>
             </view>
-            <QtIcon name="chevron-right" :size="layout.isWide ? 14 : 18" :color="themeStore.dark ? '#7c8494' : '#a6adba'" />
+            <!-- 骨架层必须再包一层满宽容器：.sk-host 是 row+wrap，骨架组件的根节点
+                 作为 flex item 塞进去会被压成内容宽，卡宽与换行全部失准
+                 （见 uni_modules/qt-ui/docs/design.md §6.17，首页同一原因也包了这一层） -->
+                <view v-if="skeletonOn" class="sk-fill">
+              <QtSkeletonList
+                kind="rank"
+                :rows="skeletonRows"
+                :revealed="reveal.revealedCount.value"
+                :lifted="skeletonLifted"
+                :shining="shining"
+                :card-width="skeletonRowWidth"
+              />
+            </view>
           </view>
-          <view v-if="filteredCharts.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
-            <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''">暂无榜单数据</text>
-          </view>
-        </view>
+              <view v-if="!loading && filteredCharts.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
+                <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="qtFontDual(26, 15)">暂无榜单数据</text>
+              </view>
+            </view>
         <view class="pad" :class="layout.isWide ? 'pad-wide' : ''"></view>
       </scroll-view>
 
@@ -37,24 +95,32 @@
 </template>
 
 <script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
-import { onShow } from "@dcloudio/uni-app";
-import QtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
+import { onShow, onLoad } from "@dcloudio/uni-app";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
-import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
+import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import { useQtReveal } from "@/uni_modules/qt-ui/composables/use-qt-reveal";
 import { musicApi } from "@/services/music-api";
 import { packsFingerprint, SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
 import { useSourceStore } from "@/stores/source";
 import { useSourceRegistryStore } from "@/stores/source-registry";
+import { usePlayerStore } from "@/stores/player";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtColumnCount } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { platformLabel } from "@/services/platform";
-import type { Source, Chart } from "@/services/music-api";
+import { readChartScroll, saveChartScroll } from "@/services/chart-tabs";
+import type { Source, Chart, Song } from "@/services/music-api";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { logMsgErr } from "@/services/logger";
+import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
 
 const themeStore = useThemeStore();
 const sourceStore = useSourceStore();
+const player = usePlayerStore();
 const layout = useQtLayout();
 
 // 音源清单来自数据包注册表：注册表异步加载完成后由 watch 同步选中项。
@@ -63,28 +129,176 @@ const layout = useQtLayout();
 // 旧包未声明 features 时全部源照常显示，行为不变）。
 const sourceRegistry = useSourceRegistryStore();
 const sources = computed<Source[]>(() => sourceRegistry.sourceIdsWith("charts") as Source[]);
+// 标题栏药丸用全称（platformLabel，用户定稿「上面的tag显示全称」；无描边由 frame 内联给）
 const sourceLabels = computed<string[]>(() => sources.value.map((s) => platformLabel(s)));
+const sourceActives = computed<boolean[]>(() => sources.value.map((s, i) => i == sourceIndex.value));
 const sourceIndex = ref(0);
-const loading = ref(false);
+// 页面参数 si：切 tab 走整页 redirectTo 重载，目标音源下标由它带过来
+let paramSi = -1;
+// 初值 true：onMounted 才发请求，首帧若按 false 渲染会先闪一下「暂无榜单数据」
+const loading = ref(true);
 const allCharts = ref<Chart[]>([]);
 
-// 非响应式：仅切源时读一次用于恢复位置。滚动中只写普通变量、不更新 ref，
-// 否则 :scroll-top 会被每帧回写，触发整棵列表子树重渲染（下滑卡顿根因）。
-// 长度跟随注册表（源数不再写死），越界读取返回 0。
-let scrollPositions: number[] = [];
+// ── 榜单内前三名预览 ─────────────────────────────────────────────────────
+// 每张卡要单独拉一次 chartDetail（全量榜单接口），逐卡并发 3 个排队取，
+// 结果按「平台:id@包态指纹」缓存：切音源/切页回来不再重发请求。
+const PREVIEW_ROWS = 3;
+// 预览是逐卡一次 chartDetail 请求，25 张卡排 3 并发要 9 轮；提到 6 明显缩短首屏补齐时间
+const PREVIEW_CONCURRENCY = 6;
+interface RankPreview {
+  songs: Song[];
+  total: number;
+}
+let previewCache = new Map<string, RankPreview>();
+const previewStates = ref<number[]>([]); // 0/3 = 等待或拉取中（画占位），1 = 就绪，2 = 拉不到
+const previewSongs = ref<Song[][]>([]);
+const previewTotals = ref<number[]>([]);
+let previewSeq = 0;
+
+function chartKey(chart: Chart): string {
+  return chart.platform + ":" + chart.id + "@" + packsFingerprint();
+}
+
+function rebuildPreviews(): void {
+  const list = filteredCharts.value;
+  const states: number[] = [];
+  const songs: Song[][] = [];
+  const totals: number[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const cached = previewCache.get(chartKey(list[i]));
+    states.push(cached != null ? 1 : 0);
+    songs.push(cached != null ? cached.songs : []);
+    totals.push(cached != null ? cached.total : 0);
+  }
+  previewStates.value = states;
+  previewSongs.value = songs;
+  previewTotals.value = totals;
+  kickPreviews();
+}
+
+function kickPreviews(): void {
+  const mySeq = ++previewSeq;
+  let next = 0;
+  const runNext = (): void => {
+    if (mySeq != previewSeq) return;
+    const list = filteredCharts.value;
+    while (next < list.length) {
+      const idx = next++;
+      if (previewStates.value[idx] != 0) continue;
+      previewStates.value[idx] = 3;
+      loadPreview(mySeq, idx, list[idx], runNext);
+      return;
+    }
+  };
+  for (let w = 0; w < PREVIEW_CONCURRENCY; w++) runNext();
+}
+
+async function loadPreview(mySeq: number, idx: number, chart: Chart, done: () => void): Promise<void> {
+  try {
+    const songs = await musicApi.chartDetail(chart);
+    if (mySeq != previewSeq) return;
+    const top: Song[] = [];
+    for (let i = 0; i < songs.length && i < PREVIEW_ROWS; i++) top.push(songs[i]);
+    const preview: RankPreview = { songs: top, total: songs.length };
+    if (songs.length > 0) previewCache.set(chartKey(chart), preview);
+    const songArr = previewSongs.value.slice();
+    while (songArr.length <= idx) songArr.push([]);
+    songArr[idx] = top;
+    previewSongs.value = songArr;
+    const totalArr = previewTotals.value.slice();
+    while (totalArr.length <= idx) totalArr.push(0);
+    totalArr[idx] = preview.total;
+    previewTotals.value = totalArr;
+    const stateArr = previewStates.value.slice();
+    stateArr[idx] = songs.length > 0 ? 1 : 2;
+    previewStates.value = stateArr;
+  } catch (error) {
+    if (mySeq != previewSeq) return;
+    const stateArr = previewStates.value.slice();
+    stateArr[idx] = 2;
+    previewStates.value = stateArr;
+  } finally {
+    done();
+  }
+}
+
+/** 卡头右侧：就绪后显示「共 N 首」（用户定稿，替换原来的榜单描述文案） */
+function previewMeta(idx: number): string {
+  if (idx >= previewStates.value.length || previewStates.value[idx] != 1) return "";
+  const total = idx < previewTotals.value.length ? previewTotals.value[idx] : 0;
+  return "共 " + total + " 首";
+}
+
+/** 第 idx 张榜单第 row 行的展示文案：就绪「歌名 - 歌手」，未就绪「···」占位。
+ *  占位收进函数里而不是模板 v-else —— Vapor 下 v-if/v-else 分支文本实测不渲染 */
+function previewSongLine(idx: number, row: number): string {
+  if (idx >= previewSongs.value.length) return "···";
+  const songs = previewSongs.value[idx];
+  if (row >= songs.length) return "···";
+  const song = songs[row];
+  return song.name + " - " + song.singer;
+}
+
+async function onPreviewTap(idx: number, row: number): Promise<void> {
+  if (idx >= previewSongs.value.length) return;
+  const songs = previewSongs.value[idx];
+  if (row >= songs.length) return;
+  const song = songs[row];
+  try {
+    song.url = await musicApi.playUrl(song, player.quality);
+    player.playSingle(song);
+  } catch (error) {
+    logMsgErr("[QT Music Chart Page]", error);
+    qtShowToast({ title: "播放失败", icon: "none" });
+  }
+}
+
+// ── 滚动状态 ─────────────────────────────────────────────────────────────
+// 切 tab 是整页 redirectTo 重载（见模板注释），所以这里的 scrollTop 只是本页
+// 生命周期内的绑定值；每个音源的滚动位置由 chart-tabs 服务记忆，重载后恢复。
 const scrollTop = ref(0);
 const showBackToTop = ref(false);
+
+/** 当前音源 id（记忆滚动位置用的键；注册表未就绪时为空串，直接不记忆） */
+function currentSourceId(): string {
+  const list = sources.value;
+  const i = sourceIndex.value;
+  return i >= 0 && i < list.length ? list[i] : "";
+}
+
 function onListScroll(e: any): void {
   const st = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
-  scrollPositions[sourceIndex.value] = st;
+  saveChartScroll(currentSourceId(), st);
   const next = st > 600;
   if (next !== showBackToTop.value) showBackToTop.value = next;
 }
+
 function backToTop(): void {
-  // 0/1 交替写入，保证 scroll-top 每次都真正变化——用户向下滚后 scrollTop 未同步更新，
+  // 0/1 交替写入，保证 scroll-top 每次都真正变化——用户向下滚后绑定值未同步更新，
   // 重复设同一个值不会触发回顶
   scrollTop.value = scrollTop.value == 0 ? 1 : 0;
   showBackToTop.value = false;
+  saveChartScroll(currentSourceId(), 0);
+}
+
+/** 重载后把该音源上次的滚动位置还原（网格高度未稳定时重试几轮） */
+function restoreScroll(): void {
+  const target = readChartScroll(currentSourceId());
+  if (target <= 0) {
+    showBackToTop.value = false;
+    return;
+  }
+  showBackToTop.value = target > 600;
+  const apply = (attempt: number): void => {
+    if (!gridAlive) return;
+    if (attempt >= 6) return;
+    gridTimers.push(setTimeout(() => {
+      if (!gridAlive) return;
+      scrollTop.value = scrollTop.value == target ? target - 1 : target;
+      if (attempt < 2) apply(attempt + 1);
+    }, attempt == 0 ? 120 : 260) as number);
+  };
+  apply(0);
 }
 
 const contentWidth = computed<number>(() => Math.min(layout.windowWidth, 1280));
@@ -103,13 +317,16 @@ let gridAlive = true;
 // 且 scroll-view 子节点 width:100% 解析不出（会收缩成卡片总宽），所以：
 // 1) 测外层 scroll-view（定宽元素）拿真实可用宽度；2) 把该宽度显式写成网格的 px 宽度。
 const scrollWidth = ref(0);
+// 列表可视高度：骨架块数要按「一屏能铺多少块」算，宽屏还得乘列数（见 skeletonRows）
+const scrollHeight = ref(0);
 function measureGrid(attempt: number): void {
   if (!gridAlive) return;
   uni.createSelectorQuery()
-    .select("#chart-scroll")
+    .select("#chart-scroll-" + sourceIndex.value)
     .boundingClientRect((rect: UniNodeInfo) => {
       if (rect != null && rect.width > 0) {
         scrollWidth.value = rect.width;
+        scrollHeight.value = rect.height;
         return;
       }
       if (attempt < 3) {
@@ -126,16 +343,15 @@ const chartInnerWidth = computed<number>(() => {
   return Math.max(320, contentWidth.value - 48);
 });
 const chartColumns = computed<number>(() => {
-  const w = chartInnerWidth.value;
-  if (w >= 1000) return 4;
-  if (w >= 680) return 3;
-  return 2;
+  // 榜单卡（封面 + 三行歌）比旧的单行条目宽，最小卡宽从 300 提到 380，宽屏最多 3 列
+  if (!layout.isWide) return 1;
+  return qtColumnCount(chartInnerWidth.value, 380, 12, 3);
 });
-/** 宽屏按 scroll-view 实测宽度自动分成 2/3/4 列，竖屏始终一列。 */
+/** 宽屏按 scroll-view 实测宽度自动分成 2/3 列，竖屏始终一列。 */
 const chartCardWidth = computed<number>(() => {
   if (!layout.isWide) return 0;
   // 每个卡片保留 12px 右侧间距，避免最后一项换行。
-  return Math.max(120, Math.floor((chartInnerWidth.value - chartColumns.value * 12) / chartColumns.value));
+  return Math.max(160, Math.floor((chartInnerWidth.value - chartColumns.value * 12) / chartColumns.value));
 });
 const gridStyle = computed<string>(() => layout.isWide && scrollWidth.value > 0 ? "width:" + scrollWidth.value + "px;" : "");
 
@@ -145,53 +361,145 @@ const filteredCharts = computed<Chart[]>(() => {
   return allCharts.value.filter((chart) => chart.platform === currentSource);
 });
 
+// ── 骨架屏 ────────────────────────────────────────────────────────────────
+// 骨架块数不能写死：竖屏一列要铺满整屏，宽屏 2/3 列还得乘列数。写死 6 块时
+// 竖屏只盖住半屏、宽屏只盖住一行半，下面一大片空白，看着不像「正在加载」。
+const SKELETON_MIN_ROWS = 6; // 再短的屏也铺这么多块，冷启动首帧不至于只有两三块
+// 一屏最多按 24 行算：24 行 × 单块步长已超过任何真实窗口高，纯属兜底
+const SKELETON_MAX_LINES = 24;
+const SKELETON_STAGGER_MAX = 16; // 错峰 tick 数单独封顶（见 loadAll）
+const reveal = useQtReveal();
+// 初值必须是「全部透明」，否则首帧会先按满载状态把真实行画出来再收回去
+reveal.resetReveal();
+/** 列表可视高度：优先用实测的 scroll-view 高，未测得前按窗口高扣掉顶部标签行估算 */
+const listAreaPx = computed<number>(() => {
+  if (scrollHeight.value > 0) return scrollHeight.value;
+  return Math.max(320, layout.windowHeight - qtRpx(180));
+});
+const skeletonRows = computed<number>(() => {
+  // 单块竖向步长 = 榜单卡总高 + 卡距（与 .qt-skl-rk / .rank-card 同源：
+  // 竖屏 20+44+20+148+24rpx 内边距 + 20rpx 卡距 ≈ 296rpx；宽屏约 156px）
+  const rowPx = layout.isWide ? 156 : qtRpx(296);
+  const lines = Math.min(SKELETON_MAX_LINES, Math.ceil(listAreaPx.value / Math.max(24, rowPx)) + 1);
+  const fill = layout.isWide ? lines * chartColumns.value : lines;
+  const real = filteredCharts.value.length;
+  // 真实行比一屏还少时骨架跟着收窄，否则多出来的灰块会盖在「已加载全部」下方
+  if (real > 0 && real < fill) return real;
+  return Math.max(SKELETON_MIN_ROWS, fill);
+});
+/**
+ * 骨架行宽：宽屏是网格卡宽；竖屏真实行是 width:100%，但骨架行在 row+wrap 容器里
+ * 没有可靠的百分比基准（Vapor 下百分比宽度需父级定宽），所以按实测 scroll-view 宽
+ * 减去 .chart-grid 的左右 24rpx 内边距显式给 px，与 .rank-card 等宽。
+ */
+const skeletonRowWidth = computed<number>(() => {
+  if (layout.isWide) return chartCardWidth.value;
+  const inner = scrollWidth.value > 0 ? scrollWidth.value : contentWidth.value;
+  return Math.max(120, inner - qtRpx(48));
+});
+const skeletonOn = computed<boolean>(() => reveal.revealing.value || (loading.value && filteredCharts.value.length == 0));
+// 数据到达后骨架层脱离文档流，改由真实行决定高度，两层才能同位叠加
+const skeletonLifted = computed<boolean>(() => filteredCharts.value.length > 0);
+const shining = computed<boolean>(() => skeletonOn.value && !skeletonLifted.value);
+function chartRowStyle(index: number): string {
+  return reveal.itemStyle(index, layout.isWide ? "width:" + chartCardWidth.value + "px;" : "");
+}
+
 /** 上次加载时的包态指纹：音源包安装/更新/卸载/启停后变化，整页重拉 */
 let loadedPackFp = "";
 // loadAll 并发序号：onShow 与包变更广播可能同时触发拉取，旧一轮的慢响应
 // 若后到会把新数据覆盖掉、还会提前收走 loading——非最新序号的回调全部丢弃
 let loadAllSeq = 0;
 
-function onSourceChange(index: number): void {
-  sourceIndex.value = index;
-  scrollTop.value = scrollPositions[index] ?? 0;
+function onChipTap(index: number): void {
+  if (index == sourceIndex.value) return;
+  // 页内切换，不整页重载（redirectTo 的重建间隙必然闪黑，且该基座不认动画参数）。
+  // 换数据的唯一安全配方来自搜索页实证（pages/search L871/L977 注释）：
+  // **先回顶、再整组换 filteredCharts**——停在滚动深处整组替换会让 scroll-view
+  // 整段丢渲染（本页前几版黑屏的真正根因），回顶后替换从未失败过。
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  gridTimers.push(setTimeout(() => {
+    if (!gridAlive) return;
+    sourceIndex.value = index;
+    // 预览重建由下方 watch(sourceIndex) 统一负责；该音源上次的位置
+    // （顶部则不动）由重试逻辑在网格重排后落位
+    restoreScroll();
+  }, 80) as number);
 }
 
-/** 注册表源清单变化（异步加载/换包）后同步选中项与滚动位置数组长度 */
+/** 注册表源清单变化（异步加载/换包）后同步选中项 */
 function syncSourceIndex(): void {
   const ids = sources.value;
   if (ids.length == 0) return;
-  if (scrollPositions.length < ids.length) scrollPositions = ids.map(() => 0);
+  // 页面参数 si 优先（切 tab 是整页重载，参数就是目标音源下标）；
+  // 没有参数（从其他页面进来）时跟随全局当前音源
   const idx = ids.indexOf(sourceStore.current);
-  sourceIndex.value = idx >= 0 ? idx : 0;
+  if (paramSi >= 0 && paramSi < ids.length) {
+    sourceIndex.value = paramSi;
+  } else if (idx >= 0) {
+    sourceIndex.value = idx;
+  }
 }
 
-/** 拉全量榜单（onMounted/onShow/包变更广播共用），完成后记录包态指纹 */
+/** 拉榜单（onMounted/onShow/包变更广播共用），完成后记录包态指纹。
+ *  先拉当前源单独渲染（单源请求快、还命中 12h 缓存），全源合并放后台补——
+ *  旧写法 await allCharts() 要等 6 个源全部返回才出第一屏，打开明显偏慢 */
 async function loadAll(): Promise<void> {
   const mySeq = ++loadAllSeq;
   loadedPackFp = packsFingerprint();
+  // 重新进入加载态：把浮现进度清零，骨架才会重新可见
+  reveal.resetReveal();
   loading.value = true;
   allCharts.value = [];
+  let firstShown = false;
+  const settle = (): void => {
+    if (mySeq != loadAllSeq || firstShown) return;
+    firstShown = true;
+    // 错峰只排首屏前 16 块：宽屏 4 列时骨架块数能到 40，逐块 60ms 要两秒多，
+    // 那样真实内容迟迟不亮；排不到的块在最后一拍一起浮现
+    reveal.startReveal(Math.min(skeletonRows.value, SKELETON_STAGGER_MAX));
+    loading.value = false;
+    gridTimers.push(setTimeout(() => {
+      measureGrid(0);
+      // 首屏就位后还原该音源上次的滚动位置（切 tab 是整页重载，位置靠存储带过来）
+      restoreScroll();
+    }, 300) as number);
+  };
+  const applyCharts = (list: Chart[]): void => {
+    if (mySeq != loadAllSeq) return;
+    // unkeyed v-for 只做「按索引原地 diff」是安全的：唯一验证可靠的换数据方式
+    allCharts.value = list;
+    // 首轮也必须启动前三名预览：rebuildPreviews 原来只挂在 sourceIndex 的 watch 上，
+    // 首次进入（sourceIndex 没变化过）时队列永远不会跑，三行一直是「···」占位
+    rebuildPreviews();
+  };
   try {
-    const charts = await musicApi.allCharts();
-    if (mySeq == loadAllSeq) allCharts.value = charts;
+    const current = sources.value[sourceIndex.value];
+    if (current != null) {
+      const mine = await musicApi.charts(current);
+      if (mySeq != loadAllSeq) return;
+      if (mine.length > 0) {
+        applyCharts(mine);
+        settle();
+      }
+    }
+    const all = await musicApi.allCharts();
+    if (mySeq != loadAllSeq) return;
+    if (all.length > allCharts.value.length || allCharts.value.length == 0) {
+      applyCharts(all);
+    }
+    settle();
   } catch (error) {
-    console.error("[QT Music Chart Page]", error);
+    logMsgErr("[QT Music Chart Page]", error);
     if (mySeq == loadAllSeq) {
-      uni.showToast({ title: "加载失败", icon: "none" });
+      qtShowToast({ title: "加载失败", icon: "none" });
     }
-  } finally {
-    // 网格随 loading 消失才渲染，等布局落定后实测一次宽度
-    if (mySeq == loadAllSeq) {
-      loading.value = false;
-      gridTimers.push(setTimeout(() => {
-        measureGrid(0);
-      }, 300) as number);
-    }
+    settle();
   }
 }
 
 function openChart(chart: Chart): void {
-  uni.navigateTo({
+  uni.navigateTo({ animationType: qtNavAnimation(),
     url:
       "/pages/playlist/index?id=" +
       encodeURIComponent(chart.id) +
@@ -209,9 +517,18 @@ function openChart(chart: Chart): void {
 
 /** 音源包变更广播：App 层更新弹窗确认时收不到 onShow，事件实时重拉 */
 function onPacksChanged(): void {
+  // 包换了，榜单内容全变：前三名缓存作废并整页重拉
+  previewCache = new Map<string, RankPreview>();
   loadAll();
 }
 
+onLoad((options: Record<string, string> | null) => {
+  if (options == null) return;
+  const raw = options["si"];
+  if (raw == null) return;
+  const n = Number(raw);
+  if (n >= 0) paramSi = Math.floor(n);
+});
 onMounted(() => {
   sourceStore.restore();
   sourceRegistry.ensure();
@@ -222,6 +539,10 @@ onMounted(() => {
 // 注册表异步加载完成（或换包后清单变化）时重选当前音源对应 tab
 watch(() => sources.value.length, () => {
   syncSourceIndex();
+});
+// 切音源：榜单列表换了，预览行跟着重建（命中缓存的卡直接亮，其余重新排队拉）
+watch(sourceIndex, () => {
+  rebuildPreviews();
 });
 // 页面停留时旋转屏幕：窗口尺寸变化后重测网格宽度，列数/卡宽随之刷新
 watch(
@@ -244,6 +565,7 @@ onShow(() => {
 });
 onUnmounted(() => {
   gridAlive = false;
+  previewSeq++; // 在途的预览请求全部作废
   // 页面卸载时清掉全部延迟/重试定时器，避免在已注销的 UTS 实例上触发回调
   for (const t of gridTimers) {
     if (t != null) clearTimeout(t);
@@ -255,36 +577,53 @@ onUnmounted(() => {
 
 <style>
 .page { flex: 1; min-height: 0; }
-.source-row { padding: 12rpx; margin: 22rpx 24rpx 0; background-color: #ffffff; border-width: 1px; border-color: #e6e8ee; border-radius: 24rpx; }
-.scroll { flex: 1; min-height: 0; margin-top: 20rpx; }
-.loading { height: 320rpx; align-items: center; justify-content: center; }
+.scroll { flex: 1; min-height: 0; }
+/* 骨架宿主：骨架层用 absolute 盖在真实行上，宿主必须是这两层的定位祖先 */
+.sk-host { width: 100%; position: relative; flex-direction: row; flex-wrap: wrap; }
+/* 骨架层必须包满宽：.sk-host 是 row+wrap，骨架根节点直接当 flex item 会被压成内容宽 */
+.sk-fill { width: 100%; }
 /* 宽屏下网格宽度由脚本实测 scroll-view 后显式指定（见 gridStyle）；
    这里保留 width:100% 供竖屏兜底 */
-.chart-grid { width: 100%; padding: 0 24rpx; flex-direction: row; flex-wrap: wrap; }
-.chart-row { width: 100%; height: 116rpx; margin-bottom: 12rpx; padding: 0 14rpx; flex-direction: row; align-items: center; background-color: #f6f7f9; border-radius: 16rpx; }
-.chart-cover { width: 82rpx; height: 82rpx; border-radius: 12rpx; background-color: #edeff3; }
-.chart-info { flex: 1; min-width: 0; margin-left: 16rpx; }
-.chart-name { color: #1b202b; font-size: 30rpx; font-weight: 600; text-overflow: ellipsis; }
-.chart-meta { margin-top: 6rpx; color: #8b93a2; font-size: 24rpx; text-overflow: ellipsis; }
+.chart-grid { width: 100%; padding: 20rpx 24rpx 0; flex-direction: row; flex-wrap: wrap; }
+/* QQ 音乐式榜单卡：卡头标题 + 左封面右前三名 */
+.rank-card { width: 100%; padding: 20rpx 24rpx 24rpx; margin-bottom: 20rpx; background-color: #ffffff; border-width: 1px; border-style: solid; border-color: #e6e8ee; border-radius: 24rpx; }
+.rank-head { flex-direction: row; align-items: center; justify-content: space-between; }
+.rank-name { color: #1b202b; font-size: 32rpx; font-weight: 600; text-overflow: ellipsis; }
+.rank-meta { margin-left: 16rpx; color: #8b93a2; font-size: 24rpx; text-overflow: ellipsis; flex-shrink: 0; }
+.rank-body { margin-top: 20rpx; flex-direction: row; align-items: center; }
+.rank-cover-wrap { width: 148rpx; height: 148rpx; border-radius: 16rpx; overflow: hidden; background-color: #edeff3; flex-shrink: 0; }
+.rank-cover { width: 148rpx; height: 148rpx; }
+.rank-play { position: absolute; left: 0; top: 0; right: 0; bottom: 0; align-items: center; justify-content: center; background-color: rgba(0, 0, 0, 0.25); }
+.rank-songs { flex: 1; min-width: 0; margin-left: 24rpx; }
+.rank-song { height: 50rpx; flex-direction: row; align-items: center; }
+.rank-idx { width: 40rpx; color: #8b93a2; font-size: 26rpx; font-weight: 600; }
+.rank-song-name { flex: 1; min-width: 0; color: #1b202b; font-size: 26rpx; text-overflow: ellipsis; }
 .empty { width: 100%; height: 300rpx; align-items: center; justify-content: center; }
 .empty-text { color: #9097a5; font-size: 26rpx; }
 .pad { height: 44rpx; }
 
-.source-row-dark { background-color: #161a23; border-color: #2a2f3a; }
-.chart-row-dark { background-color: #212734; }
-.chart-name-dark { color: #e9ebf0; }
-.chart-meta-dark { color: #9aa2b0; }
+.rank-card-dark { background-color: #212734; border-color: #2a2f3a; }
+.rank-name-dark { color: #e9ebf0; }
+.rank-meta-dark { color: #9aa2b0; }
+.rank-idx-dark { color: #9aa2b0; }
+.rank-song-name-dark { color: #e9ebf0; }
 
-.source-row-wide { margin: 12px 16px 0; padding: 8px; border-radius: 14px; align-self: flex-start; width: 520px; }
-.chart-grid-wide { padding-left: 16px; padding-right: 16px; }
-.loading-wide { height: 220px; }
-.chart-row-wide { height: 54px; margin-right: 12px; border-radius: 12px; }
-.chart-cover-wide { width: 38px; height: 38px; border-radius: 8px; }
-.chart-info-wide { margin-left: 10px; }
-.chart-name-wide { font-size: 15px; }
-.chart-meta-wide { margin-top: 3px; font-size: 13px; }
+.chart-grid-wide { padding: 12px 16px 0; }
+.rank-card-wide { padding: 12px 14px 14px; margin-bottom: 12px; margin-right: 12px; border-radius: 14px; }
+.rank-name-wide { font-size: 17px; }
+.rank-meta-wide { margin-left: 8px; font-size: 13px; }
+.rank-body-wide { margin-top: 10px; }
+.rank-cover-wrap-wide { width: 84px; height: 84px; border-radius: 10px; }
+.rank-cover-wide { width: 84px; height: 84px; }
+.rank-songs-wide { margin-left: 12px; }
+.rank-song-wide { height: 28px; }
+.rank-idx-wide { width: 22px; font-size: 13px; }
+.rank-song-name-wide { font-size: 13px; }
+/* 桌面指针反馈：只在宽屏启用 */
+.rank-card-hover {
+  background-color: rgba(127, 127, 127, 0.10);
+}
 .pad-wide { height: 22px; }
 .empty-wide { height: 220px; }
 .empty-text-wide { font-size: 15px; }
 </style>
-

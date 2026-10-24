@@ -1,0 +1,436 @@
+<template>
+  <qt-page-frame width-kind="list" title="AI 接口配置">
+    <scroll-view class="page" :class="layout.isWide ? 'page-wide' : ''" :show-scrollbar="false">
+      <qt-card
+        class="intro-card"
+        :class="layout.isWide ? 'intro-card-wide' : ''"
+        title="本地模型供应商"
+        description="「本地模型精选」模式从这里取接口：配置任一 OpenAI / Anthropic / Gemini 兼容网关，每日推荐和音乐助手共用。"
+      >
+        <text class="intro-hint" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)">密钥只保存在本机（明文存储），列表里仅显示掩码；请求直连你填的地址，不经过任何中转。</text>
+      </qt-card>
+
+      <view
+        v-for="(p, index) in profiles"
+        :key="p.id"
+        class="profile-card"
+        :class="layout.isWide ? 'profile-card-wide' : ''"
+        :style="profileStyle(p)"
+      >
+        <view class="profile-head" @click="openEdit(p)">
+          <view class="profile-main">
+            <view class="profile-title-row">
+              <text class="profile-name" :style="'color:' + theme.skin.text + ';' + qtFontDual(30, 16)">{{ p.name.length > 0 ? p.name : "未命名供应商" }}</text>
+              <view v-if="activeId == p.id" class="active-badge" :style="activeBadgeStyle"><text class="active-badge-text" :style="'color:' + theme.skin.onAccent + ';' + qtFontDual(20, 11)">生效中</text></view>
+            </view>
+            <text class="profile-url" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)">{{ p.baseUrl }}</text>
+            <text class="profile-meta" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)">{{ protocolLabel(p.protocol) }} · {{ activeModelOf(p) }} · 密钥 {{ keyMaskText(p) }}</text>
+          </view>
+          <QtIcon name="chevron-right" :size="layout.isWide ? 18 : 28" :color="theme.skin.iconMuted" />
+        </view>
+        <view class="profile-btn-row" :class="layout.isWide ? 'profile-btn-row-wide' : ''">
+          <qt-button class="profile-btn" label="编辑" variant="ghost" size="sm" @click="openEdit(p)" />
+          <qt-button v-if="activeId != p.id" class="profile-btn" label="设为生效" variant="secondary" size="sm" @click="setActive(p.id)" />
+          <qt-button class="profile-btn" label="删除" variant="outline" size="sm" @click="removeProfile(p)" />
+        </view>
+      </view>
+
+      <view v-if="profiles.length == 0" class="empty-card" :class="layout.isWide ? 'empty-card-wide' : ''" :style="emptyStyle">
+        <text class="empty-title" :style="'color:' + theme.skin.text + ';' + qtFontDual(28, 15)">还没有供应商</text>
+        <text class="empty-sub" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)">点下面「新增供应商」，填一个 OpenAI 兼容地址即可开始。</text>
+      </view>
+
+      <view class="add-row" :class="layout.isWide ? 'add-row-wide' : ''">
+        <qt-button class="add-btn" :class="layout.isWide ? 'add-btn-wide' : ''" label="新增供应商" variant="secondary" size="md" @click="openNew" />
+      </view>
+      <view class="pad"></view>
+    </scroll-view>
+
+    <!-- 编辑弹层：列表页进入单档编辑（qt-pc 的 AiProvidersDialog 移动端形态） -->
+    <view v-if="editVisible" class="edit-mask" @click="closeEdit">
+      <view class="edit-panel" :class="[layout.isWide ? 'edit-panel-wide' : '', editOpen ? 'edit-panel-on' : '']" :style="editPanelStyle" @click.stop>
+        <scroll-view class="edit-scroll" :show-scrollbar="false">
+          <view class="edit-head">
+            <text class="edit-title" :style="'color:' + theme.skin.text + ';' + qtFontDual(32, 18)">{{ isNew ? "新增供应商" : "编辑供应商" }}</text>
+            <view class="edit-close" @click="closeEdit"><QtIcon name="close" :size="layout.isWide ? 18 : 30" :color="theme.skin.iconMuted" /></view>
+          </view>
+
+          <view class="field-row">
+            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13)">名称</text>
+            <input class="field-input" :class="layout.isWide ? 'field-input-wide' : ''" :style="fieldInputStyle" :value="nameT" @input="onNameInput" placeholder="如 深度求索" :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'" :maxlength="24" />
+          </view>
+          <view class="field-row">
+            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13)">接口地址</text>
+            <input class="field-input" :class="layout.isWide ? 'field-input-wide' : ''" :style="fieldInputStyle" :value="baseT" @input="onBaseInput" placeholder="https://api.example.com（不带 /v1）" :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'" :maxlength="256" />
+          </view>
+          <view class="field-row" @click="openProtoSheet">
+            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13)">协议</text>
+            <view class="field-value-row"><text class="field-value" :style="'color:' + theme.skin.text + ';' + qtFontDual(25, 14)">{{ protocolLabel(proto) }}</text><QtIcon name="chevron-right" :size="layout.isWide ? 16 : 26" :color="theme.skin.iconMuted" /></view>
+          </view>
+          <view class="field-row">
+            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13)">模型</text>
+            <input class="field-input" :class="layout.isWide ? 'field-input-wide' : ''" :style="fieldInputStyle" :value="modelT" @input="onModelInput" placeholder="模型 ID" :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'" :maxlength="64" />
+            <qt-button class="field-btn" label="拉取列表" variant="outline" size="sm" :disabled="loadingModels" @click="fetchModels" />
+          </view>
+          <view class="field-row">
+            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13)">密钥</text>
+            <input class="field-input" :class="layout.isWide ? 'field-input-wide' : ''" :style="fieldInputStyle" :value="keyT" @input="onKeyInput" :placeholder="isNew ? 'API Key（只存本机）' : keyPlaceholder" :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'" :maxlength="256" />
+          </view>
+          <view class="field-row" @click="toggleCert">
+            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13)">证书校验</text>
+            <text class="field-value" :style="'color:' + theme.skin.text + ';' + qtFontDual(25, 14)">{{ skipCert ? "已跳过（自签证书网关用）" : "严格校验（默认）" }}</text>
+          </view>
+
+          <text v-if="testText.length > 0" class="test-text" :style="'color:' + (testOk ? theme.skin.success : theme.skin.danger) + ';' + qtFontDual(22, 12)">{{ testText }}</text>
+
+          <view class="edit-btn-row" :class="layout.isWide ? 'edit-btn-row-wide' : ''">
+            <qt-button class="edit-btn" label="测试连接" variant="outline" size="sm" :disabled="testing" @click="testNow" />
+            <qt-button class="edit-btn" label="保存" variant="secondary" size="sm" @click="save" />
+          </view>
+          <view class="edit-pad"></view>
+        </scroll-view>
+      </view>
+    </view>
+
+    <qt-action-sheet :visible="protoSheetVisible" title="选择协议" :actions="protoActions" @select="onProtoSelect" @close="protoSheetVisible = false" />
+    <qt-action-sheet :visible="modelSheetVisible" title="选择模型" :actions="modelActions" @select="onModelSelect" @close="modelSheetVisible = false" />
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import { computed, ref } from "vue";
+import { onUnload } from "@dcloudio/uni-app";
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtCard from "@/uni_modules/qt-ui/components/qt-card/qt-card.uvue";
+import { qtConfirm } from "@/services/confirm";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtShowToast } from "@/services/toast";
+import {
+  readProviders,
+  saveProviders,
+  activeProfile,
+  activeModelOf,
+  maskKey,
+  listModels,
+  testConnection,
+  AI_PROTOCOL_ORDER,
+  type AiProviderProfile,
+  type AiProviderProtocol,
+} from "@/services/ai-providers";
+import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+
+const theme = useThemeStore();
+const layout = useQtLayout();
+
+/** 列表态：每次进页/保存后从 storage 重读，避免页面与其它入口写穿 */
+const profiles = ref<AiProviderProfile[]>([]);
+const activeId = ref("");
+
+function reload(): void {
+  const cfg = readProviders();
+  profiles.value = cfg.profiles;
+  activeId.value = cfg.activeId;
+}
+reload();
+
+/** 编辑弹层（16ms 进场动画与歌单广场分类面板同一配方） */
+const editVisible = ref(false);
+const editOpen = ref(false);
+const isNew = ref(false);
+const editId = ref("");
+const keepKeys = ref<string[]>([]);
+const nameT = ref("");
+const baseT = ref("");
+const modelT = ref("");
+const keyT = ref("");
+const proto = ref<AiProviderProtocol>("openai");
+const skipCert = ref(false);
+const testing = ref(false);
+const testOk = ref(false);
+const testText = ref("");
+const loadingModels = ref(false);
+let openTimer = 0;
+
+const keyPlaceholder = computed((): string => {
+  if (keepKeys.value.length == 0) return "尚未设置密钥";
+  return "已保存 " + maskKey(keepKeys.value[0]) + "（留空保持不变）";
+});
+
+function openNew(): void {
+  isNew.value = true;
+  editId.value = "";
+  keepKeys.value = [];
+  nameT.value = "";
+  baseT.value = "";
+  modelT.value = "";
+  keyT.value = "";
+  proto.value = "openai";
+  skipCert.value = false;
+  testText.value = "";
+  showEdit();
+}
+
+function openEdit(p: AiProviderProfile): void {
+  isNew.value = false;
+  editId.value = p.id;
+  keepKeys.value = p.keys.slice();
+  nameT.value = p.name;
+  baseT.value = p.baseUrl;
+  modelT.value = activeModelOf(p);
+  keyT.value = "";
+  proto.value = p.protocol;
+  skipCert.value = p.skipCertVerify;
+  testText.value = "";
+  showEdit();
+}
+
+function showEdit(): void {
+  editVisible.value = true;
+  if (openTimer != 0) clearTimeout(openTimer);
+  openTimer = setTimeout((): void => { editOpen.value = true; }, 16);
+}
+
+function closeEdit(): void {
+  editOpen.value = false;
+  if (openTimer != 0) { clearTimeout(openTimer); openTimer = 0; }
+  setTimeout((): void => { editVisible.value = false; }, 220);
+}
+
+onUnload((): void => {
+  if (openTimer != 0) clearTimeout(openTimer);
+});
+
+function protocolLabel(p: AiProviderProtocol): string {
+  if (p == "openai") return "OpenAI";
+  if (p == "openai-responses") return "OpenAI Responses";
+  if (p == "anthropic") return "Anthropic";
+  return "Gemini";
+}
+
+function onNameInput(e: UniInputEvent): void { nameT.value = e.detail.value; }
+function onBaseInput(e: UniInputEvent): void { baseT.value = e.detail.value; }
+function onModelInput(e: UniInputEvent): void { modelT.value = e.detail.value; }
+function onKeyInput(e: UniInputEvent): void { keyT.value = e.detail.value; }
+
+function toggleCert(): void {
+  skipCert.value = !skipCert.value;
+}
+
+/** 协议选择 */
+const protoSheetVisible = ref(false);
+const protoActions = computed((): SheetAction[] => {
+  const acts: SheetAction[] = [];
+  for (let i = 0; i < AI_PROTOCOL_ORDER.length; i++) {
+    const p = AI_PROTOCOL_ORDER[i];
+    acts.push({ name: protocolLabel(p), color: p == proto.value ? theme.skin.accent : "" });
+  }
+  return acts;
+});
+
+function openProtoSheet(): void { protoSheetVisible.value = true; }
+
+function onProtoSelect(_action: SheetAction, index: number): void {
+  proto.value = AI_PROTOCOL_ORDER[index];
+  protoSheetVisible.value = false;
+}
+
+/** 模型列表：网关不支持 /v1/models 时允许手动输入 */
+const modelSheetVisible = ref(false);
+const modelsList = ref<string[]>([]);
+const modelActions = computed((): SheetAction[] => {
+  const acts: SheetAction[] = [];
+  for (let i = 0; i < modelsList.value.length; i++) {
+    acts.push({ name: modelsList.value[i], color: modelsList.value[i] == modelT.value ? theme.skin.accent : "" });
+  }
+  return acts;
+});
+
+function fetchModels(): void {
+  const base = baseT.value.trim();
+  const key = keyT.value.trim().length > 0 ? keyT.value.trim() : (keepKeys.value.length > 0 ? keepKeys.value[0] : "");
+  if (base.length == 0) { qtShowToast({ title: "先填接口地址", icon: "none" }); return; }
+  loadingModels.value = true;
+  listModels(base, key, proto.value, skipCert.value)
+    .then((models: string[]): void => {
+      loadingModels.value = false;
+      if (models.length == 0) {
+        qtShowToast({ title: "接口没返回模型列表，请手动填模型 ID", icon: "none" });
+        return;
+      }
+      modelsList.value = models;
+      modelSheetVisible.value = true;
+    })
+    .catch((err: any): void => {
+      loadingModels.value = false;
+      const msg = err != null && err.message != null ? String(err.message) : "拉取失败";
+      qtShowToast({ title: msg + "，请手动填模型 ID", icon: "none" });
+    });
+}
+
+function onModelSelect(action: SheetAction, _index: number): void {
+  modelT.value = action.name;
+  modelSheetVisible.value = false;
+}
+
+/** 测试：一条 你好 消息走完整链路（qt-pc AiLocalTestResult 同口径） */
+function testNow(): void {
+  const base = baseT.value.trim();
+  const model = modelT.value.trim();
+  const key = keyT.value.trim().length > 0 ? keyT.value.trim() : (keepKeys.value.length > 0 ? keepKeys.value[0] : "");
+  if (base.length == 0 || model.length == 0) { testOk.value = false; testText.value = "先填接口地址和模型"; return; }
+  testing.value = true;
+  testText.value = "请求中…";
+  testConnection(base, proto.value, model, key, skipCert.value)
+    .then((res): void => {
+      testing.value = false;
+      testOk.value = res.ok;
+      testText.value = res.ok
+        ? "连通（HTTP " + res.status + "，" + res.elapsedMs + "ms）" + (res.reply.length > 0 ? "：" + res.reply : "")
+        : "失败：" + (res.error.length > 0 ? res.error : "HTTP " + res.status);
+    })
+    .catch((): void => { testing.value = false; });
+}
+
+/** 保存：编辑态密钥留空 = 保留旧密钥；新增态必须给密钥 */
+function save(): void {
+  const name = nameT.value.trim();
+  const base = baseT.value.trim();
+  const model = modelT.value.trim();
+  const keyIn = keyT.value.trim();
+  if (name.length == 0) { qtShowToast({ title: "给供应商起个名字", icon: "none" }); return; }
+  if (base.indexOf("http") != 0) { qtShowToast({ title: "接口地址要以 http(s) 开头", icon: "none" }); return; }
+  if (model.length == 0) { qtShowToast({ title: "填一个模型 ID", icon: "none" }); return; }
+  const keys = keyIn.length > 0 ? [keyIn] : keepKeys.value;
+  if (keys.length == 0) { qtShowToast({ title: "需要至少一把密钥", icon: "none" }); return; }
+
+  const cfg = readProviders();
+  let id = editId.value;
+  const models = [model];
+  if (isNew.value) {
+    id = "p" + Date.now().toString();
+    cfg.profiles.push({ id, name, baseUrl: base, protocol: proto.value, model, models, keys, icon: "", skipCertVerify: skipCert.value });
+    if (cfg.activeId.length == 0 || activeProfile() == null) cfg.activeId = id;
+  } else {
+    let hit = false;
+    for (let i = 0; i < cfg.profiles.length; i++) {
+      if (cfg.profiles[i].id == id) {
+        cfg.profiles[i] = { id, name, baseUrl: base, protocol: proto.value, model, models, keys, icon: cfg.profiles[i].icon, skipCertVerify: skipCert.value };
+        hit = true;
+        break;
+      }
+    }
+    if (!hit) cfg.profiles.push({ id, name, baseUrl: base, protocol: proto.value, model, models, keys, icon: "", skipCertVerify: skipCert.value });
+  }
+  saveProviders(cfg);
+  reload();
+  closeEdit();
+  qtShowToast({ title: "已保存", icon: "none" });
+}
+
+function setActive(id: string): void {
+  const cfg = readProviders();
+  cfg.activeId = id;
+  saveProviders(cfg);
+  reload();
+  qtShowToast({ title: "已设为生效供应商", icon: "none" });
+}
+
+async function removeProfile(p: AiProviderProfile): Promise<void> {
+  // 密钥删了就找不回来，与清日志/删会话同级破坏性操作，同样过一次确认
+  const ok = await qtConfirm({ title: "删除供应商", content: "将删除「" + p.name + "」及其配置的 Key，不可恢复。", confirmText: "删除", danger: true });
+  if (!ok) return;
+  const cfg = readProviders();
+  const rest: AiProviderProfile[] = [];
+  for (let i = 0; i < cfg.profiles.length; i++) {
+    if (cfg.profiles[i].id != p.id) rest.push(cfg.profiles[i]);
+  }
+  cfg.profiles = rest;
+  if (cfg.activeId == p.id) cfg.activeId = rest.length > 0 ? rest[0].id : "";
+  saveProviders(cfg);
+  reload();
+  qtShowToast({ title: "已删除", icon: "none" });
+}
+
+function keyMaskText(p: AiProviderProfile): string {
+  if (p.keys.length == 0) return "未设置";
+  return maskKey(p.keys[0]);
+}
+
+const profileStyle = computed((): ((p: AiProviderProfile) => string) => {
+  return (p: AiProviderProfile): string => {
+    return "background-color:" + theme.skin.surface + ";border-color:" + (activeId.value == p.id ? theme.skin.accent : theme.skin.border) + ";";
+  };
+});
+
+const activeBadgeStyle = computed((): string => {
+  return "background-color:" + theme.skin.accent + ";";
+});
+
+const emptyStyle = computed((): string => {
+  return "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";";
+});
+
+const editPanelStyle = computed((): string => {
+  // max-height 不支持百分比（编译报错），面板限高在脚本里按窗口高算 px
+  const maxH = Math.floor(layout.windowHeight * (layout.isWide ? 0.8 : 0.82));
+  return "background-color:" + theme.skin.surface + ";max-height:" + maxH + "px;";
+});
+
+const fieldInputStyle = computed((): string => {
+  return "color:" + theme.skin.text + ";border-bottom-color:" + theme.skin.divider + ";";
+});
+</script>
+<style scoped>
+.page { flex: 1; padding: 24rpx 24rpx 0; }
+.page-wide { padding: 16px 20px 0; }
+.intro-card { margin-bottom: 20rpx; }
+.intro-card-wide { margin-bottom: 12px; margin-right: 0; }
+.intro-hint { margin-top: 4rpx; line-height: 36rpx; }
+.profile-card { border-width: 1rpx; border-style: solid; border-radius: 20rpx; padding: 24rpx; margin-bottom: 20rpx; }
+.profile-card-wide { border-width: 1px; border-radius: 12px; padding: 14px; margin-bottom: 12px; margin-right: 0; }
+.profile-head { flex-direction: row; align-items: center; }
+.profile-main { flex: 1; min-width: 0; }
+.profile-title-row { flex-direction: row; align-items: center; }
+.profile-name { font-weight: 600; }
+.active-badge { margin-left: 12rpx; border-radius: 999rpx; padding: 2rpx 14rpx; }
+.profile-url { margin-top: 6rpx; line-height: 32rpx; }
+.profile-meta { margin-top: 2rpx; line-height: 32rpx; }
+.profile-btn-row { flex-direction: row; justify-content: flex-end; margin-top: 16rpx; }
+.profile-btn-row-wide { margin-top: 10px; }
+.profile-btn { margin-left: 16rpx; }
+.empty-card { border-width: 1rpx; border-style: solid; border-radius: 20rpx; padding: 40rpx 24rpx; align-items: center; }
+.empty-card-wide { border-width: 1px; border-radius: 12px; padding: 24px 16px; }
+.empty-title { font-weight: 600; }
+.empty-sub { margin-top: 8rpx; }
+.add-row { padding: 8rpx 0 24rpx; align-items: center; }
+.add-row-wide { padding: 4px 0 16px; }
+.add-btn { width: 420rpx; }
+.add-btn-wide { width: 260px; }
+.pad { height: 40rpx; }
+.edit-mask { position: fixed; left: 0; right: 0; top: 0; bottom: 0; background-color: rgba(0, 0, 0, 0.45); }
+.edit-panel { position: fixed; left: 0; right: 0; bottom: 0; border-top-left-radius: 24rpx; border-top-right-radius: 24rpx; transform: translateY(102%); transition-property: transform; transition-duration: 220ms; }
+.edit-panel-on { transform: translateY(0); }
+.edit-panel-wide { border-top-left-radius: 14px; border-top-right-radius: 14px; }
+.edit-scroll { padding: 28rpx 32rpx 0; }
+.edit-head { flex-direction: row; align-items: center; justify-content: space-between; margin-bottom: 16rpx; }
+.edit-title { font-weight: 600; }
+.edit-close { padding: 8rpx; }
+.field-row { flex-direction: row; align-items: center; padding: 20rpx 0; }
+.field-label { width: 150rpx; flex-shrink: 0; }
+.field-input { flex: 1; height: 60rpx; border-bottom-width: 1rpx; border-bottom-style: solid; font-size: 26rpx; }
+.field-input-wide { height: 34px; border-bottom-width: 1px; font-size: 14px; }
+.field-value-row { flex: 1; flex-direction: row; align-items: center; justify-content: flex-end; }
+.field-value { margin-right: 8rpx; }
+.field-btn { margin-left: 16rpx; flex-shrink: 0; }
+.test-text { margin-top: 8rpx; line-height: 34rpx; }
+.edit-btn-row { flex-direction: row; justify-content: flex-end; margin-top: 24rpx; }
+.edit-btn-row-wide { margin-top: 16px; }
+.edit-btn { margin-left: 16rpx; }
+.edit-pad { height: 60rpx; }
+.field-ph { color: #b8bec9; font-size: 24rpx; }
+.field-ph-wide { color: #b8bec9; font-size: 13px; }
+</style>

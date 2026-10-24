@@ -1,10 +1,10 @@
 <template>
-  <qt-page-frame :max-width="640">
+  <qt-page-frame width-kind="form">
   <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']">
     <view class="head" :class="layout.isWide ? 'head-wide' : ''">
       <image class="logo-img" :class="layout.isWide ? 'logo-img-wide' : ''" src="/static/icon/xxxhdpi.png" mode="aspectFill" />
-      <text class="head-title" :class="layout.isWide ? 'head-title-wide' : ''">重置密码</text>
-      <text class="head-sub" :class="layout.isWide ? 'head-sub-wide' : ''">通过邮箱验证码找回您的账号密码</text>
+      <text class="head-title" :class="layout.isWide ? 'head-title-wide' : ''" :style="qtFontDual(34, 20)">重置密码</text>
+      <text class="head-sub" :class="layout.isWide ? 'head-sub-wide' : ''" :style="qtFontDual(24, 13)">通过邮箱验证码找回您的账号密码</text>
     </view>
 
     <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
@@ -31,7 +31,7 @@
           :maxlength="6"
         />
         <view class="code-btn" :class="[layout.isWide ? 'code-btn-wide' : '', sending || countdown > 0 ? 'code-btn-disabled' : '']" :style="sending || countdown > 0 ? '' : 'background-color:' + themeStore.skin.accentSoft + ';'" @click="sendCode">
-          <text class="code-btn-text" :class="layout.isWide ? 'code-btn-text-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">{{ countdown > 0 ? countdown + 's' : '获取验证码' }}</text>
+          <text class="code-btn-text" :class="layout.isWide ? 'code-btn-text-wide' : ''" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(25, 13)">{{ countdown > 0 ? countdown + 's' : '获取验证码' }}</text>
         </view>
       </view>
 
@@ -80,6 +80,7 @@
   </qt-page-frame>
 </template>
 <script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { ref, computed, onBeforeUnmount } from "vue";
 import { accountApi } from "@/services/music-api";
@@ -87,6 +88,7 @@ import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const themeStore = useThemeStore();
 const layout = useQtLayout();
@@ -127,18 +129,18 @@ function sendCode(): void {
   if (sending.value || countdown.value > 0) return;
   const mail = email.value.trim();
   if (mail.length == 0) {
-    uni.showToast({ title: "请输入邮箱", icon: "none" });
+    qtShowToast({ title: "请输入邮箱", icon: "none" });
     return;
   }
   if (!isEmail(mail)) {
-    uni.showToast({ title: "请输入正确的邮箱地址", icon: "none" });
+    qtShowToast({ title: "请输入正确的邮箱地址", icon: "none" });
     return;
   }
   sending.value = true;
   accountApi
     .sendEmail(mail, "changePasswordByEmail")
     .then(() => {
-      uni.showToast({ title: "验证码已发送", icon: "success" });
+      qtShowToast({ title: "验证码已发送", icon: "success" });
       countdown.value = 60;
       timer = setInterval(() => {
         countdown.value--;
@@ -149,7 +151,7 @@ function sendCode(): void {
       }, 1000) as unknown as number;
     })
     .catch((error) => {
-      uni.showToast({ title: (error as Error).message || "发送失败", icon: "none" });
+      qtShowToast({ title: (error as Error).message || "发送失败", icon: "none" });
     })
     .finally(() => {
       sending.value = false;
@@ -160,43 +162,43 @@ async function submit(): Promise<void> {
   const mail = email.value.trim();
   const pw = password.value;
   if (mail.length == 0) {
-    uni.showToast({ title: "请输入邮箱", icon: "none" });
+    qtShowToast({ title: "请输入邮箱", icon: "none" });
     return;
   }
   if (!isEmail(mail)) {
-    uni.showToast({ title: "请输入正确的邮箱地址", icon: "none" });
+    qtShowToast({ title: "请输入正确的邮箱地址", icon: "none" });
     return;
   }
   if (code.value.length == 0) {
-    uni.showToast({ title: "请输入验证码", icon: "none" });
+    qtShowToast({ title: "请输入验证码", icon: "none" });
     return;
   }
   if (pw.length == 0) {
-    uni.showToast({ title: "请输入新密码", icon: "none" });
+    qtShowToast({ title: "请输入新密码", icon: "none" });
     return;
   }
   if (pw.length < 6 || pw.length > 18) {
-    uni.showToast({ title: "密码长度为 6-18 位", icon: "none" });
+    qtShowToast({ title: "密码长度为 6-18 位", icon: "none" });
     return;
   }
   if (confirmPw.value.length == 0) {
-    uni.showToast({ title: "请输入确认密码", icon: "none" });
+    qtShowToast({ title: "请输入确认密码", icon: "none" });
     return;
   }
   if (pw !== confirmPw.value) {
-    uni.showToast({ title: "两次输入的密码不一致", icon: "none" });
+    qtShowToast({ title: "两次输入的密码不一致", icon: "none" });
     return;
   }
 
   loading.value = true;
   try {
     await accountApi.changePassword(mail, pw, code.value.trim());
-    uni.showToast({ title: "密码重置成功", icon: "success" });
+    qtShowToast({ title: "密码重置成功", icon: "success" });
     navBackTimer = setTimeout(() => {
       uni.navigateBack();
     }, 600) as number;
   } catch (error) {
-    uni.showToast({ title: (error as Error).message || "重置失败", icon: "none" });
+    qtShowToast({ title: (error as Error).message || "重置失败", icon: "none" });
   } finally {
     loading.value = false;
   }
@@ -255,7 +257,7 @@ onBeforeUnmount(() => {
   margin-top: 26rpx;
   padding: 0 28rpx;
   background-color: #f4f5fa;
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
   border-color: #eef0f5;
   border-radius: 22rpx;
 }
@@ -282,7 +284,7 @@ onBeforeUnmount(() => {
   padding: 0 28rpx;
   justify-content: center;
   align-items: center;
-  border-left-width: 1px;
+  border-left-width: 1px; border-left-style: solid;
   border-left-color: #f5d2d2;
   border-radius: 0 22rpx 22rpx 0;
 }
@@ -301,11 +303,6 @@ onBeforeUnmount(() => {
 }
 .action {
   margin-top: 48rpx;
-}
-.action-text {
-  color: #ffffff;
-  font-size: 32rpx;
-  font-weight: 600;
 }
 
 /* Vapor 宽屏：px 覆盖 rpx，1600x900 下避免按窗口比例放大 2.7 倍 */
@@ -365,5 +362,4 @@ onBeforeUnmount(() => {
 .action-wide {
   margin-top: 20px;
 }
-.action-text-wide { font-size: 15px; }
 </style>

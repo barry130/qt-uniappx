@@ -4,7 +4,7 @@
  * 本项目以 Android 为主，此处保证接口可编译；实际调用方对返回值做降级处理。
  */
 
-import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, IsIgnoringBatteryOptimizations, OpenBatteryOptimizationSettings, OpenAutoStartSettings, OpenAppDetailsSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, PickFileResult, PickJsFile, PermissionState, QueryPermissionStates, OpenPermissionSettings } from "../interface.uts";
+import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, IsIgnoringBatteryOptimizations, OpenBatteryOptimizationSettings, OpenAutoStartSettings, OpenAppDetailsSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteMediaByPath, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, PickFileResult, PickJsFile, PickDirectoryResult, PickDirectory, SetCustomDirUri, PermissionState, QueryPermissionStates, OpenPermissionSettings } from "../interface.uts";
 
 export const openExternalUrl: OpenExternalUrl = (url: string): boolean => {
   if (url == null || url.length == 0) return false;
@@ -32,12 +32,16 @@ export const saveToPublicMedia: SaveToPublicMedia = function (
   dirType: string,
   fileName: string,
   subDir?: string
-): string {
-  return "";
+): Promise<string> {
+  return new Promise<string>((resolve: (value: string) => void, reject: (err: any) => void) => {
+    resolve("");
+  });
 };
 
-export const ensurePublicDirPermission: EnsurePublicDirPermission = function (): boolean {
-  return false;
+export const ensurePublicDirPermission: EnsurePublicDirPermission = function (): Promise<boolean> {
+  return new Promise<boolean>((resolve: (value: boolean) => void, reject: (err: any) => void) => {
+    resolve(false);
+  });
 };
 
 // iOS 没有公开的「直达本应用通知设置页」API（UIApplicationOpenSettingsURLString 只能到应用设置根页），
@@ -88,10 +92,27 @@ export const deleteLocalMedia: DeleteLocalMedia = function (items: LocalAudioIte
 	return { deleted: 0, pending: 0, failed: items.length };
 };
 
+// iOS 没有公共下载目录（saveToPublicMedia 恒 resolve 空串，下载落私有目录）；
+// 按路径删除需 NSFileManager，保持占位恒失败，由调用方降级提示。
+export const deleteMediaByPath: DeleteMediaByPath = function (paths: string[]): DeleteLocalMediaResult {
+	return { deleted: 0, pending: 0, failed: paths.length };
+};
+
 // iOS 的文件选择需 UIDocumentPickerViewController + 委托链，本项目以 Android
 // 为主，恒回调失败，由调用方隐藏「本地文件安装」入口/降级提示。
 export const pickJsFile: PickJsFile = function (onResult: (result: PickFileResult) => void): void {
 	onResult({ ok: false, name: "", content: "", message: "当前平台不支持本地文件安装" } as PickFileResult);
+};
+
+// iOS 可以选目录（UIDocumentPickerViewController + UTTypeFolder），但本项目下载落盘
+// 走 saveToPublicMedia 且 iOS 端恒不写公共目录（沙盒模型），选了也没有落盘路径可用，
+// 所以恒回调失败，由调用方保持固定目录、不显示「更改位置」。
+export const pickDirectory: PickDirectory = function (onResult: (result: PickDirectoryResult) => void): void {
+	onResult({ ok: false, path: "", name: "", message: "当前平台不支持自定义下载目录" } as PickDirectoryResult);
+};
+
+// 自定义目录 URI 只对鸿蒙有意义（Android 存真实路径、iOS 无公共目录），空实现。
+export const setCustomDirUri: SetCustomDirUri = function (uri: string): void {
 };
 
 // iOS 的授权模型与 Android 的 android.permission.* 不是一套（通知/相册/麦克风

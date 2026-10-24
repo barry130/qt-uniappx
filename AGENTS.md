@@ -16,6 +16,7 @@ This directory is a UniAppX music application only.
   Contract owner: astral `astral-common` → `com.astral.common.util.ClientHeaders`
   (documented in astral `COMPONENTS_GUIDE.md`).
 - Put Android, iOS, and Harmony native behavior in UTS services with `#ifdef` comments where platform branches are required.
+- HarmonyOS template restriction: `<sticky-section>` must contain exactly one direct `<sticky-header>` and one direct `<list-item v-for>` child. The app-harmony compile fails with `error: <sticky-section> must contain exactly one direct <sticky-header> and one direct <list-item v-for>.` on any extra direct `list-item` (empty state, skeleton, load-more) even though Android accepts it; keep those items as siblings of the section inside the same `<list-view>` (see `pages/daily/index.uvue`).
 - Do not edit sibling projects while working in this directory.
 
 ## Qt UI module architecture
@@ -29,7 +30,7 @@ This directory is a UniAppX music application only.
 - Design tokens: `uni.scss` SCSS variables resolve **only inside `uni.scss` itself**. Verified by a real HBuilderX build — the same `$var` written in a page/component `<style>` fails with ``[plugin:uni:app-uvue-css] ERROR: property value `$x` is not valid for `color` `` and that property is silently dropped (a non-existent variable produces the identical error, i.e. it is treated as a literal). So page/component styles must use literal values; `uni_modules/qt-ui/stores/theme.ts` is the place for runtime skins, wallpaper, and light/dark state.
 - All responsive UI components must use the shared layout helper at `uni_modules/qt-ui/composables/use-qt-layout.ts`. Components must handle compact and wide layouts internally, not only at the page level.
 - All pages must use `qt-page-frame` from `uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue`; immersive media pages may pass `:full-width="true"`.
-- Default wide-screen breakpoint is `720px`. Use runtime-calculated pixel widths for max-width behavior.
+- Responsive breakpoints are centralized in `use-qt-layout.ts`: `compact <600`, `medium 600–899`, `wide 900–1279`, `desktop ≥1280`. `isWide` is `width >= 900 || (landscape && width >= 600)`; do not revive the legacy `720px` breakpoint. Use `use-qt-widths.ts` content kinds and runtime-calculated pixel widths rather than page-local max-width math.
 
 ## Vapor / UVue CSS restrictions
 
@@ -39,6 +40,7 @@ This directory is a UniAppX music application only.
 - Prefer one flat class per rule. Split grouped selectors when Vapor CSS parsing is uncertain.
 - Verified unavailable in Vapor: `aria-label` / `aria-role` are rejected on built-in elements — `warn: Property 'aria-label' is not supported on '<view>'` and the same for `<text>`; the attribute is dropped. Custom components (e.g. `QtIcon`) do not warn because they simply receive unknown props, but that produces no real accessibility semantics. Do not add `aria-*` expecting screen-reader support; there is currently no accessibility-label API in this mode.
 - Do not add `linear-gradient`, `backdrop-filter`, CSS variables, or other Web-only CSS unless it has been verified in the uni-app x CSS documentation and in a real HBuilderX build.
+- **`border-width` alone paints nothing**: Vapor's `border-style` default is `none`, so every `border-width` / `border-<side>-width` declaration needs a matching `border-style: solid` (or `border-<side>-style: solid`). `border-color` defaults to `#000000`, so add the style only when that side genuinely has a color — otherwise you get a black border. The color often comes from an inline computed binding (`groupStyle`, `cardStyle`, `cellStyle`, `railStyle`, `skinOptionStyle`), so check the binding before adding. `border-width: 0` declarations (e.g. `.cell-no-border`) need no style.
 - **Text styles do not inherit**: app-uvue isolates parent and child component properties, so `font-size` / `color` / `font-weight` written on a `<view>` never reach a child `<text>` — the text silently falls back to the css reset (`font-size: 16px`, `color: #000000`). Put every text property on the `<text>` node itself (inline style or its own class). This bit the karaoke lyric line: `karaokeWrapStyle()` set `font-size` on the `.lrc-karaoke` `<view>`, so each word `<text>` rendered at the 16px default and looked smaller than ordinary lyric lines. The official wording is 「样式不继承」 in <https://doc.dcloud.net.cn/uni-app-x/css/>; `inherit` / `unset` are also unsupported.
 - Use `rpx` for component dimensions and calculated `px` for window-dependent widths.
 - Use `<image>` plus a separate overlay `<view>` for wallpapers instead of CSS `background-image` when cross-platform behavior matters.
@@ -46,6 +48,9 @@ This directory is a UniAppX music application only.
 ## Validation
 
 - Run `npm run check` after adding or moving `.uvue` components.
+- `npm run check` chains the static gates: `.uvue` structure + icon 一致性（`check-uvue`）、toast 出口（`check-toast`）、
+  听歌统计存档与口径（`check-listen-archive` / `check:listen-stats`）、**首次启动免责声明判定（`check:disclaimer`）**、
+  不喜欢规则跨端一致（`check:dislike`）。改这些模块的判定逻辑时，先在对应 `tools/check-*.mjs` 里补一条用例。
 - Run a real HBuilderX Android or iOS build before considering a UI/CSS change complete; the static checker does not replace Vapor CSS compilation.
 - Check both a compact viewport and a wide viewport, including the wide behavior of sheets/drawers, sidebars, player controls, list rows, home cards, search rows, settings cells, and content containers.
 - After changing page orientation or wide-screen layout, rebuild/reinstall the custom base or app package before judging the emulator result; a hot reload may preserve the previous orientation and layout cache.

@@ -1,10 +1,10 @@
 <template>
-  <qt-page-frame :max-width="760">
+  <qt-page-frame width-kind="prose" :max-width="640">
   <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']">
     <scroll-view v-if="notice != null" class="scroll" :class="layout.isWide ? 'scroll-wide' : ''" direction="vertical" :show-scrollbar="false">
       <view class="head" :class="layout.isWide ? 'head-wide' : ''">
-        <text class="title" :class="layout.isWide ? 'title-wide' : ''">{{ notice!.title != null && notice!.title!.length > 0 ? notice!.title! : "公告" }}</text>
-        <text v-if="notice!.createTime != null && notice!.createTime!.length > 0" class="time" :class="layout.isWide ? 'time-wide' : ''">{{
+        <text class="title" :class="layout.isWide ? 'title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(40, 20)">{{ notice!.title != null && notice!.title!.length > 0 ? notice!.title! : "公告" }}</text>
+        <text v-if="notice!.createTime != null && notice!.createTime!.length > 0" class="time" :class="layout.isWide ? 'time-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(24, 14)">{{
           notice!.createTime!
         }}</text>
       </view>
@@ -12,7 +12,11 @@
         <!-- 富文本正文：统一用 QtRichText（JS 侧同步解析成块 + 行内片段，逐段 <text> 渲染）。
              弃用原生 rich-text mode="native"：部分 ROM 会把 <b> 的字重渗到整个块
              （列表项里「名称加粗」会把整行都变粗），自绘 text 逐 run 设置字重不受影响。
-             同时避免原生异步解析导致的“内容后出现”闪现 -->
+             同时避免原生异步解析导致的“内容后出现”闪现。
+             字号基准 30rpx（不是别处的 26）：这是长文阅读页，26rpx 在 366dp 宽的机器上
+             只有约 12.7dp，用户 2026-10-22 反馈「公共详情的字体这么小」。
+             作者在 HTML 里写死的 20px/16px 由组件按「相对网页正文 14px 的倍数」换算，
+             所以抬基准后标题层级一起等比放大，不需要逐条改公告内容。 -->
         <view
           v-if="hasContent"
           class="rich" :class="layout.isWide ? 'rich-wide' : ''"
@@ -21,18 +25,22 @@
           <QtRichText
             :html="notice!.content!"
             :color="themeStore.skin.text"
-            :font-size="26"
+            :font-size="30"
             :line-height="1.7"
             align="left"
           />
         </view>
         <view v-if="hasAction" class="action" :class="layout.isWide ? 'action-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @tap="goAction">
-          <text class="action-text" :class="layout.isWide ? 'action-text-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">查看详情</text>
+          <text class="action-text" :class="layout.isWide ? 'action-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(28, 16)">查看详情</text>
         </view>
       </view>
     </scroll-view>
+    <!-- 未取到公告且尚未判定失效：铺正文骨架，避免「加载中...」四个字一闪而过 -->
+    <view v-else-if="!notFound" class="sk" :class="layout.isWide ? 'sk-wide' : ''">
+      <QtSkeletonList kind="text" :rows="SKELETON_ROWS" />
+    </view>
     <view v-else class="empty" :class="layout.isWide ? 'empty-wide' : ''">
-      <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''">{{ notFound ? "公告不存在或已失效" : "加载中..." }}</text>
+      <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(28, 16)">公告不存在或已失效</text>
     </view>
   </view>
   </qt-page-frame>
@@ -41,6 +49,7 @@
 <script setup lang="ts">
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtRichText from "@/uni_modules/qt-ui/components/qt-rich-text/qt-rich-text.uvue";
+import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
 import { ref, computed } from "vue";
 import { onLoad } from "@dcloudio/uni-app";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
@@ -48,6 +57,7 @@ import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useNoticeStore } from "@/stores/notice";
 import { fetchMessageCenter, openNoticeUrl } from "@/services/notice";
 import type { Notice } from "@/types/notice";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const themeStore = useThemeStore();
 const layout = useQtLayout();
@@ -55,6 +65,8 @@ const noticeStore = useNoticeStore();
 
 const notice = ref<Notice | null>(null);
 const notFound = ref(false);
+/** 骨架段落行数：约一屏正文量，只做占位 */
+const SKELETON_ROWS = 10;
 const noticeId = ref(0);
 
 // 内容富文本：统一用 QtRichText（JS 侧同步解析成块 + 行内片段），Vapor 下无原生异步解析闪现
@@ -116,15 +128,15 @@ onLoad((options) => {
 .head {
   padding: 40rpx 40rpx 22rpx;
 }
+/* 标题/时间的字色由模板绑定主题令牌：写死浅色主题的 #191d26 在深色主题下
+   与页面底色（#15171d）对比度仅 1.2:1，标题等于消失 */
 .title {
-  color: #191d26;
   font-size: 40rpx;
   font-weight: 700;
   line-height: 1.4;
 }
 .time {
   margin-top: 16rpx;
-  color: #6b7385;
   font-size: 24rpx;
 }
 .body {
@@ -148,8 +160,13 @@ onLoad((options) => {
   justify-content: center;
   align-items: center;
 }
+/* 正文骨架：内边距对齐 .head / .body 的 40rpx，切换时文字起始位置不动 */
+.sk {
+  flex: 1;
+  flex-direction: column;
+  padding: 40rpx 40rpx 0;
+}
 .empty-text {
-  color: #6b7385;
   font-size: 28rpx;
 }
 
@@ -164,5 +181,6 @@ onLoad((options) => {
 .action-wide { margin-top: 24px; height: 52px; border-radius: 26px; }
 .action-text-wide { font-size: 16px; }
 .empty-wide { width: 640px; }
+.sk-wide { width: 640px; padding: 24px 8px 0; }
 .empty-text-wide { font-size: 16px; }
 </style>

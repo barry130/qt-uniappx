@@ -1,15 +1,14 @@
-/**
+﻿/**
  * APP 升级模块统一服务
  * 负责版本检查、升级弹窗触发、直链下载与浏览器跳转分发
  * 渠道：stable 正式版 / beta 测试版
  */
 import { accountApi } from "@/services/music-api";
 import { apiRequest } from "@/services/http";
-import { getAccessToken } from "@/services/auth";
 import { getCurrentVersionCode, getCurrentVersionName } from "@/services/app-version";
+import { logErrV, logInfo, logWarn, logWarnV } from "@/services/logger";
 
 /** 升级弹窗状态标记（updateType=2 红点提示用） */
-const UPGRADE_FLAG_KEY = "qt-upgrade-flag";
 
 /** 更新信息类型（对齐后端 QtAppUpdate 字段，UPDATE_DESIGN.md §2.1①） */
 export type AppUpdateInfo = {
@@ -86,7 +85,7 @@ export async function checkAppUpdate(): Promise<AppUpdateInfo | null> {
       md5,
     };
   } catch (e) {
-    console.log("[Upgrade] 检查更新失败", e);
+    logErrV("Upgrade", "检查更新失败", e);
     return null;
   }
 }
@@ -109,19 +108,13 @@ export async function checkOfficialVersion(): Promise<boolean> {
     return true;
   } catch (e) {
     const msg = (e as any).message as string;
-    console.log("[Upgrade] 官方版本校验结果", msg);
+    logWarnV("Upgrade", "官方版本校验结果", msg);
     if (msg != null && msg.indexOf("非官方") >= 0) {
       return false;
     }
     // 网络/其他异常：不误杀
     return true;
   }
-}
-
-/** 是否已登录（升级弹窗展示与否可依赖登录状态） */
-export function isLoggedIn(): boolean {
-  const token = getAccessToken();
-  return token.length > 0;
 }
 
 /**
@@ -142,30 +135,6 @@ export function consumePendingUpdate(): AppUpdateInfo | null {
   const info = pendingUpdateRef.value;
   pendingUpdateRef.value = null;
   return info;
-}
-
-/** 写入红点/新版本标记 */
-export function markUpgradeFlag(versionName: string): void {
-  try {
-    uni.setStorageSync(UPGRADE_FLAG_KEY, versionName);
-  } catch (_) {}
-}
-
-/** 清除升级标记 */
-export function clearUpgradeFlag(): void {
-  try {
-    uni.removeStorageSync(UPGRADE_FLAG_KEY);
-  } catch (_) {}
-}
-
-/** 读取升级标记（关于页红点/新版本提示用） */
-export function getUpgradeFlag(): string {
-  try {
-    const v = uni.getStorageSync(UPGRADE_FLAG_KEY) as string;
-    return v != null ? v : "";
-  } catch (_) {
-    return "";
-  }
 }
 
 /** 格式化文件大小（字节 -> 可读文本） */
@@ -219,7 +188,7 @@ export async function fetchGithubAccels(): Promise<GithubAccel[]> {
     }
     return list;
   } catch (e) {
-    console.log("[Upgrade] 拉取加速节点失败，按无加速处理", e);
+    logErrV("Upgrade", "拉取加速节点失败，按无加速处理", e);
     return [];
   }
 }
@@ -304,9 +273,9 @@ export async function resolveDownloadUrl(
   for (let i = 0; i < accels.length; i++) prefixes.push(accels[i].prefixUrl);
   const picked = await pickAccelPrefix(info.downloadUrl, prefixes);
   if (picked.length > 0) {
-    console.log("[Upgrade] 命中加速节点：" + picked);
+    logInfo("Upgrade", "命中加速节点：" + picked);
     return picked + info.downloadUrl;
   }
-  console.log("[Upgrade] 加速节点全部不可用，回退原始链接");
+  logWarn("Upgrade", "加速节点全部不可用，回退原始链接");
   return info.downloadUrl;
 }

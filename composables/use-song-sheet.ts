@@ -11,6 +11,8 @@ import { useDownloadsStore } from "@/stores/downloads";
 import { useDislikesStore } from "@/stores/dislikes";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import { qtShowToast } from "@/services/toast";
+import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
 
 export function useSongSheet() {
   const player = usePlayerStore();
@@ -78,6 +80,7 @@ export function useSongSheet() {
       shareCard.open(song);
     } else if (index == 5) {
       uni.navigateTo({
+        animationType: qtNavAnimation(),
         url:
           "/pages/artist/index?name=" +
           encodeURIComponent(song.singer) +
@@ -88,21 +91,21 @@ export function useSongSheet() {
       const songBanned = dislikes.hasSongRule(song);
       if (songBanned) {
         dislikes.unbanSong(song);
-        uni.showToast({ title: "已取消屏蔽", icon: "none" });
+        qtShowToast({ title: "已取消屏蔽", icon: "none" });
       } else if (dislikes.banSong(song)) {
-        uni.showToast({ title: "已屏蔽，不再自动播放", icon: "none" });
+        qtShowToast({ title: "已屏蔽，不再自动播放", icon: "none" });
       } else {
-        uni.showToast({ title: "这首歌无法按歌名屏蔽", icon: "none" });
+        qtShowToast({ title: "这首歌无法按歌名屏蔽", icon: "none" });
       }
     } else if (index == 7) {
       const singer = song.singer != null ? song.singer : "";
       if (singer.length == 0) return;
       if (dislikes.hasSingerRule(singer)) {
         dislikes.unbanSinger(singer);
-        uni.showToast({ title: "已取消屏蔽该歌手", icon: "none" });
+        qtShowToast({ title: "已取消屏蔽该歌手", icon: "none" });
       } else {
         dislikes.banSinger(singer);
-        uni.showToast({ title: "已屏蔽该歌手", icon: "none" });
+        qtShowToast({ title: "已屏蔽该歌手", icon: "none" });
       }
     }
   }

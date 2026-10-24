@@ -42,6 +42,7 @@
  * 「发现隔离即自动重建」，故隔离的实际影响是「这一次请求失败」，而不是「永久不可用直到手动重启」。
  */
 
+import Environment from 'android.os.Environment'
 import Handler from 'android.os.Handler'
 import HandlerThread from 'android.os.HandlerThread'
 import Looper from 'android.os.Looper'
@@ -92,6 +93,8 @@ import type {
 	QtJsDataDir,
 	QtJsReadTextFile,
 	QtJsWriteTextFile,
+	QtJsAppendTextFile,
+	QtJsRenamePath,
 	QtJsExists,
 	QtJsRemove,
 	QtJsMkdirs,
@@ -135,6 +138,12 @@ const DEFAULT_UA =
 	'Mozilla/5.0 (Linux; Android 12; zh-CN) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
 /** 响应体上限（防脚本拉大文件把内存撑爆） */
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+/**
+ * 宿主嗅探出的 FLAC 位深回传头（与 PC Rust 宿主 `commands.rs` 同名同义）。
+ * 只在响应体确是 FLAC 且 STREAMINFO 合法时注入，值是 4..32 的十进制整数；
+ * 没有这个头 === 「位深未知」，包侧不会因此降级（见包内 snapQualityToMeasured）。
+ */
+const QT_FLAC_BITS_HEADER = 'x-qt-flac-bits'
 
 const HEX = '0123456789abcdef'
 
@@ -859,8 +868,31 @@ function charsetOf(contentType: string | null): string {
 	return cs
 }
 
+/** 一次 HTTP 响应的原始字节 + 按 charset 解码出的文本（位深嗅探要字节，脚本要文本） */
+class RawResponse {
+	bytes: ByteArray
+	text: string
+
+	constructor(bytes: ByteArray, text: string) {
+		this.bytes = bytes
+		this.text = text
+	}
+}
+
 /** 读干一条流（ByteArrayOutputStream.toString(charset) 直接得到字符串，不碰编码细节） */
 function readAll(input: InputStream, charset: string): string {
+	return readAllBytes(input, charset).text
+}
+
+/**
+ * 读干一条流：先拿原始字节，再按 charset 解码成字符串。
+ *
+ * 必须**先留着字节**：音源包要按字节偏移解析 FLAC STREAMINFO 判位深（24bit vs 16bit），
+ * 而 `String(bytes, charset)` 对非法 UTF-8 序列会替换成 U+FFFD——替换前后字符数与
+ * 字节数不再相等，解码后的字符串索引就是错的。PC 侧 Rust 宿主（commands.rs 的
+ * `flac_bits_of`）也是同一个理由：先 `res.bytes()` 再 `from_utf8_lossy`。
+ */
+function readAllBytes(input: InputStream, charset: string): RawResponse {
 	const buf = new ByteArray(8192)
 	const bos = new ByteArrayOutputStream()
 	let n = input.read(buf)
@@ -871,7 +903,90 @@ function readAll(input: InputStream, charset: string): string {
 		}
 		n = input.read(buf)
 	}
-	return bos.toString(charset)
+	// bos 同时留着字节缓冲：toByteArray() 取原始字节、toString(charset) 按 charset 解码，
+	// 一次读流拿两份，不用为了判位深再读一遍（响应体可能几 MB）。
+	return new RawResponse(bos.toByteArray(), bos.toString(charset))
+}
+
+/**
+ * 从原始响应字节里嗅探 FLAC 位深（0 = 不是 FLAC / 头部不完整 / 数值非法）。
+ *
+ * 与 PC 侧 `commands.rs::flac_bits_of` **逐字段对齐**（同一份契约，两边必须一起改）：
+ * STREAMINFO 是 `fLaC` 之后的第一个 metadata block，固定 34 字节，所以整个头至少
+ * 4 + 4 + 34 = 42 字节；位深字段（5 bit 的 bits-1）落在第 20/21 字节，
+ * 采样率（20 bit）落在第 18/19/20 字节，0 是保留值，用来挡掉「看着像 fLaC 的随机字节」。
+ *
+ * 读字节走 `ubyte()`（& 0xff 归一到 0..255）而不是直接下标取 `ByteArray[i]`：
+ * Kotlin 的 ByteArray 元素是**有符号** Byte，0x80 取出来是 -128，直接参与
+ * `<<` / `>>` / `|` 会把符号扩展带进拼接结果里。
+ */
+function flacBitsOf(data: ByteArray): number {
+	if (data.size < 42) return 0
+	// 'fLaC'
+	if (ubyte(data, 0) != 102) return 0
+	if (ubyte(data, 1) != 76) return 0
+	if (ubyte(data, 2) != 97) return 0
+	if (ubyte(data, 3) != 67) return 0
+	// 块头：最高位是 last-block 标志，低 7 位是类型；首个块必须是 STREAMINFO(0)
+	if ((ubyte(data, 4) & 127) != 0) return 0
+	// 块长度 24 位大端，必须是 34
+	if (ubyte(data, 5) != 0) return 0
+	if (ubyte(data, 6) != 0) return 0
+	if (ubyte(data, 7) != 34) return 0
+	// 采样率 20 bit：0 是 FLAC 保留值
+	const rate = (ubyte(data, 18) << 12) | (ubyte(data, 19) << 4) | (ubyte(data, 20) >> 4)
+	if (rate <= 0) return 0
+	// 位深 5 bit：(bits-1) = 字节 20 最低 1 位 + 字节 21 高 4 位
+	const bits = (((ubyte(data, 20) & 1) << 4) | (ubyte(data, 21) >> 4)) + 1
+	if (bits < 4) return 0
+	if (bits > 32) return 0
+	return bits
+}
+
+/**
+ * 取无符号字节值（0..255）。
+ *
+ * Kotlin 的 ByteArray 元素是**有符号** Byte：0x80 取出来是 -128，直接参与
+ * `<<` / `>>` 会把符号扩展带进拼接结果（`-128 >> 4` 仍是负数），位深和采样率
+ * 全是大端无符号拼接，必须先 & 0xff 归一。另外 ByteArray 的长度是 `.size`
+ * （java byte[] 的直映射，不是 JS 语义的 `.length`）。
+ */
+function ubyte(data: ByteArray, i: number): number {
+	return data[i.toInt()].toInt() & 255
+}
+
+/**
+ * 往 collectHeaders 生成的 JSON 里塞一个头（已存在则覆盖，保持「重复头取最后一次」）。
+ *
+ * 只在**追加**场景走字符串拼接（collectHeaders 已经收口成 `{"k":"v",...}`，
+ * 键名都过了 quoteAscii，所以「砍掉结尾 } 再补一对」是安全的）。替换分支必须按
+ * 引号边界找值的终点：响应头值里带逗号很常见（Cookie / Timing-Allow 等），
+ * 用「下一个逗号」当终点会把值截断成坏 JSON。
+ */
+function injectHeader(headersJson: string, key: string, value: string): string {
+	const k = quoteAscii(key)
+	const pair = k + ':' + quoteAscii(value)
+	const needle = k + '":'
+	const at = headersJson.indexOf(needle)
+	if (at < 0) {
+		if (headersJson == '{}') return '{' + pair + '}'
+		return headersJson.substring(0, headersJson.length - 1) + ',' + pair + '}'
+	}
+	const val = quoteAscii(value)
+	const valStart = at + needle.length
+	// 值一定是 `"..."`：从起始引号起扫到配对的结束引号（反斜杠后一位直接跳过）
+	let i = valStart + 1
+	while (i < headersJson.length) {
+		const c = headersJson.charAt(i)
+		if (c == '\\') {
+			i += 2
+			continue
+		}
+		if (c == '"') break
+		i++
+	}
+	const valEnd = i + 1
+	return headersJson.substring(0, valStart) + val + headersJson.substring(valEnd)
 }
 
 /** 收集响应头为 JSON（按索引遍历，重复头只保留最后一次出现）
@@ -972,8 +1087,18 @@ class HttpTask implements Runnable {
 				if (enc != null && enc.toLowerCase().indexOf('gzip') >= 0) {
 					input = new GZIPInputStream(stream!)
 				}
-				body = readAll(input, charsetOf(c.getContentType()))
+				// 先读成字节再解码：音源包要按**字节偏移**解析 FLAC STREAMINFO
+				// 判位深（24bit vs 16bit），而解码成字符串后 UTF-8 替换字符会让
+				// 索引与真实字节偏移错位 —— 位深必须在解码前嗅探。
+				// 位深以 `x-qt-flac-bits` 响应头回传（与 PC Rust 宿主同契约），
+				// 包侧因此能「如实重标」：请求 flac24bit 但实测 16bit 时按 flac 报。
+				const raw = readAllBytes(input, charsetOf(c.getContentType()))
 				input.close()
+				const bits = flacBitsOf(raw.bytes)
+				if (bits > 0) {
+					headersJson = injectHeader(headersJson, QT_FLAC_BITS_HEADER, `${bits}`)
+				}
+				body = raw.text
 			}
 		} catch (e) {
 			error = errText(e)
@@ -1168,6 +1293,11 @@ export const dataDir: QtJsDataDir = function (): string {
 	return dir.getAbsolutePath()
 }
 
+/** 公共统计目录：由系统解析当前用户的存储卷，不写死 /storage/emulated/0。 */
+export const publicDataDir: QtJsDataDir = function (): string {
+	return Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).getAbsolutePath() + '/QtMusic'
+}
+
 /** 递归删除 */
 function deleteRecursive(f: File): boolean {
 	if (f.isDirectory()) {
@@ -1208,6 +1338,61 @@ export const writeTextFile: QtJsWriteTextFile = function (
 		w.flush()
 		w.close()
 		deliverFile(callback, true, '', '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+/**
+ * 追加文本（UTF-8）。文件不存在会自动创建，父目录不存在会先建。
+ *
+ * 用 `FileOutputStream(f, true)` 的 append 重载（第二个参数就是 append 标志），
+ * 而不是「读全文 + 拼接 + 覆盖写」——后者在日志场景下每写一行都要把整个文件
+ * 读进内存，文件涨到几 MB 时开销和失败面都不划算。
+ */
+export const appendTextFile: QtJsAppendTextFile = function (
+	path: string,
+	text: string,
+	callback: QtJsFileCallback
+) {
+	try {
+		const f = new File(path)
+		const parent = f.getParentFile()
+		if (parent != null && !parent.exists()) {
+			parent.mkdirs()
+		}
+		const w = new OutputStreamWriter(new FileOutputStream(f, true), 'UTF-8')
+		w.write(text)
+		w.flush()
+		w.close()
+		deliverFile(callback, true, '', '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+/**
+ * 改名/移动（同分区）。目标父目录不存在时先建。
+ * `File.renameTo` 返回 false 不抛异常（跨分区、目标已存在等），所以要把返回值
+ * 当 ok 报上去，否则上层会以为轮转成功了。
+ */
+export const renamePath: QtJsRenamePath = function (
+	oldPath: string,
+	newPath: string,
+	callback: QtJsFileCallback
+) {
+	try {
+		const src = new File(oldPath)
+		if (!src.exists()) {
+			deliverFile(callback, false, '', '源路径不存在：' + oldPath)
+			return
+		}
+		const dst = new File(newPath)
+		const parent = dst.getParentFile()
+		if (parent != null && !parent.exists()) {
+			parent.mkdirs()
+		}
+		deliverFile(callback, src.renameTo(dst), '', '')
 	} catch (e) {
 		deliverFile(callback, false, '', errText(e))
 	}

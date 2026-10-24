@@ -4,11 +4,11 @@
       <QtIcon name="bell" :size="layout.isWide ? 16 : 30" :color="themeStore.skin.accent" />
     </view>
     <view class="bar-viewport" :class="layout.isWide ? 'bar-viewport-wide' : ''" ref="viewportRef">
-      <view class="bar-track" ref="trackRef">
+      <view class="bar-track" :class="layout.isWide ? 'bar-track-wide' : ''" ref="trackRef">
         <text
           class="bar-text"
           :class="[layout.isWide ? 'bar-text-wide' : '']"
-          :style="'color:' + themeStore.skin.text + ';'"
+          :style="('color:' + themeStore.skin.text + ';') + qtFontDual(25, 13)"
           :max-lines="1"
           >{{ stripHtml(notice!.content) }}</text
         >
@@ -16,7 +16,7 @@
           v-if="marquee"
           class="bar-text bar-text-copy"
           :class="[layout.isWide ? 'bar-text-wide' : '']"
-          :style="'color:' + themeStore.skin.text + ';'"
+          :style="('color:' + themeStore.skin.text + ';') + qtFontDual(25, 13)"
           ref="copyRef"
           >{{ stripHtml(notice!.content) }}</text
         >
@@ -35,6 +35,8 @@ import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import type { Notice } from "@/types/notice";
 import { openNoticeUrl, closeNoticeBarSession, stripHtml } from "@/services/notice";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { logMsgErr } from "@/services/logger";
 
 const props = defineProps<{
   notice: Notice | null;
@@ -52,8 +54,13 @@ const trackRef = ref<UniElement | null>(null);
 const copyRef = ref<UniElement | null>(null);
 let anim: UniAnimation | null = null;
 
-/** 是否启用跑马灯 */
-const marquee = computed(() => props.notice != null && (props.notice!.marquee ?? 0) == 1);
+/**
+ * 是否启用跑马灯。
+ * 宽屏一律不滚：桌面通告栏宽度够（视口 >1400px），滚动的结果是同一句话在
+ * 一屏里出现两遍（原文本 + 副本），既无信息增益又抢注意力，主流桌面音乐软件
+ * 的通告栏也都静止；宽屏改为单行省略号截断。
+ */
+const marquee = computed(() => props.notice != null && (props.notice!.marquee ?? 0) == 1 && !layout.isWide);
 
 /** 点击通告栏：打开链接 */
 function onTap(): void {
@@ -97,7 +104,7 @@ function startMarquee(): void {
     );
     anim = a;
   } catch (e) {
-    console.log("[NoticeBar] marquee error", e);
+    logMsgErr("[NoticeBar] marquee error", e);
   }
 }
 
@@ -131,6 +138,19 @@ watch(
     });
   }
 );
+
+// 档位/宽度变化时也必须重建动画：
+// 动画的位移距离是按「挂载那一刻」的文本几何算出来的，窗口变宽后旧动画仍在跑，
+// 会把整条 track 平移到窗口外，真机症状是通告栏只剩最后一个字（旋转屏幕后必现）。
+watch(
+  [() => layout.isWide, () => layout.windowWidth],
+  () => {
+    stopMarquee();
+    nextTick(() => {
+      startMarquee();
+    });
+  }
+);
 </script>
 
 <style>
@@ -140,7 +160,7 @@ watch(
   height: 76rpx;
   margin: 20rpx 24rpx 0;
   padding: 0 18rpx;
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
   border-radius: 18rpx;
 }
 .bar-icon-wrap {
@@ -163,11 +183,24 @@ watch(
   flex-shrink: 0;
   align-items: center;
 }
+/* 宽屏不滚：track 必须能被父视口裁剪，否则长文本会把关闭按钮挤出屏幕 */
+.bar-track-wide { flex-shrink: 1; flex: 1; width: 100%; overflow: hidden; }
 .bar-text {
   flex-shrink: 0;
   font-size: 25rpx;
   line-height: 76rpx;
   white-space: nowrap;
+}
+/* 宽屏静止显示：必须让文本自身可收缩（基础规则是 flex-shrink:0 + nowrap），
+   否则父级宽度不足时文本按整行原宽撑开，ellipsis 只能分到 1 个字。
+   真机症状：medium 档（640x360dp）公告栏只剩「置」一个字。 */
+.bar-text-wide {
+  font-size: 13px;
+  line-height: 40px;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .bar-text-copy {
   margin-left: 60rpx;
@@ -182,6 +215,5 @@ watch(
 .bar-root-wide { height: 40px; margin: 10px 16px 0; padding: 0 12px; border-radius: 10px; }
 .bar-icon-wrap-wide { width: 24px; height: 40px; }
 .bar-viewport-wide { height: 40px; margin-left: 4px; }
-.bar-text-wide { font-size: 13px; line-height: 40px; }
 .bar-close-wide { width: 28px; height: 40px; }
 </style>

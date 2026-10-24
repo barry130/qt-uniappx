@@ -98,6 +98,28 @@ function cacheSet(key: string, items: Song[]): void {
   }
 }
 
+/** 换源缓存规模：groups = 缓存的搜索组数，songs = 组内候选歌曲总数 */
+export type SourceSwitchCacheStat = {
+  groups: number;
+  songs: number;
+};
+
+/**
+ * 换源缓存的规模（设置页「清除缓存」展示用）：`groups` = 缓存了多少组搜索结果，
+ * `songs` = 这些组里一共多少首候选。
+ *
+ * 两个数都报而不是只报一个：一组结果通常只有 5 首（MAX_CANDIDATES 上限 20），
+ * 只报「N 组」看着像没占什么；只报「N 首」又看不出缓存了多少次搜索。
+ */
+export function sourceSwitchCacheStat(): SourceSwitchCacheStat {
+  let songs = 0;
+  for (let i = 0; i < cacheItems.length; i++) {
+    const group = cacheItems[i];
+    if (group != null) songs += group.length;
+  }
+  return { groups: cacheKeys.length, songs };
+}
+
 /** 清空换源缓存（换包/手动刷新时用） */
 export function clearSourceSwitchCache(): void {
   cacheKeys.splice(0, cacheKeys.length);

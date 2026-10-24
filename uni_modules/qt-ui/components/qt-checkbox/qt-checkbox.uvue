@@ -1,0 +1,79 @@
+<template>
+  <view
+    class="qt-checkbox"
+    :class="[boxClass, disabled ? 'qt-checkbox-disabled' : '']"
+    :style="boxStyle"
+    @click.stop="onTap"
+  >
+    <QtIcon v-if="checked" name="check" :size="iconSize" :color="theme.skin.onAccent" />
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed } from "vue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+
+/**
+ * 通用勾选框：本地音乐 / 播放历史 / 缓存管理 / 批量操作条共用。
+ *
+ * 此前三处页面各手写一套 `.checkbox`（`pages/local/index.uvue:1192`、
+ * `pages/cache/index.uvue:326` 注释也自认「仓库内没有 checkbox 组件」），
+ * 尺寸、圆角、边框色和点击行为彼此不一致，且每加一个多选场景就要再抄一遍。
+ *
+ * 尺寸走 `size` 档位而不是让调用方传像素：紧凑档 44rpx（=22dp 视觉直径，
+ * 但外层命中区由宿主行高保证），宽屏档固定 px，避免 rpx 随视口膨胀。
+ */
+const props = defineProps<{
+  checked?: boolean;
+  size?: "sm" | "md";
+  disabled?: boolean;
+}>();
+const emit = defineEmits<{ change: [boolean] }>();
+
+const theme = useThemeStore();
+const layout = useQtLayout();
+
+const checked = computed((): boolean => props.checked === true);
+const size = computed((): string => (props.size != null ? props.size! : "md"));
+/** 尺寸类：宽屏用独立扁平类覆盖（同 `.checkbox-wide` 既有写法），不用复合选择器 */
+const boxClass = computed((): string => {
+  const suffix = size.value == "sm" ? "sm" : "md";
+  return layout.isWide ? "qt-checkbox-size-" + suffix + "-wide" : "qt-checkbox-size-" + suffix;
+});
+const iconSize = computed((): number => {
+  if (layout.isWide) return size.value == "sm" ? 10 : 12;
+  return size.value == "sm" ? 18 : 22;
+});
+/**
+ * 未选中：透明底 + 主题边框色；选中：强调色实底。
+ * `border-style: solid` 写在 class 里（Vapor 下只写 border-width 不绘制），
+ * 这里只负责颜色，避免内联样式把 style 覆盖成默认的 none。
+ */
+const boxStyle = computed((): string => {
+  if (checked.value) return "background-color:" + theme.skin.accent + ";border-color:" + theme.skin.accent + ";";
+  return "background-color:transparent;border-color:" + theme.skin.border + ";";
+});
+
+function onTap(): void {
+  if (props.disabled === true) return;
+  emit("change", !checked.value);
+}
+</script>
+
+<style>
+.qt-checkbox {
+  align-items: center;
+  justify-content: center;
+  /* border-style 必须显式写，否则 Vapor 下边框不绘制（未选中态会完全看不见） */
+  border-style: solid;
+  border-width: 2px;
+}
+.qt-checkbox-size-sm { width: 36rpx; height: 36rpx; border-radius: 18rpx; }
+.qt-checkbox-size-md { width: 44rpx; height: 44rpx; border-radius: 22rpx; }
+/* 宽屏下 rpx 随视口放大，改用固定 px；独立扁平类，不写复合选择器 */
+.qt-checkbox-size-sm-wide { width: 20px; height: 20px; border-radius: 10px; }
+.qt-checkbox-size-md-wide { width: 24px; height: 24px; border-radius: 12px; }
+.qt-checkbox-disabled { opacity: 0.45; }
+</style>

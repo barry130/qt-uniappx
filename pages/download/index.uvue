@@ -1,75 +1,174 @@
 <template>
-  <qt-page-frame :max-width="860">
-  <view class="page" :class="layout.isWide ? 'page-wide' : ''">
-    <list-view class="scroll" :class="layout.isWide ? 'scroll-wide' : ''" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';box-shadow:0 10rpx 30rpx ' + theme.skin.shadow + ';'" direction="vertical" v-if="allItems.length > 0" :scroll-top="scrollTop" @scroll="onListScroll">
+  <qt-page-frame width-kind="list">
+  <view class="page">
+    <!-- 五向筛选：下载中 / 等待中 / 已完成 / 暂停 / 失败
+         不设「全部」：五个状态已覆盖全部任务与记录，多一个「全部」只会让默认页
+         同时混着在途任务和成品记录，看不出该关注哪边。
+         改成「圆角方形图标 + 中文标签 + 计数」的宫格，选中态整块换成强调色弱底。
+         不用整块纯色填充选中态的原因：五个按钮并排，纯色块会显得很重，
+         这里用 accentSoft 底 + accent 图标/文字，选中感足够又不抢眼。 -->
+    <view class="filter-row" :class="layout.isWide ? 'filter-row-wide' : ''">
+      <view
+        v-for="f in filters"
+        :key="f.key"
+        class="chip" :class="layout.isWide ? 'chip-wide' : ''"
+        :style="chipStyle(f.key)"
+        @click="switchFilter(f.key)"
+      >
+        <view class="chip-icon" :class="layout.isWide ? 'chip-icon-wide' : ''" :style="chipIconStyle(f.key)">
+          <QtIcon :name="f.icon" :size="layout.isWide ? 17 : 34" :color="chipIconColor(f.key)" />
+        </view>
+        <text class="chip-text" :class="layout.isWide ? 'chip-text-wide' : ''" :style="chipTextStyle(f.key)">{{ f.label }}</text>
+        <text class="chip-count" :class="layout.isWide ? 'chip-count-wide' : ''" :style="chipCountStyle(f.key)">{{ f.count }}</text>
+      </view>
+    </view>
+
+    <!-- 操作行：固定行高、左右等高替换，切换选择态时页面零位移。
+         任务侧（下载中/等待中/暂停/失败）：N 个任务 | 全部继续 / 全部重试 / 全部暂停 / 全部取消；
+         已完成侧：共 N 首 | 管理，选择态换成 已选 K 首 | 全选 / 删除(K) / 完成
+         每个可点动作都包一层 .hit（撑满行高 + 左右内边距），@click 挂在 .hit 上：
+         直接点裸 <text> 时命中区只有文字本身那 ~25px，行高 48px 里上下都点不中，
+         真机上就是「按了没反应」。 -->
+    <view class="ops-line" :class="layout.isWide ? 'ops-line-wide' : ''">
+      <template v-if="!isItemsView">
+        <text class="ops-count" :class="layout.isWide ? 'ops-count-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 15)">{{ visibleCount }} 个任务</text>
+        <view class="line-right">
+          <view v-if="pausedCount > 0" class="hit" :class="layout.isWide ? 'hit-wide' : ''" @click="resumeAll">
+            <text class="ops-link" :class="layout.isWide ? 'ops-link-wide' : ''" :style="('color:' + theme.skin.accent + ';') + qtFontDual(24, 13)">全部继续</text>
+          </view>
+          <view v-if="failedCount > 0" class="hit" :class="layout.isWide ? 'hit-wide' : ''" @click="retryAll">
+            <text class="ops-link" :class="layout.isWide ? 'ops-link-wide' : ''" :style="('color:' + theme.skin.accent + ';') + qtFontDual(24, 13)">全部重试</text>
+          </view>
+          <view v-if="pausableCount > 0" class="hit" :class="layout.isWide ? 'hit-wide' : ''" @click="pauseAll">
+            <text class="ops-link" :class="layout.isWide ? 'ops-link-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(24, 13)">全部暂停</text>
+          </view>
+          <view v-if="taskCount > 0" class="hit" :class="layout.isWide ? 'hit-wide' : ''" @click="cancelAll">
+            <text class="ops-link" :class="layout.isWide ? 'ops-link-wide' : ''" :style="('color:' + theme.skin.danger + ';') + qtFontDual(24, 13)">全部取消</text>
+          </view>
+        </view>
+      </template>
+      <template v-else>
+        <text class="ops-count" :class="layout.isWide ? 'ops-count-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 15)">{{ selecting ? '已选 ' + selected.length + ' 首' : '共 ' + itemsCount + ' 首' }}</text>
+        <view class="line-right">
+          <template v-if="!selecting">
+            <view v-if="itemsCount > 0" class="hit" :class="layout.isWide ? 'hit-wide' : ''" @click="toggleSelect">
+              <text class="ops-link" :class="layout.isWide ? 'ops-link-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(24, 13)">管理</text>
+            </view>
+          </template>
+          <template v-else>
+            <view class="hit" :class="layout.isWide ? 'hit-wide' : ''" @click="toggleSelectAll">
+              <text class="ops-link" :class="layout.isWide ? 'ops-link-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(24, 13)">{{ allSel ? '取消全选' : '全选' }}</text>
+            </view>
+            <view
+              class="manage-btn"
+              :class="layout.isWide ? (selected.length == 0 ? 'manage-btn-wide manage-btn-off' : 'manage-btn-wide') : (selected.length == 0 ? 'manage-btn-off' : '')"
+              :style="'background-color:' + theme.skin.danger + ';border-color:' + theme.skin.danger + ';'"
+              @click="confirmBatchDelete"
+            >
+              <QtIcon name="trash" :size="layout.isWide ? 14 : 24" :color="theme.skin.onAccent" />
+              <text class="manage-btn-text" :class="layout.isWide ? 'manage-btn-text-wide' : ''" :style="('color:' + theme.skin.onAccent + ';') + qtFontDual(24, 13)">删除({{ selected.length }})</text>
+            </view>
+            <view class="hit" :class="layout.isWide ? 'hit-wide' : ''" @click="toggleSelect">
+              <text class="ops-link" :class="layout.isWide ? 'ops-link-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(24, 13)">完成</text>
+            </view>
+          </template>
+        </view>
+      </template>
+    </view>
+
+    <!-- 列表：每条记录一张独立圆角卡片（卡片之间的间隙由 list-item 的 padding-top 提供，
+         因为 list-item 本身不支持 margin）。list-view 只当滚动容器，不再做卡片底。 -->
+    <list-view v-if="hasAny && allItems.length > 0" class="scroll" :class="layout.isWide ? 'scroll-wide' : ''" direction="vertical" :scroll-top="scrollTop" @scroll="onListScroll">
       <list-item
         v-for="entry in allItems"
         :key="entry.key"
-        class="row" :class="[[layout.isWide ? 'row-wide' : ''], [entry.type == 'task' ? 'task-row' : '', layout.isWide ? 'row-wide' : '']]"
-        :style="'border-bottom-color:' + theme.skin.divider + ';'"
+        class="row" :class="layout.isWide ? 'row-wide' : ''"
       >
-        <!-- 任务（下载中/等待/失败） -->
+        <!-- 任务（下载中/等待/暂停/失败）：封面 + 歌名 + 进度条 + 大小/速度/剩余 -->
         <template v-if="entry.type == 'task'">
-          <image class="cover" :class="layout.isWide ? 'cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="entry.data.song.picUrl" mode="aspectFill" />
-          <view class="info" :class="layout.isWide ? 'info-wide' : ''">
-            <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="'color:' + theme.skin.text + ';'" :max-lines="1">{{ entry.data.song.name }}</text>
-            <view v-if="entry.data.status == 'downloading'" class="progress-wrap" :class="layout.isWide ? 'progress-wrap-wide' : ''">
-              <view class="progress-bar" :class="layout.isWide ? 'progress-bar-wide' : ''" :style="'width:' + entry.data.progress + '%;background-color:' + theme.skin.accent + ';'"></view>
-              <text class="progress-text" :class="layout.isWide ? 'progress-text-wide' : ''" :style="'color:' + theme.skin.accent + ';'">{{ Math.round(entry.data.progress) }}%</text>
-            </view>
-            <text v-else class="meta" :class="layout.isWide ? 'meta-wide' : ''" :style="'color:' + (entry.data.status == 'failed' ? theme.skin.danger : theme.skin.textMuted) + ';'" :max-lines="1">{{ statusText(entry.data) }}</text>
-          </view>
-          <QtIcon
-            v-if="entry.data.status == 'failed'"
-            class="row-act" :class="[[layout.isWide ? 'row-act-wide' : ''], layout.isWide ? 'row-act-wide' : '']"
-
-            name="refresh"
-            :size="36"
-            :color="theme.skin.danger"
-            @click="retry(entry.data.song)"
-          />
-          <QtIcon
-            class="row-act" :class="[[layout.isWide ? 'row-act-wide' : ''], layout.isWide ? 'row-act-wide' : '']"
-
-            name="close"
-            :size="36"
-            :color="theme.skin.iconMuted"
-            @click="removeTask(entry.data.song)"
-          />
-        </template>
-        <!-- 已下载项 -->
-        <template v-else>
-          <view class="main" @click="play(entry.data)">
+          <view class="row-card" :class="layout.isWide ? 'row-card-wide' : ''" :hover-class="layout.isWide ? 'row-card-hover' : 'none'" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';'">
             <image class="cover" :class="layout.isWide ? 'cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="entry.data.song.picUrl" mode="aspectFill" />
             <view class="info" :class="layout.isWide ? 'info-wide' : ''">
-              <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="'color:' + theme.skin.text + ';'" :max-lines="1">{{ entry.data.song.name }}</text>
-              <text class="meta" :class="layout.isWide ? 'meta-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" :max-lines="1">{{ entry.data.song.singer }} - {{ entry.data.song.album }}</text>
+              <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 16)" :max-lines="1">{{ entry.data.song.name }}</text>
+              <!-- 有进度就画（暂停/失败保留断点位置，暂停用弱色区分） -->
+              <view v-if="taskHasBar(entry.data)" class="progress-wrap" :class="layout.isWide ? 'progress-wrap-wide' : ''" :style="'background-color:' + theme.skin.surfaceInset + ';'">
+                <view class="progress-bar" :class="layout.isWide ? 'progress-bar-wide' : ''" :style="'width:' + entry.data.progress + '%;background-color:' + taskBarColor(entry.data) + ';'"></view>
+              </view>
+              <text class="meta" :class="layout.isWide ? 'meta-wide' : ''" :style="('color:' + (entry.data.status == 'failed' ? theme.skin.danger : theme.skin.textMuted) + ';') + qtFontDual(23, 14)" :max-lines="1">{{ taskMeta(entry.data) }}</text>
+            </view>
+            <!-- 行尾操作：圆形底座 + 图标。图标本身只有 36rpx（约 18px），
+                 远低于可点面积下限，所以外面再包一层 .row-hit（撑满行高 + 左右内边距） -->
+            <view v-if="entry.data.status == 'failed'" class="row-hit" :class="layout.isWide ? 'row-hit-wide' : ''" @click="retry(entry.data.song)">
+              <view class="row-act" :class="layout.isWide ? 'row-act-wide' : ''" :style="'background-color:' + theme.skin.dangerSoft + ';'">
+                <QtIcon name="refresh" :size="layout.isWide ? 15 : 34" :color="theme.skin.danger" />
+              </view>
+            </view>
+            <view v-if="entry.data.status == 'downloading'" class="row-hit" :class="layout.isWide ? 'row-hit-wide' : ''" @click="pauseOne(entry.data.song)">
+              <view class="row-act" :class="layout.isWide ? 'row-act-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'">
+                <QtIcon name="pause" :size="layout.isWide ? 15 : 34" :color="theme.skin.iconMuted" />
+              </view>
+            </view>
+            <view v-if="entry.data.status == 'paused'" class="row-hit" :class="layout.isWide ? 'row-hit-wide' : ''" @click="resumeOne(entry.data.song)">
+              <view class="row-act" :class="layout.isWide ? 'row-act-wide' : ''" :style="'background-color:' + theme.skin.accentSoft + ';'">
+                <QtIcon name="play" :size="layout.isWide ? 15 : 34" :color="theme.skin.accent" />
+              </view>
+            </view>
+            <view class="row-hit" :class="layout.isWide ? 'row-hit-wide' : ''" @click="removeTask(entry.data.song)">
+              <view class="row-act" :class="layout.isWide ? 'row-act-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'">
+                <QtIcon name="close" :size="layout.isWide ? 15 : 34" :color="theme.skin.iconMuted" />
+              </view>
             </view>
           </view>
-          <QtIcon class="row-act" :class="layout.isWide ? 'row-act-wide' : ''" name="trash" :size="36" :color="theme.skin.danger" @click="remove(entry.data)" />
+        </template>
+        <!-- 已下载项：选择态显示复选框、整行点选；非选择态点行播放、右侧删除 -->
+        <template v-else>
+          <view class="row-card" :class="layout.isWide ? 'row-card-wide' : ''" :hover-class="layout.isWide ? 'row-card-hover' : 'none'" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';'">
+            <view class="main" @click="onItemTap(entry.data)">
+              <view
+                v-if="selecting"
+                class="checkbox checkbox-gap" :class="layout.isWide ? 'checkbox-wide checkbox-gap-wide' : ''"
+                :style="isItemSelected(entry.data) ? 'background-color:' + theme.skin.accent + ';border-color:' + theme.skin.accent + ';' : 'border-color:' + theme.skin.border + ';'"
+              >
+                <QtIcon v-if="isItemSelected(entry.data)" name="check" :size="layout.isWide ? 12 : 22" :color="theme.skin.onAccent" />
+              </view>
+              <image class="cover" :class="layout.isWide ? 'cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="entry.data.song.picUrl" mode="aspectFill" />
+              <view class="info" :class="layout.isWide ? 'info-wide' : ''">
+                <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 16)" :max-lines="1">{{ entry.data.song.name }}</text>
+                <text class="meta" :class="layout.isWide ? 'meta-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 14)" :max-lines="1">{{ itemMeta(entry.data) }}</text>
+              </view>
+            </view>
+            <view v-if="!selecting" class="row-hit" :class="layout.isWide ? 'row-hit-wide' : ''" @click="removeSingle(entry.data)">
+              <view class="row-act" :class="layout.isWide ? 'row-act-wide' : ''" :style="'background-color:' + theme.skin.dangerSoft + ';'">
+                <QtIcon name="trash" :size="layout.isWide ? 15 : 34" :color="theme.skin.danger" />
+              </view>
+            </view>
+          </view>
         </template>
       </list-item>
       <list-item class="pad" :class="[layout.isWide ? 'pad-wide' : '']"></list-item>
     </list-view>
-    <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+    <!-- 当前筛选为空、但整体还有内容：筛选行保留，占位用普通 view。
+         不能用 list-view 承载——内容不足一屏时它仍会上下回弹，像能滚动一样。
+         没有任何下载记录时也走这里（新模板保持一致），不再单独做「去发现音乐」空态页。 -->
     <view
       v-if="allItems.length == 0"
-      class="empty" :class="[[layout.isWide ? 'empty-wide' : ''], layout.isWide ? 'empty-wide' : '']"
-
+      class="tab-empty" :class="layout.isWide ? 'tab-empty-wide' : ''"
+      :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';'"
     >
-      <QtIcon name="download" :size="80" :color="theme.skin.placeholder" />
-      <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">还没有下载任何歌曲</text>
-      <text class="link" :class="layout.isWide ? 'link-wide' : ''" :style="'color:' + theme.skin.accent + ';'" @click="discover">去发现音乐</text>
+      <QtIcon name="download" :size="72" :color="theme.skin.placeholder" />
+      <text class="tab-empty-text" :class="layout.isWide ? 'tab-empty-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(25, 15)">{{ emptyText }}</text>
     </view>
-    <MiniPlayer />
+    <!-- 列表为空时按钮可能残留（滚到底后任务被删光），一并收掉 -->
+    <QtBackToTop v-if="allItems.length > 0" :visible="showBackToTop" @tap="backToTop" />
   </view>
   </qt-page-frame>
 </template>
 <script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
+import { qtConfirm } from "@/services/confirm";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { onShow } from "@dcloudio/uni-app";
 import { computed, ref } from "vue";
-import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import { useDownloadsStore, type DownloadItem, type DownloadTask } from "@/stores/downloads";
@@ -77,6 +176,7 @@ import { usePlayerStore } from "@/stores/player";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import type { Song } from "@/types/music";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const downloads = useDownloadsStore();
 const player = usePlayerStore();
@@ -95,28 +195,364 @@ function backToTop() {
   showBackToTop.value = false;
 }
 
+// ---- 五向筛选：下载中 / 等待中 / 已完成 / 暂停 / 失败 ----
+// 不设「全部」：五个状态已经把在途任务和已完成记录全部覆盖，
+// 多一个「全部」只会让默认页同时混着在途任务和成品记录，反而看不出该关注哪边。
+const FILTER_DOWNLOADING = "downloading";
+const FILTER_PENDING = "pending";
+const FILTER_DONE = "done";
+const FILTER_PAUSED = "paused";
+const FILTER_FAILED = "failed";
+
+const filter = ref<string>(FILTER_DOWNLOADING);
+
+const taskCount = computed<number>(() => downloads.tasks.length);
+const itemsCount = computed<number>(() => downloads.items.length);
+
+function countStatus(status: string): number {
+  let n = 0;
+  for (let i = 0; i < downloads.tasks.length; i++) {
+    if (downloads.tasks[i].status == status) n++;
+  }
+  return n;
+}
+
+const failedCount = computed<number>(() => countStatus("failed"));
+const pausedCount = computed<number>(() => countStatus("paused"));
+const downloadingCount = computed<number>(() => countStatus("downloading"));
+/** 等待中：已排队但还没拿到连接的任务 */
+const pendingCount = computed<number>(() => countStatus("pending"));
+/** 可暂停数：在途 + 等待中（全部暂停的显隐条件） */
+const pausableCount = computed<number>(() => {
+  let n = 0;
+  for (let i = 0; i < downloads.tasks.length; i++) {
+    const s = downloads.tasks[i].status;
+    if (s == "downloading" || s == "pending") n++;
+  }
+  return n;
+});
+const hasAny = computed<boolean>(() => taskCount.value > 0 || itemsCount.value > 0);
+
+/** 筛选按钮：key/label/icon/count。计数直接取上面的 computed，模板里不用再算 */
+const filters = computed<{ key: string; label: string; icon: string; count: number }[]>(() => [
+  { key: FILTER_DOWNLOADING, label: "下载中", icon: "download", count: downloadingCount.value },
+  { key: FILTER_PENDING, label: "等待中", icon: "clock", count: pendingCount.value },
+  { key: FILTER_DONE, label: "已完成", icon: "check", count: itemsCount.value },
+  { key: FILTER_PAUSED, label: "暂停", icon: "pause", count: pausedCount.value },
+  { key: FILTER_FAILED, label: "失败", icon: "ban", count: failedCount.value },
+]);
+
+/** 「已完成」筛选下操作行走已下载那套（管理/全选/删除）。 */
+const isItemsView = computed<boolean>(() => filter.value == FILTER_DONE);
+
+const emptyText = computed<string>(() => {
+  if (!hasAny.value) return "还没有下载任何歌曲";
+  if (filter.value == FILTER_DONE) return "还没有下载完成的歌曲";
+  if (filter.value == FILTER_PAUSED) return "没有暂停的下载";
+  if (filter.value == FILTER_FAILED) return "没有失败的下载";
+  if (filter.value == FILTER_PENDING) return "没有等待中的下载";
+  return "没有正在下载的歌曲";
+});
+
+/** 用户是否手动点过筛选：没点过才允许 onShow 按内容自动挑默认页签 */
+let userPickedFilter = false;
+
+function switchFilter(key: string): void {
+  if (filter.value == key) return;
+  userPickedFilter = true;
+  filter.value = key;
+  // 换了内容集，回到顶部；否则新筛选内容短时「回到顶部」按钮会残留
+  scrollTop.value = 0;
+  showBackToTop.value = false;
+  // 离开「已完成」就退出选择态，避免残留勾选被下一次删除带上
+  if (!isItemsView.value && selecting.value) {
+    selecting.value = false;
+    selected.value = [];
+  }
+}
+
 onShow(() => {
   downloads.restore();
+  // 默认页签是「下载中」；真进来发现一个在途任务都没有（全下完了或从没下过），
+  // 就落到「已完成」，别让用户对着一个必然为空的列表。
+  if (!userPickedFilter && taskCount.value == 0) filter.value = FILTER_DONE;
+});
+
+/** 当前页签下的条目数：操作行左侧那行字跟着筛选走，不再固定报「N 个任务」 */
+const visibleCount = computed<number>(() => {
+  if (isItemsView.value) return itemsCount.value;
+  if (filter.value == FILTER_DOWNLOADING) return downloadingCount.value;
+  if (filter.value == FILTER_PENDING) return pendingCount.value;
+  if (filter.value == FILTER_PAUSED) return pausedCount.value;
+  if (filter.value == FILTER_FAILED) return failedCount.value;
+  return taskCount.value;
 });
 
 const allItems = computed(() => {
   const items: { key: string; type: string; data: any }[] = [];
-  // 添加任务（下载中/等待/失败）
-  for (const task of downloads.tasks) {
-    items.push({ key: 'task-' + task.song.id + task.song.platform, type: 'task', data: task });
+  if (filter.value == FILTER_DONE) {
+    for (const item of downloads.items) {
+      items.push({ key: 'item-' + item.song.id + item.song.platform, type: 'item', data: item });
+    }
+    return items;
   }
-  // 添加已下载项
-  for (const item of downloads.items) {
-    items.push({ key: 'item-' + item.song.id + item.song.platform, type: 'item', data: item });
+  for (const task of downloads.tasks) {
+    if (filter.value == FILTER_DOWNLOADING && task.status != "downloading") continue;
+    if (filter.value == FILTER_PENDING && task.status != "pending") continue;
+    if (filter.value == FILTER_PAUSED && task.status != "paused") continue;
+    if (filter.value == FILTER_FAILED && task.status != "failed") continue;
+    items.push({ key: 'task-' + task.song.id + task.song.platform, type: 'task', data: task });
   }
   return items;
 });
 
-function statusText(task: DownloadTask): string {
-  if (task.status == "downloading") return "下载中...";
-  if (task.status == "failed")
+// ---- 行内元信息 ----
+
+/** 任务行是否画进度条：有断点就画（暂停/失败也保留，让用户看到下到哪了） */
+function taskHasBar(task: DownloadTask): boolean {
+  return task.status == "downloading" || task.progress > 0;
+}
+
+function taskBarColor(task: DownloadTask): string {
+  if (task.status == "failed") return theme.skin.danger;
+  if (task.status == "paused") return theme.skin.textSubtle;
+  return theme.skin.accent;
+}
+
+/** 任务行第二行：进度% + 已下载/总大小 + 速度 + 剩余时间，一行说完 */
+function taskMeta(task: DownloadTask): string {
+  if (task.status == "failed") {
     return "失败：" + (task.error.length > 0 ? task.error : "未知错误");
-  return "等待中";
+  }
+  const pct = Math.round(task.progress) + "%";
+  const size = sizePairText(task.doneBytes, task.totalBytes);
+  if (task.status == "paused") return "已暂停 · " + pct + size;
+  if (task.status == "pending") return "等待中 · " + pct + size;
+  // 下载中：速度与剩余时间都要靠页面自己的 1s 时钟推进，不能只读 store
+  const parts: string[] = [pct];
+  if (size.length > 0) parts.push(size);
+  if (task.speed > 0) {
+    parts.push(formatSpeed(task.speed));
+    const eta = etaText(task);
+    if (eta.length > 0) parts.push(eta);
+  }
+  return parts.join(" · ");
+}
+
+/** 已下载行第二行：歌手 - 专辑 · 大小 */
+function itemMeta(item: DownloadItem): string {
+  const base = item.song.singer + " - " + item.song.album;
+  if (item.size > 0) return base + " · " + formatBytes(item.size);
+  return base;
+}
+
+/** 「已下载 / 总大小」；两者都未知返回空串（不显示 0 B 这种噪音） */
+function sizePairText(done: number, total: number): string {
+  if (total > 0) return " · " + formatBytes(done) + "/" + formatBytes(total);
+  if (done > 0) return " · " + formatBytes(done);
+  return "";
+}
+
+/** 剩余时间：按当前速度线性外推，速度未知/已下完返回空串 */
+function etaText(task: DownloadTask): string {
+  if (task.totalBytes <= 0 || task.speed <= 0) return "";
+  const left = task.totalBytes - task.doneBytes;
+  if (left <= 0) return "";
+  const seconds = Math.floor(left / task.speed);
+  if (seconds < 60) return "剩余 " + seconds + " 秒";
+  if (seconds < 3600) return "剩余 " + Math.floor(seconds / 60) + " 分钟";
+  return "剩余 " + Math.floor(seconds / 3600) + " 小时";
+}
+
+/** 字节数转可读文案（B/KB/MB/GB，保留一位小数，B 不带小数） */
+function formatBytes(bytes: number): string {
+  if (bytes <= 0) return "0 B";
+  if (bytes < 1024) return bytes + " B";
+  const kb = bytes / 1024;
+  if (kb < 1024) return kb.toFixed(1) + " KB";
+  const mb = kb / 1024;
+  if (mb < 1024) return mb.toFixed(1) + " MB";
+  return (mb / 1024).toFixed(2) + " GB";
+}
+
+function formatSpeed(bytesPerSec: number): string {
+  if (bytesPerSec <= 0) return "";
+  return formatBytes(bytesPerSec) + "/s";
+}
+
+// ---- 筛选按钮样式（选中态用强调色弱化底 + 强调色字，未选中走弱底 + 正文色） ----
+
+function chipStyle(key: string): string {
+  if (filter.value == key) {
+    return 'background-color:' + theme.skin.accentSoft + ';border-color:' + theme.skin.accentSoft + ';';
+  }
+  return 'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';';
+}
+
+/** 图标底座：选中态给强调色弱底，让五个图标块有主次 */
+function chipIconStyle(key: string): string {
+  if (filter.value == key) {
+    return 'background-color:' + theme.skin.accent + ';';
+  }
+  return 'background-color:' + theme.skin.surfaceMuted + ';';
+}
+
+function chipIconColor(key: string): string {
+  return filter.value == key ? theme.skin.onAccent : theme.skin.iconMuted;
+}
+
+function chipTextStyle(key: string): string {
+  const color = filter.value == key ? theme.skin.accent : theme.skin.textMuted;
+  return 'color:' + color + ';' + qtFontDual(23, 13);
+}
+
+function chipCountStyle(key: string): string {
+  const color = filter.value == key ? theme.skin.accent : theme.skin.textSubtle;
+  return 'color:' + color + ';' + qtFontDual(21, 12);
+}
+
+/**
+ * 说明：这里**不需要**页面自己的时钟。
+ * store 的 1s 采样器只要速度有变化就 `this.tasks = [...this.tasks]`，
+ * 而速度变化正是「剩余时间 / 已下载字节」需要重算的时刻；速度归零后
+ * 字节数也不再变化，文案自然静止。
+ */
+
+// ---- 任务页签的批量操作：全部重试 / 全部取消 ----
+
+function retryAll(): void {
+  const n = downloads.retryAllFailed();
+  if (n > 0) qtShowToast({ title: "已重试 " + n + " 首", icon: "none" });
+}
+
+function cancelAll(): void {
+  const n = taskCount.value;
+  if (n == 0) return;
+    qtConfirm({
+    title: "取消全部下载",
+    content: "将取消 " + n + " 个下载任务，已下载完成的文件不受影响",
+    confirmText: "全部取消",
+    danger: true,
+  }).then((ok: boolean) => {
+      if (!ok) return;
+      const c = downloads.cancelAll();
+      qtShowToast({ title: "已取消 " + c + " 个任务", icon: "none" });
+  });
+}
+
+// ---- 任务页签的暂停/继续（单首按钮 + 全部暂停/全部继续） ----
+
+function pauseOne(song: Song): void {
+  downloads.pause(song);
+}
+
+function resumeOne(song: Song): void {
+  downloads.resume(song);
+}
+
+function pauseAll(): void {
+  const n = downloads.pauseAll();
+  if (n > 0) qtShowToast({ title: "已暂停 " + n + " 首", icon: "none" });
+}
+
+function resumeAll(): void {
+  const n = downloads.resumeAll();
+  if (n > 0) qtShowToast({ title: "已继续 " + n + " 首", icon: "none" });
+}
+
+// ---- 已下载页签：管理 / 全选 / 批量删除（删除记录同时删除手机里的音频文件） ----
+const selecting = ref<boolean>(false);
+const selected = ref<string[]>([]);
+
+function keyOf(song: Song): string {
+  return song.id + '|' + song.platform;
+}
+
+function isItemSelected(item: DownloadItem): boolean {
+  return selected.value.indexOf(keyOf(item.song)) >= 0;
+}
+
+const allSel = computed<boolean>(
+  () => itemsCount.value > 0 && selected.value.length >= itemsCount.value,
+);
+
+function toggleSelect(): void {
+  selecting.value = !selecting.value;
+  if (!selecting.value) selected.value = [];
+}
+
+function toggleSelectAll(): void {
+  if (allSel.value) {
+    selected.value = [];
+  } else {
+    const keys: string[] = [];
+    for (let i = 0; i < downloads.items.length; i++) keys.push(keyOf(downloads.items[i].song));
+    selected.value = keys;
+  }
+}
+
+function onItemTap(item: DownloadItem): void {
+  if (selecting.value) {
+    const key = keyOf(item.song);
+    if (isItemSelected(item)) {
+      selected.value = selected.value.filter((k: string): boolean => k != key);
+    } else {
+      selected.value = [...selected.value, key];
+    }
+    return;
+  }
+  play(item);
+}
+
+function selectedSongs(): Song[] {
+  const songs: Song[] = [];
+  for (let i = 0; i < downloads.items.length; i++) {
+    const item = downloads.items[i];
+    if (selected.value.indexOf(keyOf(item.song)) >= 0) songs.push(item.song);
+  }
+  return songs;
+}
+
+function removeToast(removed: number, filesFailed: number): void {
+  let title = "已删除 " + removed + " 首";
+  if (filesFailed > 0) title = title + "，" + filesFailed + " 个文件未删除";
+  qtShowToast({ title, icon: "none" });
+}
+
+function confirmBatchDelete(): void {
+  if (selected.value.length == 0) return;
+  const n = selected.value.length;
+  const keep = !downloads.deleteFileOnRemove;
+    qtConfirm({
+    title: "删除下载",
+    content: keep
+      ? "将删除选中的 " + n + " 首下载记录，手机里的音频文件会保留"
+      : "将删除选中的 " + n + " 首下载记录，并删除手机里对应的音频文件",
+    confirmText: "删除",
+    danger: true,
+  }).then((ok: boolean) => {
+      if (!ok) return;
+      const r = downloads.removeMany(selectedSongs(), !keep);
+      selecting.value = false;
+      selected.value = [];
+      removeToast(r.removed, r.filesFailed);
+  });
+}
+
+function removeSingle(item: DownloadItem): void {
+  const keep = !downloads.deleteFileOnRemove;
+    qtConfirm({
+    title: "删除下载",
+    content: keep
+      ? "将删除该歌曲的下载记录，手机里的音频文件会保留"
+      : "将删除该歌曲的下载记录，并删除手机里对应的音频文件",
+    confirmText: "删除",
+    danger: true,
+  }).then((ok: boolean) => {
+      if (!ok) return;
+      const r = downloads.removeMany([item.song], !keep);
+      removeToast(r.removed, r.filesFailed);
+  });
 }
 
 function play(item: DownloadItem): void {
@@ -135,20 +571,12 @@ function play(item: DownloadItem): void {
   player.playSingle(local);
 }
 
-function remove(item: DownloadItem): void {
-  downloads.remove(item.song);
-}
-
 function retry(song: Song): void {
   downloads.retry(song);
 }
 
 function removeTask(song: Song): void {
   downloads.removeTask(song);
-}
-
-function discover(): void {
-  uni.switchTab({ url: "/pages/home/index" });
 }
 </script>
 
@@ -158,23 +586,39 @@ function discover(): void {
 }
 .scroll {
   flex: 1;
-  margin: 20rpx 24rpx 0;
-
-  border-width: 1px;
-
-  border-radius: 24rpx;
-
+  margin: 4rpx 0 0;
 }
+/*
+ * 列表改成「一条记录一张独立圆角卡片」：
+ * .row 负责行高 + 卡片间距（list-item 不支持 margin，间距用 padding-top 表达），
+ * .row-card 负责底色/圆角/边框/横向内边距。
+ * 行高必须定死在 list-item 上，list-view 的虚拟滚动靠它预估高度，改成 min-height 会抖。
+ */
 .row {
-  height: 128rpx;
-  padding: 0 32rpx;
+  height: 148rpx;
+  padding: 16rpx 24rpx 0;
+  flex-direction: row;
+  align-items: stretch;
+}
+.row-wide {
+  height: 88px;
+  padding: 16px 24px 0;
+}
+.row-card {
+  flex: 1;
+  padding: 0 22rpx;
   flex-direction: row;
   align-items: center;
-  border-bottom-width: 1px;
-
+  border-radius: 22rpx;
+  border-width: 1px; border-style: solid;
 }
-.task-row {
-  height: 124rpx;
+/* 桌面指针反馈：只在宽屏启用 */
+.row-card-hover {
+  background-color: rgba(127, 127, 127, 0.10);
+}
+.row-card-wide {
+  padding: 0 14px;
+  border-radius: 14px;
 }
 .main {
   flex: 1;
@@ -210,62 +654,231 @@ function discover(): void {
   width: 100%;
   height: 16rpx;
   border-radius: 8rpx;
-  background-color: rgba(0,0,0,0.08);
-  position: relative;
   overflow: hidden;
 }
 .progress-bar {
   height: 16rpx;
   border-radius: 8rpx;
-
-  transition: width 0.3s;
 }
-.progress-text {
-  position: absolute;
-  right: 0;
-  top: 50%;
-  transform: translateY(-50%);
-
-  font-size: 18rpx;
-  font-weight: 500;
-}
-.row-act {
-  margin-left: 24rpx;
-}
-.empty {
-  flex: 1;
-  padding-top: 200rpx;
+/*
+ * 行尾操作图标的命中区包装层。
+ * QtIcon 只有 34rpx（约 17px）见方，手指按上去很难命中；
+ * 这层给足高度（等于卡片内高）并加左右内边距，
+ * flex-shrink: 0 保证歌名再长也不会把它挤扁。
+ */
+.row-hit {
+  height: 116rpx;
+  padding: 0 8rpx;
+  flex-shrink: 0;
+  justify-content: center;
   align-items: center;
 }
-.empty-text {
-  margin-top: 20rpx;
-
-  font-size: 27rpx;
+.row-hit-wide {
+  height: 60px;
+  padding: 0 6px;
 }
-.link {
-  margin-top: 20rpx;
-
-  font-size: 27rpx;
+/* 圆形操作底座：没有 play-circle / trash-circle 这类图标，用 view 自己画 */
+.row-act {
+  width: 68rpx;
+  height: 68rpx;
+  border-radius: 34rpx;
+  align-items: center;
+  justify-content: center;
+}
+.row-act-wide {
+  width: 38px;
+  height: 38px;
+  border-radius: 19px;
 }
 .pad {
   height: 40rpx;
 }
 
+/* ===== 五向筛选行：图标方块 + 标签 + 计数 ===== */
+.filter-row {
+  flex-direction: row;
+  align-items: stretch;
+  margin: 20rpx 24rpx 0;
+}
+.filter-row-wide {
+  margin: 16px 24px 0;
+}
+.chip {
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  margin-right: 12rpx;
+  padding: 14rpx 0 12rpx;
+  border-radius: 20rpx;
+  border-width: 1px; border-style: solid;
+}
+.chip-wide {
+  margin-right: 8px;
+  padding: 8px 0 7px;
+  border-radius: 12px;
+}
+.chip-icon {
+  width: 56rpx;
+  height: 56rpx;
+  border-radius: 16rpx;
+  align-items: center;
+  justify-content: center;
+}
+.chip-icon-wide {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+}
+.chip-text {
+  margin-top: 10rpx;
+  font-size: 23rpx;
+  font-weight: 500;
+}
+.chip-text-wide {
+  margin-top: 6px;
+  font-size: 13px;
+}
+.chip-count {
+  margin-top: 2rpx;
+  font-size: 21rpx;
+}
+.chip-count-wide {
+  margin-top: 1px;
+  font-size: 12px;
+}
+
+.ops-line {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  height: 84rpx;
+  margin: 0 24rpx;
+}
+.ops-line-wide {
+  height: 50px;
+  margin: 0 24px;
+}
+.ops-count {
+  flex-shrink: 1;
+  font-size: 26rpx;
+  font-weight: 600;
+}
+.ops-count-wide {
+  font-size: 15px;
+}
+/*
+ * flex-shrink: 0 —— 右侧四个操作按钮绝不能被压缩出界。
+ * 行宽 702rpx，字号默认档 1.15 时「N 个任务 + 全部继续/重试/暂停/取消」
+ * 几乎顶满；一旦溢出，越界部分会被 qt-page-frame 的 overflow:hidden 裁掉，
+ * 而裁掉的像素不参与命中测试，表现就是「点了没反应」。
+ * 让左侧计数先让位，操作区保持完整。
+ */
+.line-right {
+  flex-direction: row;
+  align-items: center;
+  flex-shrink: 0;
+}
+.ops-link {
+  font-size: 24rpx;
+  font-weight: 500;
+}
+.ops-link-wide {
+  font-size: 13px;
+}
+/*
+ * 命中区包装层：把「行高」交给它，文字只负责显示。
+ * 原来 @click 直接挂在裸 <text> 上，命中矩形等于文字本身（约 48×25rpx），
+ * 行高 84rpx 里上下各留 30rpx 死区 —— 手指落在死区就完全没反应，
+ * 真机上表现为「管理那一块按钮点着很费劲，经常无反应」。
+ * 现在 .hit 撑满整行高，左右再加 12rpx 内边距，视觉不变、命中区翻倍。
+ */
+.hit {
+  height: 84rpx;
+  padding: 0 14rpx;
+  justify-content: center;
+  align-items: center;
+}
+.hit-wide {
+  height: 50px;
+  padding: 0 10px;
+}
+.manage-btn-off {
+  opacity: 0.5;
+}
+.manage-btn {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  margin-left: 14rpx;
+  padding: 10rpx 18rpx;
+  border-radius: 30rpx;
+  border-width: 1px; border-style: solid;
+
+}
+.manage-btn-wide {
+  margin-left: 8px;
+  padding: 6px 12px;
+  border-radius: 16px;
+}
+.manage-btn-text {
+  margin-left: 6rpx;
+  font-size: 24rpx;
+  font-weight: 500;
+}
+.manage-btn-text-wide {
+  margin-left: 4px;
+  font-size: 13px;
+}
+.checkbox {
+  width: 44rpx;
+  height: 44rpx;
+  border-radius: 22rpx;
+  /* border-style 必须显式写，否则 Vapor 下边框不绘制（未选中态会完全看不见） */
+  border-style: solid;
+  border-width: 2px;
+  align-items: center;
+  justify-content: center;
+}
+.checkbox-wide {
+  width: 24px;
+  height: 24px;
+  border-radius: 12px;
+}
+.checkbox-gap {
+  margin-right: 22rpx;
+}
+.checkbox-gap-wide {
+  margin-right: 14px;
+}
+/* 当前页签为空时的占位：做成和 .scroll 同样的卡片，撑满剩余空间且**不可滚动** */
+.tab-empty {
+  flex: 1;
+  margin: 20rpx 24rpx 0;
+  border-radius: 24rpx;
+  border-width: 1px; border-style: solid;
+  align-items: center;
+  justify-content: center;
+}
+.tab-empty-wide {
+  margin: 14px 24px 0;
+  border-radius: 14px;
+}
+.tab-empty-text {
+  margin-top: 18rpx;
+  font-size: 25rpx;
+}
+.tab-empty-text-wide {
+  font-size: 15px;
+}
+
 /* Vapor 宽屏：使用 px 覆盖移动端 rpx，避免 1600x900 下按窗口比例放大 */
 
-.scroll-wide { margin-top: 14px; margin-left: 24px; margin-right: 24px; border-radius: 14px; }
-.row-wide { height: 64px; padding-left: 20px; padding-right: 20px; }
+.scroll-wide { margin-top: 4px; }
 .cover-wide { width: 52px; height: 52px; border-radius: 10px; }
 .info-wide { margin-left: 16px; }
 .name-wide { font-size: 16px; }
 .meta-wide { margin-top: 6px; font-size: 14px; }
 .progress-wrap-wide { margin-top: 6px; height: 8px; border-radius: 4px; }
 .progress-bar-wide { height: 8px; border-radius: 4px; }
-.progress-text-wide { font-size: 12px; }
-.row-act-wide { margin-left: 16px; }
-.empty-wide { padding-top: 90px; }
-.empty-text-wide { margin-top: 12px; font-size: 16px; }
-.link-wide { margin-top: 12px; font-size: 16px; }
 .pad-wide { height: 20px; }
-.task-row-wide { padding: 10px 14px; border-radius: 12px; }
 </style>

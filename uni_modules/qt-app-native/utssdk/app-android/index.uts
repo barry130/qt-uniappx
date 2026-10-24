@@ -14,6 +14,7 @@ import Build from "android.os.Build";
 import Environment from "android.os.Environment";
 import ContentValues from "android.content.ContentValues";
 import MediaStore from "android.provider.MediaStore";
+import MediaScannerConnection from "android.media.MediaScannerConnection";
 import Settings from "android.provider.Settings";
 import PowerManager from "android.os.PowerManager";
 import ComponentName from "android.content.ComponentName";
@@ -28,7 +29,8 @@ import BufferedReader from "java.io.BufferedReader";
 import InputStreamReader from "java.io.InputStreamReader";
 import OpenableColumns from "android.provider.OpenableColumns";
 import PackageManager from "android.content.pm.PackageManager";
-import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, IsIgnoringBatteryOptimizations, OpenBatteryOptimizationSettings, OpenAutoStartSettings, OpenAppDetailsSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, PickFileResult, PickJsFile, PermissionState, QueryPermissionStates, OpenPermissionSettings } from "../interface.uts";
+import DocumentsContract from "android.provider.DocumentsContract";
+import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, IsIgnoringBatteryOptimizations, OpenBatteryOptimizationSettings, OpenAutoStartSettings, OpenAppDetailsSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteMediaByPath, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, PickFileResult, PickJsFile, PickDirectoryResult, PickDirectory, SetCustomDirUri, PermissionState, QueryPermissionStates, OpenPermissionSettings } from "../interface.uts";
 
 /**
  * 强制窗口回归传统布局模式（decorFitsSystemWindows = true）。
@@ -343,7 +345,10 @@ const DEFAULT_SUB_DIR = "轻听";
 /** 已知扩展名（含 apk — 更新 APK 也走此插件） */
 const KNOWN_EXTS: string[] = [
 	"mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "ape", "mp4", "wma",
-	"apk"
+	"apk",
+	// 下载同时附带的封面图 / 歌词：必须登记，否则 resolveDisplayName 认不出扩展名，
+	// 会兜底成「歌手 - 歌名.jpg.mp3」落进音乐目录。
+	"jpg", "jpeg", "png", "webp", "lrc"
 ];
 
 /** 从文件名中取出小写扩展名（不含点），取不到返回空串 */
@@ -351,6 +356,13 @@ function extOf(fileName: string): string {
 	const dot = fileName.lastIndexOf(".");
 	if (dot < 0 || dot == fileName.length - 1) return "";
 	return fileName.substring(dot + 1).toLowerCase();
+}
+
+/** 去掉文件名末尾的扩展名（用于 TITLE 为空时兜底展示） */
+function stripExt(fileName: string): string {
+	const dot = fileName.lastIndexOf(".");
+	if (dot <= 0) return fileName;
+	return fileName.substring(0, dot);
 }
 
 /** 扩展名 -> MIME，未知扩展名统一按通用二进制处理 */
@@ -364,6 +376,13 @@ function mimeOf(ext: string): string {
 	if (ext == "ogg" || ext == "opus") return "audio/ogg";
 	if (ext == "ape") return "audio/x-ape";
 	if (ext == "wma") return "audio/x-ms-wma";
+	// 下载同时附带的封面图 / 歌词
+	if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
+	if (ext == "png") return "image/png";
+	if (ext == "webp") return "image/webp";
+	// MediaStore 会按 MIME 校正扩展名；text/plain 不认识 .lrc 时会补成 .lrc.txt。
+	// 通用类型不指定替代扩展名，保留传入的歌词文件名和 UTF-8 内容。
+	if (ext == "lrc") return "application/octet-stream";
 	return "application/octet-stream";
 }
 
@@ -439,18 +458,21 @@ function saveLegacy(source: File, dirType: string, displayName: string, mime: st
 		try { output.close(); } catch (e2) {}
 	}
 
-	// 通知媒体库，让文件管理器能扫描到
+	// 通知媒体库，让文件管理器能扫描到（同样交给扫描器解析标签，见 saveAbsolute 的说明）
 	try {
 		const context = UTSAndroid.getAppContext();
 		if (context != null) {
-			const values = new ContentValues();
-			values.put(MediaStore.MediaColumns.DISPLAY_NAME, finalName);
-			values.put(MediaStore.MediaColumns.MIME_TYPE, mime);
-			values.put(MediaStore.MediaColumns.DATA, target.getAbsolutePath());
-			context!.getContentResolver().insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values);
+			const paths = [target.getAbsolutePath()];
+			const mimes = [mime];
+			MediaScannerConnection.scanFile(
+				context,
+				paths.toKotlinList().toTypedArray(),
+				mimes.toKotlinList().toTypedArray(),
+				null
+			);
 		}
 	} catch (e3) {
-		console.log("[MediaStore] legacy: 媒体库登记失败(文件已写入)");
+		console.log("[MediaStore] legacy: 媒体库登记失败(文件已写入) " + (e3 != null ? e3.toString() : "unknown"));
 	}
 	const path = target.getAbsolutePath();
 	console.log("[MediaStore] legacy 写入成功 " + path);
@@ -535,61 +557,168 @@ function saveScoped(source: File, dirType: string, displayName: string, mime: st
 }
 
 /**
- * 检查/申请写公共目录的权限。
- * Android 10+ 用 MediaStore，无需权限；Android 9- 需要 WRITE_EXTERNAL_STORAGE。
+ * 写入用户自定义的绝对目录（下载设置 → 更改位置 选出来的）。
+ *
+ * 这里**故意绕开 MediaStore**，用 java.io.File 直写：自定义目录可能在 Download 之外
+ * （比如 SD 卡、Documents、自己建的目录），MediaStore 的 RELATIVE_PATH 只认
+ * Download/DCIM/Music 等几个白名单主目录，塞不进去。代价是需要「所有文件访问」
+ * （MANAGE_EXTERNAL_STORAGE，Android 11+ 由用户在系统设置里开；Android 10 及以下
+ * 有 WRITE_EXTERNAL_STORAGE 就够）。没有权限时直接返回空串，调用方降级到固定目录，
+ * 不让下载整体失败。
+ *
+ * 写完后同样往媒体库登记一次，否则第三方文件管理器要等重启才看得到新文件。
  */
-export const ensurePublicDirPermission: EnsurePublicDirPermission = function (): boolean {
+function saveAbsolute(source: File, dirPath: string, displayName: string, mime: string): string {
+	// 权限预检：Android 11+ 必须「所有文件访问」，否则 FileOutputStream 会抛
+	// FileNotFoundException(EACCES)，报错信息对用户毫无意义，不如提前拦下来。
 	const sdk = Build.VERSION.SDK_INT;
-	if (sdk >= 29) return true;
-	const activity = UTSAndroid.getUniActivity();
-	if (activity == null) return false;
-	const perms = ["android.permission.WRITE_EXTERNAL_STORAGE"];
-	if (UTSAndroid.checkSystemPermissionGranted(activity!, perms)) return true;
-	UTSAndroid.requestSystemPermission(activity!, perms, function (allRight: boolean, granted: string[]) {
-		console.log("[MediaStore] 存储权限申请结果 " + allRight);
-	}, function (doNotAskAgain: boolean, granted: string[]) {
-		console.log("[MediaStore] 存储权限被拒绝 doNotAskAgain=" + doNotAskAgain);
+	let allowed = false;
+	if (sdk >= 30) {
+		allowed = Environment.isExternalStorageManager();
+	} else {
+		const activity = UTSAndroid.getUniActivity();
+		allowed = activity != null && UTSAndroid.checkSystemPermissionGranted(activity!, ["android.permission.WRITE_EXTERNAL_STORAGE"]);
+	}
+	if (!allowed) {
+		console.log("[MediaStore] 自定义目录缺少存储权限，dir=" + dirPath);
+		return "";
+	}
+
+	const dir = new File(dirPath);
+	if (!dir.exists() && !dir.mkdirs()) {
+		console.log("[MediaStore] 自定义目录创建失败 dir=" + dirPath);
+		return "";
+	}
+	if (!dir.isDirectory() || !dir.canWrite()) {
+		console.log("[MediaStore] 自定义目录不可写 dir=" + dirPath);
+		return "";
+	}
+
+	const finalName = avoidDuplicate(dir, displayName);
+	const target = new File(dir, finalName);
+
+	const input = new FileInputStream(source);
+	const output = new FileOutputStream(target);
+	try {
+		copyStream(input, output);
+	} finally {
+		try { input.close(); } catch (e1) {}
+		try { output.close(); } catch (e2) {}
+	}
+
+	// 通知媒体库（音频才有意义；封面/歌词登记失败无所谓，不影响文件本身）。
+	// 走 MediaScannerConnection 而不是手工 insert：手工 insert 只能塞进
+	// DISPLAY_NAME / MIME_TYPE / DATA，TITLE、ARTIST、DURATION、IS_MUSIC 全是 NULL，
+	// 而且记录一旦存在，扫描器就不会再补标签 —— 于是这些歌在别的播放器里显示成
+	// 空标题、被「只显示音乐」类过滤掉。扫描器会真正解析文件头，标签齐全。
+	try {
+		const context = UTSAndroid.getAppContext();
+		if (context != null && mime.indexOf("audio/") == 0) {
+			const paths = [target.getAbsolutePath()];
+			const mimes = [mime];
+			MediaScannerConnection.scanFile(
+				context,
+				paths.toKotlinList().toTypedArray(),
+				mimes.toKotlinList().toTypedArray(),
+				null
+			);
+		}
+	} catch (e3) {
+		console.log("[MediaStore] 自定义目录：媒体库登记失败(文件已写入) " + (e3 != null ? e3.toString() : "unknown"));
+	}
+
+	const path = target.getAbsolutePath();
+	console.log("[MediaStore] 自定义目录写入成功 " + path);
+	return path;
+}
+
+/**
+ * 检查/申请写公共目录的权限。
+ * Android 10+ 用 MediaStore，无需权限，直接 resolve true；
+ * Android 9- 需要 WRITE_EXTERNAL_STORAGE：已授权 resolve true，
+ * 未授权时拉起系统权限弹窗并在回调里 resolve 最终结果（同意 true / 拒绝 false）。
+ *
+ * 改成 Promise 的原因：老实现弹窗后立刻返回 false，导致**第一次下载**必然落到私有目录，
+ * 用户要再点一次才会进公共目录。现在等回调，第一次点下载就能直接进公共目录。
+ */
+export const ensurePublicDirPermission: EnsurePublicDirPermission = function (): Promise<boolean> {
+	return new Promise<boolean>((resolve: (value: boolean) => void, reject: (err: any) => void) => {
+		const sdk = Build.VERSION.SDK_INT;
+		if (sdk >= 29) {
+			resolve(true);
+			return;
+		}
+		const activity = UTSAndroid.getUniActivity();
+		if (activity == null) {
+			resolve(false);
+			return;
+		}
+		const perms = ["android.permission.WRITE_EXTERNAL_STORAGE"];
+		if (UTSAndroid.checkSystemPermissionGranted(activity!, perms)) {
+			resolve(true);
+			return;
+		}
+		UTSAndroid.requestSystemPermission(activity!, perms, function (allRight: boolean, granted: string[]) {
+			console.log("[MediaStore] 存储权限申请结果 " + allRight);
+			resolve(allRight);
+		}, function (doNotAskAgain: boolean, granted: string[]) {
+			console.log("[MediaStore] 存储权限被拒绝 doNotAskAgain=" + doNotAskAgain);
+			resolve(false);
+		});
 	});
-	return false;
 }
 
 export const saveToPublicMedia: SaveToPublicMedia = function (
 	tempPath: string,
 	dirType: string,
 	fileName: string,
-	subDir?: string
-): string {
-	try {
-		// tempFilePath 可能是 file:// 或 unifile://sandbox/... 形式，统一转成绝对路径
-		let realPath = tempPath;
-		if (realPath.indexOf("file://") == 0) realPath = realPath.substring(7);
-		let source = new File(realPath);
-		if (!source.exists()) {
-			const converted = UTSAndroid.convert2AbsFullPath(tempPath);
-			if (converted.length > 0) {
-				source = new File(converted);
-				realPath = converted;
+	subDir?: string,
+	absDir?: string
+): Promise<string> {
+	return new Promise<string>((resolve: (value: string) => void, reject: (err: any) => void) => {
+		try {
+			// tempFilePath 可能是 file:// 或 unifile://sandbox/... 形式，统一转成绝对路径
+			let realPath = tempPath;
+			if (realPath.indexOf("file://") == 0) realPath = realPath.substring(7);
+			let source = new File(realPath);
+			if (!source.exists()) {
+				const converted = UTSAndroid.convert2AbsFullPath(tempPath);
+				if (converted.length > 0) {
+					source = new File(converted);
+					realPath = converted;
+				}
 			}
-		}
-		if (!source.exists()) {
-			console.log("[MediaStore] 源文件不存在 tempPath=" + tempPath + " realPath=" + realPath);
-			return "";
-		}
+			if (!source.exists()) {
+				console.log("[MediaStore] 源文件不存在 tempPath=" + tempPath + " realPath=" + realPath);
+				resolve("");
+				return;
+			}
 
-		const dir = subDir != null && subDir.length > 0 ? subDir : DEFAULT_SUB_DIR;
-		const displayName = resolveDisplayName(fileName, realPath);
-		const mime = mimeOf(extOf(displayName));
-		const sdk = Build.VERSION.SDK_INT;
-		console.log("[MediaStore] sdk=" + sdk + " dirType=" + dirType + " subDir=" + dir + " name=" + displayName + " mime=" + mime);
+			const displayName = resolveDisplayName(fileName, realPath);
+			const mime = mimeOf(extOf(displayName));
 
-		if (sdk >= 29) {
-			return saveScoped(source, dirType, displayName, mime, dir);
+			// 用户自定义目录优先：非空时忽略 dirType/subDir，直接写绝对路径
+			const custom = absDir != null && absDir!.length > 0 ? absDir! : "";
+			if (custom.length > 0) {
+				console.log("[MediaStore] 自定义目录 dir=" + custom + " name=" + displayName);
+				resolve(saveAbsolute(source, custom, displayName, mime));
+				return;
+			}
+
+			const dir = subDir != null && subDir.length > 0 ? subDir : DEFAULT_SUB_DIR;
+			const sdk = Build.VERSION.SDK_INT;
+			console.log("[MediaStore] sdk=" + sdk + " dirType=" + dirType + " subDir=" + dir + " name=" + displayName + " mime=" + mime);
+
+			if (sdk >= 29) {
+				resolve(saveScoped(source, dirType, displayName, mime, dir));
+				return;
+			}
+			resolve(saveLegacy(source, dirType, displayName, mime, dir));
+		} catch (e) {
+			console.log("[MediaStore] 写入失败 " + (e != null ? e.toString() : "unknown"));
+			resolve("");
 		}
-		return saveLegacy(source, dirType, displayName, mime, dir);
-	} catch (e) {
-		console.log("[MediaStore] 写入失败 " + (e != null ? e.toString() : "unknown"));
-		return "";
-	}
+	});
 };
 
 /** 真正执行 MediaStore 音频扫描（调用前需已具备读取权限） */
@@ -599,12 +728,18 @@ function doScanAudio(): LocalAudioItem[] {
 		const context = UTSAndroid.getAppContext();
 		if (context == null) return items;
 		// projection 传 null 返回全部列，再用 getColumnIndex 定位（UTSArray 与 Kotlin Array<String> 类型不兼容，不能显式传列数组）
-		const selection = MediaStore.Audio.Media.IS_MUSIC + " != 0";
+		//
+		// 这里**故意不做 IS_MUSIC 过滤**：MediaStore 的 is_music 是「目录启发式」的产物，
+		// 文件只要落在 Ringtones/ 之类的目录名下就是 0，哪怕它本身是首完整的歌；反过来
+		// 应用自己的按钮音效却常常是 1。更要命的是 SQL 三值逻辑：媒体库里手工插入或
+		// 尚未补全标签的行 is_music 为 NULL，`NULL != 0` 求值为 NULL（假），会被整行丢掉 ——
+		// 用户自己放进下载目录的歌就是这么消失的。所以这里返回完整音频池，
+		// 「系统音」的取舍交给页面（默认排除，并提供「包含系统音」开关，切换无需重扫）。
 		const sortOrder = MediaStore.Audio.Media.DATE_ADDED + " DESC";
 		const cursor = context.getContentResolver().query(
 			MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
 			null,
-			selection,
+			null,
 			null,
 			sortOrder
 		);
@@ -617,27 +752,37 @@ function doScanAudio(): LocalAudioItem[] {
 		const idxSize = cursor.getColumnIndex(MediaStore.Audio.Media.SIZE);
 		const idxMtime = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_MODIFIED);
 		const idxPath = cursor.getColumnIndex(MediaStore.Audio.Media.DATA);
+		const idxName = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME);
+		const idxIsMusic = cursor.getColumnIndex(MediaStore.Audio.Media.IS_MUSIC);
 		while (cursor.moveToNext()) {
 			const id = cursor.getLong(idxId);
-			const title = cursor.getString(idxTitle) ?? "";
+			const titleRaw = cursor.getString(idxTitle) ?? "";
+			const nameRaw = idxName >= 0 ? (cursor.getString(idxName) ?? "") : "";
 			const artistRaw = cursor.getString(idxArtist) ?? "";
 			const album = cursor.getString(idxAlbum) ?? "";
 			const durationMs = cursor.getLong(idxDuration);
 			const sizeBytes = cursor.getLong(idxSize);
 			const modified = cursor.getLong(idxMtime);
 			const path = cursor.getString(idxPath) ?? "";
-			// 无效条目（无时长/无标题）跳过，避免列表里出现不可播的空行
-			if (title.length == 0 || durationMs <= 0) continue;
+			// is_music 只作为附加信息带出去（-1 = 媒体库没有该列或为 NULL，即「未知」），
+			// 不参与过滤：我们自己的下载记录就是 NULL，不能当成「非歌曲」。
+			const isMusic = idxIsMusic >= 0 && !cursor.isNull(idxIsMusic) ? cursor.getInt(idxIsMusic) : -1;
+			// TITLE 可能为空（手工插入或没标签的行），退回文件名并去掉扩展名；
+			// 时长也可能为 NULL/0，那种行仍然列出来，只是时长显示为 0。
+			let title = titleRaw;
+			if (title.length == 0) title = stripExt(nameRaw);
+			if (title.length == 0) continue;
 			const item: LocalAudioItem = {
 				id: "local_" + id.toString(),
 				title: title,
 				singer: artistRaw == "<unknown>" ? "" : artistRaw,
 				album: album,
-				duration: Math.floor(durationMs / 1000),
+				duration: Math.floor(Math.max(durationMs, 0) / 1000),
 				uri: "content://media/external/audio/media/" + id.toString(),
 				path: path,
 				size: sizeBytes,
-				mtime: modified
+				mtime: modified,
+				isMusic: isMusic
 			};
 			items.push(item);
 		}
@@ -755,7 +900,89 @@ export const deleteLocalMedia: DeleteLocalMedia = (items: LocalAudioItem[]): Del
 	return result;
 };
 
-// ==================== 系统文件选择器（选一个 js/文本文件读回全文） ====================
+// ==================== 按路径批量删除媒体文件（下载管理） ====================
+
+/**
+ * 按 DATA 列（_data）在指定 MediaStore 集合里反查 content URI 并删除。
+ * 下载记录只持久化了绝对路径（saveToPublicMedia 返回的就是 DATA 路径），
+ * 删除时按路径反查条目，删条目会连磁盘文件一起删掉。
+ * @returns 删掉的行数（0 = 该集合里没有这个路径）
+ */
+function deleteByDataPath(collection: Uri, path: string, context: Context): number {
+	try {
+		const args = [path];
+		const cursor = context.getContentResolver().query(
+			collection,
+			null,
+			MediaStore.MediaColumns.DATA + " = ?",
+			args.toKotlinList().toTypedArray(),
+			null
+		);
+		if (cursor == null) return 0;
+		try {
+			if (cursor!.moveToFirst()) {
+				// _ID 的字面值在所有集合里都是 "_id"，沿用 doScanAudio 的列名与 URI 拼法
+				const idxId = cursor!.getColumnIndex(MediaStore.Audio.Media._ID);
+				const id = cursor!.getLong(idxId);
+				const itemUri = Uri.parse(collection.toString() + "/" + id.toString());
+				return context.getContentResolver().delete(itemUri, null, null);
+			}
+		} finally {
+			cursor!.close();
+		}
+		return 0;
+	} catch (e) {
+		console.log("[MediaStore] 按路径反查删除失败 " + (e != null ? e.toString() : "unknown"));
+		return 0;
+	}
+}
+
+export const deleteMediaByPath: DeleteMediaByPath = (paths: string[]): DeleteLocalMediaResult => {
+	const result: DeleteLocalMediaResult = { deleted: 0, pending: 0, failed: 0 };
+	const context = UTSAndroid.getAppContext();
+	if (context == null) {
+		result.failed = paths.length;
+		return result;
+	}
+	for (let i = 0; i < paths.length; i++) {
+		let raw = paths[i];
+		if (raw == null || raw.length == 0) {
+			result.failed++;
+			continue;
+		}
+		// file:// / unifile://sandbox/... 统一转成绝对路径（与 saveToPublicMedia 同规则）
+		let abs = raw;
+		if (abs.indexOf("file://") == 0) abs = abs.substring(7);
+		let f = new File(abs);
+		if (!f.exists()) {
+			const converted = UTSAndroid.convert2AbsFullPath(raw);
+			if (converted.length > 0) {
+				f = new File(converted);
+				abs = converted;
+			}
+		}
+		let removed = false;
+		// 1) MediaStore 反查删除（API 29+ 在 Downloads 集合，API 28- 落在 Audio 集合）。
+		//    只删本应用写入的文件：自有条目无分区存储限制，不会抛 RecoverableSecurityException。
+		if (Build.VERSION.SDK_INT >= 29) {
+			if (deleteByDataPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI, abs, context) > 0) removed = true;
+		} else {
+			if (deleteByDataPath(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, abs, context) > 0) removed = true;
+		}
+		// 2) File.delete 兜底（条目反查不到、或已删但文件残留时）
+		if (!removed) {
+			try {
+				if (f.exists() && f.delete()) removed = true;
+			} catch (e) {
+				console.log("[MediaStore] File.delete 失败 " + (e != null ? e.toString() : "unknown"));
+			}
+		}
+		if (removed) result.deleted++;
+		else result.failed++;
+	}
+	console.log("[MediaStore] 按路径删除完成 " + result.deleted + "/" + paths.length);
+	return result;
+};
 
 /** pickJsFile 用的 Activity result 请求码（避开运行时已占用的区间，过滤时严格比对） */
 // 必须显式标 Int：UTS 字面量默认推断 number（编译为 Kotlin Number），
@@ -769,9 +996,9 @@ let pickJsFileListenerReady = false;
 
 /**
  * 打开系统文件选择器（ACTION_OPEN_DOCUMENT），选中后经 contentResolver 读回
- * UTF-8 全文。不限 MIME：文件管理器对 .js 的归类五花八门（octet-stream /
- * text/plain / x-javascript…），宁宽勿漏，选到的内容由上层 installFromText
- * 校验包头，非音源包会被拒绝。ACTION_OPEN_DOCUMENT 返回的 content URI 只有
+ * UTF-8 全文。选择器只接受 JavaScript MIME，读取前还须校验显示名以 .js 结尾，
+ * 避免文件管理器错误归类时读入其他文件。包内容再由上层 installFromText
+ * 校验。ACTION_OPEN_DOCUMENT 返回的 content URI 只有
  * 一次性读权限，所以必须在这里把内容读出来回传（不能把 URI 存着以后用）。
  */
 export const pickJsFile: PickJsFile = function (onResult: (result: PickFileResult) => void): void {
@@ -799,7 +1026,7 @@ export const pickJsFile: PickJsFile = function (onResult: (result: PickFileResul
 			}
 			try {
 				const resolver = activity.getContentResolver();
-				// 显示名（仅用于提示；失败不影响读取）
+				// 显示名用于后缀校验，无法确认类型时不读取。
 				let name = "";
 				try {
 					const cursor = resolver.query(uri, null, null, null, null);
@@ -807,9 +1034,13 @@ export const pickJsFile: PickJsFile = function (onResult: (result: PickFileResul
 						const idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
 						if (idx >= 0) name = cursor.getString(idx);
 					}
-					cursor!.close();
+					if (cursor != null) cursor.close();
 				} catch (e) {
-					// 查不到名字就算了
+					// 读取显示名失败时由下面的后缀校验拒绝。
+				}
+				if (!name.toLowerCase().endsWith(".js") || name.length <= 3) {
+					cb({ ok: false, name: name, content: "", message: "请选择 .js 格式的音源文件" } as PickFileResult);
+					return;
 				}
 				const reader = new BufferedReader(new InputStreamReader(resolver.openInputStream(uri), "UTF-8"));
 				let text = "";
@@ -844,7 +1075,9 @@ export const pickJsFile: PickJsFile = function (onResult: (result: PickFileResul
 	try {
 		const intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
 		intent.addCategory(Intent.CATEGORY_OPENABLE);
-		intent.setType("*/*");
+		intent.setType("application/javascript");
+		const mimeTypes: string[] = ["application/javascript", "text/javascript", "application/x-javascript", "text/x-javascript", "application/ecmascript", "text/ecmascript"];
+		intent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes.toKotlinList().toTypedArray());
 		pickJsFileCallback = onResult;
 		activity.startActivityForResult(intent, PICK_JS_FILE_REQUEST);
 	} catch (e) {
@@ -1038,4 +1271,109 @@ export const openPermissionSettings: OpenPermissionSettings = function (id: stri
 		console.log("[AppNative] openPermissionSettings error " + (e != null ? e.toString() : "unknown"));
 		return false;
 	}
+};
+
+// ==================== 下载目录选择（下载设置 → 更改位置） ====================
+
+/** pickDirectory 用的 Activity result 请求码（与 pickJsFile 分开，避免串扰） */
+const PICK_DIR_REQUEST: Int = 40012;
+/** 一次只允许一个目录选择会话 */
+let pickDirCallback: ((result: PickDirectoryResult) => void) | null = null;
+/** 目录选择的 onAppActivityResult 只注册一次 */
+let pickDirListenerReady = false;
+
+/**
+ * 把 ACTION_OPEN_DOCUMENT_TREE 返回的 document URI 反解成真实绝对路径。
+ *
+ * tree URI 形如 content://com.android.externalstorage.documents/tree/primary%3ADownload%2FQtMusic，
+ * DocumentsContract.getTreeDocumentId 解出 "primary:Download/QtMusic"：冒号前是卷标识
+ * （primary = 内置存储，其余是 SD 卡卷 UUID），冒号后是卷内相对路径。
+ *
+ * 反解真实路径而不是长期持有 URI，是为了后续用 java.io.File 直写（见 saveAbsolute 的注释）。
+ * 拿不到映射时返回空串，调用方会提示用户改选内置存储。
+ */
+function treeUriToPath(uri: Uri): string {
+	const docId = DocumentsContract.getTreeDocumentId(uri);
+	if (docId == null || docId.length == 0) return "";
+	const sep = docId.indexOf(":");
+	if (sep < 0) return "";
+	const volume = docId.substring(0, sep);
+	const relative = docId.substring(sep + 1);
+
+	let base = "";
+	if (volume == "primary") {
+		base = Environment.getExternalStorageDirectory().getAbsolutePath();
+	} else {
+		// SD 卡 / U 盘：卷标识就是 /storage 下的目录名
+		base = "/storage/" + volume;
+	}
+	if (base.length == 0) return "";
+	if (relative.length == 0) return base;
+	return base + "/" + relative;
+}
+
+/**
+ * 打开系统文件管理器选一个目录（ACTION_OPEN_DOCUMENT_TREE）。
+ *
+ * 只回传路径、不申请持久化 URI 授权（takePersistableUriPermission）：本项目写文件走
+ * java.io.File 直写，权限由「所有文件访问」提供，不依赖 URI 授权，也就没有「重启后
+ * 授权失效、下载静默失败」的坑。调用方需要在调用前确保已获得该权限。
+ */
+export const pickDirectory: PickDirectory = function (onResult: (result: PickDirectoryResult) => void): void {
+	const activity = UTSAndroid.getUniActivity();
+	if (activity == null) {
+		onResult({ ok: false, path: "", name: "", message: "窗口未就绪，请稍后重试" } as PickDirectoryResult);
+		return;
+	}
+	if (!pickDirListenerReady) {
+		pickDirListenerReady = true;
+		UTSAndroid.onAppActivityResult((requestCode: Int, resultCode: Int, data?: Intent) => {
+			if (requestCode != PICK_DIR_REQUEST) return;
+			const cb = pickDirCallback;
+			pickDirCallback = null;
+			if (cb == null) return;
+			// Activity.RESULT_OK = -1；取消/关闭都按「用户取消」处理
+			if (resultCode != -1 || data == null) {
+				cb({ ok: false, path: "", name: "", message: "已取消选择" } as PickDirectoryResult);
+				return;
+			}
+			const uri = data.getData();
+			if (uri == null) {
+				cb({ ok: false, path: "", name: "", message: "未选择目录" } as PickDirectoryResult);
+				return;
+			}
+			try {
+				const path = treeUriToPath(uri!);
+				if (path.length == 0) {
+					cb({ ok: false, path: "", name: "", message: "无法解析该目录，请改选内置存储" } as PickDirectoryResult);
+					return;
+				}
+				// 显示名取路径最后一段（文档树拿不到友好的目录名）
+				let name = path;
+				const slash = path.lastIndexOf("/");
+				if (slash >= 0 && slash < path.length - 1) name = path.substring(slash + 1);
+				cb({ ok: true, path: path, name: name, message: "" } as PickDirectoryResult);
+			} catch (e) {
+				console.log("[AppNative] pickDirectory resolve error " + (e != null ? e.toString() : "unknown"));
+				cb({ ok: false, path: "", name: "", message: "解析目录失败" } as PickDirectoryResult);
+			}
+		});
+	}
+	try {
+		const intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+		// 部分 ROM 不指定这两项会只显示「最近」，看不到完整目录树
+		intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+		intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+		pickDirCallback = onResult;
+		activity.startActivityForResult(intent, PICK_DIR_REQUEST);
+	} catch (e) {
+		pickDirCallback = null;
+		console.log("[AppNative] pickDirectory launch error " + (e != null ? e.toString() : "unknown"));
+		onResult({ ok: false, path: "", name: "", message: "无法打开文件管理器" } as PickDirectoryResult);
+	}
+};
+
+// 自定义目录 URI 只对鸿蒙有意义：Android 选完目录后反解成真实路径直接写文件，
+// 不需要「启动时把 URI 喂回原生」这一步，空实现。
+export const setCustomDirUri: SetCustomDirUri = function (uri: string): void {
 };

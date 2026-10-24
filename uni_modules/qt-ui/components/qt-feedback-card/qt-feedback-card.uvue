@@ -1,0 +1,139 @@
+<template>
+  <!-- 一条反馈卡。
+       抽成组件的原因：宽屏两列时同一段标记要在左右两格各出现一次，不抽组件
+       就得抄两遍，两列的行高/内边距一定会漂。 -->
+  <view
+    class="fb-item"
+    :class="[[themeStore.dark ? 'fb-item-dark' : ''], [layout.isWide ? 'fb-item-wide' : ''], [inColumn ? 'fb-in-col' : '']]"
+    :hover-class="layout.isWide ? 'fb-item-hover' : 'none'"
+    @tap="emit('tap')"
+  >
+    <view class="fb-head" :class="layout.isWide ? 'fb-head-wide' : ''">
+      <view class="type-badge" :class="layout.isWide ? 'type-badge-wide' : ''" :style="'background-color:' + typeColor + ';'">
+        <text class="type-badge-text" :class="layout.isWide ? 'type-badge-text-wide' : ''" :style="qtFontDual(20, 11)">{{ typeText }}</text>
+      </view>
+      <text class="fb-title" :class="layout.isWide ? 'fb-title-wide' : ''" :max-lines="1" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(29, 16)">{{ title }}</text>
+      <view class="status-badge" :class="layout.isWide ? 'status-badge-wide' : ''" :style="'background-color:' + statusColor + ';'">
+        <text class="status-badge-text" :class="layout.isWide ? 'status-badge-text-wide' : ''" :style="qtFontDual(20, 11)">{{ statusText }}</text>
+      </view>
+    </view>
+    <text class="fb-content" :class="layout.isWide ? 'fb-content-wide' : ''" :max-lines="2" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(25, 14)">{{ content }}</text>
+    <view class="fb-foot" :class="layout.isWide ? 'fb-foot-wide' : ''">
+      <text class="fb-time" :class="layout.isWide ? 'fb-time-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(22, 12)">{{ timeText }}</text>
+      <text v-if="showPublic" class="fb-public" :class="layout.isWide ? 'fb-public-wide' : ''" :style="qtFontDual(22, 12)">已公开</text>
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+
+defineProps<{
+  title: string;
+  content: string;
+  typeText: string;
+  typeColor: string;
+  statusText: string;
+  statusColor: string;
+  timeText: string;
+  showPublic: boolean;
+  /** 两列时由宿主传 true：列宽已扣掉留白，卡片不能再带左右外边距 */
+  inColumn: boolean;
+}>();
+
+const emit = defineEmits<{ tap: [] }>();
+
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+</script>
+
+<style>
+/* 文字颜色一律由模板里的 themeStore.skin.* 内联给出（跟随深浅色与换肤），
+   这里只留字号/字重/间距；下面这些规则里不要再写死颜色 */
+.fb-item {
+  margin: 20rpx 24rpx 0;
+  padding: 28rpx 24rpx;
+  background-color: rgba(255, 255, 255, 0.62);
+  border-width: 1px; border-style: solid;
+  border-color: rgba(255, 255, 255, 0.6);
+  border-radius: 20rpx;
+}
+.fb-item-dark {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+.fb-head {
+  flex-direction: row;
+  align-items: center;
+}
+.type-badge {
+  flex-shrink: 0;
+  padding: 4rpx 14rpx;
+  border-radius: 8rpx;
+}
+.type-badge-text {
+  color: #ffffff;
+  font-size: 20rpx;
+  font-weight: 600;
+}
+.fb-title {
+  flex: 1;
+  margin-left: 14rpx;
+  margin-right: 14rpx;
+  color: #191d26;
+  font-size: 29rpx;
+  font-weight: 600;
+}
+.status-badge {
+  flex-shrink: 0;
+  padding: 4rpx 14rpx;
+  border-radius: 8rpx;
+}
+.status-badge-text {
+  color: #ffffff;
+  font-size: 20rpx;
+  font-weight: 600;
+}
+.fb-content {
+  margin-top: 14rpx;
+  color: #596173;
+  font-size: 25rpx;
+  line-height: 1.5;
+}
+.fb-foot {
+  margin-top: 14rpx;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+.fb-time {
+  color: #6b7385;
+  font-size: 22rpx;
+}
+.fb-public {
+  color: #4fb186;
+  font-size: 22rpx;
+}
+
+/* Vapor 宽屏：px 覆盖 rpx，1600x900 下避免按窗口比例放大 2.7 倍 */
+/* 桌面指针反馈 */
+.fb-item-hover {
+  background-color: rgba(127, 127, 127, 0.10);
+}
+/* 两列时卡片的左右外边距归零：列宽已扣掉页面留白与列间距，
+   保留 24px margin 会让右列贴不住列边界 */
+.fb-item-wide { margin: 14px 24px 0; padding: 20px; border-radius: 14px; }
+.fb-in-col { margin-left: 0; margin-right: 0; }
+.fb-head-wide { flex-direction: row; align-items: center; }
+.type-badge-wide { padding: 2px 8px; border-radius: 5px; }
+.type-badge-text-wide { font-size: 11px; }
+.fb-title-wide { margin-left: 8px; margin-right: 8px; font-size: 16px; }
+.status-badge-wide { padding: 2px 8px; border-radius: 5px; }
+.status-badge-text-wide { font-size: 11px; }
+.fb-content-wide { margin-top: 8px; font-size: 14px; }
+.fb-foot-wide { margin-top: 8px; }
+.fb-time-wide { font-size: 12px; }
+.fb-public-wide { font-size: 12px; }
+</style>

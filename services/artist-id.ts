@@ -100,19 +100,3 @@ export function resolveArtistId(platform: Source, name: string): Promise<string>
   }
   return task;
 }
-
-/** 已解析过的 id（同步）；没解析过返回 "" */
-export function peekArtistId(platform: Source, name: string): string {
-  const key = keyOf(platform, name);
-  const at = settledKeys.indexOf(key);
-  if (at >= 0) return settledValues[at] as string;
-  return "";
-}
-
-/** 清空缓存（切音源包等场景） */
-export function clearArtistIdCache(): void {
-  pendingKeys.splice(0, pendingKeys.length);
-  pendingValues.splice(0, pendingValues.length);
-  settledKeys.splice(0, settledKeys.length);
-  settledValues.splice(0, settledValues.length);
-}

@@ -1,25 +1,25 @@
 <template>
-  <qt-page-frame :max-width="1360">
-    <view class="page">
+  <qt-page-frame width-kind="grid">
+    <view class="page" :class="layout.isWide ? 'page-wide' : ''">
       <!-- 歌单区标题 + 操作 -->
       <view class="pl-head" :class="layout.isWide ? 'pl-head-wide' : ''">
           <view class="pl-head-copy">
-            <text class="pl-kicker" :style="'color:' + themeStore.skin.accent + ';'">COLLECTION</text>
+            <text class="pl-kicker" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(21, 12)">COLLECTION</text>
             <view class="pl-head-title-row">
-              <text class="pl-head-title" :class="layout.isWide ? 'pl-head-title-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">我的收藏歌单</text>
+              <text class="pl-head-title" :class="layout.isWide ? 'pl-head-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(36, 24)">我的收藏歌单</text>
               <view v-if="allPlaylists.length > 0" class="pl-count-pill" :class="layout.isWide ? 'pl-count-pill-wide' : ''" :style="chipStyle">
-                <text class="pl-count-text" :class="layout.isWide ? 'pl-count-text-wide' : ''" :style="'color:' + themeStore.skin.accent + ';'">{{ allPlaylists.length }}</text>
+                <text class="pl-count-text" :class="layout.isWide ? 'pl-count-text-wide' : ''" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(24, 14)">{{ allPlaylists.length }}</text>
               </view>
             </view>
           </view>
           <view class="pl-actions">
             <view class="import-btn" :class="layout.isWide ? 'import-btn-wide' : ''" :style="ghostBtnStyle" @click="goImport">
               <QtIcon name="download" :size="layout.isWide ? 14 : 22" :color="themeStore.skin.iconMuted" />
-              <text class="import-btn-text" :class="layout.isWide ? 'import-btn-text-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">导入</text>
+              <text class="import-btn-text" :class="layout.isWide ? 'import-btn-text-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(23, 13)">导入</text>
             </view>
             <view class="create-btn" :class="layout.isWide ? 'create-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @click="createPlaylist">
               <QtIcon name="folder" :size="layout.isWide ? 14 : 22" :color="themeStore.skin.onAccent" />
-              <text class="create-btn-text" :class="layout.isWide ? 'create-btn-text-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">新建</text>
+              <text class="create-btn-text" :class="layout.isWide ? 'create-btn-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(23, 13)">新建</text>
             </view>
           </view>
         </view>
@@ -32,6 +32,7 @@
               :key="pl.id + pl.platform"
               class="pl-item" :class="layout.isWide ? 'pl-item-wide' : ''"
               :style="plItemStyle"
+              :hover-class="layout.isWide ? 'pl-item-hover' : 'none'"
               @click="openPlaylist(pl)"
               @longpress="onPlaylistLongPress(pl)"
             >
@@ -42,43 +43,78 @@
                   class="pl-badge" :class="layout.isWide ? 'pl-badge-wide' : ''"
                   :style="'background-color:' + (pl.platform === 'local' ? '#8b93a7' : platformColor(pl.platform))"
                 >
-                  <text class="pl-badge-text" :class="layout.isWide ? 'pl-badge-text-wide' : ''">{{ pl.platform === 'local' ? '本地' : platformShort(pl.platform) }}</text>
+                  <text class="pl-badge-text" :class="layout.isWide ? 'pl-badge-text-wide' : ''" :style="qtFontDual(22, 12)">{{ pl.platform === 'local' ? '本地' : platformShort(pl.platform) }}</text>
+                </view>
+                <view
+                  v-if="isDefaultFav(pl)"
+                  class="pl-fav-badge" :class="layout.isWide ? 'pl-fav-badge-wide' : ''"
+                  :style="'background-color:' + themeStore.skin.accent"
+                >
+                  <QtIcon name="heart-fill" :size="layout.isWide ? 13 : 24" :color="themeStore.skin.onAccent" />
                 </view>
               </view>
-              <text class="pl-name" :class="layout.isWide ? 'pl-name-wide' : ''" :style="'color:' + themeStore.skin.text + ';'" :max-lines="2">{{ pl.name }}</text>
+              <text class="pl-name" :class="layout.isWide ? 'pl-name-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 16)" :max-lines="2">{{ pl.name }}</text>
             </view>
           </view>
           <view v-else class="empty" :class="layout.isWide ? 'empty-wide' : ''">
             <view class="empty-chip" :class="layout.isWide ? 'empty-chip-wide' : ''" :style="chipStyle">
               <QtIcon name="heart" :size="layout.isWide ? 36 : 64" :color="themeStore.skin.accent" />
             </view>
-            <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">还没有收藏歌单</text>
-            <text class="empty-sub" :class="layout.isWide ? 'empty-sub-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';'">在发现页找到喜欢的歌单，点收藏即可出现在这里</text>
+            <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(32, 20)">还没有收藏歌单</text>
+            <text class="empty-sub" :class="layout.isWide ? 'empty-sub-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 14)">在发现页找到喜欢的歌单，点收藏即可出现在这里</text>
             <view class="empty-actions">
               <view class="empty-ghost" :class="layout.isWide ? 'empty-ghost-wide' : ''" :style="ghostBtnStyle" @click="createPlaylist">
                 <QtIcon name="folder" :size="layout.isWide ? 16 : 28" :color="themeStore.skin.text" />
-                <text class="empty-ghost-text" :class="layout.isWide ? 'empty-ghost-text-wide' : ''" :style="'color:' + themeStore.skin.text + ';'">新建歌单</text>
+                <text class="empty-ghost-text" :class="layout.isWide ? 'empty-ghost-text-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 16)">新建歌单</text>
               </view>
               <view class="empty-primary" :class="layout.isWide ? 'empty-primary-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @click="discover">
                 <QtIcon name="compass" :size="layout.isWide ? 16 : 28" :color="themeStore.skin.onAccent" />
-                <text class="empty-primary-text" :class="layout.isWide ? 'empty-primary-text-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">去发现音乐</text>
+                <text class="empty-primary-text" :class="layout.isWide ? 'empty-primary-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(28, 16)">去发现音乐</text>
               </view>
             </view>
           </view>
         </scroll-view>
       <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
-      <MiniPlayer />
     </view>
+  <!-- 新建歌单：页内输入弹层（uni.showModal 的 editable 在 App 端不出输入框） -->
+  <view v-if="createSheetVisible" class="cs-mask" :style="'background-color:' + themeStore.skin.scrim + ';'" @click="closeCreateSheet">
+    <view class="cs-card" :class="layout.isWide ? 'cs-card-wide' : ''" :style="csCardStyle" @click.stop>
+      <text class="cs-title" :class="layout.isWide ? 'cs-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(32, 18)">新建歌单</text>
+      <text class="cs-desc" :class="layout.isWide ? 'cs-desc-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13)">给新歌单起个名字，之后可以把喜欢的歌拷进来</text>
+      <input
+        class="cs-input"
+        :class="layout.isWide ? 'cs-input-wide' : ''"
+        :style="csInputStyle"
+        :value="createSheetValue"
+        @input="onCreateSheetInput"
+        placeholder="请输入歌单名称"
+        :placeholder-class="layout.isWide ? 'cs-ph-wide' : 'cs-ph'"
+        :maxlength="40"
+        :focus="createSheetVisible"
+      />
+      <text v-if="createSheetError.length > 0" class="cs-error" :class="layout.isWide ? 'cs-error-wide' : ''" :style="('color:' + themeStore.skin.danger + ';') + qtFontDual(22, 12)">{{ createSheetError }}</text>
+      <view class="cs-btn-row" :class="layout.isWide ? 'cs-btn-row-wide' : ''">
+        <view class="cs-btn" :class="layout.isWide ? 'cs-btn-wide' : ''" @click="closeCreateSheet">
+          <text class="cs-btn-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(28, 15)">取消</text>
+        </view>
+        <view class="cs-btn" :class="layout.isWide ? 'cs-btn-wide' : ''" @click="submitCreateSheet">
+          <text class="cs-btn-text" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(28, 15)">创建</text>
+        </view>
+      </view>
+    </view>
+  </view>
   </qt-page-frame>
 </template><script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
+import { qtShowActionSheet } from "@/services/action-sheet";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { computed, ref } from "vue";
-import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { usePlayerStore } from "@/stores/player";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtContentWidth, qtColumnCount, QT_MIN_COLUMN_WIDTH } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { platformShort, platformColor } from "@/services/platform";
 import {
   uploadPlaylistCover, clearPlaylistCover, chooseImage,
@@ -86,6 +122,8 @@ import {
 } from "@/services/media";
 import { getAccessToken } from "@/services/auth";
 import { beginLoading, finishLoading } from "@/services/ui-loading";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtNavAnimation, qtSwitchTab } from "@/uni_modules/qt-ui/composables/qt-nav";
 
 const player = usePlayerStore();
 const themeStore = useThemeStore();
@@ -108,30 +146,57 @@ function backToTop() {
   showBackToTop.value = false;
 }
 const allPlaylists = computed(() => {
-  const locals = player.localPlaylists.map(p => ({ ...p, isLocal: true }));
-  const saveds = player.savedPlaylists.map(p => ({ ...p, isLocal: false }));
+  const locals = player.localPlaylists.map(p => ({ ...p, picUrl: player.playlistDisplayPic(p), isLocal: true }));
+  const saveds = player.savedPlaylists.map(p => ({ ...p, picUrl: player.playlistDisplayPic(p), isLocal: false }));
   return [...locals, ...saveds];
 });
 
+/** 栅格可用宽（px）：宽屏取内容列宽减左右 26px 内边距，手机按 750 基准折算 */
+const plInnerWidth = computed<number>((): number => {
+  const win = layout.windowWidth;
+  return layout.isWide ? qtContentWidth("grid") - 52 : win - win * (48 / 750);
+});
 /**
- * 歌单卡宽（inline px，随窗口实时缩放）：三列起，卡宽 < 92px 退化两列。
+ * 宽屏列数按「最小卡宽」推导，不再写死 4 列。
+ * 改造前是 isWide 固定 4 列 + 卡宽上限 226px：1920px 窗口里四张 226px 的卡靠左叠放，
+ * 右侧空出近 500px，而内容列本身还被旧 qt-page-frame 拉到 1360。
+ */
+const plCols = computed<number>((): number => {
+  if (!layout.isWide) return 3;
+  return qtColumnCount(plInnerWidth.value, QT_MIN_COLUMN_WIDTH.card, 20, 8);
+});
+/**
+ * 歌单卡宽（inline px，随窗口实时缩放）：手机端三列起，卡宽 < 92px 退化两列。
  */
 const plCardWidth = computed<number>(() => {
   const win = layout.windowWidth;
-  const inner = layout.isWide ? Math.min(win, 1360) - 52 : win - win * (48 / 750);
-  const gap = win * (14 / 750);
-  const cols = layout.isWide ? 4 : 3;
-  const w = Math.floor((inner - gap * cols) / cols);
-  if (layout.isWide) return Math.min(226, w);
-  const three = Math.floor((inner - gap * 3) / 3);
-  const two = Math.floor((inner - gap * 2) / 2);
-  return three >= 92 ? three : two;
+  if (!layout.isWide) {
+    const inner = win - win * (48 / 750);
+    const gap = win * (14 / 750);
+    const three = Math.floor((inner - gap * 3) / 3);
+    const two = Math.floor((inner - gap * 2) / 2);
+    return three >= 92 ? three : two;
+  }
+  const cols = plCols.value;
+  const w = Math.floor((plInnerWidth.value - 20 * cols) / cols);
+  // 上限 260：再宽封面就成了主角，歌单名反而被挤成两行
+  return w > 260 ? 260 : w;
 });
 const plItemStyle = computed<string>(() => "width:" + plCardWidth.value + "px;");
 const plCoverStyle = computed<string>(() => "width:" + plCardWidth.value + "px;height:" + plCardWidth.value + "px;");
 
+// 当前生效的默认收藏歌单（通知栏 ♡ 的收藏目标）：显式设置优先，未设置时回落第一个自建歌单。
+// 用 computed 跟随 store 变化（歌单增删 / 长按改设置），模板里据此给歌单打标。
+const defaultFavId = computed<string>(() => {
+  const pl = player.defaultFavPlaylist();
+  return pl != null ? pl.id : "";
+});
+function isDefaultFav(pl: { id: string; platform: string }): boolean {
+  return pl.platform === "local" && pl.id === defaultFavId.value;
+}
+
 function openPlaylist(pl: { id: string; platform: string }): void {
-  uni.navigateTo({
+  uni.navigateTo({ animationType: qtNavAnimation(),
     url:
       "/pages/playlist/index?id=" +
       encodeURIComponent(pl.id) +
@@ -148,21 +213,36 @@ function openPlaylist(pl: { id: string; platform: string }): void {
 const coverBusy = ref(false);
 
 function onPlaylistLongPress(pl: { id: string; platform: string; picUrl: string; isLocal: boolean }): void {
-  // 本地歌单的封面只是本机展示字段，服务端歌单行是收藏元数据，开放换封面会引起同步歧义
+  // 自建歌单（本机新建 + 其他端同步回来的 platform=local）：长按 = 设为默认收藏歌单。
+  // 通知栏/车机的收藏 ♡ 收进的就是它；不设置时默认用第一个自建歌单。
+  if (pl.platform === "local") {
+    // 只有「显式设置过的那一个」才给取消入口：未设置时的默认值是「第一个自建歌单」
+    // 算出来的，对它显示取消会让人以为取消后就不收藏了，实际仍会回落到它自己
+    const isExplicit = player.defaultFavPlaylistId.length > 0 && player.defaultFavPlaylistId === pl.id;
+    const items: string[] = isExplicit ? ["取消默认收藏歌单"] : ["设为默认收藏歌单"];
+    qtShowActionSheet({ itemList: items }).then((idx: number) => {
+      if (idx !== 0) return;
+      if (isExplicit) {
+        player.setDefaultFavPlaylist("");
+        qtShowToast({ title: "已取消设置，通知栏收藏回到第一个自建歌单", icon: "none" });
+      } else {
+        player.setDefaultFavPlaylist(pl.id);
+        qtShowToast({ title: "已设为默认收藏歌单，通知栏收藏将收进这里", icon: "none" });
+      }
+    });
+    return;
+  }
+  // 在线歌单：封面只是本机展示字段，服务端歌单行是收藏元数据，开放换封面会引起同步歧义
   if (pl.isLocal) return;
   if (getAccessToken().length === 0) {
-    uni.showToast({ title: "登录后才能更换封面", icon: "none" });
+    qtShowToast({ title: "登录后才能更换封面", icon: "none" });
     return;
   }
   // 自定义封面 = 我们对象键（astral/{publicId}/v1/…）下的直链，此时提供恢复默认入口
   const isCustom = pl.picUrl.indexOf("/astral/") >= 0;
-  uni.showActionSheet({
-    itemList: isCustom ? ["更换封面", "恢复默认封面"] : ["更换封面"],
-    success: (sel) => {
-      const idx = sel != null && sel.tapIndex != null ? (sel.tapIndex as number) : -1;
-      if (idx === 0) changeCover(pl);
-      else if (idx === 1) restoreCover(pl);
-    },
+  qtShowActionSheet({ itemList: isCustom ? ["更换封面", "恢复默认封面"] : ["更换封面"] }).then((idx: number) => {
+    if (idx === 0) changeCover(pl);
+    else if (idx === 1) restoreCover(pl);
   });
 }
 
@@ -180,10 +260,10 @@ async function changeCover(pl: { id: string; platform: string }): Promise<void> 
     const url = await uploadPlaylistCover(pl.id, pl.platform, path);
     player.setSavedPlaylistCover(pl.platform, pl.id, url);
     finishLoading(upToken);
-    uni.showToast({ title: "封面已更新", icon: "none" });
+    qtShowToast({ title: "封面已更新", icon: "none" });
   } catch (e) {
     finishLoading(upToken);
-    uni.showToast({ title: (e as Error).message || "上传失败", icon: "none", duration: 3000 });
+    qtShowToast({ title: (e as Error).message || "上传失败", icon: "none", duration: 3000 });
   } finally {
     coverBusy.value = false;
   }
@@ -197,43 +277,58 @@ async function restoreCover(pl: { id: string; platform: string }): Promise<void>
     await clearPlaylistCover(pl.id, pl.platform);
     player.setSavedPlaylistCover(pl.platform, pl.id, "");
     finishLoading(rstToken);
-    uni.showToast({ title: "已恢复默认封面", icon: "none" });
+    qtShowToast({ title: "已恢复默认封面", icon: "none" });
   } catch (e) {
     finishLoading(rstToken);
-    uni.showToast({ title: (e as Error).message || "操作失败", icon: "none", duration: 3000 });
+    qtShowToast({ title: (e as Error).message || "操作失败", icon: "none", duration: 3000 });
   } finally {
     coverBusy.value = false;
   }
 }
 function discover() {
-  uni.switchTab({ url: "/pages/home/index" });
+  qtSwitchTab("/pages/home/index");
 }
+/** 新建歌单：页内输入弹层状态（原生 showModal 的 editable 在 App 端不出输入框） */
+const createSheetVisible = ref(false);
+const createSheetValue = ref("");
+const createSheetError = ref("");
+const csCardStyle = computed<string>(() => "background-color:" + themeStore.skin.surface + ";border-radius:24rpx;");
+const csInputStyle = computed<string>(() => "background-color:" + themeStore.skin.surfaceInset + ";color:" + themeStore.skin.text + ";border-radius:14rpx;");
+
 function createPlaylist(): void {
-  uni.showModal({
-    title: '新建歌单',
-    editable: true,
-    placeholderText: '请输入歌单名称',
-    success: (res) => {
-      if (res.confirm) {
-        const name = res.content != null ? res.content.trim() : '';
-        if (name.length === 0) {
-          uni.showToast({ title: '歌单名称不能为空', icon: 'none' });
-          return;
-        }
-        const created = player.createLocalPlaylist(name);
-        if (created == null) {
-          uni.showToast({ title: '该歌单名称已存在', icon: 'none' });
-          return;
-        }
-        uni.showToast({ title: '已创建歌单', icon: 'none' });
-      }
-    }
-  });
+  createSheetValue.value = "";
+  createSheetError.value = "";
+  createSheetVisible.value = true;
+}
+
+function closeCreateSheet(): void {
+  createSheetVisible.value = false;
+}
+
+function onCreateSheetInput(e: InputEvent): void {
+  createSheetValue.value = e.detail.value;
+  if (createSheetError.value.length > 0) createSheetError.value = "";
+}
+
+/** 提交：空名/重名在弹层里红字提示，成功则关层并提示 */
+function submitCreateSheet(): void {
+  const name = createSheetValue.value.trim();
+  if (name.length === 0) {
+    createSheetError.value = "歌单名称不能为空";
+    return;
+  }
+  const created = player.createLocalPlaylist(name);
+  if (created == null) {
+    createSheetError.value = "该歌单名称已存在";
+    return;
+  }
+  createSheetVisible.value = false;
+  qtShowToast({ title: '已创建歌单', icon: 'none' });
 }
 
 /** 打开导入页（拷贝歌曲进自建歌单 / 收藏远程歌单，两种方式在页内切换） */
 function goImport(): void {
-  uni.navigateTo({ url: "/pages/playlist-import/index" });
+  uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/playlist-import/index" });
 }
 </script>
 <style>
@@ -312,7 +407,7 @@ function goImport(): void {
   padding: 0 20rpx;
   margin-right: 12rpx;
   border-radius: 32rpx;
-  border-width: 1rpx;
+  border-width: 1rpx; border-style: solid;
 }
 .import-btn-wide {
   height: 34px;
@@ -361,6 +456,10 @@ function goImport(): void {
   /* 实际宽度由 plCardWidth 按窗口实时计算（inline px），rpx 仅为兜底 */
   margin-right: 14rpx;
   margin-bottom: 36rpx;
+}
+/* 桌面指针反馈：只在宽屏启用 */
+.pl-item-hover {
+  background-color: rgba(255, 255, 255, 0.06);
 }
 .pl-item-wide {
   width: 226px;
@@ -414,6 +513,24 @@ function goImport(): void {
 }
 .pl-badge-text-wide {
   font-size: 12px;
+}
+/* 默认收藏歌单标记：放右下角，避开右上角的平台角标 */
+.pl-fav-badge {
+  position: absolute;
+  right: 10rpx;
+  bottom: 10rpx;
+  width: 42rpx;
+  height: 42rpx;
+  border-radius: 21rpx;
+  align-items: center;
+  justify-content: center;
+}
+.pl-fav-badge-wide {
+  right: 8px;
+  bottom: 8px;
+  width: 24px;
+  height: 24px;
+  border-radius: 12px;
 }
 .pl-name {
   margin-top: 16rpx;
@@ -479,7 +596,7 @@ function goImport(): void {
   height: 80rpx;
   padding: 0 32rpx;
   border-radius: 40rpx;
-  border-width: 1rpx;
+  border-width: 1rpx; border-style: solid;
   margin-right: 18rpx;
 }
 .empty-ghost-wide {
@@ -517,5 +634,83 @@ function goImport(): void {
 .empty-primary-text-wide {
   font-size: 16px;
   margin-left: 7px;
+}
+/* ===== 新建歌单输入弹层（替代 uni.showModal 的 editable） ===== */
+.cs-mask {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+}
+.cs-card {
+  width: 580rpx;
+  padding: 36rpx 32rpx 20rpx;
+}
+.cs-card-wide {
+  width: 420px;
+  padding: 22px 24px 14px;
+}
+.cs-title {
+  font-weight: 600;
+}
+.cs-title-wide {
+  font-size: 18px;
+}
+.cs-desc {
+  margin-top: 10rpx;
+  line-height: 1.5;
+}
+.cs-desc-wide {
+  margin-top: 6px;
+}
+.cs-input {
+  margin-top: 24rpx;
+  height: 80rpx;
+  padding: 0 20rpx;
+  font-size: 28rpx;
+}
+.cs-input-wide {
+  margin-top: 14px;
+  height: 42px;
+  padding: 0 12px;
+  font-size: 15px;
+}
+.cs-ph {
+  font-size: 26rpx;
+  color: #9aa1b0;
+}
+.cs-ph-wide {
+  font-size: 14px;
+  color: #9aa1b0;
+}
+.cs-error {
+  margin-top: 12rpx;
+  line-height: 1.5;
+}
+.cs-error-wide {
+  margin-top: 7px;
+}
+.cs-btn-row {
+  flex-direction: row;
+  margin-top: 28rpx;
+}
+.cs-btn-row-wide {
+  margin-top: 16px;
+}
+.cs-btn {
+  flex: 1;
+  height: 88rpx;
+  align-items: center;
+  justify-content: center;
+}
+.cs-btn-wide {
+  height: 46px;
+}
+.cs-btn-text {
+  font-weight: 600;
 }
 </style>

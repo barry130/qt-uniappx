@@ -3,13 +3,14 @@
     class="row"
     :class="layout.isWide ? 'row-wide' : ''"
     :style="'background-color:' + themeStore.skin.surface + ';'"
+    :hover-class="layout.isWide ? 'row-hover' : 'none'"
     @click="emit('play')"
     @longpress="onLongPress"
   >
     <view class="cover-wrap" :class="layout.isWide ? 'cover-wrap-wide' : ''">
       <image class="cover" :class="layout.isWide ? 'cover-wide' : ''" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
       <view v-if="showBadge" class="pbadge" :class="layout.isWide ? 'pbadge-wide' : ''" :style="badgeStyle"
-        ><text class="pbadge-text" :class="layout.isWide ? 'pbadge-text-wide' : ''" :style="'color:#ffffff;'">{{ shortName(song.platform) }}</text></view
+        ><text class="pbadge-text" :class="layout.isWide ? 'pbadge-text-wide' : ''" :style="('color:#ffffff;') + qtFontDual(18, 10)">{{ shortName(song.platform) }}</text></view
       >
       <view v-if="selected" class="select-mark" :style="'background-color:' + themeStore.skin.accentSoft + ';border-color:' + themeStore.skin.accent + ';'"
         ><QtIcon name="check" :size="24" :color="themeStore.skin.accent" /></view
@@ -18,13 +19,13 @@
     <view class="info" :class="layout.isWide ? 'info-wide' : ''">
       <text
         class="name" :class="layout.isWide ? 'name-wide' : ''"
-        :style="'color:' + (disliked ? themeStore.skin.textMuted : themeStore.skin.text) + ';'"
+        :style="('color:' + (disliked ? themeStore.skin.textMuted : themeStore.skin.text) + ';') + qtFontDual(29, 17)"
         :max-lines="1"
         >{{ song.name }}</text
       >
       <text
         class="meta" :class="layout.isWide ? 'meta-wide' : ''"
-        :style="'color:' + themeStore.skin.textMuted + ';'"
+        :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 14)"
         :max-lines="1"
         >{{ song.singer }} - {{ song.album }}</text
       >
@@ -54,6 +55,7 @@
   />
 </template>
 <script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
 import { ref, computed } from "vue";
 import type { Song } from "@/types/music";
 import { usePlayerStore } from "@/stores/player";
@@ -65,17 +67,18 @@ import { platformShort, platformColor } from "@/services/platform";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
 
 const props = defineProps<{
   song: Song;
   showBadge?: boolean;
   inHistory?: boolean;
   selected?: boolean;
-  usePicker?: boolean;
   /** 宿主处于多选态：屏蔽长按/三点菜单，避免与勾选操作冲突 */
   selecting?: boolean;
 }>();
-const emit = defineEmits<{ play: []; more: []; pick: [Song, any] }>();
+const emit = defineEmits<{ play: [] }>();
 
 const player = usePlayerStore();
 const downloads = useDownloadsStore();
@@ -98,7 +101,7 @@ const sheetActions = computed<SheetAction[]>(() => {
   // 必须独立可单独解除）；歌手按钮恒占一位（串空时置灰），保持 index 稳定
   const songBanned = dislikes.hasSongRule(props.song);
   const hasSinger = props.song.singer != null && props.song.singer.length > 0;
-  const singerBanned = hasSinger && dislikes.hasSingerRule(props.song);
+  const singerBanned = hasSinger && dislikes.hasSingerRule(props.song.singer != null ? props.song.singer : "");
   const actions: SheetAction[] = [
     { name: "下一首播放" },
     {
@@ -132,15 +135,10 @@ function shortName(platform: string): string {
 
 /**
  * 红心：不再有内置的「我喜欢的歌曲」，收藏必须落到用户自建的歌单上，
- * 所以点红心 = 「选一个歌单收进去」。
- * 宿主页面提供了歌单选择器（usePicker）时交给它弹，
- * 否则就地列出本地歌单；一个歌单都没有时提示先新建。
+ * 所以点红心 = 「选一个歌单收进去」；
+ * 就地列出本地歌单（全局操作表宿主渲染），一个歌单都没有时提示先新建。
  */
 function toggleLike(): void {
-  if (props.usePicker) {
-    emit('pick', props.song, undefined);
-    return;
-  }
   player.showPlaylistPickerFor(props.song);
 }
 function openSheet(): void {
@@ -165,7 +163,7 @@ function onSheetSelect(_action: SheetAction, index: number): void {
   } else if (index == 4) {
     shareSong(props.song);
   } else if (index == 5) {
-    uni.navigateTo({
+    uni.navigateTo({ animationType: qtNavAnimation(),
       url:
         "/pages/artist/index?name=" +
         encodeURIComponent(props.song.singer) +
@@ -176,25 +174,25 @@ function onSheetSelect(_action: SheetAction, index: number): void {
     const songBanned = dislikes.hasSongRule(props.song);
     if (songBanned) {
       dislikes.unbanSong(props.song);
-      uni.showToast({ title: "已取消屏蔽", icon: "none" });
+      qtShowToast({ title: "已取消屏蔽", icon: "none" });
     } else if (dislikes.banSong(props.song)) {
-      uni.showToast({ title: "已屏蔽，不再自动播放", icon: "none" });
+      qtShowToast({ title: "已屏蔽，不再自动播放", icon: "none" });
     } else {
-      uni.showToast({ title: "这首歌无法按歌名屏蔽", icon: "none" });
+      qtShowToast({ title: "这首歌无法按歌名屏蔽", icon: "none" });
     }
   } else if (index == 7) {
     const singer = props.song.singer != null ? props.song.singer : "";
     if (singer.length == 0) return;
     if (dislikes.hasSingerRule(singer)) {
       dislikes.unbanSinger(singer);
-      uni.showToast({ title: "已取消屏蔽该歌手", icon: "none" });
+      qtShowToast({ title: "已取消屏蔽该歌手", icon: "none" });
     } else {
       dislikes.banSinger(singer);
-      uni.showToast({ title: "已屏蔽该歌手", icon: "none" });
+      qtShowToast({ title: "已屏蔽该歌手", icon: "none" });
     }
   } else if (index == 8) {
     player.removeHistory(props.song);
-    uni.showToast({ title: "已从最近播放移除", icon: "none" });
+    qtShowToast({ title: "已从最近播放移除", icon: "none" });
   }
 }
 function shareSong(song: Song): void {
@@ -202,7 +200,7 @@ function shareSong(song: Song): void {
   uni.setClipboardData({
     data: text,
     success: () => {
-      uni.showToast({ title: "已复制分享文本", icon: "none" });
+      qtShowToast({ title: "已复制分享文本", icon: "none" });
     },
   });
 }
@@ -242,7 +240,7 @@ function shareSong(song: Song): void {
   justify-content: center;
   align-items: center;
   border-radius: 20rpx;
-  border-width: 2rpx;
+  border-width: 2rpx; border-style: solid;
 }
 .info {
   flex: 1;
@@ -274,5 +272,7 @@ function shareSong(song: Song): void {
 .meta-wide { margin-top: 6px; font-size: 14px; }
 .actions-wide { min-width: 78px; }
 .pbadge-wide { padding: 2px 6px; border-radius: 0 4px 0 6px; }
-.pbadge-text-wide { font-size: 10px; }
+.pbadge-text-wide { font-size: 11px; }
+/* 桌面指针反馈：只在宽屏启用（手机上 hover-class 会在点按瞬间闪一下，观感不对） */
+.row-hover { background-color: rgba(255, 255, 255, 0.06); }
 </style>

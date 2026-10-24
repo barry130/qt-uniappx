@@ -1,8 +1,8 @@
 <template>
-  <qt-page-frame :max-width="960">
+  <qt-page-frame width-kind="form" :max-width="720">
     <view class="page" :class="layout.isWide ? 'page-wide' : ''">
       <view v-if="song == null" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
-        <text class="empty-text" :style="'color:' + themeStore.skin.textMuted + ';'">没有可分享的歌曲</text>
+        <text class="empty-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(14)">没有可分享的歌曲</text>
       </view>
 
       <template v-else>
@@ -22,8 +22,8 @@
               @error="onCoverLoad"
             />
             <view class="info">
-              <text class="song-name" max-lines="2" :style="'color:' + themeStore.skin.text + ';'">{{ song.name }}</text>
-              <text class="song-singer" max-lines="1" :style="'color:' + themeStore.skin.textSubtle + ';'">{{ song.singer }}</text>
+              <text class="song-name" max-lines="2" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(18)">{{ song.name }}</text>
+              <text class="song-singer" max-lines="1" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(13)">{{ song.singer }}</text>
               <view v-if="mode == 1" class="lyric-block">
                 <view v-if="lyricLines.length > 0">
                   <text
@@ -31,15 +31,19 @@
                     :key="idx"
                     class="lyric-line"
                     max-lines="1"
-                    :style="'color:' + (idx == 0 ? themeStore.skin.accent : themeStore.skin.textSubtle) + ';'"
+                    :style="('color:' + (idx == 0 ? themeStore.skin.accent : themeStore.skin.textSubtle) + ';') + qtFontPx(14)"
                   >{{ line }}</text>
                 </view>
-                <text v-else class="lyric-line" :style="'color:' + themeStore.skin.textSubtle + ';'">{{ lyricLoading ? "歌词加载中..." : "暂无歌词" }}</text>
+                <!-- 歌词未回来：铺三行文字骨架；这块会被截图导出，所以关掉扫光 -->
+                <view v-else-if="lyricLoading" class="lyric-sk">
+                  <QtSkeletonList kind="text" :rows="3" :shining="false" />
+                </view>
+                <text v-else class="lyric-line" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(14)">暂无歌词</text>
               </view>
             </view>
             <view class="footer">
-              <text class="footer-brand" :style="'color:' + themeStore.skin.accent + ';'">轻听音乐</text>
-              <text class="footer-sub" :style="'color:' + themeStore.skin.textMuted + ';'">QuietMusic</text>
+              <text class="footer-brand" :style="('color:' + themeStore.skin.accent + ';') + qtFontPx(13)">轻听音乐</text>
+              <text class="footer-sub" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(10)">QuietMusic</text>
             </view>
           </view>
         </view>
@@ -47,24 +51,26 @@
         <!-- 操作区 -->
         <view class="actions" :class="layout.isWide ? 'actions-wide' : ''">
           <view class="act-btn act-primary" :style="'background-color:' + themeStore.skin.accent + ';'" @click="doShare">
-            <text class="act-text" :style="'color:' + themeStore.skin.onAccent + ';'">{{ working ? "处理中..." : "分享图片" }}</text>
+            <text class="act-text" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontPx(14)">{{ working ? "处理中..." : "分享图片" }}</text>
           </view>
           <view class="act-btn act-ghost" :style="'background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';'" @click="doSave">
-            <text class="act-text" :style="'color:' + themeStore.skin.text + ';'">{{ working ? "处理中..." : "保存到相册" }}</text>
+            <text class="act-text" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(14)">{{ working ? "处理中..." : "保存到相册" }}</text>
           </view>
         </view>
         <view class="tip-row" :class="layout.isWide ? 'tip-row-wide' : ''">
-          <text class="tip-text" :style="'color:' + themeStore.skin.textMuted + ';'">生成图片后可分享到微信、QQ 等应用</text>
+          <text class="tip-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(12)">生成图片后可分享到微信、QQ 等应用</text>
         </view>
       </template>
     </view>
   </qt-page-frame>
 </template>
 <script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
 import { onLoad, onUnload } from "@dcloudio/uni-app";
 import { computed, ref } from "vue";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
+import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
@@ -73,6 +79,7 @@ import { parseLrc } from "@/utils/lrc.uts";
 import { useShareCardStore } from "@/stores/share-card";
 import { DEFAULT_PLAYLIST_COVER_ASSET } from "@/services/media";
 import { beginLoading, finishLoading } from "@/services/ui-loading";
+import { qtFontPx } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const layout = useQtLayout();
 const themeStore = useThemeStore();
@@ -129,13 +136,13 @@ function onCoverLoad(): void {
 function snapshotCard(onDone: (tempPath: string) => void, onFail: () => void): void {
   if (working.value) return;
   if (!coverReady.value) {
-    uni.showToast({ title: "封面还在加载，稍候再试", icon: "none", duration: 2500 });
+    qtShowToast({ title: "封面还在加载，稍候再试", icon: "none", duration: 2500 });
     onFail();
     return;
   }
   const el = uni.getElementById("shareCard");
   if (el == null) {
-    uni.showToast({ title: "生成图片失败", icon: "none", duration: 2500 });
+    qtShowToast({ title: "生成图片失败", icon: "none", duration: 2500 });
     onFail();
     return;
   }
@@ -148,7 +155,7 @@ function snapshotCard(onDone: (tempPath: string) => void, onFail: () => void): v
       finishLoading(snapToken);
       const path = res.tempFilePath;
       if (path == null || path.length == 0) {
-        uni.showToast({ title: "生成图片失败", icon: "none", duration: 2500 });
+        qtShowToast({ title: "生成图片失败", icon: "none", duration: 2500 });
         onFail();
         return;
       }
@@ -157,7 +164,7 @@ function snapshotCard(onDone: (tempPath: string) => void, onFail: () => void): v
     fail: () => {
       working.value = false;
       finishLoading(snapToken);
-      uni.showToast({ title: "生成图片失败", icon: "none", duration: 2500 });
+      qtShowToast({ title: "生成图片失败", icon: "none", duration: 2500 });
       onFail();
     },
   });
@@ -172,11 +179,11 @@ function doShare(): void {
         type: "image",
         imageUrl: tempPath,
         fail: () => {
-          uni.showToast({ title: "分享未完成", icon: "none", duration: 2500 });
+          qtShowToast({ title: "分享未完成", icon: "none", duration: 2500 });
         },
       });
     } catch (_) {
-      uni.showToast({ title: "系统分享不可用，可先保存到相册", icon: "none", duration: 3000 });
+      qtShowToast({ title: "系统分享不可用，可先保存到相册", icon: "none", duration: 3000 });
     }
   }, () => {});
 }
@@ -186,10 +193,10 @@ function doSave(): void {
     uni.saveImageToPhotosAlbum({
       filePath: tempPath,
       success: () => {
-        uni.showToast({ title: "已保存到相册", icon: "none", duration: 2500 });
+        qtShowToast({ title: "已保存到相册", icon: "none", duration: 2500 });
       },
       fail: () => {
-        uni.showToast({ title: "保存失败，请检查相册权限", icon: "none", duration: 2500 });
+        qtShowToast({ title: "保存失败，请检查相册权限", icon: "none", duration: 2500 });
       },
     });
   }, () => {});
@@ -254,6 +261,9 @@ function doSave(): void {
 }
 .lyric-block {
   margin-top: 14px;
+}
+.lyric-sk {
+  flex-direction: column;
 }
 .lyric-line {
   font-size: 14px;

@@ -1,0 +1,81 @@
+<template>
+  <!-- 应用内确认弹窗宿主（全站一个实例，挂在 qt-page-frame）。
+       配方同 qt-action-sheet：根节点就是全屏 fixed 蒙层（零尺寸根节点会点击穿透），
+       蒙层用自带透明度的 scrim 色、不用 opacity 动画（opacity 会连坐子树）。 -->
+  <view
+    v-if="st.visible.value"
+    class="qc-mask"
+    :style="'background-color:' + theme.skin.scrim + ';'"
+    @click="onCancel"
+  >
+    <view class="qc-card" :class="layout.isWide ? 'qc-card-wide' : ''" :style="cardStyle" @click.stop>
+      <text class="qc-title" :class="layout.isWide ? 'qc-title-wide' : ''" :style="titleStyle" :max-lines="2">{{ st.title.value }}</text>
+      <text v-if="st.content.value.length > 0" class="qc-content" :class="layout.isWide ? 'qc-content-wide' : ''" :style="contentStyle" :max-lines="5">{{ st.content.value }}</text>
+      <view class="qc-btns" :class="layout.isWide ? 'qc-btns-wide' : ''">
+        <view
+          v-if="st.showCancel.value"
+          class="qc-btn"
+          :class="layout.isWide ? 'qc-btn-wide' : ''"
+          :style="'border-right-width:1px;border-right-style:solid;border-right-color:' + theme.skin.divider + ';'"
+          @click="onCancel"
+        >
+          <text class="qc-btn-text" :style="cancelTextStyle">{{ st.cancelText.value }}</text>
+        </view>
+        <view class="qc-btn" :class="layout.isWide ? 'qc-btn-wide' : ''" @click="onConfirm">
+          <text class="qc-btn-text" :style="confirmTextStyle">{{ st.confirmText.value }}</text>
+        </view>
+      </view>
+    </view>
+  </view>
+</template>
+
+<script lang="ts" setup>
+import { computed } from "vue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtConfirmState, qtConfirmResolve } from "@/services/confirm";
+
+const st = qtConfirmState();
+const theme = useThemeStore();
+const layout = useQtLayout();
+
+const cardStyle = computed((): string => {
+  return "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.divider + ";";
+});
+const titleStyle = computed((): string => {
+  return "color:" + theme.skin.text + ";" + qtFontDual(32, 18);
+});
+const contentStyle = computed((): string => {
+  return "color:" + theme.skin.textMuted + ";" + qtFontDual(28, 15);
+});
+const cancelTextStyle = computed((): string => {
+  return "color:" + theme.skin.textMuted + ";" + qtFontDual(30, 16);
+});
+const confirmTextStyle = computed((): string => {
+  const color = st.danger.value ? theme.skin.danger : theme.skin.accent;
+  return "color:" + color + ";" + qtFontDual(30, 16);
+});
+
+function onConfirm() {
+  qtConfirmResolve(true);
+}
+function onCancel() {
+  qtConfirmResolve(false);
+}
+</script>
+
+<style scoped>
+.qc-mask { position: fixed; left: 0; right: 0; top: 0; bottom: 0; align-items: center; justify-content: center; z-index: 980; }
+.qc-card { width: 600rpx; border-width: 1px; border-style: solid; border-radius: 24rpx; overflow: hidden; }
+.qc-card-wide { width: 320px; border-radius: 14px; }
+.qc-title { text-align: center; font-weight: 600; margin-top: 40rpx; padding: 0 32rpx; }
+.qc-content { text-align: center; margin-top: 20rpx; padding: 0 36rpx; line-height: 44rpx; margin-bottom: 36rpx; }
+.qc-btns { margin-top: 36rpx; flex-direction: row; }
+.qc-btn { flex: 1; height: 88rpx; align-items: center; justify-content: center; }
+.qc-btn-text { font-weight: 600; }
+.qc-title-wide { margin-top: 22px; padding: 0 18px; }
+.qc-content-wide { margin-top: 11px; padding: 0 20px; line-height: 24px; margin-bottom: 20px; }
+.qc-btns-wide { margin-top: 20px; }
+.qc-btn-wide { height: 48px; }
+</style>

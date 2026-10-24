@@ -1,27 +1,27 @@
 <template>
-  <qt-page-frame :max-width="860">
-  <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']">
+  <qt-page-frame width-kind="list">
+  <view class="page" :class="themeStore.dark ? 'page-dark' : ''">
     <!-- 顶部：Tab + 提交按钮 -->
     <view class="topbar" :class="[themeStore.dark ? 'topbar-dark' : '', layout.isWide ? 'topbar-wide' : '']">
       <view class="tabs" :class="layout.isWide ? 'tabs-wide' : ''">
         <view class="tab" :class="[tab == 'mine' ? 'tab-active' : '', layout.isWide ? 'tab-wide' : '']" :style="tab == 'mine' ? 'background-color:' + themeStore.skin.accent + ';' : ''" @tap="switchTab('mine')">
-          <text class="tab-text" :class="[tab == 'mine' ? 'tab-text-active' : '', layout.isWide ? 'tab-text-wide' : '']" :style="tab == 'mine' ? 'color:' + themeStore.skin.onAccent + ';' : ''">我的</text>
+          <text class="tab-text" :class="[tab == 'mine' ? 'tab-text-active' : '', layout.isWide ? 'tab-text-wide' : '']" :style="(tab == 'mine' ? 'color:' + themeStore.skin.onAccent + ';' : '') + qtFontDual(26, 14)">我的</text>
         </view>
         <view class="tab" :class="[tab == 'public' ? 'tab-active' : '', layout.isWide ? 'tab-wide' : '']" :style="tab == 'public' ? 'background-color:' + themeStore.skin.accent + ';' : ''" @tap="switchTab('public')">
-          <text class="tab-text" :class="[tab == 'public' ? 'tab-text-active' : '', layout.isWide ? 'tab-text-wide' : '']" :style="tab == 'public' ? 'color:' + themeStore.skin.onAccent + ';' : ''">公开</text>
+          <text class="tab-text" :class="[tab == 'public' ? 'tab-text-active' : '', layout.isWide ? 'tab-text-wide' : '']" :style="(tab == 'public' ? 'color:' + themeStore.skin.onAccent + ';' : '') + qtFontDual(26, 14)">公开</text>
         </view>
       </view>
       <view class="submit-btn" :class="layout.isWide ? 'submit-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @tap="goSubmit">
-        <text class="submit-btn-text" :class="layout.isWide ? 'submit-btn-text-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">+ 提交反馈</text>
+        <text class="submit-btn-text" :class="layout.isWide ? 'submit-btn-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(26, 14)">+ 提交反馈</text>
       </view>
     </view>
 
     <!-- 未登录兜底（正常入口已限制登录，这里防直达） -->
     <view v-if="!loggedIn" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
       <QtIcon name="user" :size="layout.isWide ? 44 : 72" color="#c3c9d6" />
-      <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''">登录后可以提交与查看反馈</text>
+      <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="qtFontDual(26, 14)">登录后可以提交与查看反馈</text>
       <view class="login-btn" :class="layout.isWide ? 'login-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @tap="goLogin">
-        <text class="login-btn-text" :class="layout.isWide ? 'login-btn-text-wide' : ''" :style="'color:' + themeStore.skin.onAccent + ';'">去登录</text>
+        <text class="login-btn-text" :class="layout.isWide ? 'login-btn-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(27, 14)">去登录</text>
       </view>
     </view>
 
@@ -30,52 +30,64 @@
       class="list"
       direction="vertical"
       :show-scrollbar="false"
+      :scroll-top="scrollTop"
       @scrolltolower="loadMore"
     >
-      <view v-if="loading && items.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
-        <QtIcon name="loader" :size="layout.isWide ? 40 : 64" color="#c3c9d6" />
-        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''">加载中...</text>
+      <view v-if="loading && items.length == 0" class="sk">
+        <QtSkeletonList kind="feedback" :rows="SKELETON_ROWS" />
       </view>
       <view v-else-if="items.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
         <QtIcon name="feedback" :size="layout.isWide ? 44 : 72" color="#c3c9d6" />
-        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''">{{ tab == "mine" ? "还没有反馈，说说你的想法吧" : "暂无公开反馈" }}</text>
+        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="qtFontDual(26, 14)">{{ tab == "mine" ? "还没有反馈，说说你的想法吧" : "暂无公开反馈" }}</text>
       </view>
 
-      <view
-        v-for="f in items"
-        :key="f.id"
-        class="fb-item" :class="[[layout.isWide ? 'fb-item-wide' : ''], [themeStore.dark ? 'fb-item-dark' : '', layout.isWide ? 'fb-item-wide' : '']]"
-        
-        @tap="openDetail(f)"
-      >
-        <view class="fb-head" :class="layout.isWide ? 'fb-head-wide' : ''">
-          <view class="type-badge" :class="layout.isWide ? 'type-badge-wide' : ''" :style="'background-color:' + feedbackTypeColor(f.type)">
-            <text class="type-badge-text" :class="layout.isWide ? 'type-badge-text-wide' : ''">{{ feedbackTypeLabel(f.type) }}</text>
-          </view>
-          <text class="fb-title" :class="layout.isWide ? 'fb-title-wide' : ''" :max-lines="1">{{ f.title }}</text>
-          <view class="status-badge" :class="layout.isWide ? 'status-badge-wide' : ''" :style="'background-color:' + feedbackStatusColor(f.status)">
-            <text class="status-badge-text" :class="layout.isWide ? 'status-badge-text-wide' : ''">{{ feedbackStatusLabel(f.status) }}</text>
-          </view>
+      <view v-for="pair in pairs" :key="pair.key" class="fb-row" :class="twoColumn ? 'fb-row-2' : ''">
+        <view class="cell" :style="cellStyle">
+          <QtFeedbackCard
+            :title="pair.left.title"
+            :content="pair.left.content"
+            :typeText="feedbackTypeLabel(pair.left.type)"
+            :typeColor="feedbackTypeColor(pair.left.type)"
+            :statusText="feedbackStatusLabel(pair.left.status)"
+            :statusColor="feedbackStatusColor(pair.left.status)"
+            :timeText="formatTime(pair.left.createTime)"
+            :showPublic="tab == 'mine' && (pair.left.isPublic ?? false)"
+            :inColumn="twoColumn"
+            @tap="openDetail(pair.left)"
+          />
         </view>
-        <text class="fb-content" :class="layout.isWide ? 'fb-content-wide' : ''" :max-lines="2">{{ f.content }}</text>
-        <view class="fb-foot" :class="layout.isWide ? 'fb-foot-wide' : ''">
-          <text class="fb-time" :class="layout.isWide ? 'fb-time-wide' : ''">{{ formatTime(f.createTime) }}</text>
-          <text v-if="tab == 'mine' && (f.isPublic ?? false)" class="fb-public" :class="layout.isWide ? 'fb-public-wide' : ''">已公开</text>
+        <!-- 右格容器恒渲染、内容条件渲染：奇数条时右格留空，不塞占位卡片 -->
+        <view v-if="twoColumn" class="cell-right" :style="rightCellStyle">
+          <QtFeedbackCard
+            v-if="pair.hasRight"
+            :title="pair.right.title"
+            :content="pair.right.content"
+            :typeText="feedbackTypeLabel(pair.right.type)"
+            :typeColor="feedbackTypeColor(pair.right.type)"
+            :statusText="feedbackStatusLabel(pair.right.status)"
+            :statusColor="feedbackStatusColor(pair.right.status)"
+            :timeText="formatTime(pair.right.createTime)"
+            :showPublic="tab == 'mine' && (pair.right.isPublic ?? false)"
+            :inColumn="twoColumn"
+            @tap="openDetail(pair.right)"
+          />
         </view>
       </view>
 
       <view v-if="items.length > 0" class="list-foot" :class="layout.isWide ? 'list-foot-wide' : ''" @tap="loadMore">
-        <text class="list-foot-text" :class="layout.isWide ? 'list-foot-text-wide' : ''">{{ loading ? "加载中..." : (hasMore ? "加载更多" : "没有更多了") }}</text>
+        <text class="list-foot-text" :class="layout.isWide ? 'list-foot-text-wide' : ''" :style="qtFontDual(24, 14)">{{ loading ? "加载中..." : (hasMore ? "加载更多" : "没有更多了") }}</text>
       </view>
     </scroll-view>
   </view>
   </qt-page-frame>
 </template>
 <script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { ref, computed } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import {
@@ -90,6 +102,10 @@ import {
 import { isLoggedIn } from "@/services/auth";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
 import type { FeedbackItem, FeedbackPageResult } from "@/types/feedback";
+import QtFeedbackCard from "@/uni_modules/qt-ui/components/qt-feedback-card/qt-feedback-card.uvue";
+import { useQtSongColumns } from "@/uni_modules/qt-ui/composables/use-qt-song-columns";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
 
 const themeStore = useThemeStore();
 const layout = useQtLayout();
@@ -99,9 +115,12 @@ const tab = ref<"mine" | "public">("mine");
 const items = ref<FeedbackItem[]>([]);
 const total = ref(0);
 const pageNum = ref(1);
-const loading = ref(false);
+// 初值 true：加载在 onShow 里发起，首帧若按 false 渲染会先闪一下空态文案
+const loading = ref(true);
 const loggedIn = computed(() => isLoggedIn());
 const hasMore = computed(() => items.value.length < total.value);
+/** 骨架卡片数：约一屏量，只做占位 */
+const SKELETON_ROWS = 5;
 
 /** 拉取指定 Tab 第 page 页（tab 由调用方快照传入，不读实时 tab） */
 async function fetchPage(page: number, whichTab: "mine" | "public"): Promise<FeedbackPageResult> {
@@ -113,6 +132,16 @@ async function fetchPage(page: number, whichTab: "mine" | "public"): Promise<Fee
 
 // 列表序号：tab 切换/刷新时旧响应晚到不得写入新 tab（写回前比对）
 let listSeq = 0;
+
+/** 滚动位置绑定：回顶用（0/1 交替写入保证每次都真正变化） */
+const scrollTop = ref(0);
+/**
+ * 整组换血前先回顶：scroll-view 停在滚动深处时整组替换数组会整段丢渲染
+ * （大块空白带，搜索页 L871 注释与排行榜页均有实证），回顶后替换安全。
+ */
+function resetListScroll() {
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+}
 
 /** 刷新到第一页 */
 async function refresh(): Promise<void> {
@@ -128,7 +157,7 @@ async function refresh(): Promise<void> {
     items.value = res.records;
   } catch (e) {
     if (seq !== listSeq) return;
-    uni.showToast({ title: (e as Error).message || "加载失败", icon: "none" });
+    qtShowToast({ title: (e as Error).message || "加载失败", icon: "none" });
   } finally {
     if (seq === listSeq) loading.value = false;
   }
@@ -149,7 +178,7 @@ async function loadMore(): Promise<void> {
     items.value = items.value.concat(res.records);
   } catch (e) {
     if (seq !== listSeq) return;
-    uni.showToast({ title: (e as Error).message || "加载失败", icon: "none" });
+    qtShowToast({ title: (e as Error).message || "加载失败", icon: "none" });
   } finally {
     if (seq === listSeq) loading.value = false;
   }
@@ -157,6 +186,8 @@ async function loadMore(): Promise<void> {
 
 function switchTab(t: "mine" | "public"): void {
   if (tab.value == t) return;
+  // tab 切换 = 列表整组换血：先回顶再清数据（见 resetListScroll 注释）
+  resetListScroll();
   tab.value = t;
   items.value = [];
   total.value = 0;
@@ -164,15 +195,15 @@ function switchTab(t: "mine" | "public"): void {
 }
 
 function openDetail(f: FeedbackItem): void {
-  uni.navigateTo({ url: "/pages/feedback/detail?id=" + f.id });
+  uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/feedback/detail?id=" + f.id });
 }
 
 function goSubmit(): void {
-  uni.navigateTo({ url: "/pages/feedback/submit" });
+  uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/feedback/submit" });
 }
 
 function goLogin(): void {
-  uni.navigateTo({ url: "/pages/login/index" });
+  uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/login/index" });
 }
 
 function formatTime(t?: string): string {
@@ -180,6 +211,32 @@ function formatTime(t?: string): string {
   if (t.length >= 16) return t.substring(5, 16);
   return t;
 }
+
+/* ---------------- 宽屏两列 ---------------- */
+/* 门限按最小列宽判定而不是 sizeClass：横屏 ~1067dp 属 wide 档却够两列，
+   按 isDesktop 会误关。24 是 .fb-item-wide 的左右外边距，两列时归零。 */
+const { twoColumn, cellStyle, rightCellStyle } = useQtSongColumns(24, "list");
+
+type FeedbackPair = { key: string; left: FeedbackItem; right: FeedbackItem; hasRight: boolean };
+
+/** 一行承载两张卡。奇数条时右格留空，靠 hasRight 判定 */
+const pairs = computed((): FeedbackPair[] => {
+  const src = items.value;
+  const out: FeedbackPair[] = [];
+  if (!twoColumn.value) {
+    for (let i = 0; i < src.length; i++) {
+      out.push({ key: "f" + src[i].id, left: src[i], right: src[i], hasRight: false });
+    }
+    return out;
+  }
+  let i = 0;
+  while (i < src.length) {
+    const has = i + 1 < src.length;
+    out.push({ key: "f" + src[i].id, left: src[i], right: has ? src[i + 1] : src[i], hasRight: has });
+    i += 2;
+  }
+  return out;
+});
 
 onShow(() => {
   qtTrackPage("pages/feedback/index");
@@ -238,65 +295,13 @@ onShow(() => {
   margin: 20rpx 24rpx 0;
   padding: 28rpx 24rpx;
   background-color: rgba(255, 255, 255, 0.62);
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
   border-color: rgba(255, 255, 255, 0.6);
   border-radius: 20rpx;
 }
 .fb-item-dark {
   background-color: rgba(255, 255, 255, 0.08);
   border-color: rgba(255, 255, 255, 0.12);
-}
-.fb-head {
-  flex-direction: row;
-  align-items: center;
-}
-.type-badge {
-  flex-shrink: 0;
-  padding: 4rpx 14rpx;
-  border-radius: 8rpx;
-}
-.type-badge-text {
-  color: #ffffff;
-  font-size: 20rpx;
-  font-weight: 600;
-}
-.fb-title {
-  flex: 1;
-  margin-left: 14rpx;
-  margin-right: 14rpx;
-  color: #191d26;
-  font-size: 29rpx;
-  font-weight: 600;
-}
-.status-badge {
-  flex-shrink: 0;
-  padding: 4rpx 14rpx;
-  border-radius: 8rpx;
-}
-.status-badge-text {
-  color: #ffffff;
-  font-size: 20rpx;
-  font-weight: 600;
-}
-.fb-content {
-  margin-top: 14rpx;
-  color: #596173;
-  font-size: 25rpx;
-  line-height: 1.5;
-}
-.fb-foot {
-  margin-top: 14rpx;
-  flex-direction: row;
-  align-items: center;
-  justify-content: space-between;
-}
-.fb-time {
-  color: #6b7385;
-  font-size: 22rpx;
-}
-.fb-public {
-  color: #4fb186;
-  font-size: 22rpx;
 }
 .list-foot {
   padding: 24rpx 0 40rpx;
@@ -311,6 +316,10 @@ onShow(() => {
   padding: 140rpx 32rpx;
   justify-content: center;
   align-items: center;
+}
+/* 骨架容器：卡片自带外边距，这里只管纵向排列 */
+.sk {
+  flex-direction: column;
 }
 .empty-text {
   margin-top: 20rpx;
@@ -336,21 +345,23 @@ onShow(() => {
 .tab-text-wide { font-size: 14px; }
 .submit-btn-wide { padding: 9px 18px; border-radius: 18px; }
 .submit-btn-text-wide { font-size: 14px; }
+/* 桌面指针反馈 */
+.fb-item-hover {
+  background-color: rgba(127, 127, 127, 0.10);
+}
+/* 两列时卡片外边距归零：列宽已扣掉页面留白与列间距 */
 .fb-item-wide { margin: 14px 24px 0; padding: 20px; border-radius: 14px; }
-.fb-head-wide { flex-direction: row; align-items: center; }
-.type-badge-wide { padding: 2px 8px; border-radius: 5px; }
-.type-badge-text-wide { font-size: 11px; }
-.fb-title-wide { margin-left: 8px; margin-right: 8px; font-size: 16px; }
-.status-badge-wide { padding: 2px 8px; border-radius: 5px; }
-.status-badge-text-wide { font-size: 11px; }
-.fb-content-wide { margin-top: 8px; font-size: 14px; }
-.fb-foot-wide { margin-top: 8px; }
-.fb-time-wide { font-size: 12px; }
-.fb-public-wide { font-size: 12px; }
 .list-foot-wide { padding: 12px 0 20px; }
 .list-foot-text-wide { font-size: 14px; }
 .empty-wide { padding: 80px 24px; }
 .empty-text-wide { margin-top: 10px; font-size: 14px; }
 .login-btn-wide { margin-top: 20px; padding: 12px 32px; border-radius: 22px; }
 .login-btn-text-wide { font-size: 14px; }
+/* 两列：align-items:flex-start 让两卡各按内容高度排，
+   默认 stretch 会把短卡拉长露出卡片底色空白 */
+.fb-row { flex-direction: column; }
+/* 两列：align-items:flex-start 让两卡各按内容高度排，默认 stretch 会把短卡拉长 */
+.fb-row-2 { flex-direction: row; align-items: flex-start; justify-content: center; }
+.cell { flex-direction: column; }
+.cell-right { flex-direction: column; }
 </style>

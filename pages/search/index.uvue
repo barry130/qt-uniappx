@@ -1,31 +1,36 @@
 <template>
-  <qt-page-frame :max-width="960">
-  <view class="page" :class="layout.isWide ? 'page-wide' : ''"
-    ><view class="bar" :class="layout.isWide ? 'bar-wide' : ''" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';'"
+  <!-- 搜索页常驻标题栏搜索态（2026-10-24 用户要求「搜索这行放到标题栏，聚合也放到标题栏」）：
+       输入框 + 音源药丸 + 聚合药丸全在标题栏里，页面正文直接从分类条开始。
+       宽屏没有标题栏（框架约定），所以宽屏保留原来的页内搜索行 + 聚合行。 -->
+  <qt-page-frame
+    width-kind="list"
+    :header-searching="true"
+    :header-search-value="keyword"
+    header-search-placeholder="搜索"
+    :header-chip-texts="headerChips"
+    :header-chip-actives="headerChipActives"
+    @header-search-input="onHeaderInput"
+    @header-search-confirm="doSearch"
+    @header-search-close="onHeaderClose"
+    @header-chip-tap="onHeaderChipTap"
+  >
+  <view class="page"
+    ><view v-if="layout.isWide" class="bar" :class="layout.isWide ? 'bar-wide' : ''" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';'"
       ><input
         v-model="keyword"
         class="input" :class="layout.isWide ? 'input-wide' : ''"
         :style="'color:' + theme.skin.text + ';background-color:' + theme.skin.surfaceInset + ';border-color:' + theme.skin.border + ';'"
         :placeholder-style="'color:' + theme.skin.placeholder + ';'"
-        placeholder="搜索歌曲、歌手、歌单、专辑"
+        placeholder="搜索"
         confirm-type="search"
         @confirm="doSearch"
       /><view class="button" :class="layout.isWide ? 'button-wide' : ''" :style="'background-color:' + theme.skin.accent + ';'" @click="doSearch"
         ><QtIcon name="search" :size="32" :color="theme.skin.onAccent" /></view
-      ><view class="bar-switch" :class="layout.isWide ? 'bar-switch-wide' : ''"
-        ><SourceSwitcher @change="ensureSource" /></view
       ></view
     >
-    <!-- 搜索中：仅首屏且无缓存数据时显示全屏居中遮罩（切换 tag 用 foot 提示，避免闪屏） -->
-    <view
-      v-if="searched && searching && songs.length == 0 && playlists.length == 0 && artists.length == 0 && albums.length == 0"
-      class="cover-load"
-    >
-      <qt-loading :visible="true" />
-    </view>
     <scroll-view v-if="!searched" class="hot-wrap" direction="vertical">
       <view class="section" :class="layout.isWide ? 'section-wide' : ''">
-        <text class="section-title" :class="[layout.isWide ? 'section-title-wide' : '']" :style="'color:' + theme.skin.text + ';'">搜索历史</text>
+        <text class="section-title" :class="[layout.isWide ? 'section-title-wide' : '']" :style="('color:' + theme.skin.text + ';') + qtFontDual(30, 15)">搜索历史</text>
         <view v-if="history.length > 0" class="history" :class="[layout.isWide ? 'history-wide' : '']">
           <view
             v-for="word in history"
@@ -33,22 +38,22 @@
             class="history-item" :class="layout.isWide ? 'history-item-wide' : ''"
             :style="'background-color:' + theme.skin.surfaceMuted + ';border-color:' + theme.skin.border + ';'"
             @click="useWord(word)"
-            ><text class="history-text" :class="[layout.isWide ? 'history-text-wide' : '']" :style="'color:' + theme.skin.textMuted + ';'">{{ word }}</text
+            ><text class="history-text" :class="[layout.isWide ? 'history-text-wide' : '']" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 12)">{{ word }}</text
             ><QtIcon class="history-close" :class="[layout.isWide ? 'history-close-wide' : '']" name="close" :size="22" :color="theme.skin.iconMuted" @click.stop="removeWord(word)" /></view
           >
         </view>
         <view v-if="history.length > 0" class="clear-row" :class="[layout.isWide ? 'clear-row-wide' : '']"
-          ><text class="clear-link" :class="[layout.isWide ? 'clear-link-wide' : '']" :style="'color:' + theme.skin.textMuted + ';'" @click="clearHistory">清空历史</text></view
+          ><text class="clear-link" :class="[layout.isWide ? 'clear-link-wide' : '']" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 12)" @click="clearHistory">清空历史</text></view
         >
       </view>
       <view class="section" :class="layout.isWide ? 'section-wide' : ''">
-        <text class="section-title" :class="[layout.isWide ? 'section-title-wide' : '']" :style="'color:' + theme.skin.text + ';'">热门搜索</text>
+        <text class="section-title" :class="[layout.isWide ? 'section-title-wide' : '']" :style="('color:' + theme.skin.text + ';') + qtFontDual(30, 15)">热门搜索</text>
         <view class="tags" :class="[layout.isWide ? 'tags-wide' : '']">
           <text
             v-for="word in words"
             :key="word"
-            class="tag" :class="layout.isWide ? 'tag-wide' : ''"
-            :style="'color:' + theme.skin.textMuted + ';background-color:' + theme.skin.surfaceMuted + ';border-color:' + theme.skin.border + ';'"
+            class="tag" :class="layout.isWide ? 'tag-wide' : ''" :hover-class="layout.isWide ? 'tag-hover' : 'none'"
+            :style="('color:' + theme.skin.textMuted + ';background-color:' + theme.skin.surfaceMuted + ';border-color:' + theme.skin.border + ';') + qtFontDual(25, 15)"
             @click="useWord(word)"
             >{{ word }}</text
           >
@@ -59,64 +64,84 @@
       <view class="type-row" :class="layout.isWide ? 'type-row-wide' : ''" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';'">
         <qt-segmented :list="typeLabels" v-model="typeIndex" @change="switchType" />
       </view>
+      <!-- 聚合搜索开关：仅宽屏（窄屏的聚合开关收进了标题栏药丸；qt-pc 同款——
+           并发全部音源、合并去重、按相关性排序） -->
+      <view v-if="type == 'song' && layout.isWide" class="agg-row" :class="layout.isWide ? 'agg-row-wide' : ''">
+        <view
+          class="agg-chip" :class="[aggregateMode ? 'agg-chip-on' : '', layout.isWide ? 'agg-chip-wide' : '']"
+          :style="aggChipStyle"
+          @click="toggleAggregateMode"
+          ><text class="agg-chip-text" :class="layout.isWide ? 'agg-chip-text-wide' : ''" :style="aggChipTextStyle + qtFontDual(24, 12)">聚合搜索</text></view
+        >
+        <text class="agg-hint" :class="layout.isWide ? 'agg-hint-wide' : ''" :style="'color:' + theme.skin.textSubtle + ';' + qtFontDual(22, 12)">跨音源合并去重</text>
+      </view>
       <!-- 全部：四类型分节预览（主流搜索默认页形态），各节「查看更多」跳对应 tag -->
       <scroll-view v-show="type == 'all'" class="results" direction="vertical" :show-scrollbar="false">
+        <!-- 宽屏两列：左列「单曲」（最多 20 行，最长），右列「歌单+歌手+专辑」三节累加。
+             不用 flex-wrap 自动折行：单曲那一节比歌单高得多，折行后右列会在歌单下方
+             空出一大段等高的空白。分列在标记层写死，纵向顺序与单列视图完全一致。 -->
+        <view class="all-cols" :class="allTwoColumn ? 'all-cols-2' : ''">
+        <view class="all-col" :style="allTwoColumn ? allColStyle : ''">
         <view v-if="allReady && allSongRows.length > 0" class="all-section" :class="layout.isWide ? 'all-section-wide' : ''">
           <view class="all-head" :class="layout.isWide ? 'all-head-wide' : ''">
-            <text class="all-head-title" :class="layout.isWide ? 'all-head-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">单曲</text>
-            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" @click="gotoType('song')">查看更多</text>
+            <text class="all-head-title" :class="layout.isWide ? 'all-head-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(30, 20)">单曲</text>
+            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 15)" @click="gotoType('song')">查看更多</text>
           </view>
           <view v-for="item in allSongRows" :key="item.key" class="all-row">
             <QtSongRowLite :song="item.song!" :showBadge="false" @play="play(item.song!)" @more="openSheet" />
           </view>
         </view>
+        </view>
+        <view class="all-col all-col-right" :style="allTwoColumn ? allColRightStyle : ''">
         <view v-if="allReady && allPlaylistRows.length > 0" class="all-section" :class="layout.isWide ? 'all-section-wide' : ''">
           <view class="all-head" :class="layout.isWide ? 'all-head-wide' : ''">
-            <text class="all-head-title" :class="layout.isWide ? 'all-head-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">歌单</text>
-            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" @click="gotoType('playlist')">查看更多</text>
+            <text class="all-head-title" :class="layout.isWide ? 'all-head-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(30, 20)">歌单</text>
+            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 15)" @click="gotoType('playlist')">查看更多</text>
           </view>
           <view v-for="row in allPlaylistRows" :key="row.key" class="all-media-row" :class="layout.isWide ? 'all-media-row-wide' : ''" @click="openPlaylist(row.playlist!)">
             <image class="all-cover" :class="layout.isWide ? 'all-cover-wide' : ''" :src="row.playlist!.picUrl" mode="aspectFill" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" />
             <view class="all-media-info" :class="layout.isWide ? 'all-media-info-wide' : ''">
-              <text class="all-media-name" :class="layout.isWide ? 'all-media-name-wide' : ''" :max-lines="1" :style="'color:' + theme.skin.text + ';'">{{ row.playlist!.name }}</text>
-              <text class="all-media-sub" :class="layout.isWide ? 'all-media-sub-wide' : ''" :max-lines="1" :style="'color:' + theme.skin.textMuted + ';'">{{ platLabel(row.playlist!.platform) }} 歌单</text>
+              <text class="all-media-name" :class="layout.isWide ? 'all-media-name-wide' : ''" :max-lines="1" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ row.playlist!.name }}</text>
+              <text class="all-media-sub" :class="layout.isWide ? 'all-media-sub-wide' : ''" :max-lines="1" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">{{ platLabel(row.playlist!.platform) }} 歌单</text>
             </view>
             <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
           </view>
         </view>
         <view v-if="allReady && allArtistRows.length > 0" class="all-section" :class="layout.isWide ? 'all-section-wide' : ''">
           <view class="all-head" :class="layout.isWide ? 'all-head-wide' : ''">
-            <text class="all-head-title" :class="layout.isWide ? 'all-head-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">歌手</text>
-            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" @click="gotoType('artist')">查看更多</text>
+            <text class="all-head-title" :class="layout.isWide ? 'all-head-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(30, 20)">歌手</text>
+            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 15)" @click="gotoType('artist')">查看更多</text>
           </view>
           <view v-for="row in allArtistRows" :key="row.key" class="all-media-row" :class="layout.isWide ? 'all-media-row-wide' : ''" @click="openArtist(row.artist!)">
             <image class="all-cover all-cover-round" :class="layout.isWide ? 'all-cover-wide' : ''" :src="row.artist!.picUrl" mode="aspectFill" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" />
             <view class="all-media-info" :class="layout.isWide ? 'all-media-info-wide' : ''">
-              <text class="all-media-name" :class="layout.isWide ? 'all-media-name-wide' : ''" :max-lines="1" :style="'color:' + theme.skin.text + ';'">{{ row.artist!.name }}</text>
-              <text class="all-media-sub" :class="layout.isWide ? 'all-media-sub-wide' : ''" :max-lines="1" :style="'color:' + theme.skin.textMuted + ';'">{{ platLabel(row.artist!.platform) }} 歌手</text>
+              <text class="all-media-name" :class="layout.isWide ? 'all-media-name-wide' : ''" :max-lines="1" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ row.artist!.name }}</text>
+              <text class="all-media-sub" :class="layout.isWide ? 'all-media-sub-wide' : ''" :max-lines="1" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">{{ platLabel(row.artist!.platform) }} 歌手</text>
             </view>
             <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
           </view>
         </view>
         <view v-if="allReady && allAlbumRows.length > 0" class="all-section" :class="layout.isWide ? 'all-section-wide' : ''">
           <view class="all-head" :class="layout.isWide ? 'all-head-wide' : ''">
-            <text class="all-head-title" :class="layout.isWide ? 'all-head-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">专辑</text>
-            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" @click="gotoType('album')">查看更多</text>
+            <text class="all-head-title" :class="layout.isWide ? 'all-head-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(30, 20)">专辑</text>
+            <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 15)" @click="gotoType('album')">查看更多</text>
           </view>
           <view v-for="row in allAlbumRows" :key="row.key" class="all-media-row" :class="layout.isWide ? 'all-media-row-wide' : ''" @click="openAlbum(row.album!)">
             <image class="all-cover" :class="layout.isWide ? 'all-cover-wide' : ''" :src="row.album!.picUrl" mode="aspectFill" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" />
             <view class="all-media-info" :class="layout.isWide ? 'all-media-info-wide' : ''">
-              <text class="all-media-name" :class="layout.isWide ? 'all-media-name-wide' : ''" :max-lines="1" :style="'color:' + theme.skin.text + ';'">{{ row.album!.name }}</text>
-              <text class="all-media-sub" :class="layout.isWide ? 'all-media-sub-wide' : ''" :max-lines="1" :style="'color:' + theme.skin.textMuted + ';'">{{ row.album!.artist.length > 0 ? row.album!.artist : "专辑" }}</text>
+              <text class="all-media-name" :class="layout.isWide ? 'all-media-name-wide' : ''" :max-lines="1" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ row.album!.name }}</text>
+              <text class="all-media-sub" :class="layout.isWide ? 'all-media-sub-wide' : ''" :max-lines="1" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">{{ row.album!.artist.length > 0 ? row.album!.artist : "专辑" }}</text>
             </view>
             <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
           </view>
         </view>
-        <view v-if="searching && !allReady" class="all-empty" :class="layout.isWide ? 'all-empty-wide' : ''">
-          <text class="all-empty-text" :class="layout.isWide ? 'all-empty-text-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">加载中...</text>
+        </view>
+        </view>
+        <view v-if="searching && !allReady" class="all-sk">
+          <QtSkeletonList kind="song" :rows="SKELETON_ROWS" />
         </view>
         <view v-if="allReady && allEmpty && !searching" class="all-empty" :class="layout.isWide ? 'all-empty-wide' : ''">
-          <text class="all-empty-text" :class="layout.isWide ? 'all-empty-text-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">没有找到相关结果</text>
+          <text class="all-empty-text" :class="layout.isWide ? 'all-empty-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(26, 16)">没有找到相关结果</text>
         </view>
       </scroll-view>
       <!-- 歌曲 -->
@@ -130,6 +155,25 @@
         :scroll-top="scrollTop"
         @scroll="onListScroll"
       >
+        <!-- 首屏骨架：与真实行同形同高（128rpx/82px），固定高度避免虚拟滚动预估抖动 -->
+        <list-item v-if="searching && songs.length == 0" class="sk-item" :class="layout.isWide ? 'sk-item-wide' : ''">
+          <QtSkeletonList kind="song" :rows="SKELETON_ROWS" />
+        </list-item>
+        <!-- 播放全部：必须放在 v-for 之前（状态/操作条目一律先于数据条目，
+             否则长列表回收时行错乱），内容包在内层 view 里保证 list-item 只有一个 view 子节点 -->
+        <list-item
+          v-if="songs.length > 0 && !searching"
+          class="play-all-item" :class="layout.isWide ? 'play-all-item-wide' : ''"
+          @click="playAllSongs"
+        >
+          <view class="play-all-row" :class="layout.isWide ? 'play-all-row-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';border-bottom-color:' + theme.skin.divider + ';'">
+            <view class="play-all-chip" :class="layout.isWide ? 'play-all-chip-wide' : ''" :style="'background-color:' + theme.skin.accentSoft + ';'">
+              <QtIcon name="play" :size="layout.isWide ? 12 : 22" :color="theme.skin.accent" />
+            </view>
+            <text class="play-all-text" :class="layout.isWide ? 'play-all-text-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 16)">播放全部</text>
+            <text class="play-all-count" :class="layout.isWide ? 'play-all-count-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13)">({{ songs.length }})</text>
+          </view>
+        </list-item>
         <list-item
           v-for="item in songRows"
           :key="item.key"
@@ -138,7 +182,7 @@
         >
           <QtSongRowLite
             :song="item.song!"
-            :showBadge="false"
+            :showBadge="true"
             @play="play(item.song!)"
             @more="openSheet"
           />
@@ -154,12 +198,12 @@
         </list-item>
         <list-item v-else-if="!resultsHasMore.song && !emptyShowSong" class="foot-item" :class="[layout.isWide ? 'foot-item-wide' : '']">
           <view class="foot-inner" :class="[layout.isWide ? 'foot-inner-wide' : '']">
-            <text class="foot-text" :class="[layout.isWide ? 'foot-text-wide' : '']" :style="'color:' + theme.skin.textSubtle + ';'">已加载全部</text>
+            <text class="foot-text" :class="[layout.isWide ? 'foot-text-wide' : '']" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(24, 12)">已加载全部</text>
           </view>
         </list-item>
         <list-item v-if="emptyShowSong && !searching" class="empty-item" :class="[layout.isWide ? 'empty-item-wide' : '']">
           <view class="empty-inner" :class="[layout.isWide ? 'empty-inner-wide' : '']">
-            <text class="empty-text" :class="[layout.isWide ? 'empty-text-wide' : '']" :style="'color:' + theme.skin.textMuted + ';'">没有找到相关结果</text>
+            <text class="empty-text" :class="[layout.isWide ? 'empty-text-wide' : '']" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(27, 14)">没有找到相关结果</text>
           </view>
         </list-item>
       </list-view>
@@ -175,6 +219,9 @@
         :scroll-top="scrollTop"
         @scroll="onListScroll"
       >
+        <list-item v-if="searching && playlists.length == 0" class="sk-item" :class="layout.isWide ? 'sk-item-wide' : ''">
+          <QtSkeletonList kind="song" :rows="SKELETON_ROWS" />
+        </list-item>
         <list-item
           v-for="item in playlistRows"
           :key="item.key"
@@ -184,9 +231,9 @@
           <view class="row" :class="layout.isWide ? 'row-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';border-top-color:' + theme.skin.divider + ';'">
             <image class="row-cover" :class="layout.isWide ? 'row-cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="item.playlist!.picUrl" mode="aspectFill" />
             <view class="row-info" :class="[layout.isWide ? 'row-info-wide' : '']"
-              ><text class="row-name" :class="layout.isWide ? 'row-name-wide' : ''" :style="'color:' + theme.skin.text + ';'" :max-lines="1">{{ item.playlist!.name }}</text
-              ><text class="row-meta" :class="layout.isWide ? 'row-meta-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" :max-lines="1"
-                >{{ shortName(item.playlist!.platform) }} · {{ item.playlist!.playCount }} 播放</text
+              ><text class="row-name" :class="layout.isWide ? 'row-name-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)" :max-lines="1">{{ item.playlist!.name }}</text
+              ><text class="row-meta" :class="layout.isWide ? 'row-meta-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 14)" :max-lines="1"
+                >{{ shortName(item.playlist!.platform) }} · {{ formatBigCount(item.playlist!.playCount) }} 播放</text
               ></view
             >
             <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
@@ -199,12 +246,12 @@
         </list-item>
         <list-item v-else-if="!resultsHasMore.playlist && !emptyShowPlaylist" class="foot-item" :class="[layout.isWide ? 'foot-item-wide' : '']">
           <view class="foot-inner" :class="[layout.isWide ? 'foot-inner-wide' : '']">
-            <text class="foot-text" :class="[layout.isWide ? 'foot-text-wide' : '']" :style="'color:' + theme.skin.textSubtle + ';'">已加载全部</text>
+            <text class="foot-text" :class="[layout.isWide ? 'foot-text-wide' : '']" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(24, 12)">已加载全部</text>
           </view>
         </list-item>
         <list-item v-if="emptyShowPlaylist && !searching" class="empty-item" :class="[layout.isWide ? 'empty-item-wide' : '']">
           <view class="empty-inner" :class="[layout.isWide ? 'empty-inner-wide' : '']">
-            <text class="empty-text" :class="[layout.isWide ? 'empty-text-wide' : '']" :style="'color:' + theme.skin.textMuted + ';'">没有找到相关结果</text>
+            <text class="empty-text" :class="[layout.isWide ? 'empty-text-wide' : '']" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(27, 14)">没有找到相关结果</text>
           </view>
         </list-item>
       </list-view>
@@ -220,6 +267,9 @@
         :scroll-top="scrollTop"
         @scroll="onListScroll"
       >
+        <list-item v-if="searching && artists.length == 0" class="sk-item" :class="layout.isWide ? 'sk-item-wide' : ''">
+          <QtSkeletonList kind="song" :rows="SKELETON_ROWS" />
+        </list-item>
         <list-item
           v-for="item in artistRows"
           :key="item.key"
@@ -229,8 +279,8 @@
           <view class="row" :class="layout.isWide ? 'row-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';border-top-color:' + theme.skin.divider + ';'">
             <image class="row-cover round" :class="[layout.isWide ? 'row-cover-wide' : '', layout.isWide ? 'round-wide' : '']" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="item.artist!.picUrl" mode="aspectFill" />
             <view class="row-info" :class="[layout.isWide ? 'row-info-wide' : '']"
-              ><text class="row-name" :class="layout.isWide ? 'row-name-wide' : ''" :style="'color:' + theme.skin.text + ';'" :max-lines="1">{{ item.artist!.name }}</text
-              ><text class="row-meta" :class="layout.isWide ? 'row-meta-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" :max-lines="1">{{ shortName(item.artist!.platform) }} · 歌手</text></view
+              ><text class="row-name" :class="layout.isWide ? 'row-name-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)" :max-lines="1">{{ item.artist!.name }}</text
+              ><text class="row-meta" :class="layout.isWide ? 'row-meta-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 14)" :max-lines="1">{{ shortName(item.artist!.platform) }} · 歌手</text></view
             >
             <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
           </view>
@@ -242,12 +292,12 @@
         </list-item>
         <list-item v-else-if="!resultsHasMore.artist && !emptyShowArtist" class="foot-item" :class="[layout.isWide ? 'foot-item-wide' : '']">
           <view class="foot-inner" :class="[layout.isWide ? 'foot-inner-wide' : '']">
-            <text class="foot-text" :class="[layout.isWide ? 'foot-text-wide' : '']" :style="'color:' + theme.skin.textSubtle + ';'">已加载全部</text>
+            <text class="foot-text" :class="[layout.isWide ? 'foot-text-wide' : '']" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(24, 12)">已加载全部</text>
           </view>
         </list-item>
         <list-item v-if="emptyShowArtist && !searching" class="empty-item" :class="[layout.isWide ? 'empty-item-wide' : '']">
           <view class="empty-inner" :class="[layout.isWide ? 'empty-inner-wide' : '']">
-            <text class="empty-text" :class="[layout.isWide ? 'empty-text-wide' : '']" :style="'color:' + theme.skin.textMuted + ';'">没有找到相关结果</text>
+            <text class="empty-text" :class="[layout.isWide ? 'empty-text-wide' : '']" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(27, 14)">没有找到相关结果</text>
           </view>
         </list-item>
       </list-view>
@@ -263,6 +313,9 @@
         :scroll-top="scrollTop"
         @scroll="onListScroll"
       >
+        <list-item v-if="searching && albums.length == 0" class="sk-item" :class="layout.isWide ? 'sk-item-wide' : ''">
+          <QtSkeletonList kind="song" :rows="SKELETON_ROWS" />
+        </list-item>
         <list-item
           v-for="item in albumRows"
           :key="item.key"
@@ -272,8 +325,8 @@
           <view class="row" :class="layout.isWide ? 'row-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';border-top-color:' + theme.skin.divider + ';'">
             <image class="row-cover" :class="layout.isWide ? 'row-cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="item.album!.picUrl" mode="aspectFill" />
             <view class="row-info" :class="[layout.isWide ? 'row-info-wide' : '']"
-              ><text class="row-name" :class="layout.isWide ? 'row-name-wide' : ''" :style="'color:' + theme.skin.text + ';'" :max-lines="1">{{ item.album!.name }}</text
-              ><text class="row-meta" :class="layout.isWide ? 'row-meta-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'" :max-lines="1"
+              ><text class="row-name" :class="layout.isWide ? 'row-name-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)" :max-lines="1">{{ item.album!.name }}</text
+              ><text class="row-meta" :class="layout.isWide ? 'row-meta-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 14)" :max-lines="1"
                 >{{ shortName(item.album!.platform) }} · {{ item.album!.artist }}</text
               ></view
             >
@@ -287,12 +340,12 @@
         </list-item>
         <list-item v-else-if="!resultsHasMore.album && !emptyShowAlbum" class="foot-item" :class="[layout.isWide ? 'foot-item-wide' : '']">
           <view class="foot-inner" :class="[layout.isWide ? 'foot-inner-wide' : '']">
-            <text class="foot-text" :class="[layout.isWide ? 'foot-text-wide' : '']" :style="'color:' + theme.skin.textSubtle + ';'">已加载全部</text>
+            <text class="foot-text" :class="[layout.isWide ? 'foot-text-wide' : '']" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(24, 12)">已加载全部</text>
           </view>
         </list-item>
         <list-item v-if="emptyShowAlbum && !searching" class="empty-item" :class="[layout.isWide ? 'empty-item-wide' : '']">
           <view class="empty-inner" :class="[layout.isWide ? 'empty-inner-wide' : '']">
-            <text class="empty-text" :class="[layout.isWide ? 'empty-text-wide' : '']" :style="'color:' + theme.skin.textMuted + ';'">没有找到相关结果</text>
+            <text class="empty-text" :class="[layout.isWide ? 'empty-text-wide' : '']" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(27, 14)">没有找到相关结果</text>
           </view>
         </list-item>
       </list-view>
@@ -304,25 +357,35 @@
       :actions="sheetActions"
       @select="onSheetSelect"
     />
-    <MiniPlayer
+    <QtActionSheet
+      v-model:visible="sourceSheetVisible"
+      title="切换音源"
+      :actions="sourceSheetActions"
+      @select="onSourceSelect"
+    />
   /></view>
   </qt-page-frame>
 </template><script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
+import { formatBigCount } from "@/services/format";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtContentWidth, qtCanTwoColumn } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import QtSongRowLite from "@/uni_modules/qt-ui/components/qt-song-row-lite/qt-song-row-lite.uvue";
-import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
-import SourceSwitcher from "@/uni_modules/qt-ui/components/qt-source-switcher/qt-source-switcher.uvue";
+import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
 import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import qtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import { useSongSheet } from "@/composables/use-song-sheet";
 import { musicApi } from "@/services/music-api";
+import { aggregateSongKey } from "@/services/aggregate-merge";
+import { readAggregateSources, AGGREGATE_SOURCES_CHANGED_EVENT } from "@/services/aggregate-sources";
 import { packsFingerprint, SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
 import { usePlayerStore } from "@/stores/player";
 import { useSourceStore } from "@/stores/source";
@@ -331,6 +394,8 @@ import { platformShort, platformLabel } from "@/services/platform";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
 import type { Song, Playlist, Artist, Album } from "@/types/music";
 import type { Source } from "@/services/music-api";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
 
 /** 搜索结果统一行：混排歌曲/歌单/歌手/专辑，供 list-view 虚拟滚动复用 */
 type ResultRow = {
@@ -344,11 +409,56 @@ type ResultRow = {
 
 const keyword = ref("");
 const songs = ref<Song[]>([]);
+
+// —— 标题栏搜索态（窄屏）：输入/提交/清空 + 音源、聚合两个药丸 ——
+// 框架的搜索框是受控的：值由页面持有，输入事件写回；清空图标只清词不关态。
+function onHeaderInput(value: string): void {
+  keyword.value = value;
+}
+function onHeaderClose(): void {
+  keyword.value = "";
+}
+/** 标题栏药丸文案：[当前音源, 聚合搜索]（宽屏没有标题栏，用不到） */
+// 标题栏药丸宽度有限：音源用简写（网易/QQ/酷我…），全名放下会太挤
+const headerChips = computed((): string[] => [platformShort(sourceStore.current), "聚合搜索"]);
+const headerChipActives = computed((): boolean[] => [false, aggregateMode.value]);
+function onHeaderChipTap(index: number): void {
+  if (index == 0) openSourceSheet();
+  else toggleAggregateMode();
+}
+// 音源切换：与 qt-source-switcher 同一套（注册表清单 + accent 标当前），只是入口搬进了标题栏
+const sourceSheetVisible = ref(false);
+const sourceSheetActions = computed<SheetAction[]>(() => {
+  const ids = sourceRegistry.sourceIds();
+  const out: SheetAction[] = [];
+  for (let i = 0; i < ids.length; i++) {
+    out.push({ name: platformLabel(ids[i]), color: ids[i] == sourceStore.current ? theme.skin.accent : undefined });
+  }
+  return out;
+});
+function openSourceSheet(): void {
+  if (sourceRegistry.sourceIds().length == 0) {
+    qtShowToast({ title: "请先在 设置→音源包管理 安装数据包", icon: "none" });
+    return;
+  }
+  sourceSheetVisible.value = true;
+}
+function onSourceSelect(_action: SheetAction, index: number): void {
+  const ids = sourceRegistry.sourceIds();
+  if (index < 0 || index >= ids.length) return;
+  const s = ids[index];
+  if (s == sourceStore.current) return;
+  sourceStore.setSource(s);
+  ensureSource();
+}
+
 const playlists = ref<Playlist[]>([]);
 const artists = ref<Artist[]>([]);
 const albums = ref<Album[]>([]);
 const searched = ref(false);
 const searching = ref(false);
+/** 骨架行数：首屏 5 行（640rpx / 410px），与 .sk-item 的高度严格对应 */
+const SKELETON_ROWS = 5;
 // 每种类型独立维护分页：切换 tag 时互不影响
 const resultsPage = reactive<Record<string, number>>({
   song: 1,
@@ -372,6 +482,18 @@ const player = usePlayerStore();
 const sourceStore = useSourceStore();
 const theme = useThemeStore();
 
+// ── 「全部」视图两列 ──
+// 判定用最小列宽而不是 sizeClass：真机 MuMu 横屏只有 ~1067dp（wide 档）却足够
+// 放下两列 420px，用 isDesktop 会错关。左列「单曲」最多 20 行是最长的一节，
+// 右列三节（歌单 6 + 歌手 8 + 专辑 6）累加后高度接近，两列不会一边高一边空。
+const allInnerWidth = computed((): number => qtContentWidth("list"));
+const allTwoColumn = computed((): boolean => qtCanTwoColumn("group", allInnerWidth.value, 16));
+const allColStyle = computed((): string => {
+  const w = Math.floor((allInnerWidth.value - 16) / 2);
+  return "width:" + (w > 320 ? w : 320) + "px;";
+});
+const allColRightStyle = computed((): string => allColStyle.value + "margin-left:16px;");
+
 // 回到顶部
 const scrollTop = ref(0);
 const showBackToTop = ref(false);
@@ -379,15 +501,23 @@ function onListScroll(e: any) {
   const st = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
   showBackToTop.value = st > 600;
 }
-function backToTop() {
+/** 强制回顶：scroll-top 同值不触发滚动，用 1/0 翻转保证每次都是「变化」。
+ *  新搜索/切聚合模式后内容整组换血，若停在旧的深处位置，list-view 会渲染出
+ *  大块空白（内容其实还在下方），所以换数据前先回顶。 */
+function resetListScroll(): void {
   scrollTop.value = scrollTop.value == 0 ? 1 : 0;
   showBackToTop.value = false;
+}
+function backToTop() {
+  resetListScroll();
 }
 const { sheetVisible, sheetActions, openSheet, onSheetSelect, sheetTitle } =
   useSongSheet();
 let loadedSource = "";
 /** 上次加载时的包态指纹：音源包安装/更新/卸载/启停后变化，热词/结果重拉 */
 let loadedPackFp = "";
+/** 上次热词拉取时的包态指纹：热词是跨源聚合（allHotWords），不随音源变化，只随包态重拉 */
+let loadedHotFp = "";
 // 搜索代号：每次新搜索/切音源 +1。切音源会连发多次搜索，慢返回的旧响应会覆盖新结果，
 // 表现为"切了音源页面却没反应"。所有异步写回前都校验代号是否仍是最新。
 let searchSeq = 0;
@@ -420,6 +550,68 @@ watch(types, (next) => {
   }
 });
 const HISTORY_KEY = "qt-search-history";
+
+// ── 聚合搜索（对齐 qt-pc SearchPage 的聚合形态）──
+// 歌曲页开「聚合搜索」后并发打全部音源，合并去重成一条按相关性排序的列表，
+// 每行带音源徽标。默认关（与 PC 一致），选择持久化在本地。
+const AGGREGATE_MODE_KEY = "qt-search-aggregate-mode";
+const aggregateMode = ref<boolean>(loadAggregateMode());
+/** 跨页去重键（aggregateSongKey）：同一首歌各页重复出现时只保留首次 */
+let aggSeenKeys: string[] = [];
+/** 最近一次合并页的 full（各源原始页是否取满 = 大概率还有下一页） */
+let lastMergeFull = true;
+/** 现有歌曲结果是聚合模式拉的吗（null = 还没拉过）。
+ *  「全部」tab 的单曲节和歌曲 tab 共用 songs 数组；切到歌曲 tab 时若拉取时的
+ *  聚合开关状态与当前不一致，必须重搜——否则出现「开关开着、列表却是单源」的错位。 */
+let songsAggLoaded: boolean | null = null;
+
+function loadAggregateMode(): boolean {
+  try {
+    return uni.getStorageSync(AGGREGATE_MODE_KEY) == "1";
+  } catch (_) {
+    return false;
+  }
+}
+function toggleAggregateMode(): void {
+  aggregateMode.value = !aggregateMode.value;
+  try {
+    uni.setStorageSync(AGGREGATE_MODE_KEY, aggregateMode.value ? "1" : "0");
+  } catch (_) {}
+  // 每页条数与合并规则都变了，旧的歌曲结果不能再续用
+  aggSeenKeys.splice(0, aggSeenKeys.length);
+  lastMergeFull = true;
+  if (searched.value && keyword.value.trim().length > 0) {
+    songs.value = [];
+    resultsPage.song = 1;
+    resultsHasMore.song = true;
+    resetListScroll(); // 列表整组换血，停在旧的深处位置会渲染出空白带
+    if (type.value == "song") searchCurrent("song");
+  }
+}
+/** 聚合模式每页条数 = 各音源 searchPageMax 的最小值（对齐 qt-pc：按最慢的源对齐节奏） */
+function aggregatePageSize(): number {
+  let min = 0;
+  const list = sourceRegistry.sources;
+  for (let i = 0; i < list.length; i++) {
+    const max = list[i].searchPageMax;
+    if (max != null && max > 0 && (min == 0 || max < min)) min = max;
+  }
+  if (min > 0) return min;
+  return musicApi.searchPageMaxOf(sourceStore.current as Source);
+}
+function songPageSize(): number {
+  if (aggregateMode.value) return aggregatePageSize();
+  return musicApi.searchPageMaxOf(sourceStore.current as Source);
+}
+const aggChipStyle = computed((): string => {
+  if (aggregateMode.value) {
+    return "background-color:" + theme.skin.accent + ";border-color:" + theme.skin.accent + ";";
+  }
+  return "background-color:" + theme.skin.surfaceMuted + ";border-color:" + theme.skin.border + ";";
+});
+const aggChipTextStyle = computed((): string => {
+  return "color:" + (aggregateMode.value ? theme.skin.onAccent : theme.skin.textMuted) + ";";
+});
 
 function typeLabel(value: string): string {
   if (value == "all") return "全部";
@@ -476,11 +668,13 @@ function defaultHotWords(): string[] {
   return ["周杰伦", "陈奕迅", "晴天", "告白气球", "Taylor Swift"];
 }
 
+/** 热词拉取：allHotWords 跨源聚合（bundle 内多源并发、去重、封顶 30 条），
+ *  传聚合白名单——用户没勾的音源热词也不要；null = 不限 */
 async function loadHot(): Promise<void> {
   const seq = ++hotSeq;
   try {
-    const list = await musicApi.hotWords(sourceStore.current as Source);
-    if (seq != hotSeq) return; // 已切到别的音源，丢弃过期热词
+    const list = await musicApi.allHotWords(readAggregateSources());
+    if (seq != hotSeq) return; // 包态已变触发新一轮拉取，丢弃过期结果
     // 未装数据包时 musicApi 不再抛错，而是给空列表（避免启动弹「加载失败」）；
     // 空热词会让「热门搜索」整区只剩标题，故与 catch 同款兜底，保持原观感。
     words.value = list.length > 0 ? list : defaultHotWords();
@@ -497,11 +691,32 @@ function ensureSource(): void {
   loadedSource = current;
   loadedPackFp = fp;
   if (searched.value && keyword.value.trim().length > 0) doSearch();
-  else loadHot();
+  else if (loadedHotFp != fp) {
+    // 聚合热词不随音源走：切音源只影响搜索结果，热词仅在包态变化
+    // （安装/更新/卸载/启停）时重拉，避免每切一次源就白发一轮多源请求
+    loadedHotFp = fp;
+    loadHot();
+  }
 }
 /** 音源包变更广播：App 层更新弹窗确认时收不到 onShow，事件实时重拉 */
 function onPacksChanged(): void {
   ensureSource();
+}
+/** 聚合音源白名单变了（音源包管理页改的）：清跨页去重并刷新进行中的聚合搜索；
+ *  热词同样按白名单拉（用户没勾的源热词不要），落地区强制重拉 */
+function onAggSourcesChanged(): void {
+  aggSeenKeys.splice(0, aggSeenKeys.length);
+  lastMergeFull = true;
+  loadedHotFp = ""; // 热词白名单指纹变化，下次回到落地区时重拉
+  if (!searched.value) loadHot();
+  if (aggregateMode.value && searched.value && keyword.value.trim().length > 0) {
+    songs.value = [];
+    resultsPage.song = 1;
+    resultsHasMore.song = true;
+    resetListScroll();
+    if (type.value == "song") searchCurrent("song");
+    else if (type.value == "all") doSearch();
+  }
 }
 
 onMounted(() => {
@@ -510,6 +725,7 @@ onMounted(() => {
   loadHistory();
   ensureSource();
   uni.$on(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
+  uni.$on(AGGREGATE_SOURCES_CHANGED_EVENT, onAggSourcesChanged);
 });
 onShow(() => {
   qtTrackPage("pages/search/index");
@@ -518,6 +734,7 @@ onShow(() => {
 });
 onUnmounted(() => {
   uni.$off(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
+  uni.$off(AGGREGATE_SOURCES_CHANGED_EVENT, onAggSourcesChanged);
 });
 
 const emptyShowSong = computed(() => songs.value.length == 0);
@@ -650,6 +867,24 @@ function uniqueSongs(list: Song[]): Song[] {
   }
   return out;
 }
+/** 原地把新到的歌曲追加进 songs（按 platform:id 去重）。
+ *  list-view 在滚动深处「整组替换数组」时会整段丢渲染出现大块空白带
+ *  （真机实测：空白区往下翻数据其实还在），增量 push 走普通 diff，不触发整表重建。 */
+function appendSongsInPlace(list: Song[]): void {
+  const seen: string[] = [];
+  const arr = songs.value;
+  for (let i = 0; i < arr.length; i++) {
+    const it = arr[i] as Song;
+    seen.push(it.platform + ":" + it.id);
+  }
+  for (let i = 0; i < list.length; i++) {
+    const it = list[i] as Song;
+    const k = it.platform + ":" + it.id;
+    if (seen.indexOf(k) != -1) continue;
+    seen.push(k);
+    arr.push(it);
+  }
+}
 async function runSearch(text: string, page: number, seq: number): Promise<void> {
   // seq 是发起时记录的搜索代号。返回时若代号已变，说明用户又搜了一次或切了音源，
   // 本批结果必须丢弃——否则旧音源的响应晚到就会覆盖新音源的数据。
@@ -672,15 +907,49 @@ async function runSearch(text: string, page: number, seq: number): Promise<void>
     albums.value = append ? uniqueAlbums(albums.value.concat(list)) : uniqueAlbums(list);
     return;
   }
+  if (aggregateMode.value) {
+    const size = songPageSize();
+    if (page == 1) aggSeenKeys.splice(0, aggSeenKeys.length);
+    const merged = await musicApi.searchMerged(
+      text,
+      page,
+      size,
+      readAggregateSources(),
+      sourceStore.current as Source
+    );
+    if (seq != searchSeq) return;
+    lastMergeFull = merged.full;
+    // 跨页按 aggregateSongKey 去重：同一首歌换页重复出现时只保留首次
+    const fresh: Song[] = [];
+    for (let i = 0; i < merged.songs.length; i++) {
+      const it = merged.songs[i] as Song;
+      const k = aggregateSongKey(it);
+      if (aggSeenKeys.indexOf(k) != -1) continue;
+      aggSeenKeys.push(k);
+      fresh.push(it);
+    }
+    if (append) {
+      appendSongsInPlace(fresh);
+    } else {
+      songs.value = fresh;
+    }
+    songsAggLoaded = true;
+    return;
+  }
   const list = await musicApi.search(
     text,
     sourceStore.current as Source,
     "song",
     page,
-    30
+    songPageSize()
   );
   if (seq != searchSeq) return;
-  songs.value = append ? uniqueSongs(songs.value.concat(list)) : uniqueSongs(list);
+  if (append) {
+    appendSongsInPlace(list);
+  } else {
+    songs.value = uniqueSongs(list);
+  }
+  songsAggLoaded = false;
 }
 async function doSearch(): Promise<void> {
   const text = keyword.value.trim();
@@ -703,6 +972,9 @@ async function doSearch(): Promise<void> {
   playlists.value = [];
   artists.value = [];
   albums.value = [];
+  aggSeenKeys.splice(0, aggSeenKeys.length);
+  lastMergeFull = true;
+  resetListScroll(); // 新搜索内容整组换血，旧滚动位置会让 list-view 渲染出空白带
   try {
     if (type.value == "all") {
       allLoaded = false;
@@ -712,7 +984,7 @@ async function doSearch(): Promise<void> {
       await runSearch(text, 1, seq);
     }
   } catch (_) {
-    if (seq == searchSeq) uni.showToast({ title: "搜索服务暂不可用", icon: "none" });
+    if (seq == searchSeq) qtShowToast({ title: "搜索服务暂不可用", icon: "none" });
   } finally {
     if (seq == searchSeq) searching.value = false;
   }
@@ -722,11 +994,7 @@ async function runAllSections(text: string, seq: number): Promise<void> {
   // 展示门重置：本次聚合结束（四节齐了）才放开，中途切换标签重进也不会半截展示
   allReady.value = false;
   const src = sourceStore.current as Source;
-  const songTask = musicApi
-    .search(text, src, "song", 1, 30)
-    .then((list) => {
-      if (seq == searchSeq) songs.value = uniqueSongs(list);
-    })
+  const songTask = runSearch(text, 1, seq)
     .catch(() => {});
   const playlistTask = musicApi
     .searchPlaylists(text, src, 1, 10)
@@ -780,8 +1048,12 @@ async function loadMoreResults(): Promise<void> {
             : songs.value.length;
     resultsPage[curType] = next;
     if (after == before) resultsHasMore[curType] = false;
+    // 聚合页包侧已声明没有下一页（full=false）时直接收尾，别再白发请求
+    if (curType == "song" && aggregateMode.value && !lastMergeFull) {
+      resultsHasMore[curType] = false;
+    }
   } catch (_) {
-    if (seq == searchSeq) uni.showToast({ title: "加载失败", icon: "none" });
+    if (seq == searchSeq) qtShowToast({ title: "加载失败", icon: "none" });
   } finally {
     if (seq == searchSeq) resultsLoadingMore.value = false;
   }
@@ -803,7 +1075,9 @@ function switchType(index: number): void {
     searchCurrent("all");
     return;
   }
-  // 已加载过该类型的数据则保持缓存（v-show 切换，位置原生保留），否则从第 1 页开始加载
+  // 已加载过该类型的数据则保持缓存（v-show 切换，位置原生保留），否则从第 1 页开始加载。
+  // 歌曲 tab 额外要求聚合开关状态一致：「全部」tab 的单曲节不按聚合拉（或反之）时直接复用，
+  // 用户会看到「聚合开着、列表却是单源」的错位——模式变了就重搜。
   const loaded =
     value == "playlist"
       ? playlists.value.length > 0
@@ -811,7 +1085,7 @@ function switchType(index: number): void {
         ? artists.value.length > 0
         : value == "album"
           ? albums.value.length > 0
-          : songs.value.length > 0;
+          : songs.value.length > 0 && songsAggLoaded == aggregateMode.value;
   if (loaded) return;
   searchCurrent(value);
 }
@@ -837,7 +1111,7 @@ async function searchCurrent(curType: string): Promise<void> {
       await runSearch(text, 1, seq);
     }
   } catch (_) {
-    if (seq == searchSeq) uni.showToast({ title: "搜索服务暂不可用", icon: "none" });
+    if (seq == searchSeq) qtShowToast({ title: "搜索服务暂不可用", icon: "none" });
   } finally {
     if (seq == searchSeq) resultsLoadingMore.value = false;
   }
@@ -847,18 +1121,27 @@ async function play(song: Song): Promise<void> {
     song.url = await musicApi.playUrl(song, player.quality);
     player.playSingle(song);
   } catch (_) {
-    uni.showToast({ title: "该歌曲暂时无法播放", icon: "none" });
+    qtShowToast({ title: "该歌曲暂时无法播放", icon: "none" });
   }
 }
+/**
+ * 播放全部：把当前搜索结果（歌曲 Tab）整体替换成播放队列。
+ * 与单曲的 `play()` 不同 —— 这里不预取首曲地址：`player.play(song, queue)`
+ * 走的是懒解析（qt-resolve:// 占位），逐曲播放时再取址，省掉一次串行等待。
+ */
+function playAllSongs(): void {
+  if (songs.value.length == 0) return;
+  player.play(songs.value[0], songs.value);
+}
 function openPlaylist(pl: Playlist): void {
-  uni.navigateTo({
+  uni.navigateTo({ animationType: qtNavAnimation(),
     url: "/pages/playlist/index?id=" + encodeURIComponent(pl.id) + "&platform=" + encodeURIComponent(pl.platform),
   });
 }
 function openArtist(ar: Artist): void {
   // 2026-10-06：带上歌手真实 id，歌手页按 id 取作品（同名歌手不再混进来）；
   // 老路径（只有 name）依然可用，包内取不到 id 作品时自动退回名字搜索。
-  uni.navigateTo({
+  uni.navigateTo({ animationType: qtNavAnimation(),
     url:
       "/pages/artist/index?name=" +
       encodeURIComponent(ar.name) +
@@ -871,7 +1154,7 @@ function openArtist(ar: Artist): void {
 function openAlbum(al: Album): void {
   // 必须带 name/pic/desc：163 对版权受限专辑返回 HTTP 200 + code:404，albumDetail 拿到空数据，
   // 靠入口页（搜索结果）带来的信息兜底，否则专辑页整页无封面无名字。
-  uni.navigateTo({
+  uni.navigateTo({ animationType: qtNavAnimation(),
     url:
       "/pages/playlist/index?id=" +
       encodeURIComponent(al.id) +
@@ -909,7 +1192,7 @@ function openAlbum(al: Album): void {
   padding: 20rpx 28rpx;
   flex-direction: row;
 
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
 
   border-radius: 0 0 24rpx 24rpx;
 }
@@ -918,7 +1201,7 @@ function openAlbum(al: Album): void {
   height: 76rpx;
   padding: 0 30rpx;
 
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
 
   border-radius: 38rpx;
   font-size: 27rpx;
@@ -932,16 +1215,32 @@ function openAlbum(al: Album): void {
 
   border-radius: 38rpx;
 }
-.bar-switch {
-  margin-left: 18rpx;
-}
 .type-row {
   padding: 22rpx 28rpx;
 
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
 
   border-radius: 24rpx;
 }
+.agg-row {
+  padding: 12rpx 28rpx 2rpx;
+  flex-direction: row;
+  align-items: center;
+}
+.agg-row-wide { padding: 7px 24px 1px; }
+.agg-chip {
+  padding: 8rpx 24rpx;
+  border-width: 1px; border-style: solid;
+  border-radius: 999rpx;
+}
+.agg-chip-wide { padding: 4px 13px; }
+.agg-chip-text { font-size: 24rpx; }
+.agg-chip-text-wide { font-size: 12px; }
+.agg-hint {
+  margin-left: 16rpx;
+  font-size: 22rpx;
+}
+.agg-hint-wide { margin-left: 9px; font-size: 12px; }
 .hot-wrap {
   flex: 1;
 }
@@ -965,7 +1264,7 @@ function openAlbum(al: Album): void {
   flex-direction: row;
   align-items: center;
 
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
 
   border-radius: 28rpx;
 }
@@ -994,13 +1293,25 @@ function openAlbum(al: Album): void {
   padding: 13rpx 24rpx;
 
 
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
 
   border-radius: 30rpx;
   font-size: 25rpx;
 }
 .results {
   flex: 1;
+}
+/* 首屏骨架条目：5 行 × 128rpx/82px（与 .row / .row-wide 同高），
+   高度写死避免 list-view 虚拟滚动按可变高度预估导致抖动 */
+.sk-item {
+  height: 640rpx;
+}
+.sk-item-wide {
+  height: 410px;
+}
+/* 「综合」Tab 是 scroll-view，骨架直接铺在分区位置 */
+.all-sk {
+  flex-direction: column;
 }
 .empty-text {
 
@@ -1016,13 +1327,44 @@ function openAlbum(al: Album): void {
   flex-direction: row;
   align-items: center;
 
-  border-top-width: 1px;
+  border-top-width: 1px; border-top-style: solid;
 
 }
 /* list-view 虚拟滚动：所有 list-item 固定高度，避免预估高度错乱抖动 */
 .row-item {
   height: 128rpx;
   justify-content: center;
+}
+/* 「播放全部」操作条：固定高度与歌曲行同档，虚拟滚动才不抖 */
+.play-all-item {
+  height: 96rpx;
+  justify-content: center;
+}
+.play-all-row {
+  height: 96rpx;
+  padding: 0 32rpx;
+  flex-direction: row;
+  align-items: center;
+
+  border-bottom-width: 1px; border-bottom-style: solid;
+
+}
+.play-all-chip {
+  width: 56rpx;
+  height: 56rpx;
+  border-radius: 28rpx;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.play-all-text {
+  margin-left: 16rpx;
+  font-size: 28rpx;
+  font-weight: 600;
+}
+.play-all-count {
+  margin-left: 8rpx;
+  font-size: 24rpx;
 }
 .empty-item {
   height: 240rpx;
@@ -1074,13 +1416,21 @@ function openAlbum(al: Album): void {
 .bar-wide { padding: 12px 24px; border-radius: 0 0 18px 18px; }
 .input-wide { height: 48px; padding-left: 20px; padding-right: 20px; border-radius: 24px; font-size: 16px; }
 .button-wide { width: 48px; height: 48px; margin-left: 10px; border-radius: 24px; }
-.bar-switch-wide { margin-left: 14px; }
 .type-row-wide { padding: 14px 24px; border-radius: 18px; }
 .section-wide { padding: 22px 24px; }
 .history-item-wide { height: 38px; margin-right: 12px; margin-bottom: 12px; padding-left: 16px; padding-right: 12px; border-radius: 19px; }
+/* 桌面指针反馈 */
+.tag-hover {
+  background-color: rgba(127, 127, 127, 0.16);
+}
 .tag-wide { margin-right: 12px; margin-bottom: 12px; padding: 8px 16px; border-radius: 20px; font-size: 15px; }
 .row-wide { height: 82px; padding-left: 24px; padding-right: 24px; }
 .row-item-wide { height: 82px; }
+.play-all-item-wide { height: 60px; }
+.play-all-row-wide { height: 60px; padding-left: 24px; padding-right: 24px; }
+.play-all-chip-wide { width: 32px; height: 32px; border-radius: 16px; }
+.play-all-text-wide { margin-left: 10px; font-size: 16px; }
+.play-all-count-wide { margin-left: 5px; font-size: 13px; }
 .row-cover-wide { width: 58px; height: 58px; border-radius: 10px; }
 .row-name-wide { font-size: 17px; }
 .row-meta-wide { margin-top: 6px; font-size: 14px; }
@@ -1103,6 +1453,12 @@ function openAlbum(al: Album): void {
 /* 全部聚合视图 */
 .all-section { margin: 0 0 12rpx; }
 .all-section-wide { margin: 0 0 10px; }
+/* 「全部」视图两列：单列时 .all-cols 只是纵向容器，与原始结构等价。
+   间距写成内联样式而不是 .all-col-right 的 margin-left —— 单列时右列会整体缩进 16px。 */
+.all-cols { flex-direction: column; }
+.all-cols-2 { flex-direction: row; align-items: flex-start; justify-content: flex-start; }
+.all-col { flex-direction: column; }
+.all-col-right { flex-direction: column; }
 .all-head { flex-direction: row; align-items: center; justify-content: space-between; height: 80rpx; margin: 0 24rpx; }
 .all-head-wide { height: 52px; margin: 0 16px; }
 .all-head-title { font-size: 30rpx; font-weight: 700; }

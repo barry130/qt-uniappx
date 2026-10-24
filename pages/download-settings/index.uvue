@@ -1,0 +1,557 @@
+<template>
+  <qt-page-frame width-kind="flow">
+  <view class="page">
+    <scroll-view class="list" :class="layout.isWide ? 'list-wide' : ''" direction="vertical" :show-scrollbar="false">
+      <!-- 宽屏两列（≥1280）：左列「保存位置 / 下载行为」5 行，右列「附带资源」2 行 +「删除行为」1 行。
+           单列时这三组在 1920 下拉成 1312px 宽、每行右侧空出 600px。 -->
+      <view v-if="twoColumn" class="cols" :style="colsStyle">
+        <view class="col" :style="colStyle">
+          <view class="group group-wide group-col" :style="groupStyle">
+            <view class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="changeDownloadDir">
+              <QtIcon class="cell-icon cell-icon-wide" name="folder" :size="36" color="#d99b3f" />
+              <text class="directory-title" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">保存位置</text>
+              <scroll-view class="directory-scroll directory-scroll-wide" direction="horizontal" :show-scrollbar="false">
+                <view class="directory-track directory-track-wide">
+                  <text class="directory-value" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">{{ downloads.dirHint() }}</text>
+                </view>
+              </scroll-view>
+              <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+            </view>
+            <view v-if="downloads.hasCustomDir()" class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="restoreDefaultDir">
+              <QtIcon class="cell-icon cell-icon-wide" name="refresh" :size="36" color="#8a8f99" />
+              <text class="directory-title" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">恢复默认</text>
+              <scroll-view class="directory-scroll directory-scroll-wide" direction="horizontal" :show-scrollbar="false">
+                <view class="directory-track directory-track-wide">
+                  <text class="directory-value" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">{{ defaultDirHint }}</text>
+                </view>
+              </scroll-view>
+            </view>
+            <view class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showDownloadQuality">
+              <QtIcon class="cell-icon cell-icon-wide" name="download" :size="36" color="#6d8fd6" />
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">下载默认音质</text>
+              <view class="cell-right">
+                <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ downloadQualityText() }}</text>
+                <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+              </view>
+            </view>
+            <view class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showDownloadNameFormat">
+              <QtIcon class="cell-icon cell-icon-wide" name="type" :size="36" color="#6d8fd6" />
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">下载文件名格式</text>
+              <view class="cell-right">
+                <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ downloadNameFormatText() }}</text>
+                <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+              </view>
+            </view>
+            <view class="cell cell-no-border cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showDownloadConcurrency">
+              <QtIcon class="cell-icon cell-icon-wide" name="sliders" :size="36" color="#d99b3f" />
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">同时下载数</text>
+              <view class="cell-right">
+                <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ downloadConcurrencyText() }}</text>
+                <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+              </view>
+            </view>
+          </view>
+        </view>
+        <view class="col col-right" :style="colStyle">
+          <view class="group group-wide group-col" :style="groupStyle">
+            <view class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleCover">
+              <QtIcon class="cell-icon cell-icon-wide" name="disc" :size="36" color="#4fb186" />
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">同时下载封面</text>
+              <view class="cell-right">
+                <view class="switch" :class="downloads.downloadCover ? 'switch-on' : ''" :style="downloads.downloadCover ? ('background-color:' + theme.skin.accent + ';') : ('background-color:' + theme.skin.surfaceMuted + ';')">
+                  <view class="switch-dot" />
+                </view>
+              </view>
+            </view>
+            <view class="cell cell-no-border cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleLyric">
+              <QtIcon class="cell-icon cell-icon-wide" name="list" :size="36" color="#5f9ea0" />
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">同时下载歌词</text>
+              <view class="cell-right">
+                <view class="switch" :class="downloads.downloadLyric ? 'switch-on' : ''" :style="downloads.downloadLyric ? ('background-color:' + theme.skin.accent + ';') : ('background-color:' + theme.skin.surfaceMuted + ';')">
+                  <view class="switch-dot" />
+                </view>
+              </view>
+            </view>
+          </view>
+          <view class="group group-wide group-col" :style="groupStyle">
+            <view class="cell cell-no-border cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleDeleteFile">
+              <QtIcon class="cell-icon cell-icon-wide" name="trash" :size="36" color="#d9534f" />
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">删除记录时同时删除文件</text>
+              <view class="cell-right">
+                <view class="switch" :class="downloads.deleteFileOnRemove ? 'switch-on' : ''" :style="downloads.deleteFileOnRemove ? ('background-color:' + theme.skin.accent + ';') : ('background-color:' + theme.skin.surfaceMuted + ';')">
+                  <view class="switch-dot" />
+                </view>
+              </view>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 竖屏 / 中等宽度：单列（原样） -->
+      <view v-else>
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="changeDownloadDir">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="folder" :size="36" color="#d99b3f" />
+          <text class="directory-title" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">保存位置</text>
+          <scroll-view class="directory-scroll" :class="layout.isWide ? 'directory-scroll-wide' : ''" direction="horizontal" :show-scrollbar="false">
+            <view class="directory-track" :class="layout.isWide ? 'directory-track-wide' : ''">
+              <text class="directory-value" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">{{ downloads.dirHint() }}</text>
+            </view>
+          </scroll-view>
+          <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        </view>
+        <view v-if="downloads.hasCustomDir()" class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="restoreDefaultDir">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="refresh" :size="36" color="#8a8f99" />
+          <text class="directory-title" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">恢复默认</text>
+          <scroll-view class="directory-scroll" :class="layout.isWide ? 'directory-scroll-wide' : ''" direction="horizontal" :show-scrollbar="false">
+            <view class="directory-track" :class="layout.isWide ? 'directory-track-wide' : ''">
+              <text class="directory-value" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">{{ defaultDirHint }}</text>
+            </view>
+          </scroll-view>
+        </view>
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showDownloadQuality">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="download" :size="36" color="#6d8fd6" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">下载默认音质</text>
+          <view class="cell-right">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ downloadQualityText() }}</text>
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </view>
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showDownloadNameFormat">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="type" :size="36" color="#6d8fd6" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">下载文件名格式</text>
+          <view class="cell-right">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ downloadNameFormatText() }}</text>
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </view>
+        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showDownloadConcurrency">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="sliders" :size="36" color="#d99b3f" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">同时下载数</text>
+          <view class="cell-right">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ downloadConcurrencyText() }}</text>
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </view>
+      </view>
+
+      <!-- 附带资源：与音频同目录、同基名落盘（歌手 - 歌名.mp3 / .lrc / .jpg） -->
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleCover">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="disc" :size="36" color="#4fb186" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">同时下载封面</text>
+          <view class="cell-right">
+            <view class="switch" :class="downloads.downloadCover ? 'switch-on' : ''" :style="downloads.downloadCover ? ('background-color:' + theme.skin.accent + ';') : ('background-color:' + theme.skin.surfaceMuted + ';')">
+              <view class="switch-dot" />
+            </view>
+          </view>
+        </view>
+        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleLyric">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="list" :size="36" color="#5f9ea0" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">同时下载歌词</text>
+          <view class="cell-right">
+            <view class="switch" :class="downloads.downloadLyric ? 'switch-on' : ''" :style="downloads.downloadLyric ? ('background-color:' + theme.skin.accent + ';') : ('background-color:' + theme.skin.surfaceMuted + ';')">
+              <view class="switch-dot" />
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 删除行为：只影响「下载管理」里删记录时动不动磁盘文件 -->
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleDeleteFile">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="trash" :size="36" color="#d9534f" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">删除记录时同时删除文件</text>
+          <view class="cell-right">
+            <view class="switch" :class="downloads.deleteFileOnRemove ? 'switch-on' : ''" :style="downloads.deleteFileOnRemove ? ('background-color:' + theme.skin.accent + ';') : ('background-color:' + theme.skin.surfaceMuted + ';')">
+              <view class="switch-dot" />
+            </view>
+          </view>
+        </view>
+      </view>
+
+      </view>
+
+      <!-- 说明文字：单列在两列分支之外、仍在最下方通栏，两列时不拆断 -->
+      <view class="hint">
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">打开后，在「下载管理」里删除记录会连同手机里的音频文件（以及同一目录下的封面、歌词）一起删掉；关掉则只清掉下载记录，文件留在原处，其他播放器仍能扫到。下载未完成的任务不受影响。</text>
+      </view>
+
+      <view class="hint">
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">打开后，下载歌曲时会顺带把封面图（.jpg/.png）和歌词（.lrc）存到同一目录，文件名与歌曲一致，本地播放器可自动识别。取不到封面或歌词时只跳过，不影响歌曲本身。</text>
+      </view>
+      <view class="hint">
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">同时下载数越高越容易被音源限流。超过 {{ warnAbove }} 个时会有一次确认提醒。</text>
+      </view>
+    </scroll-view>
+
+    <qt-action-sheet
+      v-model:visible="sheetVisible"
+      :title="sheetTitle"
+      :actions="sheetActions"
+      @select="onSheetSelect"
+    />
+  </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
+import { qtConfirm } from "@/services/confirm";
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { useQtTwoColumn } from "@/uni_modules/qt-ui/composables/use-qt-columns";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { computed, ref } from "vue";
+import { onShow } from "@dcloudio/uni-app";
+import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import {
+  useDownloadsStore,
+  DOWNLOAD_CONCURRENCY_MIN,
+  DOWNLOAD_CONCURRENCY_MAX,
+  DOWNLOAD_CONCURRENCY_WARN_ABOVE,
+  DOWNLOAD_DIR_HINT,
+} from "@/stores/downloads";
+import { useSourceStore } from "@/stores/source";
+import { useSourceRegistryStore } from "@/stores/source-registry";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { pickDirectory, queryPermissionStates, openPermissionSettings, isHarmonyOs } from "@/services/app-native";
+
+const downloads = useDownloadsStore();
+const sourceStore = useSourceStore();
+const registry = useSourceRegistryStore();
+/** 宽屏两列（≥1280）：布局档位、列宽与两列容器留白全部来自公共口径 */
+const { layout, twoColumn, colStyle, colsStyle } = useQtTwoColumn();
+const theme = useThemeStore();
+const groupStyle = computed<string>(() => "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";");
+const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
+const warnAbove = DOWNLOAD_CONCURRENCY_WARN_ABOVE;
+const defaultDirHint = DOWNLOAD_DIR_HINT;
+
+const sheetVisible = ref(false);
+const sheetTitle = ref("");
+const sheetActions = ref<SheetAction[]>([]);
+let sheetSelect: ((index: number) => void) | null = null;
+
+function openSheet(title: string, actions: SheetAction[], select: (index: number) => void): void {
+  sheetTitle.value = title;
+  sheetActions.value = actions;
+  sheetSelect = select;
+  sheetVisible.value = true;
+}
+function onSheetSelect(_action: SheetAction, index: number): void {
+  const cb = sheetSelect;
+  sheetSelect = null;
+  if (cb) cb(index);
+}
+
+// 音质档位来自数据包注册表，并按**当前选中的音源**收敛（v5 契约：包侧声明了
+// 该源可用档位，如 B 站无真无损就不展示 flac；未声明 = 全部档位）
+const qualityOptions = computed<{ value: string; name: string }[]>(() =>
+  registry.sourceQualities(sourceStore.current).map((q) => ({ value: q.id, name: q.name }))
+);
+function qualityLabel(q: string): string {
+  return registry.qualityLabel(q);
+}
+function downloadQualityText(): string {
+  return qualityLabel(downloads.downloadQuality);
+}
+function showDownloadQuality(): void {
+  const opts = qualityOptions.value;
+  if (opts.length == 0) {
+    qtShowToast({ title: "请先在 设置→音源包管理 安装数据包", icon: "none" });
+    return;
+  }
+  openSheet("下载默认音质", opts.map((opt) => ({
+    name: opt.name,
+    color: opt.value == downloads.downloadQuality ? theme.skin.accent : undefined,
+  })), (index) => {
+    downloads.setDownloadQuality(opts[index].value);
+    qtShowToast({ title: "下载音质：" + opts[index].name, icon: "none" });
+  });
+}
+
+const nameFormatOptions: { value: string; name: string }[] = [
+  { value: "artist", name: "歌手 - 歌名" },
+  { value: "song", name: "歌名 - 歌手" },
+];
+function downloadNameFormatText(): string {
+  for (let i = 0; i < nameFormatOptions.length; i++) {
+    if (nameFormatOptions[i].value == downloads.downloadNameFormat)
+      return nameFormatOptions[i].name;
+  }
+  return "歌手 - 歌名";
+}
+function showDownloadNameFormat(): void {
+  openSheet("下载文件名格式", nameFormatOptions.map((opt) => ({
+    name: opt.name,
+    color: opt.value == downloads.downloadNameFormat ? theme.skin.accent : undefined,
+  })), (index) => {
+    downloads.setDownloadNameFormat(nameFormatOptions[index].value);
+    qtShowToast({ title: "下载文件名格式：" + nameFormatOptions[index].name, icon: "none" });
+  });
+}
+
+// ==================== 同时下载数 ====================
+// 音源 CDN 普遍按 IP 限流：并发越高越容易被判成爬虫，一次封禁会连累所有在线功能，
+// 所以超过 3 时先弹一次确认（LX Music 的默认上限同样是 3）
+function downloadConcurrencyText(): string {
+  return downloads.concurrencyText();
+}
+function showDownloadConcurrency(): void {
+  const actions: SheetAction[] = [];
+  for (let n = DOWNLOAD_CONCURRENCY_MIN; n <= DOWNLOAD_CONCURRENCY_MAX; n++) {
+    actions.push({
+      name: n + " 个" + (n > DOWNLOAD_CONCURRENCY_WARN_ABOVE ? "（较高）" : ""),
+      color: n == downloads.concurrency ? theme.skin.accent : undefined,
+    });
+  }
+  openSheet("同时下载数", actions, (index) => {
+    const value = DOWNLOAD_CONCURRENCY_MIN + index;
+    if (value > DOWNLOAD_CONCURRENCY_WARN_ABOVE) {
+            qtConfirm({
+        title: "并发偏高",
+        content: "同时下载 " + value + " 个文件会显著增加被音源限流甚至临时封 IP 的概率，"
+          + "被封后搜索、播放、歌词等所有在线功能都会一起失败。确认继续？",
+        confirmText: "仍然使用",
+        cancelText: "取消",
+        danger: true,
+      }).then((ok: boolean) => {
+          if (ok) applyDownloadConcurrency(value);
+      });
+      return;
+    }
+    applyDownloadConcurrency(value);
+  });
+}
+function applyDownloadConcurrency(value: number): void {
+  downloads.setConcurrency(value);
+  qtShowToast({ title: "同时下载数：" + downloads.concurrencyText(), icon: "none" });
+}
+
+function toggleCover(): void {
+  downloads.setDownloadCover(!downloads.downloadCover);
+}
+function toggleLyric(): void {
+  downloads.setDownloadLyric(!downloads.downloadLyric);
+}
+
+function toggleDeleteFile(): void {
+  downloads.setDeleteFileOnRemove(!downloads.deleteFileOnRemove);
+}
+
+/**
+ * 下载目录：默认是公共下载目录，Android 11+ 拿到「所有文件访问」后可以改成任意目录。
+ *
+ * 为什么先查权限再选目录：原生落盘走 java.io.File 直写（自定义目录可能在 Download
+ * 之外，MediaStore 的 RELATIVE_PATH 塞不进去），没有「所有文件访问」就一定写失败。
+ * 与其让用户选完目录再失败，不如先把他送到权限页。
+ *
+ * 鸿蒙走另一条路：`READ_WRITE_DOWNLOAD_DIRECTORY` 是 2in1 专属权限，phone 上系统判
+ * INVALID（2026-10-19 真机实证：hilog `... not support.` / `result: [2]`），所以系统
+ * Download 目录在手机上根本写不进去。替代方案是**系统选择器选目录 + 持久化授权**
+ * （DocumentViewPicker FOLDER + fileShare.persistPermission），手机 syscap 支持。
+ * 因此鸿蒙不再拦在「暂不支持」，而是直接拉起选择器。
+ */
+function changeDownloadDir(): void {
+  if (isHarmonyOs()) {
+    // 鸿蒙：直接拉起系统目录选择器，无需任何前置权限（持久化授权由原生侧申请）
+    pickDirectory().then((result) => {
+      if (!result.ok) {
+        if (result.message != "已取消选择") {
+          qtShowToast({ title: result.message, icon: "none" });
+        }
+        return;
+      }
+      downloads.setCustomDir(result.path);
+      qtShowToast({ title: "已保存到：" + result.name, icon: "none" });
+    });
+    return;
+  }
+  if (!hasAllFilesAccess()) {
+        qtConfirm({
+      title: "需要「所有文件访问」",
+      content: "更改保存位置要往你选的目录里直接写文件，Android 要求先开启「所有文件访问」权限。"
+        + "开启后回到本页再点一次即可。",
+      confirmText: "去开启",
+      cancelText: "取消",
+    }).then((ok: boolean) => {
+        if (ok) openPermissionSettings("android.permission.MANAGE_EXTERNAL_STORAGE");
+    });
+    return;
+  }
+  pickDirectory().then((result) => {
+    if (!result.ok) {
+      // 用户主动取消不值得弹提示
+      if (result.message != "已取消选择") {
+        qtShowToast({ title: result.message, icon: "none" });
+      }
+      return;
+    }
+    downloads.setCustomDir(result.path);
+    qtShowToast({ title: "已保存到：" + result.name, icon: "none" });
+  });
+}
+
+/**
+ * 当前是否具备写任意目录的权限。
+ *
+ * 与原生 saveAbsolute 的判定口径保持一致：Android 11+（API 30+）看「所有文件访问」，
+ * 更低版本看 WRITE_EXTERNAL_STORAGE（Android 10 仍可申请，Android 9- 一直有效）。
+ * 两个都查、任一满足即可，这样不用在页面里再判一遍系统版本。
+ * unknown（窗口未就绪等）按已授权处理：让原生侧去拦，比误拦用户更合适。
+ */
+function hasAllFilesAccess(): boolean {
+  const states = queryPermissionStates([
+    "android.permission.MANAGE_EXTERNAL_STORAGE",
+    "android.permission.WRITE_EXTERNAL_STORAGE",
+  ]);
+  for (let i = 0; i < states.length; i++) {
+    if (states[i].granted || states[i].unknown) return true;
+  }
+  return false;
+}
+
+function restoreDefaultDir(): void {
+  downloads.setCustomDir("");
+  qtShowToast({ title: "已恢复默认位置", icon: "none" });
+}
+
+onShow(() => {
+  downloads.restore();
+  sourceStore.restore();
+  registry.ensure();
+});
+</script>
+
+<style>
+.page {
+  flex: 1;
+}
+.list {
+  flex: 1;
+  padding: 16rpx 0 40rpx;
+}
+.list-wide {
+  padding: 12px 0 24px;
+}
+.group {
+  margin-top: 20rpx;
+  margin-left: 24rpx;
+  margin-right: 24rpx;
+  border-radius: 24rpx;
+  overflow: hidden;
+
+  border-width: 1px; border-style: solid;
+
+}
+.cell {
+  height: 96rpx;
+  padding: 0 32rpx;
+  flex-direction: row;
+  align-items: center;
+  border-bottom-width: 1px; border-bottom-style: solid;
+}
+/* 桌面指针反馈：只在宽屏启用（手机上 hover-class 会在点按瞬间闪一下） */
+.cell-hover {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+.cell-no-border {
+  border-bottom-width: 0;
+}
+.cell-icon {
+  margin-right: 20rpx;
+}
+.cell-title {
+  flex: 1;
+
+  font-size: 28rpx;
+  font-weight: 500;
+}
+.directory-title {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-weight: 500;
+  margin-right: 16rpx;
+}
+.directory-scroll {
+  flex: 1;
+  width: 0;
+  height: 64rpx;
+  margin-right: 12rpx;
+}
+.directory-scroll-wide { height: 44px; }
+.directory-track {
+  height: 64rpx;
+  flex-direction: row;
+  align-items: center;
+}
+.directory-track-wide { height: 44px; }
+.directory-value {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.cell-right {
+  flex-direction: row;
+  align-items: center;
+}
+.cell-value {
+
+  font-size: 24rpx;
+  margin-right: 12rpx;
+}
+.group-wide { margin-top: 14px; margin-left: 24px; margin-right: 24px; border-radius: 14px; }
+.cell-wide { height: 64px; padding-left: 24px; padding-right: 24px; }
+.cell-title-wide { font-size: 17px; }
+.cell-value-wide { font-size: 14px; }
+.cell-icon-wide { margin-right: 10px; }
+
+/* 开关：与 pages/desktop-lyric 同一套（Vapor 下圆角 + flex 对齐即可，无需伪元素） */
+.switch {
+  margin-left: 8px;
+  width: 44px;
+  height: 24px;
+  border-radius: 12px;
+  flex-direction: row;
+  align-items: center;
+}
+.switch-on {
+  justify-content: flex-end;
+}
+.switch-dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 10px;
+  background-color: #ffffff;
+}
+
+.hint {
+  margin-top: 18rpx;
+  padding: 0 40rpx;
+}
+.hint-text {
+  font-size: 22rpx;
+  line-height: 32rpx;
+}
+.hint-text-wide {
+  font-size: 12px;
+  line-height: 18px;
+}
+/* 两列：列内纵向堆叠、顶端对齐（默认 stretch 会把右列拉高露出分组底色） */
+.cols {
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: center;
+}
+.col {
+  flex-direction: column;
+}
+.col-right {
+  margin-left: 16px;
+}
+/* 两列里的分组不再带左右外边距：列宽已经把 24px 留白与 16px 间距算进去了 */
+.group-col {
+  margin-left: 0;
+  margin-right: 0;
+}
+</style>

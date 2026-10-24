@@ -1,19 +1,21 @@
 <template>
   <view v-show="visible" class="as-mask" :class="layout.isWide ? 'as-mask-wide' : ''" :style="'background-color:' + theme.skin.scrim + ';'" @click="close">
-    <view class="as-sheet" :class="layout.isWide ? 'as-sheet-wide' : ''" :style="'background-color:' + theme.skin.sheetSurface + ';'" @click.stop>
+    <view class="as-sheet" :class="layout.isWide ? 'as-sheet-wide' : ''" :style="sheetStyle" @click.stop>
       <view v-if="title.length > 0" class="as-title" :class="layout.isWide ? 'as-title-wide' : ''" :style="'border-bottom-color:' + theme.skin.divider + ';'">
-        <text class="as-title-text" :class="layout.isWide ? 'as-title-text-wide' : ''" :style="'color:' + theme.skin.textSubtle + ';'">{{ title }}</text>
+        <text class="as-title-text" :class="layout.isWide ? 'as-title-text-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(24, 13)">{{ title }}</text>
       </view>
       <scroll-view
         class="as-list"
         :class="layout.isWide ? 'as-list-wide' : ''"
         direction="vertical"
         :show-scrollbar="false"
+        :scroll-into-view="scrollAnchor"
         @click.stop
       >
         <view
           v-for="(action, index) in actions"
           :key="index"
+          :id="'as-item-' + index"
           class="as-item"
           :class="[action.disabled ? 'as-item-disabled' : '', layout.isWide ? 'as-item-wide' : '']"
           :style="'border-bottom-color:' + theme.skin.divider + ';'"
@@ -22,22 +24,24 @@
           <text
             class="as-item-text"
             :class="layout.isWide ? 'as-item-text-wide' : ''"
-            :style="'color:' + (action.color != null && action.color.length > 0 ? action.color : theme.skin.text) + ';'"
+            :style="('color:' + (action.color != null && action.color.length > 0 ? action.color : theme.skin.text) + ';') + qtFontDual(29, 15)"
             >{{ action.name }}</text
           >
         </view>
       </scroll-view>
       <view class="as-cancel" :class="layout.isWide ? 'as-cancel-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'" @click="close">
-        <text class="as-cancel-text" :class="layout.isWide ? 'as-cancel-text-wide' : ''" :style="'color:' + theme.skin.textSubtle + ';'">取消</text>
+        <text class="as-cancel-text" :class="layout.isWide ? 'as-cancel-text-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(29, 15)">取消</text>
       </view>
     </view>
   </view>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 export type SheetAction = {
   name: string;
@@ -51,6 +55,8 @@ const props = defineProps<{
   visible: boolean;
   title?: string;
   actions: SheetAction[];
+  /** 当前选中项下标（-1 = 无选中）。打开时若它在折叠区外，列表自动滚到它。 */
+  selectedIndex?: number;
 }>();
 const emit = defineEmits<{
   "update:visible": [value: boolean];
@@ -58,6 +64,43 @@ const emit = defineEmits<{
   close: [];
 }>();
 const title = computed((): string => props.title != null ? props.title! : "");
+
+/**
+ * 打开弹窗时把选中项滚进视口：列表上限停在「半行」，选中项一旦在折叠区里
+ * 用户既看不到高亮也想不到下面还能滑，所以打开瞬间用 scroll-into-view 定位。
+ * 只在选中项超出整行视口时才滚（前几项时把选中行顶到顶部反而显得跳）。
+ */
+const scrollAnchor = ref("");
+const selectedIdx = computed((): number => props.selectedIndex != null ? props.selectedIndex! : -1);
+watch(() => props.visible, (v: boolean) => {
+  if (!v) {
+    scrollAnchor.value = "";
+    return;
+  }
+  const idx = selectedIdx.value;
+  if (idx < 0) return;
+  // 整行视口数 = max-height ÷ 行高 向下取整（窄屏 572rpx/104rpx，宽屏 494px/52px）
+  const fullRows = layout.isWide ? 9 : 5;
+  if (idx <= fullRows) return;
+  const target = "as-item-" + idx;
+  nextTick(() => {
+    scrollAnchor.value = target;
+  });
+});
+
+/**
+ * 抽屉宽度走统一契约（use-qt-widths 的 QT_SHEET_WIDTH.drawer = 420），
+ * 宽屏下还要夹到窗口内（窄窗口 420 会顶到 rail 或窗口边缘）。
+ * 高度/圆角仍由 .as-sheet-wide 管，这里只补宽度与底色。
+ */
+const sheetStyle = computed((): string => {
+  let style = "background-color:" + theme.skin.sheetSurface + ";";
+  if (layout.isWide) {
+    const w = qtSheetWidth("drawer");
+    style += "width:" + w + "px;";
+  }
+  return style;
+});
 
 function close(): void {
   emit("update:visible", false);
@@ -91,18 +134,18 @@ function pick(index: number): void {
   padding-bottom: env(safe-area-inset-bottom);
 }
 .as-sheet-wide {
-  width: 420px;
+  /* 宽度改由 sheetStyle 内联给出（走 qtSheetWidth 契约，窄窗口自动夹紧） */
   height: 100%;
   border-radius: 0;
   padding-bottom: 0;
 }
 .as-title {
   padding: 30rpx 32rpx 18rpx;
-  border-bottom-width: 1rpx;
+  border-bottom-width: 1rpx; border-bottom-style: solid;
 }
 .as-title-wide {
   padding: 16px 20px 10px;
-  border-bottom-width: 1px;
+  border-bottom-width: 1px; border-bottom-style: solid;
 }
 .as-title-text {
   font-size: 24rpx;
@@ -113,20 +156,23 @@ function pick(index: number): void {
   font-size: 13px;
 }
 .as-list {
-  max-height: 540rpx;
+  /* 上限故意停在「5 行半」：下半截露出的下一行就是「底下还能滑」的暗示，
+     整行对齐时用户看不出列表被截断（572 = 104 × 5.5）。 */
+  max-height: 572rpx;
 }
 .as-list-wide {
-  max-height: 480px;
+  /* 同 .as-list：9 行半，半行做可滚动暗示（494 = 52 × 9.5） */
+  max-height: 494px;
 }
 .as-item {
   height: 104rpx;
   justify-content: center;
   align-items: center;
-  border-bottom-width: 1rpx;
+  border-bottom-width: 1rpx; border-bottom-style: solid;
 }
 .as-item-wide {
   height: 52px;
-  border-bottom-width: 1px;
+  border-bottom-width: 1px; border-bottom-style: solid;
 }
 .as-item-disabled {
   opacity: 0.45;

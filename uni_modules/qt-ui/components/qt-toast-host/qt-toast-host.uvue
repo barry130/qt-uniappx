@@ -1,0 +1,186 @@
+<!--
+  底部居中轻提示宿主（toast）。
+
+  对应 PC `qt-pc/src/components/common/ToastHost.tsx`，差别只有落点：PC 浮在右上角，
+  手机端贴在**屏幕底部的水平中央**（用户口径），这样大拇指附近就能看到回执，
+  视线也不用从内容区跳到屏幕顶上。
+
+  为什么必须浮起来、不能写在操作条里（用户 m09470 的结论）：回执文案一进操作条就把
+  页头那一行顶宽，右边的按钮跟着左右挪；文案长短不同还会让按钮位置每次都不一样。
+
+  每条的结构同 PC：kind 图标（成功绿勾 / 出错红感叹 / 普通蓝信息）+ 一行正文，
+  深色卡片配细边框。没做 PC 那条底部进度条 —— 手机上 3 秒就消失，进度条更多是噪音，
+  用户对「亮」也敏感（见 USER 偏好），这里保持克制。
+
+  职责划分：**生命周期全在 `stores/toast.ts`**（push 即排定时器，到点置 leaving 再移除），
+  本组件只渲染，避免每个宿主各维护一份定时器表。
+
+  挂载点：`qt-page-frame` 内（一处改动覆盖全站 36 个页面），与 `qt-mini-player` 同样
+  在 page-frame 内用 `position: fixed` —— 该写法已有真机先例，不会被外壳的
+  `overflow: hidden` 裁掉（浮层本来就落在外壳边界内部）。
+-->
+<template>
+  <view v-if="items.length > 0" class="qt-toast-host" :style="hostStyle">
+    <view
+      v-for="item in items"
+      :key="item.id"
+      class="qt-toast"
+      :class="[
+        layout.isWide ? 'qt-toast-wide' : '',
+        item.kind == 'error' ? 'qt-toast-error' : '',
+        item.kind == 'success' ? 'qt-toast-success' : '',
+        item.leaving ? 'qt-toast-leaving' : '',
+      ]"
+      :style="toastStyle(item)"
+    >
+      <QtIcon
+        :name="iconName(item)"
+        :size="iconSize"
+        :color="iconColor(item)"
+        :stroke-width="2.4"
+      />
+      <text
+        class="qt-toast-text"
+        :class="layout.isWide ? 'qt-toast-text-wide' : ''"
+        :style="textStyle(item)"
+        >{{ item.text }}</text
+      >
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed } from "vue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout, qtRpx, qtTabBarHeightPx, QT_PLAYER_BAR_HEIGHT_PX } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtToastItems } from "@/uni_modules/qt-ui/stores/toast";
+import type { QtToastItem } from "@/uni_modules/qt-ui/stores/toast";
+import { usePlayerStore } from "@/stores/player";
+
+const theme = useThemeStore();
+const layout = useQtLayout();
+const player = usePlayerStore();
+
+/**
+ * 直接拿 store 里的 reactive 数组：模板遍历时按索引/length 追踪，push 与 splice
+ * 都能触发重渲染，不需要再包一层 computed（包了反而多一层缓存，且返回的仍是同一引用）。
+ */
+const items = qtToastItems();
+
+/**
+ * 底部居中定位。
+ *
+ * 四条边都是 0 才真居中：uni-app x 的 absolute/fixed 里 `left:0;right:0` 铺满父容器
+ * 再配合 `align-items: center`，是唯一在 Android / 鸿蒙都验过的居中写法；只写
+ * `left:50%` 之类的百分比偏移在 Vapor 下不可靠（AGENTS.md：未验证 CSS 不进仓库）。
+ *
+ * `bottom` 要自己让开底部占位：
+ * - 竖屏：TabBar 是 fixed 的悬浮胶囊（总占位 144rpx，375dp 基准下 = 72px，见
+ *   use-qt-layout.ts 的 qtTabBarHeightPx()），宿主挂在外壳内部、层级却压过
+ *   TabBar（z-index 970 > TabBar），不让开就会盖在几个 Tab 图标上。
+ * - 宽屏：期 5 之后底部多了一条常驻播放栏（64px），有歌时 toast 必须落在它上方，
+ *   否则提示正好压在进度条上。没有当前歌曲时不挂底栏，也就不需要让位。
+ */
+const hostStyle = computed((): string => {
+  let lift = 0;
+  if (layout.isWide) {
+    lift = player.current != null ? QT_PLAYER_BAR_HEIGHT_PX + 24 : 24;
+  } else {
+    lift = qtTabBarHeightPx() + qtRpx(24);
+  }
+  return "left:0;right:0;bottom:" + lift + "px;";
+});
+
+/**
+ * 三种 kind 的图标：成功 = 勾、出错 = 感叹号、普通 = 信息。
+ * 图标名用 if 分支返回字面量（不拼字符串）：`tools/check-uvue.mjs` 的图标自检按
+ * `return "xxx"` 收集间接引用，拼出来的名字会被误报成 UNUSED。
+ */
+function iconName(item: QtToastItem): string {
+  if (item.kind == "error") return "alert";
+  if (item.kind == "success") return "check";
+  return "info";
+}
+
+function iconColor(item: QtToastItem): string {
+  if (item.kind == "error") return theme.skin.danger;
+  if (item.kind == "success") return theme.skin.success;
+  return theme.skin.accent;
+}
+
+/**
+ * 底色/边框走内联（内联压过 class），三种变体才不需要复合选择器覆盖。
+ * 出错档沿用原来的浅红底 + 红边，成功档用极淡的成功色底，普通档走常规面板色。
+ */
+function toastStyle(item: QtToastItem): string {
+  if (item.kind == "error") {
+    return "background-color:" + theme.skin.dangerSoft + ";border-color:" + theme.skin.danger + ";";
+  }
+  if (item.kind == "success") {
+    return "background-color:" + theme.skin.successSoft + ";border-color:" + theme.skin.success + ";";
+  }
+  return "background-color:" + theme.skin.surfaceStrong + ";border-color:" + theme.skin.border + ";";
+}
+
+/** 正文一律前景色：整段红/绿太吵（同 PC），颜色只交给图标 */
+function textStyle(item: QtToastItem): string {
+  return ("color:" + theme.skin.text + ";") + qtFontDual(24, 13);
+}
+
+/**
+ * 图标也跟着字号缩放：正文用 qtFontDual 已经自适应，图标如果固定 28/14
+ * 在大字号下会显得明显偏小（用户 m05974 反馈「toast 没随字体自适应」）。
+ * QtIcon 的 size 单位是 px，窄屏基准 28rpx 换算成 px 再乘缩放系数。
+ */
+const iconSize = computed((): number => {
+  const base = layout.isWide ? 14 : qtRpx(28);
+  return Math.round(base * fontScale.scale);
+});
+</script>
+
+<style>
+.qt-toast-host {
+  position: fixed;
+  /* 951–997 之间：压过页面页头，但不遮挡 998 的迷你播放球与 999 的各弹层 */
+  z-index: 970;
+  flex-direction: column;
+  /* 横向居中的实际落点：容器铺满整宽，每条自己居中 */
+  align-items: center;
+  /* 纯展示浮层：不参与命中测试，否则会吃掉底部控件的点击 */
+  pointer-events: none;
+}
+.qt-toast {
+  flex-direction: row;
+  align-items: center;
+  /* Vapor 禁百分比 max-width，px/rpx 上限可以（同 qt-action-sheet 的 max-height） */
+  max-width: 560rpx;
+  margin-bottom: 12rpx;
+  padding: 12rpx 24rpx;
+  border-radius: 16rpx;
+  /* border-style 必须显式写，否则 Vapor 下边框不绘制 */
+  border-width: 1px;
+  border-style: solid;
+  opacity: 1;
+  /* 淡出用 transition（qt-loading / qt-skeleton-shine 已有真机先例）；秒制字面量同先例 */
+  transition: opacity 0.18s ease-out;
+}
+.qt-toast-wide {
+  max-width: 352px;
+  margin-bottom: 8px;
+  padding: 6px 12px;
+  border-radius: 8px;
+}
+.qt-toast-leaving {
+  opacity: 0;
+}
+.qt-toast-text {
+  margin-left: 12rpx;
+  font-size: 24rpx;
+}
+.qt-toast-text-wide {
+  margin-left: 6px;
+  font-size: 13px;
+}
+</style>

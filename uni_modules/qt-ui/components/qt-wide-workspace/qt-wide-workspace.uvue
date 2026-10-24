@@ -1,0 +1,127 @@
+<template>
+  <!-- 宽屏工具页覆盖层：同窗口、同 Activity 地把 rail 工具入口的整页内容换进当前 tab 页。
+       核心是「保活」：每个工具页只在第一次打开时创建（v-if 只增不减），之后切换/关闭
+       只改 visibility —— 官方多子页保活的建议写法（docs/collocation/pagesjson.md：
+       『不要再 v-if 设为 false 去掉，也不通过 v-show 控制，而是通过 css 的
+       visibility 来控制显示和隐藏』；v-show 在 Android(Vapor) 本身就不支持）。
+       已创建的工具页不销毁、不重建：
+         - 切换工具 = 改一个 CSS 属性，同帧完成，没有「旧页拆掉、露出空白、新页建好」
+           的频闪（v-if 分支互换版每次点击都要整页销毁重建，用户实测每点必闪）；
+         - 滚动位置、输入内容、已加载的数据全部保留，第二次进入是瞬时恢复。 -->
+  <view v-if="paneCount > 0" class="qt-wide-workspace" :style="rootStyle">
+    <view v-if="paneOn('/pages/search/index')" class="qtww-pane" :style="paneStyle('/pages/search/index')"><SearchPage /></view>
+    <view v-if="paneOn('/pages/daily/index')" class="qtww-pane" :style="paneStyle('/pages/daily/index')"><DailyPage /></view>
+    <view v-if="paneOn('/pages/playlists/index')" class="qtww-pane" :style="paneStyle('/pages/playlists/index')"><PlaylistsPage /></view>
+    <view v-if="paneOn('/pages/chart/index')" class="qtww-pane" :style="paneStyle('/pages/chart/index')"><ChartPage /></view>
+    <view v-if="paneOn('/pages/settings/index')" class="qtww-pane" :style="paneStyle('/pages/settings/index')"><SettingsPage /></view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed, ref, watch } from "vue";
+import { qtWideWorkspace, qtCloseWideTool } from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
+import { qtTopRoute } from "@/uni_modules/qt-ui/composables/qt-page-chrome";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import SearchPage from "@/pages/search/index.uvue";
+import DailyPage from "@/pages/daily/index.uvue";
+import PlaylistsPage from "@/pages/playlists/index.uvue";
+import ChartPage from "@/pages/chart/index.uvue";
+import SettingsPage from "@/pages/settings/index.uvue";
+
+/**
+ * 宽屏工具页「就地托管」的渲染层。由两个 tab 根页（发现 / 我的）各挂一份。
+ *
+ * 全局托管状态（route）是共享的，但「哪些工具页已经创建」是每个宿主自己的事：
+ * 同一个工具页在两个宿主上各有一份实例（各自的 qt-page-frame、各自的 rail），
+ * 只会在「这个宿主上被打开过」时才创建，不会因为另一个 tab 顶上来就凭空多一份。
+ *
+ * 它必须**不透明**：宿主 tab 页自己的 rail 与底部播放栏就在下面，覆盖层负责把它们
+ * 盖住，否则会看到两份 rail 叠在一起。工具页自带的那份 rail 才是可见的那一份。
+ */
+const props = defineProps<{
+  /** 本覆盖层所在的宿主页路由（两个 tab 根页各传各的） */
+  hostRoute: string;
+}>();
+
+const ws = qtWideWorkspace();
+const theme = useThemeStore();
+const layout = useQtLayout();
+
+/** 在本宿主上创建过（保活中）的工具页清单；只增不减 */
+const alive = ref<string[]>([]);
+const paneCount = computed((): number => alive.value.length);
+
+/**
+ * 每次「打开工具」序号都会 +1（即使路由值没变），这里跟着把当前工具页收进保活清单。
+ * 盯序号而不是路由值：换过 tab 后同一个工具在新宿主上点开时路由值不变，但这个宿主
+ * 的覆盖层还从没创建过那份工具页 —— 只有序号才能保证每次点击都有机会补建。
+ * 栈顶不是本宿主就不收录：被压在下面的 tab 不该跟着创建一份看不见的实例。
+ */
+watch((): number => ws.openSeq, (): void => {
+  const route = ws.route;
+  if (route.length == 0) return;
+  if (qtTopRoute() != props.hostRoute) return;
+  if (alive.value.indexOf(route) < 0) alive.value.push(route);
+}, { immediate: true });
+
+/**
+ * 宽屏失效（窗口收窄 / 转竖屏）时清掉托管状态。
+ * 覆盖层本体随 rootStyle 隐藏，但 route 若不清，宿主页的返回键会被
+ * qtCloseWideTool 白吞一次（「关掉」一个看不见的覆盖层）。
+ */
+watch((): boolean => layout.isWide, (wide: boolean): void => {
+  if (!wide && ws.route.length > 0) qtCloseWideTool();
+});
+
+/** 该工具页是否已在本宿主上创建过（创建后保活，切换只动 visibility） */
+function paneOn(route: string): boolean {
+  return alive.value.indexOf(route) >= 0;
+}
+
+/** 只有当前托管的就是自己才显示；其余保活页隐藏（不销毁，保留布局与全部状态） */
+function paneStyle(route: string): string {
+  return ws.route == route ? "" : "visibility:hidden;";
+}
+
+/**
+ * 覆盖层整体可见性：
+ *   - 没有正在托管的工具（点了 tab / 按返回键，qtCloseWideTool 只清路由）就隐藏，
+ *     已创建的工具页全部保留，下次打开瞬时恢复；
+ *   - 栈顶不是本宿主（另一个 tab 顶上来了）就隐藏本宿主这份，另一份接手；
+ *   - 宽屏失效就隐藏（窄屏回到整页导航语义，rail 本来也不渲染）。
+ * 关闭一律是「藏」而不是「拆」—— 拆掉重建正是每次点击频闪的来源。
+ */
+const rootStyle = computed((): string => {
+  const base = "background-color:" + theme.skin.background + ";";
+  if (ws.route.length == 0 || !layout.isWide || qtTopRoute() != props.hostRoute) {
+    return base + "visibility:hidden;";
+  }
+  return base;
+});
+</script>
+
+<style>
+/* 固定铺满窗口（含状态栏区域，与 rail 同坐标系）。
+   覆盖层是保活子页的「画框」：每个 pane 都四边钉死在覆盖层上（绝对定位），
+   而不是挤在 flex 流里平分高度 —— 工具页是整页组件（自带 flex:1 的
+   .qt-page-frame），多页常驻必须各自独立铺满，谁可见由 visibility 决定。
+   （不能用 v-show 切换：Android(Vapor) 不支持，见组件头部注释。） */
+.qt-wide-workspace {
+  position: fixed;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  flex-direction: column;
+  /* 高于 rail(900)、底部播放栏与页内浮层，确保完整遮住宿主页 */
+  z-index: 1000;
+}
+.qtww-pane {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+}
+</style>

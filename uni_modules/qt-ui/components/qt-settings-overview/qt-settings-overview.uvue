@@ -1,0 +1,680 @@
+<template>
+  <view class="page">
+    <!-- 设置项较多，宽屏/横屏内容超出可视高度时必须能下滑 -->
+    <scroll-view class="list" :class="layout.isWide ? 'list-wide' : ''" direction="vertical" :show-scrollbar="false">
+    <!-- 宽屏两列（≥1280）：8 个分组 / 11 个入口挤在单列里时，1280 宽下每行右侧空出
+         600px 以上，而纵向要滚两屏。这里按「列切分」把分组劈成左右两栏 ——
+         不是 flex-wrap —— 各组高度不等（1~3 行），wrap 会走成锯齿。
+         竖屏与 900~1279 保持单列：那一档两列会把「标题 + 行尾值 + 箭头」挤到换行。
+         三栏模式下本组件在中间栏（约 420 宽），qtContentWidth 被压到右栏宽，
+         twoColumn 的宽度复核自动让它退回单列（见 use-qt-columns.ts）。 -->
+    <view v-if="twoColumn" class="cols">
+      <view class="col" :style="colStyle">
+        <view v-for="g in columns[0]" :key="g.id" class="group group-wide group-col" :style="groupStyle">
+          <view v-for="(c, ci) in g.cells" :key="c.key" class="cell cell-wide" :class="ci == g.cells.length - 1 ? 'cell-no-border' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="c.go">
+            <QtIcon class="cell-icon cell-icon-wide" :name="c.icon" :size="36" :color="c.color" />
+            <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ c.title }}</text>
+            <view v-if="c.dot" class="cell-dot" />
+            <view class="cell-right">
+              <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ c.value }}</text>
+              <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+            </view>
+          </view>
+        </view>
+      </view>
+      <view class="col col-right" :style="colStyle">
+        <view v-for="g in columns[1]" :key="g.id" class="group group-wide group-col" :style="groupStyle">
+          <view v-for="(c, ci) in g.cells" :key="c.key" class="cell cell-wide" :class="ci == g.cells.length - 1 ? 'cell-no-border' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="c.go">
+            <QtIcon class="cell-icon cell-icon-wide" :name="c.icon" :size="36" :color="c.color" />
+            <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ c.title }}</text>
+            <view v-if="c.dot" class="cell-dot" />
+            <view class="cell-right">
+              <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ c.value }}</text>
+              <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+            </view>
+          </view>
+        </view>
+      </view>
+    </view>
+
+    <!-- 竖屏 / 中等宽度 / 三栏中间栏：单列 -->
+    <view v-else>
+      <view v-for="g in visibleGroups" :key="g.id" class="group" :class="[layout.isWide ? 'group-wide' : '', inPane ? 'group-pane' : '']" :style="groupStyle">
+        <view v-for="(c, ci) in g.cells" :key="c.key" class="cell" :class="[layout.isWide ? 'cell-wide' : '', inPane ? 'cell-pane' : '', ci == g.cells.length - 1 ? 'cell-no-border' : '']" :style="cellStyleFor(c.key)" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="c.go">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '', inPane ? 'cell-icon-pane' : '']" :name="c.icon" :size="inPane ? 22 : 36" :color="c.color" />
+          <text class="cell-title" :class="[layout.isWide ? 'cell-title-wide' : '', inPane ? 'cell-title-pane' : '']" :style="('color:' + (cellActive(c.key) ? theme.skin.accent : theme.skin.text) + ';') + qtFontDual(28, 17)">{{ c.title }}</text>
+          <view v-if="c.dot" class="cell-dot" />
+          <!-- 中间栏不显示行尾摘要：400px 宽下「倍速 1x · 音质 高品 320k」必然折行挤掉标题 -->
+          <view v-if="!inPane" class="cell-right">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ c.value }}</text>
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </view>
+      </view>
+    </view>
+
+    <qt-action-sheet
+      v-model:visible="sheetVisible"
+      :title="sheetTitle"
+      :actions="sheetActions"
+      @select="onSheetSelect"
+    />
+    </scroll-view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtContentWidth, qtSplitByHeight, QT_GUTTER_PX } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { computed, onMounted, ref, watch } from "vue";
+import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { audioPlayer } from "@/services/audio-player";
+import { desktopLyric } from "@/services/desktop-lyric";
+import { usePlayerStore } from "@/stores/player";
+import { useDownloadsStore } from "@/stores/downloads";
+import { useDislikesStore } from "@/stores/dislikes";
+import { useSourceStore } from "@/stores/source";
+import { useSourceRegistryStore } from "@/stores/source-registry";
+import {
+  PLAYER_BAR_MAX_VISIBLE,
+  playerBarCounted,
+  usePlayerBarStore,
+} from "@/stores/player-bar";
+import { isQtAdmin } from "@/services/music-api";
+import { platformLabel } from "@/services/platform";
+import {
+  readAiMode,
+  saveAiMode,
+  AI_MODE_LABEL_RULE,
+  AI_MODE_LABEL_LOCAL,
+  AI_MODE_LABEL_SERVER,
+  AI_MODE_HINT_RULE,
+  AI_MODE_HINT_LOCAL,
+  AI_MODE_HINT_SERVER,
+} from "@/services/ai-mode";
+import type { AiEngineMode } from "@/services/ai-mode";
+import { readProviders, activeProfile, activeModelOf } from "@/services/ai-providers";
+import { useSourceUpdateStore } from "@/stores/source-update";
+import { formatFileSize } from "@/services/upgrade";
+import { logBytes, logSupported } from "@/services/logger";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
+import { qtTopRoute, qtIsSettingsRoute } from "@/uni_modules/qt-ui/composables/qt-page-chrome";
+
+/**
+ * 设置总览（8 组 / 11 个入口）。
+ *
+ * 为什么单独抽成组件：宽屏三栏模式下它要同时出现在两个地方 ——
+ *   1. `/pages/settings/index` 自己（整页即总览）
+ *   2. 任何设置子页（如外观与皮肤）的**中间栏**，满足用户「中间整体的设置页，
+ *      右边显示设置页下打开的页面」的要求
+ * 两处必须是同一份 UI 与同一份实时数据（音源、倍速、并发、日志大小…），
+ * 抄两份必然漂移，所以抽成一个组件、两处引用。
+ *
+ * 刷新口径：本组件在**两种宿主里都可能被复用于同一个页面实例**（返回时页面不销毁），
+ * 因此不能只靠页面 onShow —— 组件用 refreshKey 属性把「页面显示过」这个事件传进来，
+ * 变更时重跑一次对账；首次挂载也跑一次（三栏模式下中间栏是框架渲染的，没有页面事件）。
+ */
+const props = defineProps<{
+  /** 宿主页面每次 onShow 递增；变更即重新对账 */
+  refreshKey?: number;
+  /**
+   * 渲染在**框架三栏的中间栏**里（宽约 400px）。
+   *
+   * 两个必须的分支差异：
+   * 1. 强制单列 —— 中间栏里 `qtContentWidth` 已被压到右栏宽（约 600），
+   *    按 sizeClass 判出来的 twoColumn 仍为 true，会算成两列各 320 直接溢出。
+   * 2. 不渲染行尾摘要 —— 「倍速 1x · 音质 高品 320k」这类串在 400px 里必然折行，
+   *    挤掉标题。摘要在右栏（子页）和总览页里都能看到，中间栏只做导航。
+   */
+  inPane?: boolean;
+  /**
+   * 当前所在的设置子页路由（如 `/pages/theme/index`）。
+   *
+   * 三栏模式下中栏一直显示、右栏换页，用户需要一眼看出「现在停在哪一项」。
+   * 不传则退化为读页面栈栈顶（本组件在设置总览页里渲染时栈顶就是总览自己，
+   * 此时没有任何 cell 命中，不会误亮）。
+   */
+  activeRoute?: string;
+}>();
+
+const player = usePlayerStore();
+const downloads = useDownloadsStore();
+const dislikes = useDislikesStore();
+const sourceStore = useSourceStore();
+const registry = useSourceRegistryStore();
+const playerBar = usePlayerBarStore();
+/** playUrl 开关 / 运行日志入口只对 qt_admin 展示（与播放页的入口可见性同一权限来源） */
+const qtAdmin = ref(isQtAdmin());
+/** 全局 AI 模式（音乐助手与每日推荐共用，见 ai-mode.ts 与 daily-recommend.ts） */
+const aiMode = ref<AiEngineMode>(readAiMode());
+const layout = useQtLayout();
+const theme = useThemeStore();
+const groupStyle = computed<string>(() => "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";");
+const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
+
+/**
+ * 三栏中栏的「当前项」高亮。
+ *
+ * 中栏在任何设置子页上都原样显示（这是用户要的三栏形态），但如果不标出当前项，
+ * 从「播放设置」切到「权限管理」时中栏毫无变化，用户会以为点击没生效。
+ *
+ * 路由由 cell 的 key 映射而来（key 是稳定标识，不是展示文案）；`source` 这一项
+ * 是弹音源选择面板、不跳页，因此永远不会高亮。
+ */
+const CURRENT_CELL_ROUTES: string[] = [
+  "source", "pack", "play-settings", "player-bar", "download-settings",
+  "theme", "dislikes", "desktop-lyric", "permissions", "logs", "cache",
+];
+const CURRENT_CELL_PAGES: string[] = [
+  "", "/pages/source-pack/index", "/pages/play-settings/index", "/pages/player-bar/index",
+  "/pages/download-settings/index", "/pages/theme/index", "/pages/dislikes/index",
+  "/pages/desktop-lyric/index", "/pages/permissions/index", "/pages/logs/index",
+  "/pages/cache/index",
+];
+
+const routeNow = computed<string>((): string => {
+  const given = props.activeRoute;
+  if (given != null && given.length > 0) return given;
+  return qtTopRoute();
+});
+
+/** 某个 cell 是否就是当前所在页 */
+function cellActive(key: string): boolean {
+  const i = CURRENT_CELL_ROUTES.indexOf(key);
+  if (i < 0 || i >= CURRENT_CELL_PAGES.length) return false;
+  const page = CURRENT_CELL_PAGES[i];
+  return page.length > 0 && page == routeNow.value;
+}
+
+/** 当前项除了把标题染成强调色，还给一行淡淡的强调底色 —— 深色皮肤下只有文字变色不够醒目 */
+function cellStyleFor(key: string): string {
+  if (!cellActive(key)) return cellStyle.value;
+  return cellStyle.value + "background-color:" + theme.skin.accentSoft + ";";
+}
+
+const sources = computed<string[]>(() => registry.sourceIds());
+// 「有新音源包」红点：检查下载后亮，立即应用 / 下次启动自动装载后灭
+const sourceUpdateStore = useSourceUpdateStore();
+// 桌面歌词（响应式镜像：服务是非响应式单例，模板要靠 ref 刷新）
+const lyricOn = ref(desktopLyric.isEnabled());
+/**
+ * 「运行日志」行尾占用。日志大小是异步读出来的，不能写进 computed（会变成 Promise），
+ * 只能进页面时读一次存 ref。formatFileSize 对 0 返回空串，所以这里自己兜底。
+ */
+const logSizeText = ref<string>("");
+
+const sheetVisible = ref(false);
+const sheetTitle = ref("");
+const sheetActions = ref<SheetAction[]>([]);
+let sheetSelect: ((index: number) => void) | null = null;
+
+/**
+ * 设置页的 8 个分组 / 11 个入口描述（原本是 124 行手写模板，每组结构完全相同：
+ * 图标 + 标题 + 可选红点 + 行尾值 + 箭头）。
+ *
+ * 改成数据驱动是为了**两列**：分组高度从 1 行到 3 行不等，两列必须在数据层切分
+ * （`qtSplitByHeight`），模板层写死会退化成 flex-wrap 的锯齿。
+ *
+ * `value` 直接存**已求值的字符串**而不是函数：它必须作为 computed 的响应式依赖被
+ * 追踪（logSizeText / barToolCounted / downloads.concurrency 都要实时反映），
+ * 存闭包会让依赖追踪落在模板渲染期，行为更难预测。
+ */
+type SettingsCell = { key: string; icon: string; color: string; title: string; value: string; dot: boolean; go: () => void };
+type SettingsGroup = { id: string; cells: SettingsCell[] };
+
+/**
+ * 组的顺序不是随手排的：两列切分只能落在组边界上，所以要让「高度相近的两半」
+ * 恰好能被某个组边界切开。playback 是最高的一组（3 个 cell），把它放在第 3 位
+ * 之后，切分点正好落在它后面 —— 左边 4 个组约 494dp、右边 3 个组约 552dp。
+ * 若按旧顺序（appearance 在 playback 前）最优切分是 430 / 616，左列会空一大块。
+ */
+const groups = computed((): SettingsGroup[] => [
+  {
+    id: "source",
+    cells: [
+      { key: "source", icon: "disc", color: "#6d8fd6", title: "默认音源", value: sourceText(), dot: false, go: showSource },
+    ],
+  },
+  {
+    id: "pack",
+    cells: [
+      { key: "pack", icon: "music", color: "#5f9ea0", title: "音源包管理", value: "安装 / 更新 / 启停", dot: sourceUpdateStore.updatePending, go: showSourcePackage },
+    ],
+  },
+  {
+    id: "playback",
+    cells: [
+      { key: "play-settings", icon: "play", color: "#4fb186", title: "播放设置", value: playSummaryText(), dot: false, go: goPlaySettings },
+      { key: "player-bar", icon: "sliders", color: "#5f9ea0", title: "播放页展示", value: "已展示 " + barToolCounted.value + "/" + maxVisible, dot: false, go: goPlayerBar },
+      { key: "download-settings", icon: "download", color: "#6d8fd6", title: "下载设置", value: downloadSummaryText(), dot: false, go: goDownloadSettings },
+    ],
+  },
+  {
+    id: "appearance",
+    cells: [
+      { key: "theme", icon: "edit", color: "#7c6cf2", title: "外观与皮肤", value: "宽屏 / 壁纸 / 主题", dot: false, go: goTheme },
+      { key: "dislikes", icon: "ban", color: "#d97b66", title: "不喜欢列表", value: dislikesCountText(), dot: false, go: goDislikes },
+    ],
+  },
+  {
+    id: "lyric",
+    cells: [
+      { key: "desktop-lyric", icon: "music", color: "#4fb186", title: "桌面歌词", value: lyricOn.value ? "已开启" : "已关闭", dot: false, go: goDesktopLyric },
+    ],
+  },
+  {
+    id: "ai",
+    cells: [
+      { key: "ai-mode", icon: "sparkles", color: "#7c6cf2", title: "AI 模式", value: aiModeLabelOf(aiMode.value), dot: false, go: showAiMode },
+      { key: "ai-providers", icon: "settings", color: "#5f9e6e", title: "接口配置", value: aiProvidersSummary(), dot: false, go: goAiProviders },
+    ],
+  },
+  {
+    id: "permissions",
+    cells: [
+      { key: "permissions", icon: "lock", color: "#6d8fd6", title: "权限管理", value: "查看授权状态", dot: false, go: goPermissions },
+    ],
+  },
+  {
+    id: "logs",
+    cells: [
+      { key: "logs", icon: "list", color: "#6d8fd6", title: "运行日志", value: logSizeText.value, dot: false, go: goLogs },
+    ],
+  },
+  {
+    id: "cache",
+    cells: [
+      { key: "cache", icon: "trash", color: "#6d8fd6", title: "清除缓存与数据", value: "按需清理", dot: false, go: goCache },
+    ],
+  },
+]);
+
+/** 运行日志只对有权限的账号开放（与播放页「播放地址」同一权限判定），无权限不显示入口 */
+const visibleGroups = computed((): SettingsGroup[] => groups.value.filter((g: SettingsGroup): boolean => g.id != "logs" || qtAdmin.value));
+
+/**
+ * 两列门限：按**可用宽度**判，不按窗口宽度判。
+ *
+ * 三栏模式（inPane）恒为单列 —— 这一栏只有约 400px，若按宽度判它自己就会
+ * 算成两列各 320px 直接横向溢出。
+ *
+ * 非 inPane 时用同一套宽度口径：内容列宽减两侧留白与中间间距后，两列各需
+ * ≥ 420（最小分组列宽）。1280 窗口下 inner = 1024−48−16 = 960，两列各 480，
+ * 通过；900~1279 那一档对半切开每列只有 420 上下，「标题 + 行尾值 + 箭头」
+ * 开始换行，宽度判据自然排除。三栏收窄右栏后同样自动退回单列。
+ */
+const twoColumn = computed((): boolean => {
+  if (props.inPane == true) return false;
+  const inner = qtContentWidth("flow") - QT_GUTTER_PX * 2 - 16;
+  return inner >= 420 * 2;
+});
+
+/**
+   * 按「累计高度」切分。宽屏每个 cell 行高固定 64px、组间 14px，
+   * 另外每组还有约 48px 的组头（标题 + 上下内边距）—— 这一项漏掉的话，
+   * cell 少的组会被严重低估，切分点被推到偏左（真机症状：左列下方空一大块）。
+   */
+const columns = computed((): [SettingsGroup[], SettingsGroup[]] => {
+  const list = visibleGroups.value;
+  const heights = list.map((g: SettingsGroup): number => 48 + g.cells.length * 64 + 14);
+  return qtSplitByHeight<SettingsGroup>(list, heights);
+});
+
+/** 两列时每列宽：内容列宽减两侧 24px 留白再减中间 16px 间距，对半分。
+ *  `flex-shrink:0` 必须写：两列宽度是确定值且合计等于内容列宽，但 flex 默认
+ *  `flex-shrink:1`，内容窄的那列会被压扁、宽的那列反而更宽（实测不等宽）。 */
+const colStyle = computed<string>(() => {
+  const inner = qtContentWidth("flow") - QT_GUTTER_PX * 2 - 16;
+  const w = Math.floor(inner / 2);
+  return "width:" + (w > 320 ? w : 320) + "px;flex-shrink:0;";
+});
+
+function openSheet(title: string, actions: SheetAction[], select: (index: number) => void): void {
+  sheetTitle.value = title;
+  sheetActions.value = actions;
+  sheetSelect = select;
+  sheetVisible.value = true;
+}
+function onSheetSelect(_action: SheetAction, index: number): void {
+  const cb = sheetSelect;
+  sheetSelect = null;
+  if (cb) cb(index);
+}
+
+function aiModeLabelOf(mode: AiEngineMode): string {
+  if (mode == "local") return AI_MODE_LABEL_LOCAL;
+  if (mode == "server") return AI_MODE_LABEL_SERVER;
+  return AI_MODE_LABEL_RULE;
+}
+
+function aiModeHintOf(mode: AiEngineMode): string {
+  if (mode == "local") return AI_MODE_HINT_LOCAL;
+  if (mode == "server") return AI_MODE_HINT_SERVER;
+  return AI_MODE_HINT_RULE;
+}
+
+/**
+ * 全局 AI 模式（qt-pc 设置页 AiSection 的移动端形态）。
+ * 音乐助手与每日推荐共用；「服务端 AI」仅管理员可见（非管理员任何路径都存不进 server），
+ * 选中后用 toast 弹一次该模式的说明 —— 设置页不落内联提示文字，避免行高跳动。
+ */
+function showAiMode(): void {
+  const modes: AiEngineMode[] = ["rule", "local"];
+  if (qtAdmin.value) modes.push("server");
+  const acts: SheetAction[] = [];
+  for (let i = 0; i < modes.length; i++) {
+    acts.push({ name: aiModeLabelOf(modes[i]), color: modes[i] == aiMode.value ? theme.skin.accent : "" });
+  }
+  openSheet("AI 模式", acts, (index: number): void => {
+    const next = modes[index];
+    aiMode.value = next;
+    saveAiMode(next);
+    qtShowToast({ title: aiModeHintOf(next), icon: "none" });
+  });
+}
+
+/** 接口配置入口：本地模型供应商管理页（pages/ai-providers）。 */
+function aiProvidersSummary(): string {
+  const cfg = readProviders();
+  const p = activeProfile();
+  if (p == null) return cfg.profiles.length > 0 ? "未选生效档" : "未配置";
+  return (p.name.length > 0 ? p.name : "已配置") + " · " + activeModelOf(p);
+}
+
+function goAiProviders(): void {
+  uni.navigateTo({ url: "/pages/ai-providers/index", animationType: qtNavAnimation() });
+}
+
+/**
+ * 播放页展示设置已拆成独立页面（pages/player-bar/index）。
+ * 设置页只留一行入口，右侧显示「已展示 N/5」，所以这里仍需保留计数口径。
+ */
+const maxVisible = PLAYER_BAR_MAX_VISIBLE;
+/** 计数口径：把当前不可能出现的项（非管理员的播放链接）排除 */
+const countedTool = (id: string): boolean => playerBarCounted(id, qtAdmin.value);
+const barToolCounted = computed<number>(() => playerBar.countVisible(countedTool));
+
+/** 重新对账：权限 / 工具开关 / 音源注册表 / 音源包状态 / 桌面歌词 / 日志占用 */
+function refreshAll(): void {
+  downloads.restore();
+  sourceStore.restore();
+  // 权限缓存可能在「我的」页刷新过；工具按钮开关也可能被两端共用存储改过。
+  // restore 必须带名额口径，否则非管理员恢复时会把不渲染的「播放链接」当占位截断。
+  qtAdmin.value = isQtAdmin();
+  playerBar.restore(countedTool);
+  registry.ensure();
+  sourceUpdateStore.refresh();
+  // 从系统授权页返回时刷新开关状态（去授权前开关先记为开，返回后真实生效状态以权限为准）
+  // 同时与原生对账：通知栏「词」按钮改的是原生窗口，回调漏达时这里会显示错
+  desktopLyric.refreshFromNative();
+  lyricOn.value = desktopLyric.isEnabled();
+  // 日志占用同理：在日志页里清过之后返回设置页，行尾数字必须跟着变
+  refreshLogSize();
+}
+
+onMounted(() => {
+  refreshAll();
+});
+watch([(): number => (props.refreshKey != null ? props.refreshKey! : 0)], (): void => {
+  refreshAll();
+});
+
+/** 读取日志占用刷新行尾（不支持本地日志的平台显示「不支持」而不是「0 KB」） */
+function refreshLogSize(): void {
+  if (!logSupported()) {
+    logSizeText.value = "不支持";
+    return;
+  }
+  logBytes()
+    .then((bytes: number) => {
+      logSizeText.value = bytes > 0 ? formatFileSize(bytes) : "无日志";
+    })
+    .catch(() => {
+      logSizeText.value = "";
+    });
+}
+
+/**
+ * 打开一个设置子页。
+ *
+ * 两种入口，跳法不同：
+ * - 从**设置总览**（整页）点进去：navigateTo，返回键回到总览。
+ * - 已经处在**某个设置子页**（三栏模式的中间栏里点）：redirectTo 就地替换。
+ *   否则会堆成 settings → theme → permissions → cache …，手机返回键要按十几次
+ *   才退得出设置，而宽屏下中栏本来就一直显示、用户要的是「右栏换一页」。
+ * 宽屏另用 qtNavAnimation() 关掉横滑动画，中栏因此视觉静止。
+ */
+function goSubpage(url: string): void {
+  const top = qtTopRoute();
+  if (qtIsSettingsRoute(top) && top != "/pages/settings/index") {
+    uni.redirectTo({ animationType: qtNavAnimation(), url: url });
+    return;
+  }
+  uni.navigateTo({ animationType: qtNavAnimation(), url: url });
+}
+
+/** 打开「播放设置」页（倍速/定时关闭/均衡器/同时播放/默认音质/缓存上限，原来散在本页，现在独立） */
+function goPlaySettings(): void {
+  goSubpage("/pages/play-settings/index");
+}
+
+/** 行尾摘要：只放最常改的两项，不用进页面就能看出播放行为 */
+function playSummaryText(): string {
+  const parts: string[] = [];
+  if (player.sleepStopAfterCurrent) {
+    parts.push("播完本曲关闭");
+  }
+  parts.push("倍速 " + audioPlayer.rate + "x");
+  parts.push("音质 " + registry.qualityLabel(player.quality));
+  return parts.join(" · ");
+}
+
+/** 打开「播放页展示」设置页（原来这一组就在设置页里，现在独立） */
+function goPlayerBar(): void {
+  goSubpage("/pages/player-bar/index");
+}
+
+/** 打开「下载设置」页（下载音质/命名/并发/附带封面歌词，原来散在本页，现在独立） */
+function goDownloadSettings(): void {
+  goSubpage("/pages/download-settings/index");
+}
+
+/** 行尾摘要：并发 + 附带资源开关，不用进页面就能看出下载行为 */
+function downloadSummaryText(): string {
+  const extra: string[] = [];
+  if (downloads.downloadCover) extra.push("封面");
+  if (downloads.downloadLyric) extra.push("歌词");
+  return "同时 " + downloads.concurrency + " 个" + (extra.length > 0 ? " · " + extra.join("/") : "");
+}
+
+/** 打开权限管理页（列出本应用声明的权限与当前授权状态） */
+function goPermissions(): void {
+  goSubpage("/pages/permissions/index");
+}
+
+function goTheme(): void {
+  goSubpage("/pages/theme/index");
+}
+
+/** 打开不喜欢列表管理页 */
+function goDislikes(): void {
+  goSubpage("/pages/dislikes/index");
+}
+
+function dislikesCountText(): string {
+  const n = dislikes.rules.length;
+  if (n == 0) return "屏蔽歌曲 / 歌手";
+  return n + " 条规则";
+}
+
+// ==================== 后台保活（电池优化白名单 / 自启动） ====================
+// 后台取链被系统冻结时的兜底引导：播放本身有前台服务保活，但部分 ROM 仍会在
+// Doze / 省电策略下掐掉后台网络，导致锁屏后下一首取链失败。这里只做「状态展示 +
+// 跳系统设置页」，不申请任何权限（详见 uni_modules/qt-app-native 的实现注释）。
+
+function sourceText(): string {
+  return platformLabel(sourceStore.current);
+}
+function showSource(): void {
+  const list = sources.value;
+  if (list.length == 0) {
+    qtShowToast({ title: "请先在 设置→音源包管理 安装数据包", icon: "none" });
+    return;
+  }
+  openSheet("默认音源", list.map((s) => ({
+    name: platformLabel(s),
+    color: s == sourceStore.current ? theme.skin.accent : undefined,
+  })), (index) => {
+    pickSource(list[index]);
+  });
+}
+function pickSource(s: string): void {
+  sourceStore.setSource(s);
+  qtShowToast({ title: "默认音源：" + platformLabel(s), icon: "none" });
+}
+
+// ==================== 音源包管理（独立页 pages/source-pack/index，这里只留入口） ====================
+// 行尾不展示包版本/状态明细：独立页里全都有，摘要重复且每装一次包都要跟着改。
+
+/** 音源包管理已拆成独立页（pages/source-pack/index）：状态/数据包/播放包/更新/安装都在那里 */
+function showSourcePackage(): void {
+  goSubpage("/pages/source-pack/index");
+}
+
+// ==================== 播放设置已整体拆分（独立页 pages/play-settings/index） ====================
+// 默认倍速 / 定时关闭 / 均衡器 / 同时播放 / 播放默认音质 / 音乐缓存上限（含自定义输入弹层）
+// 全部搬到那里，本页只保留上面一行入口，不再保留任何副本与状态。
+// 播放音量已移除：音量与系统媒体音量重复，用户要求删除；静音态仍由系统音量键控制，
+// services/audio-player.uts 的 setVolume/setMuted 保留不动，播放页/通知栏若有需要仍可调用。
+
+// ==================== 桌面歌词 ====================
+
+function goDesktopLyric(): void {
+  goSubpage("/pages/desktop-lyric/index");
+}
+
+/** 统一清理入口：按项清缓存或清除全部缓存与本地数据。 */
+function goCache(): void {
+  goSubpage("/pages/cache/index");
+}
+
+/** 打开「运行日志」页（查看/复制/清除本地日志） */
+function goLogs(): void {
+  goSubpage("/pages/logs/index");
+}
+</script>
+
+<style>
+.page {
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+.list {
+  flex: 1;
+  padding: 16rpx 0 40rpx;
+}
+.list-wide {
+  padding: 12px 0 24px;
+}
+/* 两列容器：row + 列等宽，列内各自纵向堆叠。
+   用 align-items: flex-start 让两列顶端对齐（默认 stretch 会把两列拉成等高，
+   矮的那列底部露出空白分组背景）。 */
+.cols {
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: center;
+  padding-left: 24px;
+  padding-right: 24px;
+}
+.col {
+  flex-direction: column;
+}
+.col-right {
+  margin-left: 16px;
+}
+/* 两列里的分组不再带左右外边距：列宽已经把两侧 24px 留白和 16px 间距算进去了
+   （见 colStyle），分组再带 24px 会变成双重缩进，右列还会被挤出内容列。 */
+.group-col {
+  margin-left: 0;
+  margin-right: 0;
+}
+.group {
+  margin-top: 20rpx;
+  margin-left: 24rpx;
+  margin-right: 24rpx;
+  border-radius: 24rpx;
+  overflow: hidden;
+
+  border-width: 1px; border-style: solid;
+
+}
+.cell {
+  height: 96rpx;
+  padding: 0 32rpx;
+  flex-direction: row;
+  align-items: center;
+  border-bottom-width: 1px; border-bottom-style: solid;
+}
+.cell-no-border {
+  border-bottom-width: 0;
+}
+/* 桌面指针反馈：只在宽屏启用 */
+.cell-hover {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+.cell-icon {
+  margin-right: 20rpx;
+}
+.cell-title {
+  flex: 1;
+
+  font-size: 28rpx;
+  font-weight: 500;
+}
+.cell-right {
+  flex-direction: row;
+  align-items: center;
+}
+.cell-dot {
+  width: 16rpx;
+  height: 16rpx;
+  border-radius: 8rpx;
+  background-color: #ff4b4b;
+}
+.cell-value {
+
+  font-size: 24rpx;
+  margin-right: 12rpx;
+}
+/* 宽屏下 rpx 会随窗口放大膨胀，固定 px 尺寸 */
+.group-wide { margin-top: 14px; margin-left: 24px; margin-right: 24px; border-radius: 14px; }
+.cell-wide { height: 64px; padding-left: 24px; padding-right: 24px; }
+.cell-title-wide { font-size: 17px; }
+.cell-value-wide { font-size: 14px; }
+.cell-icon-wide { margin-right: 10px; }
+
+/* ===== 三栏中间栏（inPane）=====
+   这一栏约 400px，是「导航」不是「阅读」：行更密、字号不变、去掉行尾摘要。
+   分组的左右 24px 外边距必须清零 —— 中栏容器自己已有 padding，再带 24px
+   每行只剩 320px，五字标题 + 图标就会挤出箭头。 */
+.group-pane {
+  margin-top: 10px;
+  margin-left: 0;
+  margin-right: 0;
+  border-radius: 12px;
+}
+.cell-pane {
+  height: 52px;
+  padding-left: 14px;
+  padding-right: 14px;
+}
+.cell-icon-pane {
+  margin-right: 10px;
+}
+</style>

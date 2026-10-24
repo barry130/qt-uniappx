@@ -3,6 +3,7 @@
     class="qt-button"
     :class="[variantClass, sizeClass, disabled ? 'qt-button-disabled' : '']"
     :style="buttonStyle"
+    :hover-class="hoverClass"
     @click="onTap"
   >
     <view v-if="icon.length > 0" class="qt-button-icon">
@@ -17,6 +18,7 @@ import { computed } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const props = defineProps<{
   label: string;
@@ -50,14 +52,31 @@ const buttonStyle = computed((): string => {
   if (layout.isWide) style += "height:" + (size.value == "sm" ? 44 : 48) + "px;padding:0 18px;border-radius:12px;";
   return style;
 });
+/**
+ * 标签字号：紧凑档 sm 23rpx / md|lg 26rpx（class .qt-button-label[-sm]），
+ * 宽屏 sm 14px / md|lg 16px（rpx 在宽屏会被放大到不可用）。
+ *
+ * 为什么不用模板内联 qtFont(26)：一是 sm 变体只有 23rpx，写死 26 会压平它；
+ * 二是宽屏 px 覆盖也必须保留。两档 + 倍率一起在这里算，走 qtFontDual。
+ */
 const labelStyle = computed((): string => {
   let style = "color:" + labelColor.value + ";";
-  if (layout.isWide) style += "font-size:" + (size.value == "sm" ? 14 : 16) + "px;";
+  style += qtFontDual(size.value == "sm" ? 23 : 26, size.value == "sm" ? 14 : 16);
   return style;
 });
 function onTap(): void {
   if (!props.disabled) emit("click");
 }
+/**
+ * 桌面指针反馈：只在宽屏启用。手机端 hover-class 会在触控按下的瞬间闪一帧，
+ * 而按钮本身已有 @click 的按下反馈，宽屏又没有 :hover 伪类可用，因此只能靠 hover-class。
+ * 禁用态不给反馈，避免「看着能点其实点不动」的错觉。
+ */
+const hoverClass = computed((): string => {
+  if (!layout.isWide) return "none";
+  if (props.disabled == true) return "none";
+  return "qt-button-hover";
+});
 </script>
 
 <style>
@@ -65,6 +84,8 @@ function onTap(): void {
   flex-direction: row;
   align-items: center;
   justify-content: center;
+  /* border-style 必须显式写，否则 Vapor 下边框不绘制，outline 变体会退化成纯文字 */
+  border-style: solid;
   border-width: 1px;
   border-radius: 16rpx;
 }
@@ -76,5 +97,7 @@ function onTap(): void {
 .qt-button-label { font-size: 26rpx; font-weight: 600; }
 .qt-button-label-sm { font-size: 23rpx; }
 .qt-button-icon { margin-right: 10rpx; flex-shrink: 0; }
+/* 桌面指针反馈：背景色由内联 buttonStyle 提供，类选择器无法覆盖，只能用不透明度 */
+.qt-button-hover { opacity: 0.82; }
 .qt-button-disabled { opacity: 0.45; }
 </style>

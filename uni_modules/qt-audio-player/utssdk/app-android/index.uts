@@ -9,7 +9,7 @@
  *       含 上一首/播放暂停/下一首 按钮，单曲也显示前后按钮）。
  */
 
-import type { AudioPlayerVoidCallback, AudioPlayerTimeCallback, AudioPlayerErrorCallback, AudioPlayerStateCallback, EnsureNotificationPermission, AudioPlaylistItem, AudioResolveRequestCallback, AudioTrackChangedCallback } from '../interface.uts'
+import type { AudioPlayerVoidCallback, AudioPlayerTimeCallback, AudioPlayerErrorCallback, AudioPlayerStateCallback, EnsureNotificationPermission, AudioPlaylistItem, AudioResolveRequestCallback, AudioTrackChangedCallback, AudioRatingRequestCallback } from '../interface.uts'
 
 import {
   nativeHasOverlayPermission,
@@ -34,6 +34,7 @@ import {
 import { UTSAndroid } from 'io.dcloud.uts'
 
 import Build from 'android.os.Build'
+import SystemClock from 'android.os.SystemClock'
 import Context from 'android.content.Context'
 import Intent from 'android.content.Intent'
 import KeyEvent from 'android.view.KeyEvent'
@@ -45,10 +46,23 @@ import AudioManager from 'android.media.AudioManager'
 import AudioFocusRequest from 'android.media.AudioFocusRequest'
 import ExoPlayer from 'androidx.media3.exoplayer.ExoPlayer'
 import DefaultMediaSourceFactory from 'androidx.media3.exoplayer.source.DefaultMediaSourceFactory'
+import DefaultLoadControl from 'androidx.media3.exoplayer.DefaultLoadControl'
 import MediaItem from 'androidx.media3.common.MediaItem'
 import MediaMetadata from 'androidx.media3.common.MediaMetadata'
+import Rating from 'androidx.media3.common.Rating'
+import HeartRating from 'androidx.media3.common.HeartRating'
 import Player from 'androidx.media3.common.Player'
 import PlaybackException from 'androidx.media3.common.PlaybackException'
+import Timeline from 'androidx.media3.common.Timeline'
+import Tracks from 'androidx.media3.common.Tracks'
+import TrackSelectionParameters from 'androidx.media3.common.TrackSelectionParameters'
+import PlaybackParameters from 'androidx.media3.common.PlaybackParameters'
+import DeviceInfo from 'androidx.media3.common.DeviceInfo'
+import VideoSize from 'androidx.media3.common.VideoSize'
+import Metadata from 'androidx.media3.common.Metadata'
+import Cue from 'androidx.media3.common.text.Cue'
+import CueGroup from 'androidx.media3.common.text.CueGroup'
+import List from 'kotlin.collections.List'
 import DefaultHttpDataSource from 'androidx.media3.datasource.DefaultHttpDataSource'
 import DefaultDataSource from 'androidx.media3.datasource.DefaultDataSource'
 import DataSource from 'androidx.media3.datasource.DataSource'
@@ -57,6 +71,7 @@ import ResolvingDataSource from 'androidx.media3.datasource.ResolvingDataSource'
 import DataSpec from 'androidx.media3.datasource.DataSpec'
 import SimpleCache from 'androidx.media3.datasource.cache.SimpleCache'
 import IOException from 'java.io.IOException'
+import UnsupportedOperationException from 'java.lang.UnsupportedOperationException'
 import CountDownLatch from 'java.util.concurrent.CountDownLatch'
 import TimeUnit from 'java.util.concurrent.TimeUnit'
 import ConcurrentHashMap from 'java.util.concurrent.ConcurrentHashMap'
@@ -242,6 +257,38 @@ function deleteDirRecursive(dir: File): boolean {
   }
   if (!dir.delete()) ok = false
   return ok
+}
+
+/** 递归累加目录下所有文件的字节数（缓存占用统计用） */
+function dirSizeRecursive(dir: File): number {
+  if (!dir.exists()) return 0
+  let total = 0
+  const children = dir.listFiles()
+  if (children != null) {
+    for (let i = 0; i < children.size; i++) {
+      const f = children[i.toInt()]
+      if (f.isDirectory()) {
+        total += dirSizeRecursive(f)
+      } else {
+        total += f.length()
+      }
+    }
+  }
+  return total
+}
+
+/**
+ * 当前音频磁盘缓存占用（字节）。目录不存在（从未播放过）返回 0。
+ *
+ * 直接扫目录而不是问 SimpleCache：SimpleCache 的 getCacheSpace() 只统计
+ * **已提交完成的 span**，正在写入的分片不计入，边下边播时显示会偏小；
+ * 而用户看这一页关心的是「这个目录到底占了我多少空间」，扫描结果与系统
+ * 设置里的应用占用一致。
+ */
+function nativeAudioCacheSize(): number {
+  const context = getContext()
+  if (context == null) return 0
+  return dirSizeRecursive(new File(context.getCacheDir(), 'audio_cache'))
 }
 
 /** 手动清空音频磁盘缓存：先停播放（避免删除正在读取的分片），再释放缓存实例并删除目录与索引库，下次播放自动重建 */
@@ -658,6 +705,23 @@ const gResolvedUrls = new ConcurrentHashMap<string, string>()
 const gCacheKeyByMid = new ConcurrentHashMap<string, string>()
 let cbResolveRequest: AudioResolveRequestCallback | null = null
 let cbTrackChanged: AudioTrackChangedCallback | null = null
+let cbRating: AudioRatingRequestCallback | null = null
+
+/** 系统收藏（♡）请求 → JS：只认红心评分，unrated 忽略；主线程回调 */
+function dispatchHeartRating(mediaId: string, rating: Rating): void {
+  if (!(rating instanceof HeartRating)) {
+    console.log('[QT Audio] 收到非红心评分，忽略: ' + rating.toString())
+    return
+  }
+  const hr = rating as HeartRating
+  // unrated 只声明了样式（HeartRating()），不是一次点击，不动作
+  if (!hr.isRated()) return
+  if (cbRating == null) {
+    console.log('[QT Audio] 收藏回调未注册（JS 未调用 audioOnSetRating），本次点击丢失')
+    return
+  }
+  cbRating!!.invoke(mediaId, hr.isHeart())
+}
 
 /** 主线程侧 fire 解析请求（UTS 回调桥要求；loader 线程只阻塞等结果） */
 class QtResolveFire implements Runnable {
@@ -780,14 +844,59 @@ function fireTrackChanged(mediaId: string, naturalEnd: boolean): void {
   cbTrackChanged?.invoke(mediaId, naturalEnd)
 }
 
+/**
+ * vivo 原子通知 / 系统媒体卡片的「合作方能力位」。
+ *
+ * vivo 的 CooperateController 每次刷新元数据都**无条件**读取
+ * `vivomusicmix.media.metadata.support_event`（Long）写进内部字段 c3.a，
+ * 卡片心形按钮的 enabled = (c3.a & 0x40) != 0。读不到这个 key 时取 0，
+ * 比 vivo 自己的默认值 7 还差（播放控制/进度条也会一起退化），所以必须显式带上。
+ * 7 = SUPPORT_EVENT_DEFAULT（播放/上下首/进度），0x40 = 收藏键。
+ *
+ * 注意：vivo 只在它选中的「合作方控制器」里才读这个 key。选中条件是
+ * queryIntentServices("com.vivo.musicwidgetmix.support.service") 能扫到本服务，
+ * 见 utssdk/app-android/AndroidManifest.xml 里 QtAudioService 的那条 action。
+ */
+const VIVO_SUPPORT_EVENT_KEY = 'vivomusicmix.media.metadata.support_event'
+const VIVO_SUPPORT_EVENT_BITS = 7 | 0x40
+
+/**
+ * 构造带 vivo 握手位的 extras。media3 的 LegacyConversions 会把 extras 里所有
+ * Byte/Short/Integer/Long 值原样 putLong 进 MediaMetadataCompat（无 key 白名单），
+ * 所以这里的 Long 会原封不动到达 vivo 的控制器。
+ */
+function buildVivoExtras(): Bundle {
+  const extras = new Bundle()
+  extras.putLong(VIVO_SUPPORT_EVENT_KEY, VIVO_SUPPORT_EVENT_BITS.toLong())
+  return extras
+}
+
 /** 队列条目 → MediaItem（mediaId/元数据随条目走：通知栏、车机蓝牙 AVRCP 都用它） */
 function buildPlaylistMediaItem(item: AudioPlaylistItem): MediaItem {
-  const meta = new MediaMetadata.Builder()
+  const metaBuilder = new MediaMetadata.Builder()
     .setTitle(item.title)
     .setArtist(item.artist)
     .setAlbumTitle(item.album)
     .setArtworkUri(Uri.parse(item.coverUrl))
-    .build()
+    // 声明红心评分样式：系统媒体卡片/车机/原子随身听的 ♡ 只在元数据带 userRating
+    // 时才渲染（LegacyConversions → METADATA_KEY_USER_RATING；MediaSessionLegacyStub
+    // 的 setRatingType 也只认 userRating）。这里先给「未收藏」，
+    // 真实状态在切歌回调里按默认收藏歌单回写（见 audioSetLiked）
+    .setUserRating(new HeartRating(false))
+    // 评分**值**另走 overallRating：LegacyConversions 把它写成
+    // "android.media.metadata.RATING"，而 vivo 的 CooperateController 只读 RATING
+    // 来决定心形实心/空心（b0.p0 @480208-@48023a → c3.t）。USER_RATING 在 vivo 侧
+    // 是死代码（全 dex 只出现在 MediaMetadataCompat 自己的 key 表里）。
+    .setOverallRating(new HeartRating(false))
+    // vivo 合作方握手位：没有它 vivo 的心形永远置灰（详见 buildVivoExtras 注释）
+    .setExtras(buildVivoExtras())
+  // 声明时长（秒）：仅在播放器尚未拿到真实时长（缓冲中/未加载条目）时由 media3 兜底展示，
+  // 真实时长一旦可用始终以真实值为准（LegacyConversions 只在 TIME_UNSET 时回填）
+  const declaredSec = item.duration
+  if (declaredSec != null && declaredSec > 0) {
+    metaBuilder.setDurationMs((declaredSec * 1000).toLong())
+  }
+  const meta = metaBuilder.build()
   return new MediaItem.Builder()
     .setMediaId(item.mediaId)
     .setUri(item.uri)
@@ -1033,6 +1142,51 @@ class QtPlayerListener extends Player.Listener {
     }
     fireError(msg)
   }
+
+  // 显式覆盖 Media3 1.11.1 的其余默认回调，保留其原本的空实现语义。
+  // UTS 插件 dex 与自定义基座分开编译时，D8 会为继承的接口默认方法生成
+  // Player$Listener$-CC 转发；基座中可能没有该合成类，onEvents 等回调会直接崩溃。
+  // 这里不能调用 super；升级 Media3 时需同步核对 Player.Listener 的完整方法列表。
+  override onEvents(player: Player, events: Player.Events): void {}
+  override onTimelineChanged(timeline: Timeline, reason: Int): void {}
+  override onTracksChanged(tracks: Tracks): void {}
+  override onMediaMetadataChanged(mediaMetadata: MediaMetadata): void {}
+  override onPlaylistMetadataChanged(mediaMetadata: MediaMetadata): void {}
+  override onIsLoadingChanged(isLoading: boolean): void {}
+  // 下面这些是 Media3 标了 @Deprecated 的旧版回调，我们仍要显式覆盖（见上方注释）。
+  // 不删 override、只用 @Suppress 静音 Kotlin 的 OVERRIDE_DEPRECATION 警告：
+  // 弃用的是 media3 接口里的旧方法，不是我们的实现，标 @Deprecated 反而会污染调用方。
+  @Suppress("OVERRIDE_DEPRECATION")
+  override onLoadingChanged(isLoading: boolean): void {}
+  override onAvailableCommandsChanged(availableCommands: Player.Commands): void {}
+  override onTrackSelectionParametersChanged(parameters: TrackSelectionParameters): void {}
+  @Suppress("OVERRIDE_DEPRECATION")
+  override onPlayerStateChanged(playWhenReady: boolean, playbackState: Int): void {}
+  override onPlayWhenReadyChanged(playWhenReady: boolean, reason: Int): void {}
+  override onPlaybackSuppressionReasonChanged(playbackSuppressionReason: Int): void {}
+  override onRepeatModeChanged(repeatMode: Int): void {}
+  override onShuffleModeEnabledChanged(shuffleModeEnabled: boolean): void {}
+  override onPlayerErrorChanged(error: PlaybackException | null): void {}
+  @Suppress("OVERRIDE_DEPRECATION")
+  override onPositionDiscontinuity(reason: Int): void {}
+  override onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int): void {}
+  override onPlaybackParametersChanged(playbackParameters: PlaybackParameters): void {}
+  override onSeekBackIncrementChanged(seekBackIncrementMs: Long): void {}
+  override onSeekForwardIncrementChanged(seekForwardIncrementMs: Long): void {}
+  override onMaxSeekToPreviousPositionChanged(maxSeekToPreviousPositionMs: Long): void {}
+  override onAudioSessionIdChanged(audioSessionId: Int): void {}
+  override onAudioAttributesChanged(audioAttributes: AudioAttributes): void {}
+  override onVolumeChanged(volume: Float): void {}
+  override onSkipSilenceEnabledChanged(skipSilenceEnabled: boolean): void {}
+  override onDeviceInfoChanged(deviceInfo: DeviceInfo): void {}
+  override onDeviceVolumeChanged(volume: Int, muted: boolean): void {}
+  override onVideoSizeChanged(videoSize: VideoSize): void {}
+  override onSurfaceSizeChanged(width: Int, height: Int): void {}
+  override onRenderedFirstFrame(): void {}
+  @Suppress("OVERRIDE_DEPRECATION")
+  override onCues(cues: List<Cue>): void {}
+  override onCues(cueGroup: CueGroup): void {}
+  override onMetadata(metadata: Metadata): void {}
 }
 
 // ==================== 媒体会话 + 系统媒体通知（MediaSessionService） ====================
@@ -1132,15 +1286,94 @@ function buildLyricButtonList(on: boolean): ArrayList<CommandButton> {
   return list
 }
 
-/** 通知栏「桌面歌词」按钮状态刷新（悬浮窗显隐钩子调用） */
-function updateLyricNotifButton(on: boolean): void {
+// ==================== 通知栏「收藏 ♡」按钮（默认收藏歌单，同 onSetRating 链路） ====================
+// 与桌面歌词并列的第二个 OVERFLOW 自定义按钮，语义与系统媒体卡片 ♡ 完全一致：
+// 反映/切换「当前歌在默认收藏歌单里的成员资格」。点击走 cbRating → JS
+// onNativeSetRating（收进/移出默认收藏歌单）→ 回写 audioSetLiked → replaceMediaItem +
+// refreshNotifButtons 刷新心形。「放到上一首左边」的排序由 QtMediaNotificationProvider 完成。
+const CMD_ACTION_TOGGLE_FAV = 'qt.action.TOGGLE_FAV'
+let gCmdToggleFav: SessionCommand | null = null
+function cmdToggleFav(): SessionCommand {
+  if (gCmdToggleFav == null) {
+    gCmdToggleFav = new SessionCommand(CMD_ACTION_TOGGLE_FAV, Bundle.EMPTY)
+  }
+  return gCmdToggleFav!!
+}
+
+/** 当前曲是否已收藏：读当前条目的 userRating（HeartRating 实心即收藏） */
+function currentLiked(): boolean {
+  const mp = gMediaPlayer
+  if (mp == null) return false
+  const cur = mp.getCurrentMediaItem()
+  if (cur == null) return false
+  const ur = cur.mediaMetadata.userRating
+  if (!(ur instanceof HeartRating)) return false
+  const hr = ur as HeartRating
+  // 新条目 buildPlaylistMediaItem 统一写 HeartRating(false)（rated-not-heart）= 未收藏
+  return hr.isRated() && hr.isHeart()
+}
+
+/** 通知栏 ♡ 点击 → JS 默认收藏歌单链路（与系统媒体卡片 ♡ 同一出口 cbRating） */
+function dispatchFavToggle(): void {
+  let mediaId = ''
+  const mp = gMediaPlayer
+  if (mp != null) {
+    const cur = mp.getCurrentMediaItem()
+    if (cur != null) mediaId = cur.mediaId
+  }
+  // 诊断：这一行打出来＝点击确实到过应用（走的是我们自己的通知按钮 / 自定义命令）。
+  // 「点了完全没反应」时若日志里连它都没有，说明点击根本没进应用，去向只有两种：
+  // 按钮被系统置灰（vivo 合作方位缺失）或被别的应用的通知抢走了入口。
+  console.log('[QT Audio] 通知栏收藏点击 → mediaId=' + mediaId + ' → liked=' + (!currentLiked()).toString())
+  if (cbRating == null) {
+    console.log('[QT Audio] 收藏回调未注册（JS 未调用 audioOnSetRating），本次点击丢失')
+    return
+  }
+  cbRating!!.invoke(mediaId, !currentLiked())
+}
+
+/**
+ * 构建「收藏」通知按钮：实心/空心红心随当前收藏状态。只收 SLOT_OVERFLOW：
+ * ICON_HEART_FILLED / ICON_HEART_UNFILLED 常量经 getIconResIdForIconConstant 映射到
+ * media3 自带的 media3_icon_heart_filled / unfilled（aapt2 已在安装包验证非 0），
+ * 不会触碰 PlaybackStateCompat.CustomAction 的 icon==0 崩溃路径。
+ */
+function buildFavButton(): CommandButton {
+  const liked = currentLiked()
+  const builder = new CommandButton.Builder(liked ? CommandButton.ICON_HEART_FILLED : CommandButton.ICON_HEART_UNFILLED)
+    .setSessionCommand(cmdToggleFav())
+    .setDisplayName(liked ? '取消收藏' : '收藏')
+    .setSlots(CommandButton.SLOT_OVERFLOW)
+  return builder.build()
+}
+
+/**
+ * 通知按钮偏好总装：[收藏 ♡, 桌面歌词]。
+ * ♡ 排第一位：平台侧 PlaybackState 的 customActions 按偏好顺序生成；
+ * 通知侧 DefaultMediaNotificationProvider.getMediaButtons 也按该顺序把 OVERFLOW
+ * 按钮追加在默认三键后，再由 QtMediaNotificationProvider 把 ♡ 提到最前。
+ */
+function buildNotifButtonList(on: boolean): ArrayList<CommandButton> {
+  const list = new ArrayList<CommandButton>()
+  list.add(buildFavButton())
+  list.addAll(buildLyricButtonList(on))
+  return list
+}
+
+/** 通知栏按钮状态刷新（收藏回写 / 歌词显隐后调用）：重建偏好即触发通知重建 */
+function refreshNotifButtons(on: boolean): void {
   const session = gMediaSession3
   if (session == null) return
   try {
-    session.setMediaButtonPreferences(buildLyricButtonList(on))
+    session.setMediaButtonPreferences(buildNotifButtonList(on))
   } catch (e) {
-    console.log('[QT Audio] 通知栏歌词按钮刷新失败: ' + (e != null ? e.toString() : 'unknown'))
+    console.log('[QT Audio] 通知栏按钮刷新失败: ' + (e != null ? e.toString() : 'unknown'))
   }
+}
+
+/** 通知栏「桌面歌词」按钮状态刷新（悬浮窗显隐钩子调用） */
+function updateLyricNotifButton(on: boolean): void {
+  refreshNotifButtons(on)
 }
 
 /** 悬浮窗显隐变化（desktop-lyric.uts fire，主线程）：刷新按钮 + 通知 JS 服务 */
@@ -1215,11 +1448,23 @@ class QtSessionCallback extends MediaSession.Callback {
     session: MediaSession,
     controllerInfo: MediaSession.ControllerInfo
   ): MediaSession.ConnectionResult {
+    // 诊断：把接入的控制器包名打出来。vivo 原子通知的「合作方控制器」来自
+    // com.vivo.musicwidgetmix*；真机上从头到尾看不到它，就说明 vivo 没把我们当
+    // 合作方（心形置灰、点了没反应），问题不在会话回调而在 vivo 侧白名单。
+    // 换包名 / 装双包之后怀疑「收藏键失灵」时，这一行是最快的判据。
+    console.log('[QT Audio] 控制器接入 pkg=' + controllerInfo.packageName)
     const builder = new MediaSession.ConnectionResult.AcceptedResultBuilder(session, controllerInfo)
     const cmds = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
     cmds.add(cmdToggleDesktopLyric())
+    // ♡ 收藏按钮的自定义命令也必须注册，否则按钮对平台控制器不可用（被禁用丢弃）
+    cmds.add(cmdToggleFav())
     builder.setAvailableSessionCommands(cmds.build())
-    builder.setAvailablePlayerCommands(MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS)
+    // 随机/循环不对外开放：随机由 JS 洗牌队列实现，系统侧再开引擎随机会二次洗牌；
+    // 循环模式也由 JS 播放模式统一下发，系统侧改动 JS 无从得知。播放模式以应用内为准。
+    const playerCmds = MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
+    playerCmds.remove(Player.COMMAND_SET_SHUFFLE_MODE)
+    playerCmds.remove(Player.COMMAND_SET_REPEAT_MODE)
+    builder.setAvailablePlayerCommands(playerCmds.build())
     return builder.build()
   }
 
@@ -1234,8 +1479,139 @@ class QtSessionCallback extends MediaSession.Callback {
       toggleLyricWindowForNotification()
       return Futures.immediateFuture(new SessionResult(SessionResult.RESULT_SUCCESS))
     }
-    return super.onCustomCommand(session, controllerInfo, customCommand, args)
+    // 通知栏 ♡：当前收藏态取反后走系统收藏同一链路（cbRating → JS 默认收藏歌单）
+    if (customCommand.customAction == CMD_ACTION_TOGGLE_FAV) {
+      dispatchFavToggle()
+      return Futures.immediateFuture(new SessionResult(SessionResult.RESULT_SUCCESS))
+    }
+    return Futures.immediateFuture(new SessionResult(SessionResult.RESULT_ERROR_NOT_SUPPORTED))
   }
+
+  // 通知栏/系统媒体卡片/车机/原子随身听的「收藏 ♡」：默认实现返回 ERROR_NOT_SUPPORTED，
+  // 点了毫无反应。这里接回 JS，由 store 决定收进/移出「默认收藏歌单」，再回写 userRating
+  // 刷新图标（见 audioSetLiked）。两个重载都必须覆写：
+  //  - 带 mediaId 的：老式客户端（蓝牙 AVRCP / vivo 原子随身听 / SystemUI）经
+  //    MediaSessionLegacyStub.onSetRating → onSetRatingOnHandler(controller, mediaId, rating)；
+  //  - 不带 mediaId 的：media3 MediaController.setRating(Rating) 直接走这条。
+  override onSetRating(
+    session: MediaSession,
+    controllerInfo: MediaSession.ControllerInfo,
+    mediaId: string,
+    rating: Rating
+  ): ListenableFuture<SessionResult> {
+    console.log('[QT Audio] onSetRating(带 mediaId) 收到: ' + rating.toString() + ' mediaId=' + mediaId + ' pkg=' + controllerInfo.packageName)
+    dispatchHeartRating(mediaId, rating)
+    return Futures.immediateFuture(new SessionResult(SessionResult.RESULT_SUCCESS))
+  }
+
+  override onSetRating(
+    session: MediaSession,
+    controllerInfo: MediaSession.ControllerInfo,
+    rating: Rating
+  ): ListenableFuture<SessionResult> {
+    let mediaId = ''
+    const mp = gMediaPlayer
+    if (mp != null) {
+      const cur = mp.getCurrentMediaItem()
+      if (cur != null) mediaId = cur.mediaId
+    }
+    dispatchHeartRating(mediaId, rating)
+    return Futures.immediateFuture(new SessionResult(SessionResult.RESULT_SUCCESS))
+  }
+  // 插件 dex 与自定义基座分开编译时，继承接口默认方法会生成对
+  // MediaSession$Callback$-CC 的转发；基座可能没有这个合成类，onPostConnect 会崩溃。
+  // 显式实现 Media3 1.11.1 的全部回调，不调用接口 super；升级依赖时需重新核对方法列表。
+  override onConnectAsync(
+    session: MediaSession,
+    controllerInfo: MediaSession.ControllerInfo
+  ): ListenableFuture<MediaSession.ConnectionResult> {
+    return Futures.immediateFuture(this.onConnect(session, controllerInfo))
+  }
+
+  override onPostConnect(session: MediaSession, controllerInfo: MediaSession.ControllerInfo): void {}
+  override onDisconnected(session: MediaSession, controllerInfo: MediaSession.ControllerInfo): void {}
+
+  // 同上：Media3 已弃用三参之外的旧签名，此处必须保留 override（见 :1514 注释）。
+  @Suppress("OVERRIDE_DEPRECATION")
+  override onPlayerCommandRequest(
+    session: MediaSession,
+    controllerInfo: MediaSession.ControllerInfo,
+    playerCommand: Int
+  ): Int {
+    return SessionResult.RESULT_SUCCESS
+  }
+
+  override onCustomCommand(
+    session: MediaSession,
+    controllerInfo: MediaSession.ControllerInfo,
+    customCommand: SessionCommand,
+    args: Bundle,
+    progressReporter: MediaSession.ProgressReporter | null
+  ): ListenableFuture<SessionResult> {
+    return this.onCustomCommand(session, controllerInfo, customCommand, args)
+  }
+
+  // 保留默认语义：外部添加的条目须包含可播放配置，不能绕过应用自己的音源解析。
+  override onAddMediaItems(
+    session: MediaSession,
+    controllerInfo: MediaSession.ControllerInfo,
+    mediaItems: List<MediaItem>
+  ): ListenableFuture<List<MediaItem>> {
+    for (let i = 0; i < mediaItems.size; i++) {
+      if (mediaItems.get(i.toInt()).localConfiguration == null) {
+        return Futures.immediateFailedFuture(new UnsupportedOperationException())
+      }
+    }
+    return Futures.immediateFuture(mediaItems)
+  }
+
+  override onSetMediaItems(
+    session: MediaSession,
+    controllerInfo: MediaSession.ControllerInfo,
+    mediaItems: List<MediaItem>,
+    startIndex: Int,
+    startPositionMs: Long
+  ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+    for (let i = 0; i < mediaItems.size; i++) {
+      if (mediaItems.get(i.toInt()).localConfiguration == null) {
+        return Futures.immediateFailedFuture(new UnsupportedOperationException())
+      }
+    }
+    return Futures.immediateFuture(new MediaSession.MediaItemsWithStartPosition(mediaItems, startIndex, startPositionMs))
+  }
+
+  // 两参版已被 Media3 弃用（三参版才是新签名）。保留 override 的理由同上：
+  // 显式实现避免基座缺少 Callback$-CC 合成类时崩溃。
+  @Suppress("OVERRIDE_DEPRECATION")
+  override onPlaybackResumption(
+    session: MediaSession,
+    controllerInfo: MediaSession.ControllerInfo
+  ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+    return Futures.immediateFailedFuture(new UnsupportedOperationException())
+  }
+
+  override onPlaybackResumption(
+    session: MediaSession,
+    controllerInfo: MediaSession.ControllerInfo,
+    isForPlayback: boolean
+  ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+    return this.onPlaybackResumption(session, controllerInfo)
+  }
+
+  override onMediaButtonEvent(
+    session: MediaSession,
+    controllerInfo: MediaSession.ControllerInfo,
+    mediaButtonIntent: Intent
+  ): boolean {
+    return false
+  }
+
+  override onPlayerInteractionFinished(
+    session: MediaSession,
+    controllerInfo: MediaSession.ControllerInfo,
+    playerCommands: Player.Commands
+  ): void {}
+
   // 媒体键（通知栏/耳机/车机）不再手动解析 KeyEvent：队列迁移后 media3 按 timeline
   // 原生路由 KEYCODE_MEDIA_NEXT/PREVIOUS → seekToNext/PreviousMediaItem（真实语义），
   // 切歌事实经 onMediaItemTransition 回 JS。此前 super 不路由的坑只在「无 timeline +
@@ -1254,7 +1630,7 @@ function ensureMediaSession(): void {
     // 首帧通知就带「词」按钮。队列迁移后会话常驻，仅随播放器创建一次。
     const sessionBuilder = new MediaSession.Builder(appContext, player)
     sessionBuilder.setCallback(new QtSessionCallback())
-    sessionBuilder.setMediaButtonPreferences(buildLyricButtonList(isLyricWindowShowing()))
+    sessionBuilder.setMediaButtonPreferences(buildNotifButtonList(isLyricWindowShowing()))
     // 通知封面（largeIcon）加载器：media3 默认从 MediaSession.getBitmapLoader() 取，若不设置
     // 就是 DataSourceBitmapLoader + DefaultHttpDataSource，它**不带 UA/Referer、超时只有
     // 8 秒、且不跟随跨协议重定向**——图床挑 UA 或防盗链、返回 302 到 http 时就拉不到图，
@@ -1270,6 +1646,13 @@ function ensureMediaSession(): void {
       .setDataSourceFactory(coverHttpFactory)
       .build()
     sessionBuilder.setBitmapLoader(coverLoader)
+    // 点通知/系统媒体卡片回到应用：DefaultMediaNotificationProvider 的 contentIntent
+    // 直接取 session.getSessionActivity()，不设置时点击无反应
+    const launchIntent = appContext.getPackageManager().getLaunchIntentForPackage(appContext.getPackageName())
+    if (launchIntent != null) {
+      launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP)
+      sessionBuilder.setSessionActivity(PendingIntent.getActivity(appContext, 41002, launchIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE))
+    }
     gMediaSession3 = sessionBuilder.build()
     // 诊断日志（logcat 过滤 "QT Audio"）：通知栏按钮异常时先看这两行——
     // 图标 id 全 0 = 基座没带上 nativeResources（要重打自定义基座，不能用标准基座）。
@@ -1344,9 +1727,13 @@ function buildHeaders(): HashMap<string, string> {
 function buildPlayerOnce(): void {
   const appContext = UTSAndroid.getAppContext()
   if (appContext == null) return
+  // 超时与封面加载器对齐（media3 默认 8 秒，移动网络下偏短）；允许跨协议重定向（302 到 http 的音源）
   const httpFactory = new DefaultHttpDataSource.Factory()
     .setUserAgent(UA_HEADER)
     .setDefaultRequestProperties(buildHeaders())
+    .setConnectTimeoutMs(15000)
+    .setReadTimeoutMs(15000)
+    .setAllowCrossProtocolRedirects(true)
   // 懒解析层：qt-resolve:// 条目在真正建连那一刻才向 JS 换取真实地址（见 QtResolveResolver）；
   // 其余 scheme（content:///file:///http 直连）原样直过。放在缓存之下：缓存 key 用稳定的
   // 占位地址（歌+音质），播过的歌二次播放直接命中磁盘缓存，不再解析也不再联网。
@@ -1379,6 +1766,13 @@ function buildPlayerOnce(): void {
     .setAudioAttributes(attr, false)
     // true：media3 内置 becoming_noisy 处理（耳机/蓝牙断开自动暂停），无需手动接收器
     .setHandleAudioBecomingNoisy(true)
+    // 熄屏后台播放保活：播放/缓冲期间持有 CPU 唤醒锁 + WiFi 锁（流式音源依赖网络）
+    .setWakeMode(C.WAKE_MODE_NETWORK)
+    // 保留 30 秒回看缓冲：往回拖进度不必重新加载
+    .setLoadControl(new DefaultLoadControl.Builder().setBackBuffer(30000, true).build())
+    // 卡死检测：默认 10 分钟无进展才报错，期间界面一直转圈。45 秒 = 懒解析 15s + 建连 15s
+    // 再留余量；超时走 onPlayerError，由 JS 侧既有的失败自愈/切歌逻辑接管
+    .setStuckBufferingDetectionTimeoutMs(45000)
     .build()
   gMediaPlayer = exo
   attachPlayerListener(exo)
@@ -1416,6 +1810,12 @@ function loadAndPlay(url: string): void {
     if (gCoverUrl.length > 0) {
       metadataBuilder.setArtworkUri(Uri.parse(gCoverUrl))
     }
+    // 与队列路径（buildPlaylistMediaItem）保持一致：红心样式 + 评分值 + vivo 握手位。
+    // 单曲链路没有 mediaId，回写通道（audioSetLiked）匹配不上，这里只保证
+    // 系统卡片能渲染出可点的 ♡，不至于像以前那样置灰。
+    metadataBuilder.setUserRating(new HeartRating(false))
+    metadataBuilder.setOverallRating(new HeartRating(false))
+    metadataBuilder.setExtras(buildVivoExtras())
     const metadata = metadataBuilder.build()
     const mi = new MediaItem.Builder()
       .setUri(url)
@@ -1681,6 +2081,9 @@ class QtAudioPlayer {
   /** 手动清空音频磁盘缓存（正在播放会先停止），返回是否清理成功 */
   clearCache(): boolean { return nativeClearAudioCache() }
 
+  /** 当前音频磁盘缓存占用（字节） */
+  cacheSize(): number { return nativeAudioCacheSize() }
+
   // ==================== 桌面歌词悬浮窗（desktop-lyric.uts） ====================
 
   /** 是否已授予「显示在其他应用上层」权限 */
@@ -1722,6 +2125,63 @@ class QtAudioPlayer {
 // 注意：不要自绘 RemoteViews 通知布局——Android 13+ 的媒体卡片由 SystemUI 自己渲染，
 // 自绘布局拿不到卡片上的按钮位（真机表现为按钮全不见）。
 
+/** 通知 id 提供者：沿用官方默认 1001（与老版本通知一致，避免覆盖式重建） */
+class QtNotifIdProvider extends DefaultMediaNotificationProvider.NotificationIdProvider {
+  constructor() {
+    super()
+  }
+  override getNotificationId(mediaSession: MediaSession): Int {
+    return 1001
+  }
+}
+
+/**
+ * media3 默认通知 provider 的可覆写子类：唯一目的是把「收藏 ♡」从 OVERFLOW
+ * 追加位提到最前（用户要求放在上一首左边），compact 三槽与默认行为完全一致。
+ * 官方 Builder.build() 返回基类，故子类必须走四参公开构造。
+ */
+class QtMediaNotificationProvider extends DefaultMediaNotificationProvider {
+  constructor(
+    context: Context,
+    notificationIdProvider: DefaultMediaNotificationProvider.NotificationIdProvider,
+    channelId: string,
+    channelNameResourceId: Int
+  ) {
+    super(context, notificationIdProvider, channelId, channelNameResourceId)
+  }
+
+  /** 收藏 ♡ 提前，其余顺序保持 super 输出（[上一首, 播放, 下一首, 桌面歌词…]） */
+  override getMediaButtons(
+    session: MediaSession,
+    playerCommands: Player.Commands,
+    mediaButtonPreferences: ImmutableList<CommandButton>,
+    showPauseButton: boolean
+  ): ImmutableList<CommandButton> {
+    const origin = super.getMediaButtons(session, playerCommands, mediaButtonPreferences, showPauseButton)
+    const favs = new ArrayList<CommandButton>()
+    const rest = new ArrayList<CommandButton>()
+    // Kotlin 的 List.size 是属性不是方法（写成 origin.size() 会报
+    // "Expression 'size' of type 'Int' cannot be invoked as a function"），
+    // 且 List.get 只收 Int，循环变量是 Number，必须 toInt()。
+    const total = origin.size
+    for (let i = 0; i < total; i++) {
+      const b = origin.get(i.toInt())
+      if (b != null && b.sessionCommand != null && b.sessionCommand!!.customAction == CMD_ACTION_TOGGLE_FAV) {
+        favs.add(b)
+      } else {
+        rest.add(b)
+      }
+    }
+    if (favs.isEmpty()) {
+      return origin
+    }
+    const out = new ImmutableList.Builder<CommandButton>()
+    out.addAll(favs)
+    out.addAll(rest)
+    return out.build()
+  }
+}
+
 class QtAudioService extends MediaSessionService {
   constructor() {
     super()
@@ -1737,15 +2197,33 @@ class QtAudioService extends MediaSessionService {
     // 渠道名交给已存在的渠道，避免旧版本用户多出一个空名渠道
     ensureMediaNotifChannel(this)
     const glyph = appDrawableResId('ic_qt_notification_glyph')
-    const providerBuilder = new DefaultMediaNotificationProvider.Builder(this)
-      .setChannelId(MEDIA_NOTIF_CHANNEL_ID)
-    const provider = providerBuilder.build()
-    if (glyph != 0) {
-      provider.setSmallIcon(glyph)
+    // 换用可覆写的子类 provider：把「收藏 ♡」从 OVERFLOW 追加位提到最前（上一首左边）。
+    // 四参公开构造保留渠道/通知 id；channelNameResourceId 在 createNotification 每次构建
+    // 都会被 context.getString 求值，必须可解析 — 官方 Builder 默认用的同一资源
+    // default_notification_channel_name 在真机一直可解析，再兜底 app_name；都拿不到则
+    // 降级官方 Builder（通知正常，只是 ♡ 排在三键之后）。
+    let nameRes = appResId('default_notification_channel_name', 'string')
+    if (nameRes == 0) nameRes = appResId('app_name', 'string')
+    if (nameRes != 0) {
+      const qtProvider = new QtMediaNotificationProvider(this, new QtNotifIdProvider(), MEDIA_NOTIF_CHANNEL_ID, nameRes)
+      if (glyph != 0) {
+        qtProvider.setSmallIcon(glyph)
+      } else {
+        console.log('[QT Audio] 通知小图标 ic_qt_notification_glyph 未解析到，沿用 media3 默认图标')
+      }
+      this.setMediaNotificationProvider(qtProvider)
     } else {
-      console.log('[QT Audio] 通知小图标 ic_qt_notification_glyph 未解析到，沿用 media3 默认图标')
+      console.log('[QT Audio] 渠道名字符串资源解析失败，通知按钮重排降级为官方 Builder')
+      const providerBuilder = new DefaultMediaNotificationProvider.Builder(this)
+        .setChannelId(MEDIA_NOTIF_CHANNEL_ID)
+      const provider = providerBuilder.build()
+      if (glyph != 0) {
+        provider.setSmallIcon(glyph)
+      } else {
+        console.log('[QT Audio] 通知小图标 ic_qt_notification_glyph 未解析到，沿用 media3 默认图标')
+      }
+      this.setMediaNotificationProvider(provider)
     }
-    this.setMediaNotificationProvider(provider)
   }
 
   override onDestroy(): void {
@@ -1891,6 +2369,8 @@ export function audioSetConcurrentMode(mode: number): void { nativeSetConcurrent
 export function audioSetSpeed(speed: number): void { nativeSetSpeed(speed) }
 /** 手动清空音频磁盘缓存（正在播放会先停止） */
 export function audioClearCache(): boolean { return nativeClearAudioCache() }
+/** 当前音频磁盘缓存占用（字节），供设置页「清除缓存」展示 */
+export function audioCacheSize(): number { return nativeAudioCacheSize() }
 
 // ==================== EQ 均衡器（android.media.audiofx.Equalizer） ====================
 // 效果器挂在 ExoPlayer 底层 AudioTrack 的会话 id 上，作用于播放器全部输出。
@@ -2356,3 +2836,52 @@ export function audioLyricSetBackground(mode: string, colorArgb: number, opacity
 const _forceWidgetProvider: QtWidgetProvider = new QtWidgetProvider()
 const _forceWidgetProviderLarge: QtWidgetLargeProvider = new QtWidgetLargeProvider()
 const _forceWidgetProviderToggle: QtWidgetToggleProvider = new QtWidgetToggleProvider()
+
+// ==================== 系统收藏（红心 ♡） ====================
+// 同样必须追加在文件**最末尾**：UTS 插件的 JS 代理 methodId 按导出声明顺序生成，
+// 插在中间会让其后所有导出整体错位，与旧基座的方法表对不上（同上文各处注释）。
+/**
+ * 注册系统收藏请求回调：通知栏/系统媒体卡片/车机/原子随身听的 ♡ 被点击时触发，
+ * 参数 = 目标条目 mediaId + 客户端想要的新状态（true 收藏 / false 取消）。
+ */
+export function audioOnSetRating(callback: AudioRatingRequestCallback | null): void { cbRating = callback }
+
+/**
+ * 回写某首歌的红心状态到媒体元数据（系统媒体卡片 ♡ 实心/空心）。
+ *
+ * 用 replaceMediaItem 而不是重建队列：ExoPlayer 对「URI 不变、只有元数据变」的替换
+ * 走 canUpdateMediaSourcesWithMediaItems 原地更新（ExoPlayerImpl.java:3187-3222）——
+ * 不重建 MediaSource、不重新缓冲、窗口 uid 不变，evaluateMediaItemTransitionReason
+ * 也不会判定为切歌（不会误触发 fireTrackChanged），只刷新元数据与通知栏图标。
+ */
+export function audioSetLiked(mediaId: string, liked: boolean): void {
+  const mp = gMediaPlayer
+  if (mp == null) return
+  try {
+    const cur = mp.getCurrentMediaItem()
+    // 只回写当前条目：队列里其他条目的红心在下次入队/切歌时自然带上
+    if (cur == null || cur.mediaId != mediaId) return
+    // 两个评分位都要写：
+    //   userRating   → MediaSessionLegacyStub.setRatingType（决定系统卡片渲染 ♡ 还是 ★）
+    //   overallRating→ LegacyConversions 写成 "android.media.metadata.RATING"，
+    //                  这是 vivo CooperateController 唯一读取的心形实心/空心来源（c3.t）
+    // extras 由 buildUpon 原样继承，这里显式重设一遍以防将来有人改成新建 Builder
+    const meta = cur.mediaMetadata.buildUpon()
+      .setUserRating(new HeartRating(liked))
+      .setOverallRating(new HeartRating(liked))
+      .setExtras(buildVivoExtras())
+      .build()
+    mp.replaceMediaItem(
+      mp.getCurrentMediaItemIndex(),
+      cur.buildUpon().setMediaMetadata(meta).build()
+    )
+    // 收藏态回写完成后刷新通知按钮偏好：♡ 心形随新 userRating 变化。
+    // 必须在 replaceMediaItem 之后（buildFavButton 读回写后的 userRating）。
+    refreshNotifButtons(isLyricWindowShowing())
+  } catch (e) {
+    console.log('[QT Audio] 回写收藏状态失败: ' + (e != null ? e.toString() : 'unknown'))
+  }
+}
+
+/** 与系统时间调整无关，含锁屏经过时间。 */
+export function audioMonotonicTime(): number { return SystemClock.elapsedRealtime().toDouble() }

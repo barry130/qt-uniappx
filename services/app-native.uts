@@ -9,11 +9,33 @@
  * （编译进原生层），此处通过平台分发导入调用；H5 保留 window 实现，其余降级为复制+提示。
  */
 
-import { openExternalUrl, exitAppNative, installApkNative, openNotificationSettings as openNotificationSettingsNative, isIgnoringBatteryOptimizations as isIgnoringBatteryOptimizationsNative, openBatteryOptimizationSettings as openBatteryOptimizationSettingsNative, openAutoStartSettings as openAutoStartSettingsNative, openAppDetailsSettings as openAppDetailsSettingsNative, applyLegacyInsets as applyLegacyInsetsNative, pickJsFile as pickJsFileNative, queryPermissionStates as queryPermissionStatesNative, openPermissionSettings as openPermissionSettingsNative } from "@/uni_modules/qt-app-native";
-import type { PickFileResult, PermissionState } from "@/uni_modules/qt-app-native";
+import { openExternalUrl, exitAppNative, installApkNative, openNotificationSettings as openNotificationSettingsNative, isIgnoringBatteryOptimizations as isIgnoringBatteryOptimizationsNative, openBatteryOptimizationSettings as openBatteryOptimizationSettingsNative, openAutoStartSettings as openAutoStartSettingsNative, openAppDetailsSettings as openAppDetailsSettingsNative, applyLegacyInsets as applyLegacyInsetsNative, pickJsFile as pickJsFileNative, pickDirectory as pickDirectoryNative, setCustomDirUri as setCustomDirUriNative, queryPermissionStates as queryPermissionStatesNative, openPermissionSettings as openPermissionSettingsNative } from "@/uni_modules/qt-app-native";
+import type { PickFileResult, PickDirectoryResult, PermissionState } from "@/uni_modules/qt-app-native";
+import { logErrV } from "@/services/logger";
 import { ensureNotificationPermission as ensureNotificationPermissionNative } from "@/uni_modules/qt-audio-player";
+import { qtShowToast } from "@/services/toast";
 
 export type DownloadProgress = (received: number, total: number, percent: number) => void;
+
+/**
+ * 本机是否为鸿蒙端。
+ *
+ * 页面需要按平台切换权限清单与文案，但**不在 .uvue 里写 #ifdef**：本项目所有 .uvue
+ * 目前都无条件编译，平台差异一律收敛在 UTS 服务里（AGENTS.md 也要求平台分支进 UTS）。
+ * 与 services/source-update.uts 的 currentPlatform() 同一套做法：鸿蒙必须显式分支，
+ * 否则会被当成安卓处理。
+ *
+ * 注意别写成 `#ifndef APP-ANDROID`——uni-preprocess 的 `#ifndef A || B` 不是德摩根律，
+ * `#ifndef APP-ANDROID || APP-HARMONY` 在鸿蒙上是 TRUE，会把鸿蒙判成非鸿蒙。
+ */
+export function isHarmonyOs(): boolean {
+  // #ifdef APP-HARMONY
+  return true;
+  // #endif
+  // #ifndef APP-HARMONY
+  return false;
+  // #endif
+}
 
 /**
  * 退出应用（Android 关闭所有 Activity；鸿蒙 terminateSelf 回到桌面；H5 尝试关闭窗口）
@@ -35,13 +57,13 @@ export function exitApp(): void {
     }
   } catch (e) {}
   // #endif
-  uni.showToast({ title: "已退出", icon: "none" });
+  qtShowToast({ title: "已退出", icon: "none" });
 }
 
 /** 跳转系统浏览器打开链接 */
 export function openInBrowser(url: string): void {
   if (url.length == 0) {
-    uni.showToast({ title: "下载地址为空", icon: "none" });
+    qtShowToast({ title: "下载地址为空", icon: "none" });
     return;
   }
   // #ifdef APP-ANDROID || APP-HARMONY
@@ -60,7 +82,7 @@ export function openInBrowser(url: string): void {
   uni.setClipboardData({
     data: url,
     success: () => {
-      uni.showToast({ title: "已复制下载链接，请到浏览器打开", icon: "none" });
+      qtShowToast({ title: "已复制下载链接，请到浏览器打开", icon: "none" });
     },
   });
 }
@@ -78,7 +100,7 @@ export function downloadApk(url: string, onProgress: DownloadProgress): Promise<
         }
       },
       fail: (error) => {
-        console.log("[AppNative] 下载失败", error);
+        logErrV("AppNative", "下载失败", error);
         reject(new Error("下载失败"));
       },
     });
@@ -99,13 +121,13 @@ export function downloadApk(url: string, onProgress: DownloadProgress): Promise<
  */
 export function installApk(filePath: string): boolean {
   if (filePath.length == 0) {
-    uni.showToast({ title: "安装包不存在", icon: "none" });
+    qtShowToast({ title: "安装包不存在", icon: "none" });
     return false;
   }
   // #ifdef APP-ANDROID
   if (installApkNative(filePath)) return true;
   // #endif
-  uni.showToast({ title: "安装包已保存，请在文件管理中安装", icon: "none" });
+  qtShowToast({ title: "安装包已保存，请在文件管理中安装", icon: "none" });
   return false;
 }
 
@@ -124,7 +146,7 @@ export function ensureNotificationPermission(): Promise<boolean> {
         resolve(granted);
       });
     } catch (e) {
-      console.log("[AppNative] ensureNotificationPermission error", e);
+      logErrV("AppNative", "ensureNotificationPermission", e);
       resolve(false);
     }
   });
@@ -137,19 +159,21 @@ export function ensureNotificationPermission(): Promise<boolean> {
 /**
  * 打开本应用的系统通知设置页，供用户手动开启通知权限。
  * Android：API 26+ 直达通知页，否则降级到应用详情页。
+ * 鸿蒙：直接弹系统「是否允许通知」授权框（notificationManager.requestEnableNotification），
+ *   已授权时静默成功；用户已选「不再询问」时原生侧自动降级到应用详情页。
  * iOS / H5：不支持，返回 false，由调用方降级为提示。
  * @returns 是否成功拉起设置页
  */
 export function openNotificationSettings(): boolean {
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-HARMONY
   try {
     return openNotificationSettingsNative();
   } catch (e) {
-    console.log("[AppNative] openNotificationSettings error", e);
+    logErrV("AppNative", "openNotificationSettings", e);
     return false;
   }
   // #endif
-  // #ifndef APP-ANDROID
+  // #ifndef APP-ANDROID || APP-HARMONY
   return false;
   // #endif
 }
@@ -167,7 +191,7 @@ export function isIgnoringBatteryOptimizations(): boolean {
   try {
     return isIgnoringBatteryOptimizationsNative();
   } catch (e) {
-    console.log("[AppNative] isIgnoringBatteryOptimizations error", e);
+    logErrV("AppNative", "isIgnoringBatteryOptimizations", e);
     return true;
   }
   // #endif
@@ -186,7 +210,7 @@ export function openBatteryOptimizationSettings(): boolean {
   try {
     return openBatteryOptimizationSettingsNative();
   } catch (e) {
-    console.log("[AppNative] openBatteryOptimizationSettings error", e);
+    logErrV("AppNative", "openBatteryOptimizationSettings", e);
     return false;
   }
   // #endif
@@ -198,36 +222,38 @@ export function openBatteryOptimizationSettings(): boolean {
 /**
  * 打开厂商「自启动 / 后台运行管理」页（国产 ROM 私有入口，逐个厂商试）。
  * 全部候选都落空时原生侧会自动降级到应用详情页，因此返回 true 只代表拉起过某个页面。
+ * 鸿蒙：「应用启动管理」没有独立 action，原生侧直接跳应用详情设置页。
  * @returns 是否成功拉起设置页
  */
 export function openAutoStartSettings(): boolean {
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-HARMONY
   try {
     return openAutoStartSettingsNative();
   } catch (e) {
-    console.log("[AppNative] openAutoStartSettings error", e);
+    logErrV("AppNative", "openAutoStartSettings", e);
     return false;
   }
   // #endif
-  // #ifndef APP-ANDROID
+  // #ifndef APP-ANDROID || APP-HARMONY
   return false;
   // #endif
 }
 
 /**
  * 打开本应用的系统详情设置页（所有 ROM 都有的最终兜底入口）。
+ * 鸿蒙的权限开关与通知开关都挂在这个页面的「权限」分区下，是通用兜底入口。
  * @returns 是否成功拉起设置页
  */
 export function openAppDetailsSettings(): boolean {
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-HARMONY
   try {
     return openAppDetailsSettingsNative();
   } catch (e) {
-    console.log("[AppNative] openAppDetailsSettings error", e);
+    logErrV("AppNative", "openAppDetailsSettings", e);
     return false;
   }
   // #endif
-  // #ifndef APP-ANDROID
+  // #ifndef APP-ANDROID || APP-HARMONY
   return false;
   // #endif
 }
@@ -244,7 +270,7 @@ export function applyLegacyInsets(): boolean {
   try {
     return applyLegacyInsetsNative();
   } catch (e) {
-    console.log("[AppNative] applyLegacyInsets error", e);
+    logErrV("AppNative", "applyLegacyInsets", e);
     return false;
   }
   // #endif
@@ -254,7 +280,7 @@ export function applyLegacyInsets(): boolean {
 }
 
 /**
- * 打开系统文件选择器选一个 js/文本文件，读回全文（音源包「本地文件安装」用）。
+ * 打开系统文件选择器选一个 .js 文件，读回全文（音源包「本地文件安装」用）。
  * Android 走 ACTION_OPEN_DOCUMENT + contentResolver（content URI 只有一次读
  * 权限，所以原生侧直接把内容读出来回传）；其他平台恒回调不支持。
  */
@@ -266,7 +292,7 @@ export function pickJsFile(): Promise<PickFileResult> {
         resolve(result);
       });
     } catch (e) {
-      console.log("[AppNative] pickJsFile error", e);
+      logErrV("AppNative", "pickJsFile", e);
       resolve({ ok: false, name: "", content: "", message: "无法打开文件选择器" } as PickFileResult);
     }
   });
@@ -277,26 +303,71 @@ export function pickJsFile(): Promise<PickFileResult> {
 }
 
 /**
+ * 打开系统文件管理器选一个下载目录（下载设置 → 更改位置）。
+ *
+ * Android 走 ACTION_OPEN_DOCUMENT_TREE，原生侧把 document URI 反解成真实绝对路径回传；
+ * 需要「所有文件访问」权限（Android 11+），调用方负责先引导授权。
+ * 鸿蒙走 DocumentViewPicker（selectMode=FOLDER）+ fileShare.persistPermission 持久化
+ * 目录授权，回传的是**目录 URI**（不是普通路径）——这是 phone 上唯一能写到公共目录的
+ * 路线（READ_WRITE_DOWNLOAD_DIRECTORY 在 phone 上是 INVALID，见原生侧注释）。
+ * iOS 无公共目录落盘路径，原生恒回调失败，由调用方保持固定目录并给出说明。
+ */
+export function pickDirectory(): Promise<PickDirectoryResult> {
+  return new Promise((resolve) => {
+    try {
+      pickDirectoryNative((result) => {
+        resolve(result);
+      });
+    } catch (e) {
+      logErrV("AppNative", "pickDirectory", e);
+      resolve({ ok: false, path: "", name: "", message: "无法打开文件管理器" } as PickDirectoryResult);
+    }
+  });
+}
+
+/**
+ * 把已保存的自定义目录喂回原生层（鸿蒙专用，其余平台空实现）。
+ *
+ * 为什么需要：鸿蒙的原生变量不跨进程，`persistPermission` 授予的 URI 授权虽然持久，
+ * 但每次启动都要 `activatePermission` 激活一次。JS 侧把 URI 存在 uni storage
+ * （qt-download-dir），App 启动/进入下载页时调这里恢复。
+ * @param uri 目录 URI；空串表示恢复默认目录
+ */
+export function restoreCustomDir(uri: string): void {
+  // #ifdef APP-HARMONY
+  try {
+    setCustomDirUriNative(uri);
+  } catch (e) {
+    logErrV("AppNative", "restoreCustomDir", e);
+  }
+  // #endif
+}
+
+/**
  * 查询一批权限的当前授权状态（设置页「权限管理」用）。
  *
- * id 与 manifest.json 的声明串一致（android.permission.XXX）。原生侧已把
+ * Android：id 与 manifest.json 的声明串一致（android.permission.XXX）。原生侧已把
  * 「普通权限 / 运行时权限 / 特殊权限」三类收敛成统一结构：applicable 表示
  * 该权限在当前系统版本上是否还适用（如 WRITE_EXTERNAL_STORAGE 只到 Android 9），
  * unknown 表示查不到（窗口未就绪、平台不支持），页面据此显示「无法确定」
  * 而不是误报「未授权」。
  *
- * 非 Android 平台没有与 Android 权限一一对应的授权模型，一律返回 unknown。
+ * 鸿蒙：id 是 ohos.permission.XXX，与 module.json5 的 requestPermissions 一致。
+ * 原生侧走 AtManager.getSelfPermissionStatus（五态），能真正区分
+ * 已授权 / 未授权 / 系统版本不适用 / 受设备策略限制，能力比安卓端更强。
+ *
+ * 其余平台没有与这两套权限一一对应的授权模型，一律返回 unknown。
  */
 export function queryPermissionStates(ids: string[]): PermissionState[] {
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-HARMONY
   try {
     return queryPermissionStatesNative(ids);
   } catch (e) {
-    console.log("[AppNative] queryPermissionStates error", e);
+    logErrV("AppNative", "queryPermissionStates", e);
     return unknownPermissionStates(ids);
   }
   // #endif
-  // #ifndef APP-ANDROID
+  // #ifndef APP-ANDROID || APP-HARMONY
   return unknownPermissionStates(ids);
   // #endif
 }
@@ -312,18 +383,22 @@ function unknownPermissionStates(ids: string[]): PermissionState[] {
 
 /**
  * 跳到某条权限对应的系统设置页（能直达就直达，ROM 不认则退回应用详情页）。
+ *
+ * 鸿蒙走 AtManager.requestPermissionOnSetting——系统专门为「已拒绝、弹窗不能再弹」
+ * 场景提供的直达权限设置对话框；对 system_grant 权限会失败，原生侧自动兜底到
+ * 应用详情设置页，因此返回 true 只代表「已受理并会打开某个页面」。
  * @returns 已成功发起跳转返回 true；平台不支持返回 false（调用方提示手动前往）
  */
 export function openPermissionSettings(id: string): boolean {
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-HARMONY
   try {
     return openPermissionSettingsNative(id);
   } catch (e) {
-    console.log("[AppNative] openPermissionSettings error", e);
+    logErrV("AppNative", "openPermissionSettings", e);
     return false;
   }
   // #endif
-  // #ifndef APP-ANDROID
+  // #ifndef APP-ANDROID || APP-HARMONY
   return false;
   // #endif
 }

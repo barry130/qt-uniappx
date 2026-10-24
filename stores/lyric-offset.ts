@@ -174,11 +174,14 @@ class LyricOffsetStore {
     this.setActiveMs(0);
   }
 
-  /** 全量复位（「清除全部缓存与数据」用） */
+  /** 全量复位（「清除全部缓存与数据」用）：内存与持久化一起清，否则重启 restore() 会复活 */
   reset(): void {
     this.globalMs = 0;
     this.songs = {};
     this.activeKey = "";
+    try {
+      uni.removeStorageSync(LYRIC_OFFSET_KEY);
+    } catch (_) {}
   }
 }
 

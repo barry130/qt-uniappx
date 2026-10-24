@@ -344,13 +344,17 @@ class ThemeStore {
 
   syncSystemTheme(): void {
     if (this.mode == "system") {
-      // 优先使用 onThemeChange 推送的系统主题；部分平台 osThemeName 不会在运行期更新
+      // 优先使用 onThemeChange 推送的系统主题；只有它还没推过时才回落到 getSystemInfoSync。
+      // 注意字段名是 osTheme，不是 osThemeName——后者在任何 d.ts / 运行时 / dex 里都不存在，
+      // 读出来恒为 undefined，这段回落分支等于从未生效过（死代码）。
+      // osTheme 由 UTSAndroid.getOsTheme() → t6.q 提供，t6.q 在 Configuration 变化时会被
+      // t6.b(String) 更新并派发 onThemeChange，所以它本身也是运行期实时的。
       if (this.systemDarkKnown) {
         this.dark = this.lastSystemDark;
       } else {
         try {
           const system = uni.getSystemInfoSync();
-          const osTheme = system.osThemeName as string | null;
+          const osTheme = system.osTheme as string | null;
           if (osTheme == "light" || osTheme == "dark") {
             this.systemDarkKnown = true;
             this.lastSystemDark = osTheme == "dark";

@@ -1,10 +1,10 @@
 <template>
-  <qt-page-frame :max-width="640">
+  <qt-page-frame width-kind="form">
   <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']">
-    <scroll-view class="scroll" :class="layout.isWide ? 'scroll-wide' : ''" direction="vertical" :show-scrollbar="false">
+    <scroll-view class="scroll" :class="layout.isWide ? 'scroll-wide' : ''" :style="wideScrollStyle" direction="vertical" :show-scrollbar="false">
       <!-- 类型选择 -->
       <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
-        <text class="label" :class="layout.isWide ? 'label-wide' : ''">反馈类型</text>
+        <text class="label" :class="layout.isWide ? 'label-wide' : ''" :style="qtFontDual(27, 16)">反馈类型</text>
         <QtSegmented
           class="type-seg" :class="[[layout.isWide ? 'type-seg-wide' : ''], layout.isWide ? 'type-seg-wide' : '']"
           
@@ -12,12 +12,12 @@
           :modelValue="typeIndex"
           @change="onTypeChange"
         />
-        <text class="hint" :class="layout.isWide ? 'hint-wide' : ''">{{ type == "issue" ? "功能异常、体验问题等" : "新功能、改进建议等" }}</text>
+        <text class="hint" :class="layout.isWide ? 'hint-wide' : ''" :style="qtFontDual(22, 12)">{{ type == "issue" ? "功能异常、体验问题等" : "新功能、改进建议等" }}</text>
       </view>
 
       <!-- 标题 -->
       <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
-        <text class="label" :class="layout.isWide ? 'label-wide' : ''">标题</text>
+        <text class="label" :class="layout.isWide ? 'label-wide' : ''" :style="qtFontDual(27, 16)">标题</text>
         <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
           <input
             :value="title"
@@ -29,12 +29,12 @@
             :maxlength="128"
           />
         </view>
-        <text class="hint" :class="layout.isWide ? 'hint-wide' : ''">{{ title.length }}/128</text>
+        <text class="hint" :class="layout.isWide ? 'hint-wide' : ''" :style="qtFontDual(22, 12)">{{ title.length }}/128</text>
       </view>
 
       <!-- 内容 -->
       <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
-        <text class="label" :class="layout.isWide ? 'label-wide' : ''">内容</text>
+        <text class="label" :class="layout.isWide ? 'label-wide' : ''" :style="qtFontDual(27, 16)">内容</text>
         <view class="textarea-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'textarea-row-wide' : '']">
           <textarea
             :value="content"
@@ -46,12 +46,12 @@
             :maxlength="5000"
           />
         </view>
-        <text class="hint" :class="layout.isWide ? 'hint-wide' : ''">{{ content.length }}/5000</text>
+        <text class="hint" :class="layout.isWide ? 'hint-wide' : ''" :style="qtFontDual(22, 12)">{{ content.length }}/5000</text>
       </view>
 
       <!-- 联系方式（选填） -->
       <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
-        <text class="label" :class="layout.isWide ? 'label-wide' : ''">联系方式（选填）</text>
+        <text class="label" :class="layout.isWide ? 'label-wide' : ''" :style="qtFontDual(27, 16)">联系方式（选填）</text>
         <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
           <input
             :value="contact"
@@ -67,13 +67,14 @@
 
       <view class="submit-wrap" :class="layout.isWide ? 'submit-wrap-wide' : ''">
         <qt-button label="提交反馈" size="lg" :disabled="submitting" @click="doSubmit" />
-        <text class="privacy" :class="layout.isWide ? 'privacy-wide' : ''">提交后设备信息与版本号将一并上传，便于定位问题</text>
+        <text class="privacy" :class="layout.isWide ? 'privacy-wide' : ''" :style="qtFontDual(22, 12)">提交后设备信息与版本号将一并上传，便于定位问题</text>
       </view>
     </scroll-view>
   </view>
   </qt-page-frame>
 </template>
 <script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { ref, computed, onUnmounted } from "vue";
 import { onLoad } from "@dcloudio/uni-app";
@@ -81,11 +82,20 @@ import QtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmente
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtContentWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { submitFeedback } from "@/services/feedback";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
 
 const themeStore = useThemeStore();
 const layout = useQtLayout();
+
+/**
+ * 宽屏表单宽度改由 use-qt-widths 的 form 档给出（560-720），不再写死 420px。
+ * 420px 是改造前按「手机拉宽一点」估的，桌面端一行只能放两个字，比手机还挤。
+ */
+const wideScrollStyle = computed((): string => layout.isWide ? "width:" + qtContentWidth("form") + "px;" : "");
 
 const typeIndex = ref(0);
 const type = computed(() => (typeIndex.value == 1 ? "request" : "issue"));
@@ -115,22 +125,22 @@ async function doSubmit(): Promise<void> {
   const t = title.value.trim();
   const c = content.value.trim();
   if (t.length == 0) {
-    uni.showToast({ title: "请填写标题", icon: "none" });
+    qtShowToast({ title: "请填写标题", icon: "none" });
     return;
   }
   if (c.length == 0) {
-    uni.showToast({ title: "请填写内容", icon: "none" });
+    qtShowToast({ title: "请填写内容", icon: "none" });
     return;
   }
   submitting.value = true;
   try {
     await submitFeedback(type.value, t, c, contact.value.trim());
-    uni.showToast({ title: "提交成功", icon: "success" });
+    qtShowToast({ title: "提交成功", icon: "success" });
     submitNavTimer = setTimeout(() => {
-      uni.navigateBack();
+      uni.navigateBack({ animationType: qtNavAnimation() });
     }, 600) as number;
   } catch (e) {
-    uni.showToast({ title: (e as Error).message || "提交失败", icon: "none" });
+    qtShowToast({ title: (e as Error).message || "提交失败", icon: "none" });
   } finally {
     submitting.value = false;
   }
@@ -159,7 +169,7 @@ onUnmounted(() => {
   margin: 20rpx 24rpx 0;
   padding: 28rpx 24rpx;
   background-color: rgba(255, 255, 255, 0.62);
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
   border-color: rgba(255, 255, 255, 0.6);
   border-radius: 20rpx;
 }

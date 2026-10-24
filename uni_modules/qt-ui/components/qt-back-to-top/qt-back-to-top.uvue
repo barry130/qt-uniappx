@@ -20,7 +20,8 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from "vue";
-import { qtRpx, useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtRpx, useQtLayout, QT_PLAYER_BAR_HEIGHT_PX } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { usePlayerStore } from "@/stores/player";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 
 defineProps<{
@@ -28,6 +29,7 @@ defineProps<{
 }>();
 
 const layout = useQtLayout();
+const player = usePlayerStore();
 
 defineEmits<{
   (e: "tap"): void;
@@ -44,8 +46,11 @@ const posStyle = computed((): string => "left:" + left.value + "px;top:" + top.v
 
 function reposition(): void {
   const win = uni.getWindowInfo();
+  // 宽屏有常驻底栏时上抬 64px，否则按钮贴在底栏右端、和进度条重叠。
+  // 屏幕上抬量用 px（桌面不随 rpx 缩放），手机仍走 rpx。
+  const lift = layout.isWide && player.current != null ? QT_PLAYER_BAR_HEIGHT_PX : 0;
   left.value = win.windowWidth - qtRpx(MARGIN_RIGHT) - qtRpx(SIZE);
-  top.value = win.windowHeight - qtRpx(MARGIN_BOTTOM) - qtRpx(SIZE);
+  top.value = win.windowHeight - qtRpx(MARGIN_BOTTOM) - qtRpx(SIZE) - lift;
 }
 
 onMounted(() => {
@@ -53,9 +58,10 @@ onMounted(() => {
 });
 
 // 旋转/分屏后窗口尺寸变化，fixed 的 px 定位必须重算，
-// 否则竖转横后 top 超出新 windowHeight，按钮消失在屏幕外
+// 否则竖转横后 top 超出新 windowHeight，按钮消失在屏幕外。
+// 同时监听「是否有当前歌曲」：底栏的出现/消失会改变可用的底部空间。
 watch(
-  () => [layout.windowWidth, layout.windowHeight],
+  () => [layout.windowWidth, layout.windowHeight, player.current != null],
   () => {
     reposition();
   }

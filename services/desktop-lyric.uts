@@ -26,7 +26,7 @@ import { musicApi } from "@/services/music-api";
 import { qtDiag } from "@/services/diag";
 import { parseLrc, activeLyricIndex, parseWordByWordLrc, mergeRomanization } from "@/utils/lrc";
 import type { LyricLine, Song } from "@/types/music";
-// #ifdef APP-ANDROID
+// #ifdef APP-ANDROID || APP-HARMONY
 // 歌词窗接口直接走模块级函数（无实例桥接，见 services/audio-player.uts 头部说明），
 // 不再经由 audioPlayer 的实例缓存转发
 import {
@@ -47,6 +47,11 @@ import {
   audioLyricSetBackground,
   audioOnLyricWindowChanged,
 } from "@/uni_modules/qt-audio-player";
+// #endif
+// #ifdef APP-HARMONY
+// 整首 LRC 推送只有鸿蒙需要（安卓是我们自绘窗，按行推就够）；单独一块是为了
+// 不必往 app-android / 根兜底里加一个用不到的导出
+import { audioLyricSetLrc } from "@/uni_modules/qt-audio-player";
 // #endif
 
 const KEY_LOCK = "qt-desktop-lyric-lock";
@@ -124,15 +129,75 @@ class DesktopLyricService {
    * 1.5s 内一律不对账——对账只作为回调漏达时的兜底，不参与正常流程。
    */
   private lastSwitchAt: number = 0;
+  /**
+   * 交给系统的「整首 LRC」原文（只有鸿蒙会真的用上，见 syncLrc）。
+   * 之所以要留一份：text 在 loadLyricForCurrent 里是局部变量，而系统这条通道
+   * 需要在换歌时显式推空串清掉上一首的时间轴，不能只在有词的时候推。
+   */
+  private rawLrc: string = "";
 
   private markSwitched(): void {
     this.lastSwitchAt = Date.now();
   }
 
+  /**
+   * 把整首 LRC 交给系统（鸿蒙专用通道）。
+   *
+   * 鸿蒙的桌面歌词是**系统渲染**的：给系统整首带时间轴的 LRC，它就能自己按播放进度
+   * 滚动，息屏/后台也不掉行；安卓是我们自绘悬浮窗，按行推就够，不需要这条通道
+   * （所以原生侧只有 app-harmony 有 audioLyricSetLrc，调用点也必须夹在 APP-HARMONY 里）。
+   *
+   * **与歌词偏移的口径差异**：这条通道的时间轴是原始时间戳，不含用户在播放页设的
+   * 歌词偏移；而 singleLyricText 那条是我们按偏移算好的当前行。两者并存时，系统若
+   * 优先消费 lyric，桌面歌词会比应用内歌词差一个偏移量。这是平台固有限制（应用无法
+   * 干预系统歌词窗的滚动），偏移为 0 时两者完全一致，故保持现状并在此注明。
+   *
+   * 空串必须真的推下去：换到纯音乐/无歌词时若不推，系统会保留上一首的时间轴，
+   * 桌面歌词会继续滚上一首的词（原生侧用 gLyricLrcDirty 保证空串也带上）。
+   */
+  private syncLrc(text: string): void {
+    if (this.rawLrc == text) return;
+    this.rawLrc = text;
+    // #ifdef APP-HARMONY
+    audioLyricSetLrc(text);
+    // #endif
+  }
+
+  /**
+   * 用已解析的行拼一份标准 LRC（`[mm:ss.xx]文本`）交给系统。
+   *
+   * 为什么不直接把接口返回的原始 text 推下去：逐字歌词（酷狗 `[起点ms,时长ms]词(词)…`）
+   * 那条路上 text 可能是空的（源只有逐字格式），直接推原串就会在明明有歌词时把
+   * 系统时间轴清空。从 lines 重建则天然覆盖三条路径（普通 LRC / 逐字 / 罗马音），
+   * 且推给系统的内容与我们在应用内显示的行完全一致。
+   *
+   * 只拼主行文本：系统歌词窗是单行的，把译文并进去会破坏时间轴对齐。
+   */
+  private buildLrc(lines: LyricLine[]): string {
+    let out = "";
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i] as LyricLine;
+      if (line.text.length == 0) continue;
+      // 百分之一秒为单位做整数运算，避开浮点格式化的平台差异
+      let cs = Math.round(line.time * 100);
+      if (cs < 0) cs = 0;
+      const rest = cs % 100;
+      const totalSec = (cs - rest) / 100;
+      const sec = totalSec % 60;
+      const min = (totalSec - sec) / 60;
+      out = out + "[" + this.pad2(min) + ":" + this.pad2(sec) + "." + this.pad2(rest) + "]" + line.text + "\n";
+    }
+    return out;
+  }
+
+  private pad2(value: number): string {
+    return value < 10 ? "0" + value.toString() : value.toString();
+  }
+
   constructor() {
     // 通知栏「桌面歌词」开关（原生显隐悬浮窗）后经此回调同步运行态并启停跟随播放：
     // 窗口本体显隐全在原生侧，JS 只负责进度跟随。幂等，应用内开关触发的重复通知无害。
-    // #ifdef APP-ANDROID
+    // #ifdef APP-ANDROID || APP-HARMONY
     audioOnLyricWindowChanged((on: boolean) => {
       qtDiag("[QT Lyric] 显隐回调进入 on=" + on.toString())
       this.markSwitched();
@@ -169,20 +234,22 @@ class DesktopLyricService {
    * 必须容错：对账只是兜底，绝不能因为拿不到原生真相就把开关判反或崩掉。
    */
   private nativeShowing(): boolean | null {
-    // #ifdef APP-ANDROID
+    // 返回 null = 基座还没有这个查询接口（应用实例的基座早于本次改动）：无从对账，保持现状。
+    // 用「先赋默认值、条件块内改写」而不是 #ifndef 兜底分支：uni-preprocess 的
+    // `#ifndef A || B` 不是德摩根律（在 B 上恒真），写成互补分支极易踩坑
+    let result: boolean | null = null;
+    // #ifdef APP-ANDROID || APP-HARMONY
     try {
-      return audioLyricIsShowing()
+      result = audioLyricIsShowing()
     } catch (e) {
-      return null
+      result = null
     }
     // #endif
-    // #ifndef APP-ANDROID
-    return null
-    // #endif
+    return result;
   }
 
   refreshFromNative(): void {
-    // #ifdef APP-ANDROID
+    // #ifdef APP-ANDROID || APP-HARMONY
     // 显式变更后的一小段窗口期不对账：见 lastSwitchAt 说明
     if (Date.now() - this.lastSwitchAt < 1500) return;
     const showing = this.nativeShowing();
@@ -257,22 +324,41 @@ class DesktopLyricService {
     }
   }
 
+  /**
+   * 是否已有「绘制桌面歌词」的权限。
+   * 鸿蒙走系统渲染（AVSession 桌面歌词），**不需要任何权限**，恒为 true；
+   * 安卓是自绘悬浮窗，需要 SYSTEM_ALERT_WINDOW。用平台常量分支而不是 #ifndef 兜底。
+   */
   hasPermission(): boolean {
+    // #ifdef APP-HARMONY
+    return true;
+    // #endif
     // #ifdef APP-ANDROID
     return audioLyricHasOverlayPermission();
     // #endif
+    // 兜底（web / iOS）：必须用嵌套 #ifndef 而不是 `#ifndef APP-ANDROID || APP-HARMONY`
+    // —— uni-preprocess 把后者解析成 `(!APP-ANDROID) || APP-HARMONY`，在鸿蒙上恒真，
+    // 会让这里多出一条永远走不到、却看起来像有效分支的 return false
     // #ifndef APP-ANDROID
+    // #ifndef APP-HARMONY
     return false;
+    // #endif
     // #endif
   }
 
-  /** 跳系统设置页申请悬浮窗权限；返回是否成功拉起设置页（false 时调用方提示手动前往） */
+  /** 跳系统设置页申请悬浮窗权限；返回是否成功拉起设置页（false 时调用方提示手动前往）。
+   *  鸿蒙无权限可申请，直接返回 true（调用方据此跳过安卓那套引导弹窗）。 */
   requestPermission(): boolean {
+    // #ifdef APP-HARMONY
+    return true;
+    // #endif
     // #ifdef APP-ANDROID
     return audioLyricRequestOverlayPermission();
     // #endif
     // #ifndef APP-ANDROID
+    // #ifndef APP-HARMONY
     return false;
+    // #endif
     // #endif
   }
 
@@ -282,13 +368,15 @@ class DesktopLyricService {
   enable(): boolean {
     this.on = true;
     this.markSwitched();
-    // #ifdef APP-ANDROID
+    // #ifdef APP-ANDROID || APP-HARMONY
     const ok = audioLyricShow();
     if (ok) this.startFollowing();
     return ok;
     // #endif
     // #ifndef APP-ANDROID
+    // #ifndef APP-HARMONY
     return false;
+    // #endif
     // #endif
   }
 
@@ -296,7 +384,7 @@ class DesktopLyricService {
   disable(): void {
     this.on = false;
     this.markSwitched();
-    // #ifdef APP-ANDROID
+    // #ifdef APP-ANDROID || APP-HARMONY
     audioLyricHide();
     // #endif
     this.stopFollowing();
@@ -322,7 +410,7 @@ class DesktopLyricService {
     try {
       uni.setStorageSync(KEY_LOCK, locked ? "1" : "0");
     } catch (_) {}
-    // #ifdef APP-ANDROID
+    // #ifdef APP-ANDROID || APP-HARMONY
     audioLyricSetLocked(locked);
     // #endif
   }
@@ -648,7 +736,7 @@ class DesktopLyricService {
     if (index == this.lastLineIndex) return;
     this.lastLineIndex = index;
     const line = index >= 0 ? this.lines[index] : null;
-    // #ifdef APP-ANDROID
+    // #ifdef APP-ANDROID || APP-HARMONY
     if (line == null || line.text.length == 0) {
       audioLyricUpdate(" · · · ", "");
     } else {
@@ -678,7 +766,9 @@ class DesktopLyricService {
       this.lines = [];
       this.lastLineIndex = -2;
       this.loadedKey = "";
-      // #ifdef APP-ANDROID
+      // 整首时间轴也清掉：这条通道给的是「整首歌的词」，留着上一首的会让系统继续滚它
+      this.syncLrc("");
+      // #ifdef APP-ANDROID || APP-HARMONY
       audioLyricUpdate("等待播放", "");
       // #endif
       return;
@@ -754,12 +844,14 @@ class DesktopLyricService {
         if (lines.length == 0) {
           this.lines = [];
           this.lastLineIndex = -2;
-          // #ifdef APP-ANDROID
+          this.syncLrc("");
+          // #ifdef APP-ANDROID || APP-HARMONY
           audioLyricUpdate("纯音乐，请欣赏", "");
           // #endif
         } else {
           this.lines = lines;
           this.lastLineIndex = -2;
+          this.syncLrc(this.buildLrc(lines));
           this.refreshNow();
         }
       }
@@ -768,7 +860,8 @@ class DesktopLyricService {
       if (this.active && this.currentSongKey() == key && this.lyricEpoch == epoch) {
         this.lines = [];
         this.lastLineIndex = -2;
-        // #ifdef APP-ANDROID
+        this.syncLrc("");
+        // #ifdef APP-ANDROID || APP-HARMONY
         audioLyricUpdate("暂无歌词", "");
         // #endif
       }

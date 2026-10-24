@@ -1,0 +1,133 @@
+<template>
+  <!-- 消息中心的一条卡片。
+       抽成组件的原因：宽屏两列时 list-item 必须固定承载「两个格」，卡片标记要在
+       一格里出现一次——不抽组件就得把 30 行标记抄两遍，两列的左右两格势必漂移。
+
+       2026-10-22 用户要求「只展示标题，一行就行，也不要展示日期时间了」：
+       整卡压成**单行** —— 图标 + 类型标签 + 标题（一行截断）+ 置顶徽标 + 箭头。
+       原来的正文预览行与时间戳全部去掉，卡片高度不再需要脚本定高（等高由单行天然成立）。 -->
+  <view
+    class="n-item"
+    :class="[[read ? 'n-item-read' : ''], [themeStore.dark ? 'n-item-dark' : ''], [layout.isWide ? 'n-item-wide' : '']]"
+    :hover-class="layout.isWide ? 'n-item-hover' : 'none'"
+    @tap="emit('tap')"
+  >
+    <view class="n-icon-wrap" :class="layout.isWide ? 'n-icon-wrap-wide' : ''" :style="'background-color:' + themeStore.skin.accentSoft + ';'">
+      <QtIcon name="bell" :size="layout.isWide ? 18 : 30" :color="themeStore.skin.accent" />
+      <!-- 未读红点：前端缓存判定 -->
+      <view v-if="!read" class="n-dot" :class="layout.isWide ? 'n-dot-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'"></view>
+    </view>
+    <!-- 类型标签：公告/反馈/需求，颜色由宿主给，组件不自算。
+         宿主对「公告」传空串时整块不渲染——消息中心绝大多数是公告，标签属重复信息 -->
+    <view v-if="typeText.length > 0" class="ntype" :class="layout.isWide ? 'ntype-wide' : ''" :style="'background-color:' + typeColor + ';'">
+      <text class="ntype-text" :class="layout.isWide ? 'ntype-text-wide' : ''" :style="qtFontDual(20, 11)">{{ typeText }}</text>
+    </view>
+    <text class="n-title" :class="layout.isWide ? 'n-title-wide' : ''" :max-lines="1" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(30, 16)">{{ title }}</text>
+    <!-- 置顶徽标靠右：放标题前会把标题起点推得忽左忽右，两条卡片的标题就对不齐 -->
+    <view v-if="top" class="n-top-badge" :class="layout.isWide ? 'n-top-badge-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'">
+      <text class="n-top-badge-text" :class="layout.isWide ? 'n-top-badge-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(20, 11)">置顶</text>
+    </view>
+    <QtIcon name="chevron-right" :size="layout.isWide ? 18 : 26" color="#c3c9d6" />
+  </view>
+</template>
+
+<script setup lang="ts">
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+
+defineProps<{
+  title: string;
+  /** 类型标签文字；传空串则不渲染标签（公告类由宿主省略） */
+  typeText: string;
+  typeColor: string;
+  read: boolean;
+  top: boolean;
+}>();
+
+const emit = defineEmits<{ tap: [] }>();
+
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+</script>
+
+<style>
+/* 文字颜色一律由模板里的 themeStore.skin.* 内联给出（跟随深浅色与换肤），
+   这里只留字号/字重/间距；下面这些规则里不要再写死颜色 */
+.n-item {
+  flex: 1;
+  flex-direction: row;
+  align-items: center;
+  /* 单行卡：纵向内边距 22rpx → 18rpx，配合去掉正文行后整卡比原来矮一半以上 */
+  padding: 18rpx 24rpx;
+  background-color: rgba(255, 255, 255, 0.62);
+  border-width: 1px; border-style: solid;
+  border-color: rgba(255, 255, 255, 0.6);
+  border-radius: 20rpx;
+}
+.n-item-dark {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+.n-item-read {
+  opacity: 0.72;
+}
+.n-icon-wrap {
+  position: relative;
+  width: 56rpx;
+  height: 56rpx;
+  border-radius: 16rpx;
+  justify-content: center;
+  align-items: center;
+}
+.n-dot {
+  position: absolute;
+  right: 2rpx;
+  top: 2rpx;
+  width: 16rpx;
+  height: 16rpx;
+  border-radius: 8rpx;
+}
+.ntype {
+  flex-shrink: 0;
+  margin-left: 18rpx;
+  padding: 2rpx 12rpx;
+  border-radius: 8rpx;
+}
+.ntype-text {
+  color: #ffffff;
+  font-size: 20rpx;
+  font-weight: 600;
+}
+.n-title {
+  flex: 1;
+  margin-left: 18rpx;
+  font-size: 30rpx;
+  font-weight: 600;
+}
+.n-top-badge {
+  flex-shrink: 0;
+  margin-left: 12rpx;
+  padding: 2rpx 12rpx;
+  border-radius: 8rpx;
+}
+.n-top-badge-text {
+  font-size: 20rpx;
+  font-weight: 600;
+}
+
+/* Vapor 宽屏：px 覆盖 rpx，1600x900 下避免按窗口比例放大 2.7 倍 */
+/* 桌面指针反馈：只在宽屏启用 */
+.n-item-hover {
+  background-color: rgba(127, 127, 127, 0.10);
+}
+.n-item-wide { padding: 12px 16px; border-radius: 14px; }
+.n-icon-wrap-wide { width: 36px; height: 36px; border-radius: 10px; }
+.n-dot-wide { right: 1px; top: 1px; width: 7px; height: 7px; border-radius: 4px; }
+.ntype-wide { margin-left: 10px; padding: 2px 8px; border-radius: 5px; }
+.ntype-text-wide { font-size: 11px; }
+.n-title-wide { margin-left: 10px; font-size: 16px; }
+.n-top-badge-wide { margin-left: 8px; padding: 2px 8px; border-radius: 5px; }
+.n-top-badge-text-wide { font-size: 11px; }
+</style>

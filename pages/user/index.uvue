@@ -1,5 +1,5 @@
 <template>
-  <qt-page-frame :max-width="640">
+  <qt-page-frame width-kind="flow">
     <view class="page" :class="layout.isWide ? 'page-wide' : ''">
       <scroll-view class="page-body" direction="vertical" :show-scrollbar="false">
         <!-- 用户信息卡 -->
@@ -12,46 +12,87 @@
             />
           </view>
           <view class="info" :class="layout.isWide ? 'info-wide' : ''">
-            <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="'color:' + theme.skin.text + ';'">{{ nickname }}</text>
-            <text class="sub" :class="layout.isWide ? 'sub-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ email.length > 0 ? email : "轻听音乐账户" }}</text>
+            <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(31, 22)">{{ nickname }}</text>
+            <text class="sub" :class="layout.isWide ? 'sub-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 15)">{{ email.length > 0 ? email : "轻听音乐账户" }}</text>
           </view>
         </view>
 
-        <!-- 账户操作 -->
-        <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="cardStyle">
-          <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellBorderStyle" @click="goEditProfile">
-            <QtIcon class="cell-icon" :class="layout.isWide ? 'cell-icon-wide' : ''" name="edit" :size="36" :color="theme.skin.accent" />
-            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">修改个人资料</text>
-            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+        <!-- 宽屏两列：信息卡 + 3 行操作挤在单列里时，1920 下每行 1312px 只放一个入口。
+             左列放「账户操作」(3 行)，右列放「已保存的内容」入口 + 退出登录，
+             两列等高，信息栏留在顶部通栏（它是页头不是列表项）。 -->
+        <view v-if="twoColumn" class="cols">
+          <view class="col" :style="colStyle">
+            <view class="group group-wide" :style="cardStyle">
+              <view v-for="(c, ci) in accountCells" :key="c.key" class="cell cell-wide" :class="ci == accountCells.length - 1 ? 'cell-no-border' : ''" :style="cellBorderStyle" @click="c.go" :hover-class="layout.isWide ? 'cell-hover' : 'none'">
+                <QtIcon class="cell-icon cell-icon-wide" :name="c.icon" :size="36" :color="theme.skin.accent" />
+                <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ c.title }}</text>
+                <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+              </view>
+            </view>
           </view>
-          <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellBorderStyle" @click="goCollection">
-            <QtIcon class="cell-icon" :class="layout.isWide ? 'cell-icon-wide' : ''" name="heart" :size="36" :color="theme.skin.accent" />
-            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">我的收藏</text>
-            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
-          </view>
-          <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" @click="goStats">
-            <QtIcon class="cell-icon" :class="layout.isWide ? 'cell-icon-wide' : ''" name="chart" :size="36" :color="theme.skin.accent" />
-            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">听歌统计</text>
-            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          <view class="col col-right" :style="colStyle">
+            <view class="group group-wide" :style="cardStyle">
+              <view v-for="(c, ci) in contentCells" :key="c.key" class="cell cell-wide" :class="ci == contentCells.length - 1 ? 'cell-no-border' : ''" :style="cellBorderStyle" @click="c.go" :hover-class="layout.isWide ? 'cell-hover' : 'none'">
+                <QtIcon class="cell-icon cell-icon-wide" :name="c.icon" :size="36" :color="theme.skin.accent" />
+                <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ c.title }}</text>
+                <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+              </view>
+            </view>
+            <view class="logout-wrap logout-wrap-wide">
+              <view class="logout-btn logout-btn-wide" :style="'background-color:' + theme.skin.dangerSoft + ';'" @click="confirmLogout">
+                <QtIcon name="close" :size="14" :color="theme.skin.danger" />
+                <text class="logout-text logout-text-wide" :style="('color:' + theme.skin.danger + ';') + qtFontDual(28, 16)">退出登录</text>
+              </view>
+            </view>
           </view>
         </view>
 
-        <!-- 退出登录 -->
-        <view class="logout-wrap" :class="layout.isWide ? 'logout-wrap-wide' : ''">
-          <view class="logout-btn" :class="layout.isWide ? 'logout-btn-wide' : ''" :style="'background-color:' + theme.skin.dangerSoft + ';'" @click="confirmLogout">
-            <QtIcon name="close" :size="layout.isWide ? 14 : 26" :color="theme.skin.danger" />
-            <text class="logout-text" :class="layout.isWide ? 'logout-text-wide' : ''" :style="'color:' + theme.skin.danger + ';'">退出登录</text>
+        <!-- 竖屏 / 中等宽度：单列（原样） -->
+        <view v-else>
+          <!-- 账户操作 -->
+          <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="cardStyle">
+            <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellBorderStyle" @click="goEditProfile" :hover-class="layout.isWide ? 'cell-hover' : 'none'">
+              <QtIcon class="cell-icon" :class="layout.isWide ? 'cell-icon-wide' : ''" name="edit" :size="36" :color="theme.skin.accent" />
+              <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">修改个人资料</text>
+              <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+            </view>
+            <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellBorderStyle" @click="goCollection" :hover-class="layout.isWide ? 'cell-hover' : 'none'">
+              <QtIcon class="cell-icon" :class="layout.isWide ? 'cell-icon-wide' : ''" name="heart" :size="36" :color="theme.skin.accent" />
+              <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">我的收藏</text>
+              <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+            </view>
+            <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellBorderStyle" @click="goStats" :hover-class="layout.isWide ? 'cell-hover' : 'none'">
+              <QtIcon class="cell-icon" :class="layout.isWide ? 'cell-icon-wide' : ''" name="chart" :size="36" :color="theme.skin.accent" />
+              <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">听歌统计</text>
+              <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+            </view>
+            <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" @click="goAiAssistant" :hover-class="layout.isWide ? 'cell-hover' : 'none'">
+              <QtIcon class="cell-icon" :class="layout.isWide ? 'cell-icon-wide' : ''" name="sparkles" :size="36" :color="theme.skin.accent" />
+              <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">AI 音乐助手</text>
+              <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+            </view>
+          </view>
+
+          <!-- 退出登录 -->
+          <view class="logout-wrap" :class="layout.isWide ? 'logout-wrap-wide' : ''">
+            <view class="logout-btn" :class="layout.isWide ? 'logout-btn-wide' : ''" :style="'background-color:' + theme.skin.dangerSoft + ';'" @click="confirmLogout">
+              <QtIcon name="close" :size="layout.isWide ? 14 : 26" :color="theme.skin.danger" />
+              <text class="logout-text" :class="layout.isWide ? 'logout-text-wide' : ''" :style="('color:' + theme.skin.danger + ';') + qtFontDual(28, 16)">退出登录</text>
+            </view>
           </view>
         </view>
       </scroll-view>
     </view>
   </qt-page-frame>
 </template><script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
+import { qtConfirm } from "@/services/confirm";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { ref, computed, onMounted } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtContentWidth, QT_GUTTER_PX } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { usePlayerStore } from "@/stores/player";
 import { accountApi, persistUserRoles } from "@/services/music-api";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
@@ -59,6 +100,8 @@ import { clearTokens, getAccessToken } from "@/services/auth";
 import { getCachedAvatar, DEFAULT_AVATAR_ASSET } from "@/services/media";
 import { meCached, clearCachedMe } from "@/services/user-cache";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
 
 const theme = useThemeStore();
 const layout = useQtLayout();
@@ -76,11 +119,47 @@ const storedNickname = ref("");
 // 展示头像：缓存优先，/me 回来后刷新（http 直链才展示）
 const avatarUrl = ref(getCachedAvatar());
 
+/** 两列里的单行入口（图标 + 标题 + 箭头结构完全相同，只有跳转不同） */
+type UserCell = { key: string; icon: string; title: string; go: () => void };
+
+// AI 助手入口对全部用户展示（2026-10-24 起，音乐助手随每日推荐一起全量开放）；
+// 无权限/未登录时由助手页自身给出提示。
+//
+// 两列门限按**可用宽度**判，不按窗口宽度判：三栏模式下窗口仍是 1280 但右栏只有约 400，
+// 若按窗口判会算出两列各 320 直接横向溢出。判据 = 内容列宽减两侧留白与中间间距后
+// 仍能放下两个最小分组列宽（420 × 2）。三栏收窄后自然退回单列。
+//
+const twoColumn = computed((): boolean => qtContentWidth("flow") - QT_GUTTER_PX * 2 - 16 >= 420 * 2);
+
+/** 左列：账户操作 3 行（改资料 / 收藏 / 统计） */
+const accountCells = computed((): UserCell[] => {
+  const cells: UserCell[] = [
+    { key: "edit", icon: "edit", title: "修改个人资料", go: goEditProfile },
+    { key: "collection", icon: "heart", title: "我的收藏", go: goCollection },
+    { key: "stats", icon: "chart", title: "听歌统计", go: goStats },
+    { key: "ai", icon: "sparkles", title: "AI 音乐助手", go: goAiAssistant },
+  ];
+  return cells;
+});
+
+/** 右列：内容型入口（收藏与统计已放左列，右列只留作品相关） */
+const contentCells = computed((): UserCell[] => [
+  { key: "playlists", icon: "disc", title: "我的歌单", go: goPlaylists },
+  { key: "history", icon: "clock", title: "最近播放", go: goHistory },
+]);
+
+/** 两列列宽：`flex-shrink:0` 必须写，否则两列按内容 min-content 比例收缩 → 不等宽 */
+const colStyle = computed<string>(() => {
+  const inner = qtContentWidth("flow") - QT_GUTTER_PX * 2 - 16;
+  const w = Math.floor(inner / 2);
+  return "width:" + (w > 320 ? w : 320) + "px;flex-shrink:0;";
+});
+
 async function fetchUserInfo() {
   const accessToken = getAccessToken();
   if (!accessToken) {
     // 未登录时直接回我的页（本页仅登录态可见）
-    uni.navigateBack();
+    uni.navigateBack({ animationType: qtNavAnimation() });
     return;
   }
   token.value = accessToken;
@@ -132,48 +211,66 @@ const email = computed<string>(() => {
 });
 
 function goEditProfile() {
-  uni.navigateTo({ url: "/pages/profile/edit/index" });
+  uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/profile/edit/index" });
 }
 function goCollection() {
-  uni.navigateTo({ url: "/pages/collection/index" });
+  uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/collection/index" });
 }
 function goStats() {
-  uni.navigateTo({ url: "/pages/stats/index" });
+  uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/stats/index" });
+}
+
+/** AI 音乐助手（架子页：会话/候选/动作都在，算法在后端） */
+function goAiAssistant() {
+  uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/ai-assistant/index" });
+}
+
+/** 宽屏右列的入口：我的歌单（只增加宽屏两列时的可见入口，竖屏不出现） */
+function goPlaylists() {
+  uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/playlists/index" });
+}
+
+/** 宽屏右列的入口：最近播放 */
+function goHistory() {
+  uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/history/index" });
 }
 
 function confirmLogout() {
-  uni.showModal({
+  qtConfirm({
     title: "退出登录",
     content: "确定退出当前账号吗？本地收藏与下载不会丢失。",
     confirmText: "退出",
-    confirmColor: theme.skin.danger,
-    success: async (res) => {
-      if (!res.confirm) return;
-      // 断网期间的待推送操作先尽力补推（此时仍带原账号身份），避免退出后队列被清导致丢操作
-      try {
-        await usePlayerStore().flushPendingOps();
-      } catch (_) {}
-      try {
-        await accountApi.logout();
-      } catch (_) {
-        // 忽略登出接口错误，本地清理照常执行
-      } finally {
-        clearTokens();
-        clearCachedMe();
-        uni.removeStorageSync("qt-token");
-        uni.removeStorageSync("qt-nickname");
-        uni.removeStorageSync("qt-email");
-        uni.removeStorageSync("qt-roles");
-        uni.removeStorageSync("qt-permissions");
-        uni.removeStorageSync("qt-avatar");
-        // 收藏同步游标/队列按账号隔离，退出时重置；本地收藏缓存与账号归属标记保留
-        //（同账号重登无缝恢复，换账号登录时由登录页检测归属并清库）
-        usePlayerStore().resetLikeSync();
-        uni.showToast({ title: "已退出登录", icon: "none" });
-        uni.navigateBack();
-      }
-    },
+    danger: true,
+  }).then((ok: boolean) => {
+    if (!ok) return;
+    doLogout();
   });
+}
+
+async function doLogout() {
+  // 断网期间的待推送操作先尽力补推（此时仍带原账号身份），避免退出后队列被清导致丢操作
+  try {
+    await usePlayerStore().flushPendingOps();
+  } catch (_) {}
+  try {
+    await accountApi.logout();
+  } catch (_) {
+    // 忽略登出接口错误，本地清理照常执行
+  } finally {
+    clearTokens();
+    clearCachedMe();
+    uni.removeStorageSync("qt-token");
+    uni.removeStorageSync("qt-nickname");
+    uni.removeStorageSync("qt-email");
+    uni.removeStorageSync("qt-roles");
+    uni.removeStorageSync("qt-permissions");
+    uni.removeStorageSync("qt-avatar");
+    // 收藏同步游标/队列按账号隔离，退出时重置；本地收藏缓存与账号归属标记保留
+    //（同账号重登无缝恢复，换账号登录时由登录页检测归属并清库）
+    usePlayerStore().resetLikeSync();
+    qtShowToast({ title: "已退出登录", icon: "none" });
+    uni.navigateBack({ animationType: qtNavAnimation() });
+  }
 }
 </script>
 <style>
@@ -194,7 +291,7 @@ function confirmLogout() {
   padding: 72rpx 32rpx 50rpx;
   flex-direction: row;
   align-items: center;
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
   border-radius: 28rpx;
 }
 .avatar {
@@ -228,14 +325,18 @@ function confirmLogout() {
   margin-top: 20rpx;
   border-radius: 24rpx;
   overflow: hidden;
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
 }
 .cell {
   height: 96rpx;
   padding: 0 32rpx;
   flex-direction: row;
   align-items: center;
-  border-bottom-width: 1px;
+  border-bottom-width: 1px; border-bottom-style: solid;
+}
+/* 桌面指针反馈：只在宽屏启用 */
+.cell-hover {
+  background-color: rgba(255, 255, 255, 0.06);
 }
 .cell-no-border {
   border-bottom-width: 0;
@@ -268,7 +369,19 @@ function confirmLogout() {
   margin-left: 10rpx;
 }
 
-/* ===== 宽屏 ===== */
+/* ===== 宽屏两列 ===== */
+/* 列内纵向堆叠、顶端对齐：默认 stretch 会把矮的右列拉成和左列等高 */
+.cols {
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: center;
+}
+.col {
+  flex-direction: column;
+}
+.col-right {
+  margin-left: 16px;
+}
 .user-card-wide { padding: 34px 28px 26px; border-radius: 18px; }
 .avatar-wide { width: 72px; height: 72px; border-radius: 24px; }
 .avatar-img-wide { width: 72px; height: 72px; border-radius: 24px; }

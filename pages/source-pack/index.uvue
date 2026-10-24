@@ -1,40 +1,66 @@
 <template>
-  <qt-page-frame :max-width="640">
+  <qt-page-frame width-kind="flow" :max-width="720">
     <scroll-view class="pack-scroll" direction="vertical" :show-scrollbar="false">
       <view class="pack-content" :class="layout.isWide ? 'pack-content-wide' : ''">
         <qt-card class="pack-card" title="当前状态" description="数据包决定搜索/歌单/歌词的数据来源；播放包决定在线播放取链。" elevated>
           <view class="status-row" :style="rowBorderStyle">
             <QtIcon class="status-icon" name="disc" :size="layout.isWide ? 20 : 32" :color="theme.skin.accent" />
             <view class="status-main">
-              <text class="status-key" :style="'color:' + theme.skin.text + ';'">数据包</text>
-              <text class="status-value" :style="'color:' + theme.skin.textMuted + ';'">{{ metaStatusText() }}</text>
+              <text class="status-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">数据包</text>
+              <text class="status-value" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ metaStatusText() }}</text>
             </view>
           </view>
           <view class="status-row" :style="rowBorderStyle">
             <QtIcon class="status-icon" name="music" :size="layout.isWide ? 20 : 32" :color="theme.skin.accent" />
             <view class="status-main">
-              <text class="status-key" :style="'color:' + theme.skin.text + ';'">播放包</text>
-              <text class="status-value" :style="'color:' + theme.skin.textMuted + ';'">{{ playStatusText() }}</text>
+              <text class="status-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">播放包</text>
+              <text class="status-value" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ playStatusText() }}</text>
             </view>
           </view>
           <view class="status-row status-row-last">
             <QtIcon class="status-icon" name="info" :size="layout.isWide ? 20 : 32" :color="theme.skin.iconMuted" />
             <view class="status-main">
-              <text class="status-key" :style="'color:' + theme.skin.text + ';'">引擎</text>
-              <text class="status-value" :style="'color:' + (engineFailed() ? theme.skin.danger : theme.skin.textMuted) + ';'">{{ engineStatusText() }}</text>
+              <text class="status-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">引擎</text>
+              <text class="status-value" :style="('color:' + (engineFailed() ? theme.skin.danger : theme.skin.textMuted) + ';') + qtFontDual(24, 14)">{{ engineStatusText() }}</text>
+            </view>
+          </view>
+        </qt-card>
+
+        <qt-card class="pack-card" title="聚合搜索音源" description="搜索页「聚合搜索」参与合并的音源；全不选 = 全部音源。改动立即生效，搜索页会自动刷新进行中的聚合结果。">
+          <view class="status-row" :style="rowBorderStyle" @click="agOpen = !agOpen">
+            <QtIcon class="status-icon" name="headset" :size="layout.isWide ? 20 : 32" :color="theme.skin.accent" />
+            <view class="status-main">
+              <text class="status-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">参与聚合的音源</text>
+              <text class="status-value" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ agSummary }}</text>
+            </view>
+            <QtIcon name="chevron-down" :size="layout.isWide ? 18 : 28" :color="theme.skin.textMuted" />
+          </view>
+          <view v-if="agOpen" class="ag-wrap" :class="layout.isWide ? 'ag-wrap-wide' : ''" :style="rowBorderStyle">
+            <view class="ag-pill" :class="(agAllSelected ? 'ag-pill-on' : '') + (layout.isWide ? ' ag-pill-wide' : '')" :style="agAllSelected ? agPillOnStyle : agPillStyle" @click="agUseAll">
+              <text class="ag-pill-text" :class="layout.isWide ? 'ag-pill-text-wide' : ''" :style="'color:' + (agAllSelected ? theme.skin.onAccent : theme.skin.text) + ';' + qtFontDual(24, 13)">全部</text>
+            </view>
+            <view
+              v-for="row in agRows"
+              :key="'ag-' + row.id"
+              class="ag-pill"
+              :class="((row.on ? 'ag-pill-on' : '') + (layout.isWide ? ' ag-pill-wide' : ''))"
+              :style="row.on ? agPillOnStyle : agPillStyle"
+              @click="agToggle(row.id)"
+            >
+              <text class="ag-pill-text" :class="layout.isWide ? 'ag-pill-text-wide' : ''" :style="'color:' + (row.on ? theme.skin.onAccent : theme.skin.text) + ';' + qtFontDual(24, 13)">{{ row.name }}</text>
             </view>
           </view>
         </qt-card>
 
         <qt-card class="pack-card" title="数据包" description="多包共存、各启用其一；卸载后在线搜索/歌单/歌词及在线播放不可用，本地音乐不受影响。">
           <view v-if="metaRows.length == 0" class="pack-empty">
-            <text class="pack-empty-text" :style="'color:' + theme.skin.textMuted + ';'">未安装任何数据包，可从下方「安装音源包」入口安装；未装时仅本地音乐可用。</text>
+            <text class="pack-empty-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">未安装任何数据包，可从下方「安装音源包」入口安装；未装时仅本地音乐可用。</text>
           </view>
           <view v-for="row in metaRows" :key="'m-' + row.id" class="pack-row" :class="row.last ? 'pack-row-last' : ''" :style="rowBorderStyle">
             <QtIcon v-if="row.active" class="pack-row-check" name="check" :size="layout.isWide ? 18 : 28" :color="theme.skin.accent" />
             <view class="pack-row-main">
-              <text class="pack-row-name" :style="'color:' + (row.active ? theme.skin.accent : theme.skin.text) + ';'">{{ row.name }}</text>
-              <text class="pack-row-sub" :style="'color:' + theme.skin.textMuted + ';'">{{ row.sub }}</text>
+              <text class="pack-row-name" :style="('color:' + (row.active ? theme.skin.accent : theme.skin.text) + ';') + qtFontDual(27, 15)">{{ row.name }}</text>
+              <text class="pack-row-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.sub }}</text>
             </view>
             <qt-button v-if="!row.active" class="pack-row-btn" label="启用" variant="secondary" size="sm" @click="runSourceActivate(row.id)" />
             <qt-button v-if="row.id.length > 0" class="pack-row-btn" label="卸载" variant="ghost" size="sm" @click="runSourceUninstall(row.id)" />
@@ -43,13 +69,13 @@
 
         <qt-card class="pack-card" title="播放包" description="播放包不内置（版权原因）：未安装时在线播放不可用，本地音乐与数据功能互不影响。">
           <view v-if="playRows.length == 0" class="pack-empty">
-            <text class="pack-empty-text" :style="'color:' + theme.skin.textMuted + ';'">未安装任何播放包，可从下方「安装音源包」入口安装。</text>
+            <text class="pack-empty-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">未安装任何播放包，可从下方「安装音源包」入口安装。</text>
           </view>
           <view v-for="row in playRows" :key="'p-' + row.id" class="pack-row" :class="row.last ? 'pack-row-last' : ''" :style="rowBorderStyle">
             <QtIcon v-if="row.active" class="pack-row-check" name="check" :size="layout.isWide ? 18 : 28" :color="theme.skin.accent" />
             <view class="pack-row-main">
-              <text class="pack-row-name" :style="'color:' + (row.active ? theme.skin.accent : theme.skin.text) + ';'">{{ row.name }}</text>
-              <text class="pack-row-sub" :style="'color:' + theme.skin.textMuted + ';'">{{ row.sub }}</text>
+              <text class="pack-row-name" :style="('color:' + (row.active ? theme.skin.accent : theme.skin.text) + ';') + qtFontDual(27, 15)">{{ row.name }}</text>
+              <text class="pack-row-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.sub }}</text>
             </view>
             <qt-button v-if="!row.active" class="pack-row-btn" label="启用" variant="secondary" size="sm" @click="runSourceActivate(row.id)" />
             <qt-button class="pack-row-btn" label="卸载" variant="ghost" size="sm" @click="runSourceUninstall(row.id)" />
@@ -59,14 +85,14 @@
         <qt-card class="pack-card" title="可用更新" description="各包自述更新地址 + 官方清单双渠道发现；仅提示，确认后才更新。">
           <view class="check-row">
             <qt-button class="check-btn" label="检查更新" variant="outline" size="sm" @click="runSourceCheck" />
-            <text class="check-hint" :style="'color:' + theme.skin.textMuted + ';'">更新前会做装载自检，失败自动回滚。</text>
+            <text class="check-hint" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">更新前会做装载自检，失败自动回滚。</text>
           </view>
           <view v-if="offerRows.length == 0" class="pack-empty">
-            <text class="pack-empty-text" :style="'color:' + theme.skin.textMuted + ';'">当前没有待应用的更新。</text>
+            <text class="pack-empty-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">当前没有待应用的更新。</text>
           </view>
           <view v-for="row in offerRows" :key="'u-' + row.id" class="pack-row" :class="row.last ? 'pack-row-last' : ''">
             <view class="pack-row-main">
-              <text class="pack-row-name" :style="'color:' + theme.skin.accent + ';'">{{ row.label }}</text>
+              <text class="pack-row-name" :style="('color:' + theme.skin.accent + ';') + qtFontDual(27, 15)">{{ row.label }}</text>
             </view>
             <qt-button class="pack-row-btn" label="更新" variant="secondary" size="sm" @click="runSourceApplyUpdate(row.id)" />
           </view>
@@ -77,13 +103,13 @@
             <qt-button class="install-btn" label="从链接安装" variant="secondary" size="sm" @click="openUrlSheet" />
             <qt-button class="install-btn" label="从本地文件安装" variant="outline" size="sm" @click="runSourceInstallFile" />
           </view>
-          <text class="install-hint" :style="'color:' + theme.skin.textMuted + ';'">链接需为 https 直链；本地安装支持微信/QQ/网盘下载的 .js 文件。装完不抢已有生效位，首个包自动生效。</text>
+          <text class="install-hint" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">链接需为 https 直链；本地安装支持微信/QQ/网盘下载的 .js 文件。装完不抢已有生效位，首个包自动生效。</text>
           <!-- 官网教程：装包方式 / 换源 / 音质 / 故障速查都在这一页，比在客户端里逐步描述更完整 -->
           <view class="guide-row" :style="guideBorderStyle" @click="openSourceSetupGuide">
             <QtIcon class="guide-icon" name="globe" :size="layout.isWide ? 18 : 32" :color="theme.skin.accent" />
             <view class="guide-main">
-              <text class="guide-title" :style="'color:' + theme.skin.accent + ';'">如何设置音源包</text>
-              <text class="guide-sub" :style="'color:' + theme.skin.textMuted + ';'">三种安装方式、换源、音质与装不上排查</text>
+              <text class="guide-title" :style="('color:' + theme.skin.accent + ';') + qtFontDual(26, 14)">如何设置音源包</text>
+              <text class="guide-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">三种安装方式、换源、音质与装不上排查</text>
             </view>
             <QtIcon name="chevron-right" :size="layout.isWide ? 18 : 28" :color="theme.skin.iconMuted" />
           </view>
@@ -94,8 +120,8 @@
     <!-- 从链接安装：页内输入弹层（uni.showModal 的 editable 输入框在 App 端不渲染） -->
     <view v-if="urlSheetVisible" class="url-mask" @click="closeUrlSheet">
       <view class="url-card" :class="layout.isWide ? 'url-card-wide' : ''" :style="layout.isWide ? urlCardStyleWide : urlCardStyle" @click.stop>
-        <text class="url-title" :class="layout.isWide ? 'url-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">从链接安装</text>
-        <text class="url-desc" :class="layout.isWide ? 'url-desc-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">粘贴音源包 .js 文件的 https 直链</text>
+        <text class="url-title" :class="layout.isWide ? 'url-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(30, 17)">从链接安装</text>
+        <text class="url-desc" :class="layout.isWide ? 'url-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">粘贴音源包 .js 文件的 https 直链</text>
         <input
           class="url-input"
           :class="layout.isWide ? 'url-input-wide' : ''"
@@ -107,7 +133,7 @@
           :maxlength="2048"
           :focus="urlSheetVisible"
         />
-        <text v-if="urlSheetError.length > 0" class="url-error" :class="layout.isWide ? 'url-error-wide' : ''" :style="'color:' + theme.skin.danger + ';'">{{ urlSheetError }}</text>
+        <text v-if="urlSheetError.length > 0" class="url-error" :class="layout.isWide ? 'url-error-wide' : ''" :style="('color:' + theme.skin.danger + ';') + qtFontDual(22, 12)">{{ urlSheetError }}</text>
         <view class="url-btn-row" :class="layout.isWide ? 'url-btn-row-wide' : ''">
           <qt-button class="url-btn" label="取消" variant="ghost" size="sm" @click="closeUrlSheet" />
           <qt-button class="url-btn" label="下载并校验" variant="secondary" size="sm" @click="submitUrlSheet" />
@@ -117,6 +143,8 @@
   </qt-page-frame>
 </template>
 <script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
+import { qtConfirm } from "@/services/confirm";
 import { computed, ref } from "vue";
 import { onShow, onUnload } from "@dcloudio/uni-app";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
@@ -131,11 +159,15 @@ import { verifyOfficialSignature } from "@/services/pack-signature";
 import type { SourcePackMeta } from "@/services/source-bundle-fs";
 import { discoverUpdates, applyUpdate, installFromText, downloadPackText, uninstallPack, activatePack, pickSmokeSongs, pendingUpdates, syncSourceUpdateBadge, offerLabel } from "@/services/source-update";
 import type { PackUpdateOffer } from "@/services/source-update";
-import { parsePackHeader } from "@/services/source-pack-header";
+import { parsePackHeader, UNSUPPORTED_PACK_MESSAGE, isJsPackFileName } from "@/services/source-pack-header";
 import { openInBrowser, pickJsFile } from "@/services/app-native";
 import { OFFICIAL_SOURCE_SETUP_URL } from "@/services/official-site";
 import { useSourceUpdateStore } from "@/stores/source-update";
+import { useSourceRegistryStore } from "@/stores/source-registry";
+import { platformLabel } from "@/services/platform";
+import { readAggregateSources, saveAggregateSources, AGGREGATE_SOURCES_CHANGED_EVENT } from "@/services/aggregate-sources";
 import { beginLoading, finishLoading } from "@/services/ui-loading";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 /**
  * 音源包管理独立页（v3 统一包模型）：当前状态 / 数据包 / 播放包 /
@@ -145,7 +177,71 @@ import { beginLoading, finishLoading } from "@/services/ui-loading";
 const theme = useThemeStore();
 const layout = useQtLayout();
 const sourceUpdateStore = useSourceUpdateStore();
+const sourceRegistry = useSourceRegistryStore();
 const refreshTick = ref(0);
+
+// ── 聚合搜索音源白名单（对齐 qt-pc 设置页「聚合搜索音源」）──
+// null = 全部；勾选状态读 storage，操作后 refreshTick 触发重算并广播给搜索页。
+type AgRow = { id: string; name: string; on: boolean; last: boolean };
+const agOpen = ref(false);
+const agRows = computed((): AgRow[] => {
+  void refreshTick.value;
+  const ids = sourceRegistry.sourceIds();
+  const wl = readAggregateSources();
+  const out: AgRow[] = [];
+  for (let i = 0; i < ids.length; i++) {
+    out.push({
+      id: ids[i],
+      name: platformLabel(ids[i]),
+      on: wl == null ? true : wl.indexOf(ids[i]) != -1,
+      last: i == ids.length - 1,
+    });
+  }
+  return out;
+});
+const agAllSelected = computed((): boolean => {
+  void refreshTick.value;
+  return readAggregateSources() == null;
+});
+/** 摘要行文案：全部音源 / 已选 N/M（收起时一眼看出当前范围） */
+const agSummary = computed((): string => {
+  const rows = agRows.value;
+  if (agAllSelected.value || rows.length == 0) return "全部音源";
+  let on = 0;
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].on) on++;
+  }
+  return on > 0 ? "已选 " + on + " / " + rows.length : "全部音源";
+});
+function agUseAll(): void {
+  saveAggregateSources([]);
+  refreshTick.value++;
+  uni.$emit(AGGREGATE_SOURCES_CHANGED_EVENT);
+}
+function agToggle(id: string): void {
+  const ids = sourceRegistry.sourceIds();
+  const current = readAggregateSources();
+  let next: string[] = [];
+  if (current == null) {
+    // 「全部」里去掉一个：从全量 id 里剔除
+    for (let i = 0; i < ids.length; i++) {
+      if (ids[i] != id) next.push(ids[i]);
+    }
+  } else {
+    next = current.slice(0);
+    const idx = next.indexOf(id);
+    if (idx != -1) next.splice(idx, 1);
+    else next.push(id);
+  }
+  // 全不选 = 全部音源（services/aggregate-sources.ts 的归一语义）
+  saveAggregateSources(next);
+  refreshTick.value++;
+  uni.$emit(AGGREGATE_SOURCES_CHANGED_EVENT);
+}
+
+/** 聚合音源药丸样式（展开区）：选中 accent 底，未选中描边 */
+const agPillStyle = computed<string>(() => "border-color:" + theme.skin.divider + ";");
+const agPillOnStyle = computed<string>(() => "background-color:" + theme.skin.accent + ";border-color:" + theme.skin.accent + ";");
 
 type PackRow = { id: string; name: string; sub: string; active: boolean; last: boolean };
 type OfferRow = { id: string; label: string; last: boolean };
@@ -271,6 +367,7 @@ function openSourceSetupGuide(): void {
 
 onShow(() => {
   sourceUpdateStore.refresh();
+  sourceRegistry.ensure(); // 聚合音源行需要注册表清单（未就绪时空列表，就绪后 refreshTick 重算）
   refreshTick.value++;
   checkClipboardPackLink();
 });
@@ -395,14 +492,13 @@ function checkClipboardPackLink(): void {
       const link = data.trim();
       if (link == lastPromptedClip) return;
       lastPromptedClip = link;
-      uni.showModal({
+            qtConfirm({
         title: "检测到音源包链接",
         content: "剪贴板里有一个音源包直链：\n" + truncateText(link, 60) + "\n\n是否下载并安装？",
         confirmText: "安装",
         cancelText: "忽略",
-        success: (r) => {
-          if (r.confirm) installFromLink(link);
-        },
+      }).then((ok: boolean) => {
+          if (ok) installFromLink(link);
       });
     },
     fail: (_e) => {},
@@ -413,7 +509,7 @@ function checkClipboardPackLink(): void {
 function installFromLink(url: string): void {
   const vErr = validatePackLink(url);
   if (vErr.length > 0) {
-    uni.showToast({ title: vErr, icon: "none" });
+    qtShowToast({ title: vErr, icon: "none" });
     return;
   }
   const link = url.trim();
@@ -421,13 +517,13 @@ function installFromLink(url: string): void {
   downloadPackText(link).then((text) => {
     finishLoading(token);
     if (text.length == 0) {
-      uni.showToast({ title: "下载失败，请检查链接是否可直连", icon: "none" });
+      qtShowToast({ title: "下载失败，请检查链接是否可直连", icon: "none" });
       return;
     }
     confirmAndInstall(text, "url", link);
   }).catch(() => {
     finishLoading(token);
-    uni.showToast({ title: "下载失败，请重试", icon: "none" });
+    qtShowToast({ title: "下载失败，请重试", icon: "none" });
   });
 }
 
@@ -442,9 +538,9 @@ function installFromLink(url: string): void {
 async function confirmAndInstall(text: string, source: string, ref: string): Promise<void> {
   const header = parsePackHeader(text);
   if (header == null) {
-    uni.showModal({
+        qtConfirm({
       title: "无法安装",
-      content: "不是有效的音源包：文件首行缺少 /*__QT_PACK__*/ 身份头（需要 2026-10 后构建的包）。",
+      content: UNSUPPORTED_PACK_MESSAGE,
       showCancel: false,
     });
     return;
@@ -458,7 +554,7 @@ async function confirmAndInstall(text: string, source: string, ref: string): Pro
     const check = await verifyOfficialSignature(text);
     finishLoading(sigToken);
     if (!check.ok) {
-      uni.showModal({
+            qtConfirm({
         title: "官方包校验失败",
         content: "该文件自称官方" + (header.kind == "meta" ? "数据" : "播放") + "包，但签名校验未通过：" + check.message + "。可能不是官方原版或已被篡改，已拒绝安装。",
         showCancel: false,
@@ -467,13 +563,14 @@ async function confirmAndInstall(text: string, source: string, ref: string): Pro
     }
     content += "✓ 官方签名校验通过\n";
   }
-  uni.showModal({
+    qtConfirm({
     title: "安装音源包",
     content: content,
     confirmText: confirmText,
     cancelText: "取消",
-    success: (res) => {
-      if (!res.confirm) return;
+    showCancel: false,
+  }).then((ok: boolean) => {
+      if (!ok) return;
       const installToken = beginLoading("安装中");
       pickSmokeSongs().then((songs) => {
         return installFromText(text, songs, source, ref);
@@ -481,13 +578,16 @@ async function confirmAndInstall(text: string, source: string, ref: string): Pro
         finishLoading(installToken);
         if (!pageAlive) return;
         refreshSourceUi();
-        uni.showModal({ title: r.ok ? "安装完成" : "安装失败", content: r.message, showCancel: false });
+                qtConfirm({
+          title: r.ok ? "安装完成" : "安装失败",
+          content: r.message,
+          showCancel: false,
+        });
       }).catch(() => {
         finishLoading(installToken);
         if (!pageAlive) return;
-        uni.showToast({ title: "安装失败，请重试", icon: "none" });
+        qtShowToast({ title: "安装失败，请重试", icon: "none" });
       });
-    },
   });
 }
 
@@ -534,7 +634,11 @@ function submitUrlSheet(): void {
 function runSourceInstallFile(): void {
   pickJsFile().then((picked) => {
     if (!picked.ok || picked.content.length == 0) {
-      if (picked.message.length > 0) uni.showToast({ title: picked.message, icon: "none" });
+      if (picked.message.length > 0) qtShowToast({ title: picked.message, icon: "none" });
+      return;
+    }
+    if (!isJsPackFileName(picked.name)) {
+      qtShowToast({ title: "请选择 .js 格式的音源文件", icon: "none" });
       return;
     }
     confirmAndInstall(picked.content, "file", picked.name);
@@ -549,25 +653,24 @@ function runSourceCheck(): void {
     if (!pageAlive) return;
     refreshSourceUi();
     if (offers.length == 0) {
-      uni.showToast({ title: "所有音源包都已是最新版本", icon: "none" });
+      qtShowToast({ title: "所有音源包都已是最新版本", icon: "none" });
       return;
     }
     const lines: string[] = [];
     for (let i = 0; i < offers.length; i++) lines.push(offerLabel(offers[i]));
-    uni.showModal({
+        qtConfirm({
       title: "发现 " + offers.length + " 个可用更新",
       content: lines.join("\n") + "\n\n是否立即下载并更新？（更新前会做装载自检，失败自动回滚）",
       confirmText: "全部更新",
       cancelText: "暂不",
-      success: (res) => {
-        if (!res.confirm) return;
+    }).then((ok: boolean) => {
+        if (!ok) return;
         runSourceApplyAll(offers);
-      },
     });
   }).catch(() => {
     finishLoading(checkToken);
     if (!pageAlive) return;
-    uni.showToast({ title: "检查失败", icon: "none" });
+    qtShowToast({ title: "检查失败", icon: "none" });
   });
 }
 
@@ -582,7 +685,7 @@ async function runSourceApplyAll(offers: PackUpdateOffer[]): Promise<void> {
       finishLoading(token);
       if (!pageAlive) return;
       refreshSourceUi();
-      uni.showToast({ title: r.message, icon: "none", duration: 3000 });
+      qtShowToast({ title: r.message, icon: "none", duration: 3000 });
       if (i < offers.length - 1) {
         token = beginLoading("更新中（" + (i + 2) + "/" + offers.length + "）");
       }
@@ -590,7 +693,7 @@ async function runSourceApplyAll(offers: PackUpdateOffer[]): Promise<void> {
   } catch (_) {
     finishLoading(token);
     if (!pageAlive) return;
-    uni.showToast({ title: "更新失败，请重试", icon: "none" });
+    qtShowToast({ title: "更新失败，请重试", icon: "none" });
   } finally {
     // 兜底：任何提前 return / 异常路径都保证 loading 被收掉（页面已销毁则静默跳过）
     finishLoading(token);
@@ -605,7 +708,7 @@ function runSourceApplyUpdate(id: string): void {
     if (offers[i].targetId == id) target = offers[i];
   }
   if (target == null) {
-    uni.showToast({ title: "该更新已处理", icon: "none" });
+    qtShowToast({ title: "该更新已处理", icon: "none" });
     return;
   }
   const list: PackUpdateOffer[] = [target as PackUpdateOffer];
@@ -621,11 +724,15 @@ function runSourceActivate(id: string): void {
     finishLoading(actToken);
     if (!pageAlive) return;
     refreshSourceUi();
-    uni.showModal({ title: "启用音源包", content: r.message, showCancel: false });
+        qtConfirm({
+      title: "启用音源包",
+      content: r.message,
+      showCancel: false,
+    });
   }).catch(() => {
     finishLoading(actToken);
     if (!pageAlive) return;
-    uni.showToast({ title: "启用失败", icon: "none" });
+    qtShowToast({ title: "启用失败", icon: "none" });
   });
 }
 
@@ -633,7 +740,7 @@ function runSourceActivate(id: string): void {
 function runSourceUninstall(id: string): void {
   const p = packById(id);
   if (p == null) {
-    uni.showToast({ title: "该包已不存在", icon: "none" });
+    qtShowToast({ title: "该包已不存在", icon: "none" });
     return;
   }
   const active = activePack();
@@ -646,25 +753,24 @@ function runSourceUninstall(id: string): void {
     consequence = wasActive ? "这是当前生效的播放包，卸载后在线播放将不可用（本地音乐不受影响）。" : "";
   }
   const label = (p.kind == PACK_KIND_META ? "数据包" : "播放包") + " " + p.name + " v" + p.versionName;
-  uni.showModal({
+    qtConfirm({
     title: "卸载音源包",
     content: "卸载「" + label + "」？" + consequence + "需要时可再从链接或本地文件安装。",
     confirmText: "卸载",
     cancelText: "取消",
-    success: (res) => {
-      if (!res.confirm) return;
+  }).then((ok: boolean) => {
+      if (!ok) return;
       const unToken = beginLoading("卸载中");
       uninstallPack(id).then((r) => {
         finishLoading(unToken);
         if (!pageAlive) return;
         refreshSourceUi();
-        uni.showToast({ title: r.ok ? "已卸载" : r.message, icon: "none" });
+        qtShowToast({ title: r.ok ? "已卸载" : r.message, icon: "none" });
       }).catch(() => {
         finishLoading(unToken);
         if (!pageAlive) return;
-        uni.showToast({ title: "卸载失败，请重试", icon: "none" });
+        qtShowToast({ title: "卸载失败，请重试", icon: "none" });
       });
-    },
   });
 }
 </script>
@@ -711,6 +817,44 @@ function runSourceUninstall(id: string): void {
 .status-value {
   margin-top: 4rpx;
   font-size: 24rpx;
+}
+
+/* 聚合搜索音源下拉多选：展开后的药丸 wrap（点摘要行开合，药丸点击即切换） */
+.ag-wrap {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 18rpx 0 20rpx;
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+}
+.ag-wrap-wide {
+  padding: 10px 0 12px;
+}
+.ag-pill {
+  height: 56rpx;
+  border-radius: 28rpx;
+  border-width: 1px;
+  border-style: solid;
+  align-items: center;
+  justify-content: center;
+  padding: 0 26rpx;
+  margin: 0 16rpx 16rpx 0;
+}
+.ag-pill-wide {
+  height: 30px;
+  border-radius: 15px;
+  padding: 0 14px;
+  margin: 0 8px 8px 0;
+}
+.ag-pill-on {
+  /* 选中态颜色全在行内（accent 底 + onAccent 字） */
+}
+.ag-pill-text {
+  font-size: 24rpx;
+}
+.ag-pill-text-wide {
+  font-size: 13px;
 }
 
 .pack-row {

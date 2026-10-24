@@ -1,4 +1,5 @@
 import type { Song } from "@/types/music";
+import { logInfo, logErrV, logWarnV } from "@/services/logger";
 // #ifdef APP-ANDROID || APP-HARMONY
 // 自研原生通知栏播放器，替代 uni.getBackgroundAudioManager()：
 //   安卓 = media3 前台服务 + MediaSession + 媒体通知（utssdk/app-android）
@@ -26,6 +27,7 @@ import {
   audioSetSpeed,
   audioSetVolume,
   audioClearCache,
+  audioCacheSize,
   audioSetEqualizerBands,
   audioSetEqualizerEnabled,
   audioPostNotice,
@@ -47,11 +49,15 @@ import {
   audioResolveDone,
   audioResolveFail,
   audioEvictSongCache,
+  audioOnSetRating,
+  audioSetLiked,
 } from "@/uni_modules/qt-audio-player";
 // #endif
 // #ifdef APP-ANDROID || APP-HARMONY
-import type { AudioPlaylistItem, AudioResolveRequestCallback, AudioTrackChangedCallback } from "@/uni_modules/qt-audio-player";
+import type { AudioPlaylistItem, AudioResolveRequestCallback, AudioTrackChangedCallback, AudioRatingRequestCallback } from "@/uni_modules/qt-audio-player";
 // #endif
+// 轻提示：不能放进条件编译块，play() 的 #ifndef 分支也要用
+import { qtShowToast } from "@/services/toast";
 
 type TimeListener = (time: number, duration: number) => void;
 type EndListener = () => void;
@@ -63,6 +69,23 @@ const CACHE_LIMIT_KEY = "qt-audio-cache-limit";
 const CACHE_LIMIT_DEFAULT_MB = 1024;
 const CONCURRENT_KEY = "qt-concurrent-play-mode";
 const CONCURRENT_DEFAULT = 0;
+/**
+ * 无缝播放（默认关闭，"1"/"0" 字符串存储）。
+ *
+ * 语义只有一件事：**在播当前曲时提前把下一首的播放地址取好**（填 musicApi 的
+ * urlCache），真正切歌时取链命中缓存，省掉整条音源回退链的耗时。
+ *
+ * 为什么只做到「提前取链」而不像 qt-pc 那样接同一条输出流：
+ * - Android（media3）的时间线本来就预缓冲下一条目，缺口只在 JS 取链时机，
+ *   取链一命中，ExoPlayer 的无缝拼接天然生效；
+ * - 鸿蒙原生侧是「一次只解析一首」的串行模型（gPendingMid 单值），没有时间线
+ *   预缓冲，只能缩短取链时间，做不到真正接流；
+ * - 提前调原生 resolveDone 无效：Android audioResolveDone 在没有挂起 req 时
+ *   直接丢弃（见 qt-audio-player app-android/index.uts），所以只能预热 urlCache。
+ *
+ * 不涉及任何原生下发，因此没有对应的 audioSetXxx。
+ */
+const GAPLESS_KEY = "qt-playback-gapless";
 /** EQ 设置持久化 key：开关 + 5 段增益（dB，逗号分隔串） */
 const EQ_ENABLED_KEY = "qt-eq-enabled";
 const EQ_BANDS_KEY = "qt-eq-bands";
@@ -87,8 +110,9 @@ export class AudioPlayer {
   /** 解析桥回调（持有以便 ensureNativeBound 每次重注册，防 UTS 回调断链） */
   private resolveCb: AudioResolveRequestCallback | null = null;
   private trackCb: AudioTrackChangedCallback | null = null;
+  /** 系统收藏（♡）请求回调（通知栏/车机点击），同样持有以便重注册 */
+  private ratingCb: AudioRatingRequestCallback | null = null;
   private prevListener: (() => void) | null = null;
-  private tickTimer: number | null = null;
   private loadedUrl: string | null = null;
   rate = 1.0;
   /** EQ 当前开关与 5 段增益（dB，-12~12），启动时从持久化恢复 */
@@ -255,6 +279,19 @@ export class AudioPlayer {
   }
 
   /**
+   * 当前音频磁盘缓存占用（字节）。鸿蒙端无磁盘缓存，恒为 0；
+   * 非 APP 平台同样返回 0（设置页据此显示「无缓存」）。
+   */
+  cacheSize(): number {
+    // #ifdef APP-ANDROID || APP-HARMONY
+    return audioCacheSize();
+    // #endif
+    // #ifndef APP-ANDROID || APP-HARMONY
+    return 0;
+    // #endif
+  }
+
+  /**
    * 把 JS 侧监听器绑到原生模块的模块级回调（Android）。
    * 每次调用都幂等重注册一遍：曾经只在首次注册，一旦某次注册中断，
    * cbNext/cbPrev 永久缺失，通知栏下一首/上一首就静默失灵且无法自愈（UTS 日志
@@ -266,7 +303,7 @@ export class AudioPlayer {
   private ensureNativeBound(): void {
     if (!this.nativeBound) {
       this.nativeBound = true;
-      console.log("[QT Music Audio] 首次绑定原生回调（play/pause/stop/ended/time/error/next/prev）");
+      logInfo("QT Audio", "首次绑定原生回调（play/pause/stop/ended/time/error/next/prev）");
     }
     audioOnPlay(() => {
       if (this.onState != null) this.onState(true);
@@ -284,24 +321,26 @@ export class AudioPlayer {
       if (this.onTime != null) this.onTime(time, duration);
     });
     audioOnError((message: string) => {
-      console.log("[QT Music Audio Error]", message);
+      // 原生播放器报错：用户报障「点了没声音」时，这里是唯一能说明原因的地方
+      logErrV("QT Audio", "原生播放错误", message);
       if (this.onError != null) this.onError();
     });
     audioOnNext(() => {
-      console.log("[QT Music Audio] onNext from notification");
+      logInfo("QT Audio", "onNext from notification");
       if (this.nextListener != null) this.nextListener();
-      else console.log("[QT Music Audio] onNext 已到达但 nextListener 未绑定");
+      else logWarnV("QT Audio", "onNext 已到达但 nextListener 未绑定", "");
     });
     audioOnPrev(() => {
-      console.log("[QT Music Audio] onPrev from notification");
+      logInfo("QT Audio", "onPrev from notification");
       if (this.prevListener != null) this.prevListener();
-      else console.log("[QT Music Audio] onPrev 已到达但 prevListener 未绑定");
+      else logWarnV("QT Audio", "onPrev 已到达但 prevListener 未绑定", "");
     });
     // 解析桥/切歌对账回调与其它回调同样「每次调用重注册」：一次性注册曾因
     // UTS 回调断链丢失（cbNext 事故），症状是解析请求无人应答、loader 等 15s
     // 超时、播放静默卡死
     audioOnResolveRequest(this.resolveCb);
     audioOnTrackChanged(this.trackCb);
+    audioOnSetRating(this.ratingCb);
   }
   // #endif
 
@@ -316,7 +355,7 @@ export class AudioPlayer {
       if (this.onEnd != null) this.onEnd();
     });
     audio.onError((error) => {
-      console.log("[QT Music Audio Error]", JSON.stringify(error));
+      logErrV("QT Audio", "InnerAudioContext 播放错误", error);
       if (this.onError != null) this.onError();
     });
     audio.onPlay(() => {
@@ -332,18 +371,6 @@ export class AudioPlayer {
     // 否则「设置页调过音量 → 重启 → 首次播放」会悄悄回到满音量
     audio.volume = this.getMuted() ? 0.0 : this.getVolume();
     return audio;
-  }
-
-  private startTick(): void {
-    if (this.tickTimer != null) return;
-    this.tickTimer = setInterval(() => {
-      const audio = this.manager;
-      if (audio == null) return;
-      if (audio.paused) return;
-      if (this.onTime != null) {
-        this.onTime(audio.currentTime, audio.duration);
-      }
-    }, 1000) as number;
   }
 
   bind(
@@ -389,7 +416,7 @@ export class AudioPlayer {
       // 空地址绝不能静默返回：store 那边 playing 已经是 true、界面显示在播，
       // 这里只弹个提示的话，播完的自动切歌就断死在这一步。交给错误回调走
       // 「重取地址 → 有限次自动切歌 → 超限暂停提示」的既有流程。
-      uni.showToast({ title: "该歌曲暂无播放地址", icon: "none" });
+      qtShowToast({ title: "该歌曲暂无播放地址", icon: "none" });
       if (this.onError != null) this.onError();
       return;
     }
@@ -404,8 +431,8 @@ export class AudioPlayer {
       this.loadedUrl = song.url;
       audioPlay();
     } catch (e) {
-      console.log("[QT Music Audio Play Error]", e != null ? e.toString() : "unknown");
-      uni.showToast({ title: "播放失败，请稍后重试", icon: "none" });
+      logErrV("QT Audio", "播放失败（原生）", e);
+      qtShowToast({ title: "播放失败，请稍后重试", icon: "none" });
     }
     if (startTime > 0) this.seekWhenReady(startTime);
     return;
@@ -417,8 +444,8 @@ export class AudioPlayer {
       this.loadedUrl = song.url;
       audio.play();
     } catch (e) {
-      console.log("[QT Music Audio Play Error]", e != null ? e.toString() : "unknown");
-      uni.showToast({ title: "播放失败，请稍后重试", icon: "none" });
+      logErrV("QT Audio", "播放失败（InnerAudioContext）", e);
+      qtShowToast({ title: "播放失败，请稍后重试", icon: "none" });
     }
     if (startTime > 0) this.seekWhenReady(startTime);
     // #endif
@@ -612,7 +639,7 @@ export class AudioPlayer {
     try {
       audioSetPlaylist(items, startIndex, autoPlay, startPositionSec);
     } catch (e) {
-      console.log("[QT Audio] setPlaylist 失败: " + (e != null ? e.toString() : "unknown"));
+      logErrV("QT Audio", "setPlaylist 失败", e);
     }
     // #endif
   }
@@ -694,6 +721,44 @@ export class AudioPlayer {
     // #ifndef APP-ANDROID || APP-HARMONY
     return false;
     // #endif
+  }
+
+  /**
+   * 注册系统收藏（红心 ♡）请求：通知栏/系统媒体卡片/车机/原子随身听的收藏按钮被点击时回调，
+   * 参数 = 目标条目 mediaId + 客户端想要的新状态。由 store 决定落到哪个歌单。
+   */
+  onSetRating(callback: AudioRatingRequestCallback): void {
+    // #ifdef APP-ANDROID || APP-HARMONY
+    this.ratingCb = callback;
+    audioOnSetRating(callback);
+    // #endif
+  }
+
+  /**
+   * 把某首歌的红心状态回写系统媒体元数据（通知栏/车机 ♡ 实心/空心）。
+   * 原生侧只回写当前条目，非当前条目静默忽略。
+   */
+  setLiked(mediaId: string, liked: boolean): void {
+    // #ifdef APP-ANDROID || APP-HARMONY
+    audioSetLiked(mediaId, liked);
+    // #endif
+  }
+
+  /** 无缝播放是否开启（默认关闭；只影响 store 是否提前预热下一首地址） */
+  getGapless(): boolean {
+    try {
+      const raw = uni.getStorageSync(GAPLESS_KEY) as string;
+      return raw == "1";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /** 设置无缝播放开关，持久化。无需下发原生层（见 GAPLESS_KEY 注释） */
+  setGapless(enabled: boolean): void {
+    try {
+      uni.setStorageSync(GAPLESS_KEY, enabled ? "1" : "0");
+    } catch (_) {}
   }
 }
 export const audioPlayer = new AudioPlayer();

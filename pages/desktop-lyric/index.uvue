@@ -7,21 +7,28 @@
   待重算集合（判定条件是 UniCSSUnitValue.getUnit() == RPX，见 k0.a(int, UniCSSUnitValue)
   与 hc.a(int, Object, int)），布局回调 x9.onComplete 在 UI 线程遍历这些集合时，若另一
   个线程又登记了新节点，就会抛 java.util.ConcurrentModificationException。
-  手机私有控件样式仍为定值 px；分组列表的版式尺寸（行高/内边距/字号/分组边距）改为
-  JS 按窗口宽把设置页的 rpx 值换算成 px 后内联（u()/sz()），见 script 里的说明——
+  分组列表的版式尺寸（行高/内边距/字号/分组边距）改为 JS 按窗口宽把设置页的 rpx 值
+  换算成 px 后内联（u()/sz()），字号再叠一层全局字号倍率（fp()），见 script 里的说明——
   rpx 实际渲染随设备宽变化，定值 px 在宽屏手机上会比设置页系统性偏小。
 -->
 <template>
-  <qt-page-frame :max-width="640">
+  <qt-page-frame width-kind="flow">
     <scroll-view class="list" :class="layout.isWide ? 'list-wide' : ''" :style="listStyle" direction="vertical" :show-scrollbar="false">
-
-      <!-- 开关与锁定 -->
+      <!--
+        宽屏两列：本页 10 个分组在 1920 下每个都只有一行标题 + 一条控件，
+        单列时 1312px 宽的卡片里只放一根 200px 的滑条，纵向要滚两屏多。
+        分列在标记层写死（不用 flex-wrap 自动折行）：「颜色」「背景」两组各带
+        一排 14 个色块，比左列其它组高得多，自动折行会在右列下方留出等高空白。
+        两列容器 align-items:flex-start，否则 Vapor 默认 stretch 会把矮列拉成等高。
+      -->
+      <view v-if="twoColumn" class="cols" :style="colsStyle">
+        <view class="col" :style="colStyle">
       <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
         <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
           <QtIcon class="cell-icon" name="music" :size="36" color="#4fb186" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">启用桌面歌词</text>
+          <text class="cell-title" :style="titleStyle">启用桌面歌词</text>
           <view class="cell-right">
-            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ lyricOn ? "已开启" : "已关闭" }}</text>
+            <text class="cell-value" :style="valueStyle">{{ lyricOn ? "已开启" : "已关闭" }}</text>
             <view class="switch" :class="lyricOn ? 'switch-on' : ''" :style="lyricOn ? 'background-color:' + theme.skin.accent + ';' : 'background-color:' + theme.skin.surfaceMuted + ';'" @click="toggleEnabled">
               <view class="switch-dot" :style="lyricOn ? '' : 'background-color:' + theme.skin.iconMuted + ';'"></view>
             </view>
@@ -29,9 +36,9 @@
         </view>
         <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
           <QtIcon class="cell-icon" name="lock" :size="36" color="#9b82d9" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">锁定歌词窗口</text>
+          <text class="cell-title" :style="titleStyle">锁定歌词窗口</text>
           <view class="cell-right">
-            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ lyricLocked ? "点击穿透" : "可拖动" }}</text>
+            <text class="cell-value" :style="valueStyle">{{ lyricLocked ? "点击穿透" : "可拖动" }}</text>
             <view class="switch" :class="lyricLocked ? 'switch-on' : ''" :style="lyricLocked ? 'background-color:' + theme.skin.accent + ';' : 'background-color:' + theme.skin.surfaceMuted + ';'" @click="toggleLocked">
               <view class="switch-dot" :style="lyricLocked ? '' : 'background-color:' + theme.skin.iconMuted + ';'"></view>
             </view>
@@ -39,12 +46,25 @@
         </view>
       </view>
 
-      <!-- 实时预览 -->
-      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <!--
+        鸿蒙说明：系统渲染的桌面歌词只有「开关」和「锁定」两项由应用控制，
+        其余样式由系统决定（原生侧对应接口是空实现）。这里明说，避免用户找设置项。
+      -->
+      <view v-if="harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="info" :size="36" color="#6d8fd6" />
+          <text class="cell-title" :style="titleStyle">由系统显示</text>
+        </view>
+        <view class="cell-body cell-body-pad cell-no-border" :class="layout.isWide ? 'cell-body-pad-wide' : ''" :style="cellStyle">
+          <text class="custom-hint" :style="hintStyle(false)">鸿蒙的桌面歌词由系统绘制：本应用只提供歌词文字，字号、颜色、字体、对齐与背景由系统主题决定，无法在应用内调整。</text>
+        </view>
+      </view>
+
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
         <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
           <QtIcon class="cell-icon" name="eye" :size="36" color="#6d8fd6" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">实时预览</text>
-          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">跟随下方设置</text>
+          <text class="cell-title" :style="titleStyle">实时预览</text>
+          <text class="cell-value" :style="valueStyle">跟随下方设置</text>
         </view>
         <view class="cell-body cell-body-pad cell-no-border" :class="layout.isWide ? 'cell-body-pad-wide' : ''" :style="cellStyle">
           <view class="preview-box" :class="layout.isWide ? 'preview-box-wide' : ''">
@@ -71,12 +91,12 @@
         </view>
       </view>
 
-      <!-- 字号 -->
-      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <!-- 字号（鸿蒙隐藏：系统定字号） -->
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
         <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
           <QtIcon class="cell-icon" name="type" :size="36" color="#d99b3f" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">字号</text>
-          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ liveSize }} sp</text>
+          <text class="cell-title" :style="titleStyle">字号</text>
+          <text class="cell-value" :style="valueStyle">{{ liveSize }} sp</text>
         </view>
         <view class="cell-body cell-no-border" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
           <!--
@@ -100,12 +120,12 @@
         </view>
       </view>
 
-      <!-- 歌词窗宽度 -->
-      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <!-- 歌词窗宽度（鸿蒙隐藏：系统定窗口宽度） -->
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
         <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
           <QtIcon class="cell-icon" name="settings" :size="36" color="#4fb186" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">歌词窗宽度</text>
-          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ liveWidth }}%</text>
+          <text class="cell-title" :style="titleStyle">歌词窗宽度</text>
+          <text class="cell-value" :style="valueStyle">{{ liveWidth }}%</text>
         </view>
         <view class="cell-body cell-no-border" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
           <view
@@ -122,15 +142,14 @@
           </view>
         </view>
       </view>
-
-      <!-- 颜色 -->
-      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <!-- 颜色（鸿蒙隐藏：系统定颜色） -->
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
         <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
           <QtIcon class="cell-icon" name="droplet" :size="36" color="#7c6cf2" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">颜色</text>
+          <text class="cell-title" :style="titleStyle">颜色</text>
           <view class="cell-right">
             <view class="value-dot" :style="'background-color:' + color + ';border-color:' + theme.skin.border + ';'"></view>
-            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ color }}</text>
+            <text class="cell-value" :style="valueStyle">{{ color }}</text>
           </view>
         </view>
         <view class="cell-body" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
@@ -148,27 +167,29 @@
           </view>
         </view>
         <view class="cell-body cell-body-pad cell-no-border" :class="layout.isWide ? 'cell-body-pad-wide' : ''" :style="cellStyle">
-          <view class="custom-row" :class="layout.isWide ? 'custom-row-wide' : ''" :style="'border-color:' + theme.skin.border + ';background-color:' + theme.skin.surfaceMuted + ';'">
-            <view class="custom-preview" :class="layout.isWide ? 'custom-preview-wide' : ''" :style="'background-color:' + (customValid ? customColor : 'transparent') + ';border-color:' + theme.skin.border + ';'"></view>
+          <view class="custom-row" :style="colorRowStyle">
+            <view class="custom-preview" :style="previewStyle(customValid, customColor)"></view>
             <input
               class="custom-input"
-              :class="layout.isWide ? 'custom-input-wide' : ''"
+              :style="inputStyle"
               :value="customText"
               @input="onCustomInput"
               placeholder="#RRGGBB"
-              :placeholder-class="layout.isWide ? 'ph-wide' : 'ph'"
+              placeholder-class="ph"
             />
           </view>
-          <text class="custom-hint" :style="'color:' + (customText.length > 0 && !customValid ? theme.skin.danger : theme.skin.textMuted) + ';'">{{ customHint }}</text>
+          <text class="custom-hint" :style="hintStyle(customText.length > 0 && !customValid)">{{ customHint }}</text>
         </view>
       </view>
 
-      <!-- 字体 -->
-      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        </view>
+        <view class="col col-right" :style="colStyle">
+      <!-- 字体（鸿蒙隐藏：系统定字体） -->
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
         <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
           <QtIcon class="cell-icon" name="edit" :size="36" color="#4fb186" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">字体</text>
-          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ currentFontName }}</text>
+          <text class="cell-title" :style="titleStyle">字体</text>
+          <text class="cell-value" :style="valueStyle">{{ currentFontName }}</text>
         </view>
         <view class="cell-body cell-no-border" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
           <view class="font-wrap">
@@ -180,19 +201,19 @@
               :style="'background-color:' + (isCurrentFont(i) ? theme.skin.accentSoft : theme.skin.surfaceMuted) + ';border-color:' + (isCurrentFont(i) ? theme.skin.accent : theme.skin.border) + ';'"
               @click="pickFont(i)"
             >
-              <text class="font-chip-text" :class="[fontClasses[i], layout.isWide ? 'font-chip-text-wide' : '']" :style="'color:' + theme.skin.text + ';'">{{ name }}</text>
+              <text class="font-chip-text" :class="fontClasses[i]" :style="('color:' + theme.skin.text + ';') + fp(14, 17)">{{ name }}</text>
             </view>
           </view>
         </view>
       </view>
 
-      <!-- 描边 -->
-      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <!-- 描边（鸿蒙隐藏：系统渲染，无描边接口） -->
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
         <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
           <QtIcon class="cell-icon" name="sliders" :size="36" color="#6d8fd6" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">描边</text>
+          <text class="cell-title" :style="titleStyle">描边</text>
           <view class="cell-right">
-            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ strokeOn ? liveStrokeWidth.toFixed(1) : "已关闭" }}</text>
+            <text class="cell-value" :style="valueStyle">{{ strokeOn ? liveStrokeWidth.toFixed(1) : "已关闭" }}</text>
             <view class="switch" :class="strokeOn ? 'switch-on' : ''" :style="strokeOn ? 'background-color:' + theme.skin.accent + ';' : 'background-color:' + theme.skin.surfaceMuted + ';'" @click="toggleStroke">
               <view class="switch-dot" :style="strokeOn ? '' : 'background-color:' + theme.skin.iconMuted + ';'"></view>
             </view>
@@ -214,13 +235,13 @@
         </view>
       </view>
 
-      <!-- 阴影 -->
-      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <!-- 阴影（鸿蒙隐藏：系统渲染，无阴影接口） -->
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
         <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
           <QtIcon class="cell-icon" name="eye-off" :size="36" color="#9b82d9" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">阴影</text>
+          <text class="cell-title" :style="titleStyle">阴影</text>
           <view class="cell-right">
-            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ shadowOn ? "已开启" : "已关闭" }}</text>
+            <text class="cell-value" :style="valueStyle">{{ shadowOn ? "已开启" : "已关闭" }}</text>
             <view class="switch" :class="shadowOn ? 'switch-on' : ''" :style="shadowOn ? 'background-color:' + theme.skin.accent + ';' : 'background-color:' + theme.skin.surfaceMuted + ';'" @click="toggleShadow">
               <view class="switch-dot" :style="shadowOn ? '' : 'background-color:' + theme.skin.iconMuted + ';'"></view>
             </view>
@@ -228,12 +249,12 @@
         </view>
       </view>
 
-      <!-- 对齐 -->
-      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <!-- 对齐（鸿蒙隐藏：系统定对齐） -->
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
         <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
           <QtIcon class="cell-icon" name="list" :size="36" color="#4fb186" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">对齐</text>
-          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ currentAlignName }}</text>
+          <text class="cell-title" :style="titleStyle">对齐</text>
+          <text class="cell-value" :style="valueStyle">{{ currentAlignName }}</text>
         </view>
         <view class="cell-body cell-no-border" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
           <view class="align-wrap">
@@ -245,20 +266,20 @@
               :style="'background-color:' + (isCurrentAlign(opt.value) ? theme.skin.accentSoft : theme.skin.surfaceMuted) + ';border-color:' + (isCurrentAlign(opt.value) ? theme.skin.accent : theme.skin.border) + ';'"
               @click="pickAlign(opt.value)"
             >
-              <text class="align-chip-text" :class="layout.isWide ? 'align-chip-text-wide' : ''" :style="'color:' + theme.skin.text + ';'">{{ opt.label }}</text>
+              <text class="align-chip-text" :style="('color:' + theme.skin.text + ';') + fp(14, 17)">{{ opt.label }}</text>
             </view>
           </view>
         </view>
       </view>
 
-      <!-- 背景 -->
-      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+      <!-- 背景（鸿蒙隐藏：系统渲染，无背景接口） -->
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
         <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
           <QtIcon class="cell-icon" name="disc" :size="36" color="#d99b3f" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="titleStyle">背景</text>
+          <text class="cell-title" :style="titleStyle">背景</text>
           <view class="cell-right">
             <view class="value-dot" :style="'background-color:' + (bgMode == 'solid' ? bgColor : 'transparent') + ';border-color:' + theme.skin.border + ';'"></view>
-            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ bgMode == "solid" ? "纯色" : "无" }}</text>
+            <text class="cell-value" :style="valueStyle">{{ bgMode == "solid" ? "纯色" : "无" }}</text>
             <view class="switch" :class="bgMode == 'solid' ? 'switch-on' : ''" :style="bgMode == 'solid' ? 'background-color:' + theme.skin.accent + ';' : 'background-color:' + theme.skin.surfaceMuted + ';'" @click="toggleBgMode">
               <view class="switch-dot" :style="bgMode == 'solid' ? '' : 'background-color:' + theme.skin.iconMuted + ';'"></view>
             </view>
@@ -279,23 +300,23 @@
           </view>
         </view>
         <view class="cell-body cell-body-pad" :class="layout.isWide ? 'cell-body-pad-wide' : ''" :style="cellStyle">
-          <view class="custom-row" :class="layout.isWide ? 'custom-row-wide' : ''" :style="'border-color:' + theme.skin.border + ';background-color:' + theme.skin.surfaceMuted + ';'">
-            <view class="custom-preview" :class="layout.isWide ? 'custom-preview-wide' : ''" :style="'background-color:' + (bgCustomValid ? bgCustomColor : 'transparent') + ';border-color:' + theme.skin.border + ';'"></view>
+          <view class="custom-row" :style="colorRowStyle">
+            <view class="custom-preview" :style="previewStyle(bgCustomValid, bgCustomColor)"></view>
             <input
               class="custom-input"
-              :class="layout.isWide ? 'custom-input-wide' : ''"
+              :style="inputStyle"
               :value="bgCustomText"
               @input="onBgCustomInput"
               placeholder="#RRGGBB"
-              :placeholder-class="layout.isWide ? 'ph-wide' : 'ph'"
+              placeholder-class="ph"
             />
           </view>
-          <text class="custom-hint" :style="'color:' + (bgCustomText.length > 0 && !bgCustomValid ? theme.skin.danger : theme.skin.textMuted) + ';'">{{ bgCustomHint }}</text>
+          <text class="custom-hint" :style="hintStyle(bgCustomText.length > 0 && !bgCustomValid)">{{ bgCustomHint }}</text>
         </view>
         <view class="cell-body cell-body-pad cell-no-border" :class="layout.isWide ? 'cell-body-pad-wide' : ''" :style="cellStyle">
           <view class="cell-inline">
-            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">不透明度</text>
-            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="valueStyle">{{ liveBgOpacity.toFixed(2) }}</text>
+            <text class="cell-value" :style="valueStyle">不透明度</text>
+            <text class="cell-value" :style="valueStyle">{{ liveBgOpacity.toFixed(2) }}</text>
           </view>
           <view
             class="bgop-track"
@@ -311,22 +332,360 @@
           </view>
         </view>
       </view>
+        </view>
+      </view>
+      <view v-else>
+      <!-- 开关与锁定 -->
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="music" :size="36" color="#4fb186" />
+          <text class="cell-title" :style="titleStyle">启用桌面歌词</text>
+          <view class="cell-right">
+            <text class="cell-value" :style="valueStyle">{{ lyricOn ? "已开启" : "已关闭" }}</text>
+            <view class="switch" :class="lyricOn ? 'switch-on' : ''" :style="lyricOn ? 'background-color:' + theme.skin.accent + ';' : 'background-color:' + theme.skin.surfaceMuted + ';'" @click="toggleEnabled">
+              <view class="switch-dot" :style="lyricOn ? '' : 'background-color:' + theme.skin.iconMuted + ';'"></view>
+            </view>
+          </view>
+        </view>
+        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="lock" :size="36" color="#9b82d9" />
+          <text class="cell-title" :style="titleStyle">锁定歌词窗口</text>
+          <view class="cell-right">
+            <text class="cell-value" :style="valueStyle">{{ lyricLocked ? "点击穿透" : "可拖动" }}</text>
+            <view class="switch" :class="lyricLocked ? 'switch-on' : ''" :style="lyricLocked ? 'background-color:' + theme.skin.accent + ';' : 'background-color:' + theme.skin.surfaceMuted + ';'" @click="toggleLocked">
+              <view class="switch-dot" :style="lyricLocked ? '' : 'background-color:' + theme.skin.iconMuted + ';'"></view>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <!--
+        鸿蒙说明：系统渲染的桌面歌词只有「开关」和「锁定」两项由应用控制，
+        其余样式由系统决定（原生侧对应接口是空实现）。这里明说，避免用户找设置项。
+      -->
+      <view v-if="harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="info" :size="36" color="#6d8fd6" />
+          <text class="cell-title" :style="titleStyle">由系统显示</text>
+        </view>
+        <view class="cell-body cell-body-pad cell-no-border" :class="layout.isWide ? 'cell-body-pad-wide' : ''" :style="cellStyle">
+          <text class="custom-hint" :style="hintStyle(false)">鸿蒙的桌面歌词由系统绘制：本应用只提供歌词文字，字号、颜色、字体、对齐与背景由系统主题决定，无法在应用内调整。</text>
+        </view>
+      </view>
+
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="eye" :size="36" color="#6d8fd6" />
+          <text class="cell-title" :style="titleStyle">实时预览</text>
+          <text class="cell-value" :style="valueStyle">跟随下方设置</text>
+        </view>
+        <view class="cell-body cell-body-pad cell-no-border" :class="layout.isWide ? 'cell-body-pad-wide' : ''" :style="cellStyle">
+          <view class="preview-box" :class="layout.isWide ? 'preview-box-wide' : ''">
+            <!-- 背景层放最前、铺满整个盒子（含内边距）：原生是 box.setBackgroundColor，覆盖 padding -->
+            <view class="preview-bg" :style="previewBgStyle"></view>
+            <view class="preview-inner" :class="layout.isWide ? 'preview-inner-wide' : ''">
+              <view class="preview-line">
+                <!--
+                  描边 / 阴影模拟层。uni-app x 的 CSS 没有 text-shadow / -webkit-text-stroke
+                  （全仓 grep 无先例，HBuilderX 的样式类型定义里也没有），只能用「同一个字按偏移
+                  叠几份」近似原生 canvas 的 STROKE 层与 setShadowLayer。真机观感以悬浮窗为准，
+                  预览只保证方向正确：描边八向铺开、阴影朝下。层在 DOM 里排在填充层之前，
+                  所以填充层盖住中心，露出的只有偏移出来的边。
+                -->
+                <text v-for="(layer, i) in previewLayers" :key="i" class="preview-layer" :class="previewFontClass" :style="previewLayerStyle(layer)">轻听桌面歌词</text>
+                <text class="preview-fill" :class="previewFontClass" :style="previewMainStyle">轻听桌面歌词</text>
+              </view>
+              <view class="preview-line preview-line-tr">
+                <text v-for="(layer, i) in previewTrLayers" :key="i" class="preview-layer" :class="previewFontClass" :style="previewTrLayerStyle(layer)">Desktop Lyric Preview</text>
+                <text class="preview-tr" :class="previewFontClass" :style="previewTrStyle">Desktop Lyric Preview</text>
+              </view>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 字号（鸿蒙隐藏：系统定字号） -->
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="type" :size="36" color="#d99b3f" />
+          <text class="cell-title" :style="titleStyle">字号</text>
+          <text class="cell-value" :style="valueStyle">{{ liveSize }} sp</text>
+        </view>
+        <view class="cell-body cell-no-border" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
+          <!--
+            自绘拖拽条，不用内置 slider 组件：Vapor 模式下 slider 只能用 track-class /
+            track-active-class / thumb-class 定制样式，而这三个属性只对 iOS / 鸿蒙有文档，
+            Android 端在布局完成回调里重设这些原生子视图样式更容易撞上同一个并发问题。
+            结构照抄播放页 .prog-range（已在 Android 稳定运行）。
+          -->
+          <view
+            class="size-track"
+            :class="layout.isWide ? 'size-track-wide' : ''"
+            @touchstart="onSizeTouchStart"
+            @touchmove="onSizeTouchMove"
+            @touchend="onSizeTouchEnd"
+            @touchcancel="onSizeTouchCancel"
+          >
+            <view class="size-rail" :class="layout.isWide ? 'size-rail-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'"></view>
+            <view class="size-fill" :class="layout.isWide ? 'size-fill-wide' : ''" :style="'width:' + sizePct() + '%;background-color:' + theme.skin.accent + ';'"></view>
+            <view class="size-thumb" :class="layout.isWide ? 'size-thumb-wide' : ''" :style="'left:' + sizeThumbLeft() + 'px;background-color:' + theme.skin.accent + ';'"></view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 歌词窗宽度（鸿蒙隐藏：系统定窗口宽度） -->
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="settings" :size="36" color="#4fb186" />
+          <text class="cell-title" :style="titleStyle">歌词窗宽度</text>
+          <text class="cell-value" :style="valueStyle">{{ liveWidth }}%</text>
+        </view>
+        <view class="cell-body cell-no-border" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
+          <view
+            class="width-track"
+            :class="layout.isWide ? 'width-track-wide' : ''"
+            @touchstart="onWidthTouchStart"
+            @touchmove="onWidthTouchMove"
+            @touchend="onWidthTouchEnd"
+            @touchcancel="onWidthTouchCancel"
+          >
+            <view class="width-rail" :class="layout.isWide ? 'width-rail-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'"></view>
+            <view class="width-fill" :class="layout.isWide ? 'width-fill-wide' : ''" :style="'width:' + widthPct() + '%;background-color:' + theme.skin.accent + ';'"></view>
+            <view class="width-thumb" :class="layout.isWide ? 'width-thumb-wide' : ''" :style="'left:' + widthThumbLeft() + 'px;background-color:' + theme.skin.accent + ';'"></view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 颜色（鸿蒙隐藏：系统定颜色） -->
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="droplet" :size="36" color="#7c6cf2" />
+          <text class="cell-title" :style="titleStyle">颜色</text>
+          <view class="cell-right">
+            <view class="value-dot" :style="'background-color:' + color + ';border-color:' + theme.skin.border + ';'"></view>
+            <text class="cell-value" :style="valueStyle">{{ color }}</text>
+          </view>
+        </view>
+        <view class="cell-body" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
+          <view class="swatch-wrap">
+            <view
+              v-for="c in presetColors"
+              :key="c.hex"
+              class="swatch"
+              :class="[isCurrentColor(c.hex) ? 'swatch-active' : '', layout.isWide ? 'swatch-wide' : '']"
+              :style="'background-color:' + c.hex + ';border-color:' + (isCurrentColor(c.hex) ? theme.skin.accent : theme.skin.border) + ';'"
+              @click="pickColor(c.hex)"
+            >
+              <QtIcon v-if="isCurrentColor(c.hex)" name="check" :size="22" :color="c.ink" />
+            </view>
+          </view>
+        </view>
+        <view class="cell-body cell-body-pad cell-no-border" :class="layout.isWide ? 'cell-body-pad-wide' : ''" :style="cellStyle">
+          <view class="custom-row" :style="colorRowStyle">
+            <view class="custom-preview" :style="previewStyle(customValid, customColor)"></view>
+            <input
+              class="custom-input"
+              :style="inputStyle"
+              :value="customText"
+              @input="onCustomInput"
+              placeholder="#RRGGBB"
+              placeholder-class="ph"
+            />
+          </view>
+          <text class="custom-hint" :style="hintStyle(customText.length > 0 && !customValid)">{{ customHint }}</text>
+        </view>
+      </view>
+
+      <!-- 字体（鸿蒙隐藏：系统定字体） -->
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="edit" :size="36" color="#4fb186" />
+          <text class="cell-title" :style="titleStyle">字体</text>
+          <text class="cell-value" :style="valueStyle">{{ currentFontName }}</text>
+        </view>
+        <view class="cell-body cell-no-border" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
+          <view class="font-wrap">
+            <view
+              v-for="(name, i) in fontNames"
+              :key="i"
+              class="font-chip"
+              :class="[isCurrentFont(i) ? 'font-chip-active' : '', layout.isWide ? 'font-chip-wide' : '']"
+              :style="'background-color:' + (isCurrentFont(i) ? theme.skin.accentSoft : theme.skin.surfaceMuted) + ';border-color:' + (isCurrentFont(i) ? theme.skin.accent : theme.skin.border) + ';'"
+              @click="pickFont(i)"
+            >
+              <text class="font-chip-text" :class="fontClasses[i]" :style="('color:' + theme.skin.text + ';') + fp(14, 17)">{{ name }}</text>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 描边（鸿蒙隐藏：系统渲染，无描边接口） -->
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="sliders" :size="36" color="#6d8fd6" />
+          <text class="cell-title" :style="titleStyle">描边</text>
+          <view class="cell-right">
+            <text class="cell-value" :style="valueStyle">{{ strokeOn ? liveStrokeWidth.toFixed(1) : "已关闭" }}</text>
+            <view class="switch" :class="strokeOn ? 'switch-on' : ''" :style="strokeOn ? 'background-color:' + theme.skin.accent + ';' : 'background-color:' + theme.skin.surfaceMuted + ';'" @click="toggleStroke">
+              <view class="switch-dot" :style="strokeOn ? '' : 'background-color:' + theme.skin.iconMuted + ';'"></view>
+            </view>
+          </view>
+        </view>
+        <view class="cell-body cell-no-border" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
+          <view
+            class="stroke-track"
+            :class="layout.isWide ? 'stroke-track-wide' : ''"
+            @touchstart="onStrokeTouchStart"
+            @touchmove="onStrokeTouchMove"
+            @touchend="onStrokeTouchEnd"
+            @touchcancel="onStrokeTouchCancel"
+          >
+            <view class="stroke-rail" :class="layout.isWide ? 'stroke-rail-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'"></view>
+            <view class="stroke-fill" :class="layout.isWide ? 'stroke-fill-wide' : ''" :style="'width:' + strokePct() + '%;background-color:' + theme.skin.accent + ';'"></view>
+            <view class="stroke-thumb" :class="layout.isWide ? 'stroke-thumb-wide' : ''" :style="'left:' + strokeThumbLeft() + 'px;background-color:' + theme.skin.accent + ';'"></view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 阴影（鸿蒙隐藏：系统渲染，无阴影接口） -->
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="eye-off" :size="36" color="#9b82d9" />
+          <text class="cell-title" :style="titleStyle">阴影</text>
+          <view class="cell-right">
+            <text class="cell-value" :style="valueStyle">{{ shadowOn ? "已开启" : "已关闭" }}</text>
+            <view class="switch" :class="shadowOn ? 'switch-on' : ''" :style="shadowOn ? 'background-color:' + theme.skin.accent + ';' : 'background-color:' + theme.skin.surfaceMuted + ';'" @click="toggleShadow">
+              <view class="switch-dot" :style="shadowOn ? '' : 'background-color:' + theme.skin.iconMuted + ';'"></view>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 对齐（鸿蒙隐藏：系统定对齐） -->
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="list" :size="36" color="#4fb186" />
+          <text class="cell-title" :style="titleStyle">对齐</text>
+          <text class="cell-value" :style="valueStyle">{{ currentAlignName }}</text>
+        </view>
+        <view class="cell-body cell-no-border" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
+          <view class="align-wrap">
+            <view
+              v-for="opt in alignOptions"
+              :key="opt.value"
+              class="align-chip"
+              :class="[isCurrentAlign(opt.value) ? 'align-chip-active' : '', layout.isWide ? 'align-chip-wide' : '']"
+              :style="'background-color:' + (isCurrentAlign(opt.value) ? theme.skin.accentSoft : theme.skin.surfaceMuted) + ';border-color:' + (isCurrentAlign(opt.value) ? theme.skin.accent : theme.skin.border) + ';'"
+              @click="pickAlign(opt.value)"
+            >
+              <text class="align-chip-text" :style="('color:' + theme.skin.text + ';') + fp(14, 17)">{{ opt.label }}</text>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 背景（鸿蒙隐藏：系统渲染，无背景接口） -->
+      <view v-if="!harmony" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="rowStyle">
+          <QtIcon class="cell-icon" name="disc" :size="36" color="#d99b3f" />
+          <text class="cell-title" :style="titleStyle">背景</text>
+          <view class="cell-right">
+            <view class="value-dot" :style="'background-color:' + (bgMode == 'solid' ? bgColor : 'transparent') + ';border-color:' + theme.skin.border + ';'"></view>
+            <text class="cell-value" :style="valueStyle">{{ bgMode == "solid" ? "纯色" : "无" }}</text>
+            <view class="switch" :class="bgMode == 'solid' ? 'switch-on' : ''" :style="bgMode == 'solid' ? 'background-color:' + theme.skin.accent + ';' : 'background-color:' + theme.skin.surfaceMuted + ';'" @click="toggleBgMode">
+              <view class="switch-dot" :style="bgMode == 'solid' ? '' : 'background-color:' + theme.skin.iconMuted + ';'"></view>
+            </view>
+          </view>
+        </view>
+        <view class="cell-body" :class="layout.isWide ? 'cell-body-wide' : ''" :style="cellStyle">
+          <view class="swatch-wrap">
+            <view
+              v-for="c in presetColors"
+              :key="c.hex"
+              class="swatch"
+              :class="[isCurrentBgColor(c.hex) ? 'swatch-active' : '', layout.isWide ? 'swatch-wide' : '']"
+              :style="'background-color:' + c.hex + ';border-color:' + (isCurrentBgColor(c.hex) ? theme.skin.accent : theme.skin.border) + ';'"
+              @click="pickBgColor(c.hex)"
+            >
+              <QtIcon v-if="isCurrentBgColor(c.hex)" name="check" :size="22" :color="c.ink" />
+            </view>
+          </view>
+        </view>
+        <view class="cell-body cell-body-pad" :class="layout.isWide ? 'cell-body-pad-wide' : ''" :style="cellStyle">
+          <view class="custom-row" :style="colorRowStyle">
+            <view class="custom-preview" :style="previewStyle(bgCustomValid, bgCustomColor)"></view>
+            <input
+              class="custom-input"
+              :style="inputStyle"
+              :value="bgCustomText"
+              @input="onBgCustomInput"
+              placeholder="#RRGGBB"
+              placeholder-class="ph"
+            />
+          </view>
+          <text class="custom-hint" :style="hintStyle(bgCustomText.length > 0 && !bgCustomValid)">{{ bgCustomHint }}</text>
+        </view>
+        <view class="cell-body cell-body-pad cell-no-border" :class="layout.isWide ? 'cell-body-pad-wide' : ''" :style="cellStyle">
+          <view class="cell-inline">
+            <text class="cell-value" :style="valueStyle">不透明度</text>
+            <text class="cell-value" :style="valueStyle">{{ liveBgOpacity.toFixed(2) }}</text>
+          </view>
+          <view
+            class="bgop-track"
+            :class="layout.isWide ? 'bgop-track-wide' : ''"
+            @touchstart="onBgOpTouchStart"
+            @touchmove="onBgOpTouchMove"
+            @touchend="onBgOpTouchEnd"
+            @touchcancel="onBgOpTouchCancel"
+          >
+            <view class="bgop-rail" :class="layout.isWide ? 'bgop-rail-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'"></view>
+            <view class="bgop-fill" :class="layout.isWide ? 'bgop-fill-wide' : ''" :style="'width:' + bgOpPct() + '%;background-color:' + theme.skin.accent + ';'"></view>
+            <view class="bgop-thumb" :class="layout.isWide ? 'bgop-thumb-wide' : ''" :style="'left:' + bgOpThumbLeft() + 'px;background-color:' + theme.skin.accent + ';'"></view>
+          </view>
+        </view>
+      </view>
+      </view>
 
     </scroll-view>
   </qt-page-frame>
 </template>
 
 <script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtTwoColumn } from "@/uni_modules/qt-ui/composables/use-qt-columns";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { desktopLyric } from "@/services/desktop-lyric";
+import { isHarmonyOs } from "@/services/app-native";
+import { qtConfirm } from "@/services/confirm";
+import { QT_MIN_WIDE_FONT_PX, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const layout = useQtLayout();
 const theme = useThemeStore();
+
+// 宽屏两列口径（见 use-qt-columns.ts 文件头）。
+//
+// 本页不用 qtSplitByHeight 按高度均分，而是在标记层写死左右列：「颜色」「背景」两组
+// 各带一排 14 个色块 + 一个色码输入框，高度是其它组的 2~3 倍；按高度均分反而会把两组
+// 都推进同一列，另一列下半截空着。手工分列能把重控件错开。
+const { twoColumn, colStyle, colsStyle } = useQtTwoColumn();
+/**
+ * 本机是否鸿蒙端。
+ *
+ * 鸿蒙的桌面歌词是**系统渲染**的（AVSession 桌面歌词窗）：应用只通过 AVMetadata 提供
+ * 文本（lyric 整首 + singleLyricText 当前行），字号/颜色/字体/描边/阴影/对齐/背景
+ * 全部由系统说了算，原生侧那 8 个样式接口在鸿蒙上是有意的空实现（见 qt-audio-player
+ * utssdk/app-harmony/index.uts 末尾的导出区说明）。所以本页在鸿蒙上必须把「实时预览」
+ * 和这些样式分组藏掉——留着就是「假装生效」，用户调了半天系统纹丝不动。
+ *
+ * 唯一在鸿蒙上真能落地的是「锁定」（AVSession.setDesktopLyricState），故保留。
+ * 平台分支收敛在 UTS 服务里（AGENTS.md），这里只读一个运行期布尔量，不写 #ifdef。
+ */
+const harmony = isHarmonyOs();
 /** 本页轨道测量重试定时器句柄：页面卸载时统一清掉，避免在已注销的实例上触发回调 */
 let measureRetryTimers: number[] = [];
 // 页面存活标志（onUnmounted 置 false）。
@@ -403,10 +762,27 @@ function u(rpx: number): number {
 function sz(phoneRpx: number, widePx: number): string {
   return (layout.isWide ? widePx : u(phoneRpx)) + "px";
 }
+/**
+ * 字号：手机档按窗口宽换算成 px，宽屏用固定 px，两侧都乘全局字号倍率。
+ *
+ * 为什么不用 font-scale 里的 qtFontDualPx：那个 helper 的手机档输出**定值 px**。
+ * 本页所有「手机档 px」都是 375dp 上的等效值（14px 换算到 720dp 窗口该是 ~27px），
+ * 写死 14px 就比正文（26rpx ≈ 25px）小一半——即「字体太小」。也不用 qtFontDual：
+ * 它手机档输出 rpx，而本页禁 rpx（见文件头，会进 Vapor 待重算集合并发崩溃）。
+ * 所以复用 sz() 的换算，再叠加倍率与宽屏下限（与 qtFontPx 同一套下限规则）。
+ *
+ * @param phonePx 手机档基准（375dp 上的 px 值，等于设置页 rpx 的一半）
+ * @param widePx 宽屏档基准 px
+ */
+function fp(phonePx: number, widePx: number): string {
+  const base = layout.isWide ? widePx : u(phonePx * 2);
+  const scaled = Math.round(base * fontScale.scale * 100) / 100;
+  return "font-size:" + (layout.isWide && scaled < QT_MIN_WIDE_FONT_PX ? QT_MIN_WIDE_FONT_PX : scaled) + "px;";
+}
 const listStyle = computed<string>((): string => "padding-top:" + sz(16, 12) + ";padding-bottom:" + sz(40, 24) + ";");
 const groupStyle = computed<string>((): string =>
   "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border +
-  ";margin-top:" + sz(20, 14) + ";margin-left:" + sz(24, 24) + ";margin-right:" + sz(24, 24) +
+  ";margin-top:" + sz(20, 14) + (twoColumn.value ? "" : ";margin-left:" + sz(24, 24) + ";margin-right:" + sz(24, 24)) +
   ";border-radius:" + sz(24, 14) + ";");
 const rowStyle = computed<string>((): string =>
   "border-bottom-color:" + theme.skin.divider + ";min-height:" + sz(96, 64) +
@@ -415,8 +791,24 @@ const rowStyle = computed<string>((): string =>
 const cellStyle = computed<string>((): string =>
   "border-bottom-color:" + theme.skin.divider +
   ";padding-left:" + sz(32, 24) + ";padding-right:" + sz(32, 24) + ";");
-const titleStyle = computed<string>((): string => "color:" + theme.skin.text + ";font-size:" + sz(28, 17) + ";");
-const valueStyle = computed<string>((): string => "color:" + theme.skin.textMuted + ";font-size:" + sz(24, 14) + ";margin-right:" + sz(12, 6) + ";");
+const titleStyle = computed<string>((): string => "color:" + theme.skin.text + ";" + fp(14, 17));
+const valueStyle = computed<string>((): string => "color:" + theme.skin.textMuted + ";" + fp(12, 14) + "margin-right:" + sz(12, 6) + ";");
+// 色码输入行（颜色 / 背景两组各一处）：色块 + 输入框原先整块写死 px，字号放大后行高不跟上会裁字，
+// 所以整行度量一起改成 sz() 换算：375dp 上与原 px 逐像素一致，720dp 上随窗口等比放大。
+const colorRowStyle = computed<string>((): string =>
+  "margin-top:" + sz(6, 2) + ";padding:" + sz(10, 8) + " " + sz(16, 12) +
+  ";border-radius:" + sz(14, 9) + ";border-color:" + theme.skin.border +
+  ";background-color:" + theme.skin.surfaceMuted + ";");
+const inputStyle = computed<string>((): string =>
+  "height:" + sz(60, 38) + ";margin-left:" + sz(16, 10) + ";" + fp(13, 15));
+function previewStyle(valid: boolean, hex: string): string {
+  return "width:" + sz(48, 28) + ";height:" + sz(48, 28) + ";border-radius:" + sz(10, 6) +
+    ";background-color:" + (valid ? hex : "transparent") + ";border-color:" + theme.skin.border + ";";
+}
+/** 色码校验提示：上边距与字号都随窗口宽走（提示文字是这一行里最容易看不见的字） */
+function hintStyle(invalid: boolean): string {
+  return "margin-top:" + sz(12, 6) + ";color:" + (invalid ? theme.skin.danger : theme.skin.textMuted) + ";" + fp(11, 11);
+}
 
 function refresh(): void {
   // 先与原生真相对账：通知栏「词」按钮直接改原生窗口，回调万一漏达时这里的开关会显示错
@@ -449,7 +841,7 @@ onShow(() => {
     pendingOverlayGrant = false;
     const ok = desktopLyric.enable();
     lyricOn.value = ok;
-    if (ok) uni.showToast({ title: "权限已开启，桌面歌词已打开", icon: "none" });
+    if (ok) qtShowToast({ title: "权限已开启，桌面歌词已打开", icon: "none" });
   }
   // 页面隐藏期间拿不到布局，重新进入时再测一次轨道宽度，否则圆点会停在起点
   nextTick(() => {
@@ -486,7 +878,9 @@ function toggleEnabled(): void {
     return;
   }
   if (!desktopLyric.hasPermission()) {
-    uni.showModal({
+    // 只有安卓会走到这里：鸿蒙走系统渲染、不需要悬浮窗权限，hasPermission() 恒为 true。
+    // 文案里的机型路径（i管家 / 设置 → 应用）是安卓专有，别让它出现在鸿蒙上。
+    qtConfirm({
       title: "需要悬浮窗权限",
       content:
         "桌面歌词需要「悬浮窗 / 显示在其他应用上层」权限。\n" +
@@ -495,31 +889,42 @@ function toggleEnabled(): void {
         "· 其它机型：设置 → 应用 → 轻听 → 权限\n" +
         "找到「轻听」并允许后返回本页即可自动开启。",
       confirmText: "去开启",
-      success: (res) => {
-        if (!res.confirm) return;
-        pendingOverlayGrant = true;
-        const opened = desktopLyric.requestPermission();
-        if (!opened) {
-          uni.showToast({ title: "没能打开系统设置页，请手动到「权限管理 → 悬浮窗」开启", icon: "none" });
-        }
-      },
+    }).then((ok: boolean) => {
+      if (!ok) return;
+      pendingOverlayGrant = true;
+      const opened = desktopLyric.requestPermission();
+      if (!opened) {
+        qtShowToast({ title: "没能打开系统设置页，请手动到「权限管理 → 悬浮窗」开启", icon: "none" });
+      }
     });
     return;
   }
   const ok = desktopLyric.enable();
   lyricOn.value = ok;
-  if (!ok) uni.showToast({ title: "开启失败，请重试", icon: "none" });
+  if (!ok) {
+    // 鸿蒙返回 false = 系统明确报告不支持桌面歌词（enableDesktopLyric 抛 6600111），
+    // 不是「重试就能好」；安卓返回 false 才是失败。文案要分开，否则鸿蒙用户会反复点。
+    qtShowToast({
+      title: harmony ? "当前系统不支持桌面歌词" : "开启失败，请重试",
+      icon: "none",
+    });
+  }
 }
 
 function toggleLocked(): void {
   if (!lyricOn.value) {
-    uni.showToast({ title: "请先开启桌面歌词", icon: "none" });
+    qtShowToast({ title: "请先开启桌面歌词", icon: "none" });
     return;
   }
   const next = !lyricLocked.value;
   desktopLyric.setLocked(next);
   lyricLocked.value = next;
-  uni.showToast({ title: next ? "已锁定（点击穿透）" : "已解锁（可拖动）", icon: "none" });
+  // 鸿蒙的锁定是 AVSession.setDesktopLyricState（系统锁住歌词窗，不可拖动），
+  // 没有安卓那种「点击穿透」语义，文案不能照搬
+  qtShowToast({
+    title: harmony ? (next ? "已锁定歌词窗" : "已解锁歌词窗") : (next ? "已锁定（点击穿透）" : "已解锁（可拖动）"),
+    icon: "none",
+  });
 }
 
 // ---------- 字号 ----------
@@ -1061,6 +1466,14 @@ const previewTrLayers = computed<PreviewLayer[]>((): PreviewLayer[] => {
   return layers;
 });
 
+/**
+ * 预览字号**不乘全局字号倍率**（与页面其它文字不同）。
+ *
+ * 原因：这块预览是原生悬浮歌词窗的等比缩影，它的字号由本页自己的
+ * 「字号」滑杆（liveSize → desktopLyric.setFontSp）单独控制，是原生窗口的真实取值。
+ * 若再乘一次全局倍率，预览就会和原生窗口对不上——用户看到 30sp 的预览、
+ * 悬浮窗却按 26sp 画，等于把「所见即所得」破坏掉。全局倍率只作用于应用内的页面文字。
+ */
 function previewLayerStyle(layer: PreviewLayer): string {
   // 用 left/top 偏移而不是 transform：绝对定位 + left/top 在本仓有大量先例，
   // transform 对 <text> 的命中与重绘行为在 Vapor 下没验证过，不值得为预览冒险
@@ -1156,7 +1569,7 @@ function pickFont(index: number): void {
   margin-left: 12px;
   margin-right: 12px;
   border-radius: 12px;
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
   overflow: hidden;
 }
 .group-wide {
@@ -1165,13 +1578,24 @@ function pickFont(index: number): void {
   margin-right: 24px;
   border-radius: 14px;
 }
+.cols {
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: center;
+}
+.col {
+  flex-direction: column;
+}
+.col-right {
+  margin-left: 16px;
+}
 .cell {
   min-height: 48px;
   padding-left: 16px;
   padding-right: 16px;
   flex-direction: row;
   align-items: center;
-  border-bottom-width: 1px;
+  border-bottom-width: 1px; border-bottom-style: solid;
 }
 .cell-wide {
   min-height: 64px;
@@ -1184,33 +1608,25 @@ function pickFont(index: number): void {
 .cell-icon {
   margin-right: 10px;
 }
-/* 行标题/取值手机字号 = 设置页 rpx / 2（标题 28rpx→14px、取值 24rpx→12px）：
-   此前误把 rpx 数值原样写成 px，比设置页整整大一圈 */
+/* 行标题/取值的字号不在这里：全部由内联 titleStyle / valueStyle 给（随窗口宽 + 全局字号倍率）。
+   手机基准 = 设置页 rpx / 2（标题 28rpx→14px、取值 24rpx→12px），见 fp() 的说明。 */
 .cell-title {
   flex: 1;
-  font-size: 14px;
   font-weight: 500;
-}
-.cell-title-wide {
-  font-size: 17px;
 }
 .cell-right {
   flex-direction: row;
   align-items: center;
 }
 .cell-value {
-  font-size: 12px;
   margin-right: 6px;
-}
-.cell-value-wide {
-  font-size: 14px;
 }
 /* 控件行：标题在 .cell 里，控件本体在下面这块，左右内边距与 .cell 对齐。
    包裹型内容（色块、字体按钮）用 margin-top 做行间距，末行不会多出下边距 */
 .cell-body {
   padding: 1px 16px 5px;
   flex-direction: column;
-  border-bottom-width: 1px;
+  border-bottom-width: 1px; border-bottom-style: solid;
 }
 .cell-body-wide {
   padding: 2px 24px 10px;
@@ -1406,7 +1822,7 @@ function pickFont(index: number): void {
   margin-right: 9px;
   padding: 8px 13px;
   border-radius: 8px;
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
   align-items: center;
   justify-content: center;
 }
@@ -1418,13 +1834,10 @@ function pickFont(index: number): void {
   border-radius: 10px;
 }
 .align-chip-active {
-  border-width: 2px;
+  border-width: 2px; border-style: solid;
 }
 .align-chip-text {
-  font-size: 14px;
-}
-.align-chip-text-wide {
-  font-size: 17px;
+  flex-shrink: 0;
 }
 
 /* 不透明度行：标签在左、数值在右，与上方 .cell 的取值排版呼应 */
@@ -1534,7 +1947,7 @@ function pickFont(index: number): void {
   width: 14px;
   height: 14px;
   border-radius: 7px;
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
   margin-right: 6px;
 }
 .swatch-wrap {
@@ -1547,7 +1960,7 @@ function pickFont(index: number): void {
   margin-top: 8px;
   margin-right: 10px;
   border-radius: 19px;
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
   align-items: center;
   justify-content: center;
 }
@@ -1559,54 +1972,28 @@ function pickFont(index: number): void {
   border-radius: 23px;
 }
 .swatch-active {
-  border-width: 2px;
+  border-width: 2px; border-style: solid;
 }
+/* 以下三块的尺寸/字号全部由 colorRowStyle / previewStyle / inputStyle 内联（随窗口宽与全局字号倍率），
+   类里只留与尺寸无关的骨架属性。占位符不再给 font-size：原生输入框的提示文字跟随输入框字号，
+   写死 13px 会让 720dp 窗口里的提示比正文小一半。 */
 .custom-row {
-  margin-top: 3px;
-  padding: 5px 8px;
-  border-radius: 7px;
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
   flex-direction: row;
   align-items: center;
 }
-.custom-row-wide {
-  margin-top: 2px;
-  padding: 8px 12px;
-  border-radius: 9px;
-}
 .custom-preview {
-  width: 24px;
-  height: 24px;
-  border-radius: 5px;
-  border-width: 1px;
-}
-.custom-preview-wide {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
+  border-width: 1px; border-style: solid;
 }
 .custom-input {
   flex: 1;
-  height: 30px;
-  margin-left: 8px;
-  font-size: 13px;
-}
-.custom-input-wide {
-  height: 38px;
-  margin-left: 10px;
-  font-size: 15px;
 }
 .ph {
   color: #9aa1ae;
-  font-size: 13px;
 }
-.ph-wide {
-  color: #9aa1ae;
-  font-size: 15px;
-}
+/* margin-top / color / font-size 全部由 hintStyle() 内联 */
 .custom-hint {
-  margin-top: 6px;
-  font-size: 11px;
+  flex-shrink: 0;
 }
 
 /* 字体 */
@@ -1620,7 +2007,7 @@ function pickFont(index: number): void {
   margin-right: 9px;
   padding: 8px 13px;
   border-radius: 8px;
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
   align-items: center;
   justify-content: center;
 }
@@ -1632,12 +2019,9 @@ function pickFont(index: number): void {
   border-radius: 10px;
 }
 .font-chip-active {
-  border-width: 2px;
+  border-width: 2px; border-style: solid;
 }
 .font-chip-text {
-  font-size: 14px;
-}
-.font-chip-text-wide {
-  font-size: 17px;
+  flex-shrink: 0;
 }
 </style>

@@ -37,8 +37,6 @@ export const CLIENT_UT_ANDROID = "app-android";
 export const CLIENT_UT_IOS = "app-ios";
 /** 平台取值：HarmonyOS App（鸿蒙原生包） */
 export const CLIENT_UT_HARMONY = "app-harmony";
-/** 平台取值：Windows 桌面端（qt-pc 用） */
-export const CLIENT_UT_WINDOWS = "app-windows";
 /** 平台取值：Web / H5（管理台用） */
 export const CLIENT_UT_WEB = "web";
 

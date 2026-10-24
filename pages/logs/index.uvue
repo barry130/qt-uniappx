@@ -1,0 +1,334 @@
+<template>
+  <qt-page-frame width-kind="prose">
+  <!-- 无权限拒绝态：不读日志、不给任何操作；设置页入口也按同一权限隐藏，这里是第二道守卫 -->
+  <view v-if="!allowed" class="denied" :class="layout.isWide ? 'denied-wide' : ''">
+    <QtIcon name="lock" :size="72" :color="theme.skin.iconMuted" />
+    <text class="denied-text" :class="layout.isWide ? 'denied-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(26, 15)">当前账号没有查看运行日志的权限</text>
+  </view>
+  <view v-else class="page">
+    <view class="head" :class="layout.isWide ? 'head-wide' : ''">
+      <text class="head-value" :class="layout.isWide ? 'head-value-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(56, 32)">{{ sizeText }}</text>
+      <text class="head-label" :class="layout.isWide ? 'head-label-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13)">日志占用</text>
+      <text class="head-path" :class="layout.isWide ? 'head-path-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(20, 12)">{{ pathText }}</text>
+    </view>
+
+    <view class="actions" :class="layout.isWide ? 'actions-wide' : ''">
+      <qt-button class="act" label="复制日志" variant="secondary" size="sm" @click="copyLogs" />
+      <qt-button class="act" label="复制路径" variant="outline" size="sm" @click="copyPath" />
+      <qt-button class="act" label="清除日志" variant="outline" size="sm" @click="clearAll" />
+    </view>
+
+    <!-- 调试日志开关：仓库里没有 switch 组件，沿用缓存页的勾选框写法 -->
+    <view class="switch-row" :class="layout.isWide ? 'switch-row-wide' : ''" :style="groupStyle" @click="toggleDebug" :hover-class="layout.isWide ? 'switch-row-hover' : 'none'">
+      <QtIcon class="switch-icon" :class="[layout.isWide ? 'switch-icon-wide' : '']" name="sliders" :size="36" :color="theme.skin.iconMuted" />
+      <view class="switch-main">
+        <text class="switch-title" :class="layout.isWide ? 'switch-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">调试日志</text>
+        <text class="switch-desc" :class="layout.isWide ? 'switch-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">记录更细的排查信息，平时可关闭</text>
+      </view>
+      <view
+        class="checkbox"
+        :class="layout.isWide ? 'checkbox-wide' : ''"
+        :style="debugOn ? ('background-color:' + theme.skin.accent + ';border-color:' + theme.skin.accent + ';') : ('border-color:' + theme.skin.iconMuted + ';')"
+      >
+        <QtIcon v-if="debugOn" name="check" :size="layout.isWide ? 12 : 22" :color="theme.skin.onAccent" />
+      </view>
+    </view>
+
+    <view class="log-wrap" :class="layout.isWide ? 'log-wrap-wide' : ''" :style="groupStyle">
+      <text v-if="logLines.length == 0" class="log-empty" :class="layout.isWide ? 'log-empty-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ emptyText }}</text>
+      <scroll-view v-else class="log" direction="vertical" :show-scrollbar="true">
+        <!-- 逐行渲染而不是把整份日志塞进一个 <text>：几十万字符的单节点排版会明显卡顿，
+             而且按行拆开后行与行之间才有正常行距 -->
+        <text
+          v-for="(line, index) in logLines"
+          :key="index"
+          class="log-line"
+          :class="layout.isWide ? 'log-line-wide' : ''"
+          :style="lineStyle(line)"
+        >{{ line }}</text>
+      </scroll-view>
+    </view>
+
+    <view class="hint">
+      <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">日志写在应用私有目录，只保留最近约 4MB（1MB 一份，最多 4 份，超过就覆盖最旧的）。遇到问题时把日志复制出来发给开发者即可定位。这里只显示末尾部分，文件里有完整内容。</text>
+    </view>
+  </view>
+  </qt-page-frame>
+</template>
+
+<script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
+import { qtConfirm } from "@/services/confirm";
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { computed, ref } from "vue";
+import { onShow } from "@dcloudio/uni-app";
+import { formatFileSize } from "@/services/upgrade";
+import { isQtAdmin } from "@/services/music-api";
+import {
+  clearLogs,
+  isLogDebug,
+  logBytes,
+  logPath,
+  logSupported,
+  readLogs,
+  setLogDebug,
+} from "@/services/logger";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+
+const layout = useQtLayout();
+const theme = useThemeStore();
+const groupStyle = computed<string>(() => "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";");
+
+/** 权限守卫：进页面对一次（登录态/权限可能在别处刷新过），无权限走拒绝态 */
+const allowed = ref<boolean>(isQtAdmin());
+/** 占用字节数、路径、日志正文、调试开关：四个独立 ref（Vapor 只对 ref 顶层读写做依赖收集） */
+const sizeBytes = ref<number>(0);
+const pathText = ref<string>("");
+const logLines = ref<string[]>([]);
+const debugOn = ref<boolean>(false);
+
+const sizeText = computed<string>(() => (sizeBytes.value > 0 ? formatFileSize(sizeBytes.value) : "0 KB"));
+const emptyText = computed<string>(() => (logSupported() ? "还没有日志" : "当前平台不支持写本地日志"));
+
+/**
+ * 按级别着色。行格式由 logger 固定为 `时间戳 <级别字母> [标签] 正文`，
+ * 这里从 " [" 往前一格取级别字母（不写死列号，免得时间戳格式变了就错位）。
+ */
+function lineStyle(line: string): string {
+  const mark = line.indexOf(" [");
+  const level = mark > 0 ? line.substring(mark - 1, mark) : "";
+  let color = theme.skin.textMuted;
+  if (level == "E") color = theme.skin.danger;
+  else if (level == "W") color = theme.skin.warning;
+  else if (level == "D") color = theme.skin.textSubtle;
+  return "color:" + color + ";" + qtFontDual(20, 12);
+}
+
+/** 重新读取占用与日志正文（进页面、清除后都要重读） */
+async function refresh(): Promise<void> {
+  // 无权限：占用、路径、正文一概不读，页面只剩拒绝态（模板已用 v-if 挡掉其余内容与操作）
+  if (!allowed.value) {
+    sizeBytes.value = 0;
+    pathText.value = "";
+    logLines.value = [];
+    return;
+  }
+  pathText.value = logPath();
+  debugOn.value = isLogDebug();
+  if (!logSupported()) {
+    sizeBytes.value = 0;
+    logLines.value = [];
+    return;
+  }
+  sizeBytes.value = await logBytes();
+  logLines.value = await readLogs();
+}
+
+function toggleDebug(): void {
+  const next = !debugOn.value;
+  setLogDebug(next);
+  debugOn.value = next;
+  qtShowToast({ title: next ? "已开启调试日志" : "已关闭调试日志", icon: "none" });
+}
+
+function copyLogs(): void {
+  if (logLines.value.length == 0) {
+    qtShowToast({ title: "暂无日志", icon: "none" });
+    return;
+  }
+  uni.setClipboardData({
+    data: logLines.value.join("\n"),
+    success: () => {
+      qtShowToast({ title: "日志已复制", icon: "none" });
+    },
+  });
+}
+
+/** 路径也复制一份：用户可以用文件管理直接去取整份日志文件 */
+function copyPath(): void {
+  if (pathText.value.length == 0) {
+    qtShowToast({ title: "当前平台不支持写本地日志", icon: "none" });
+    return;
+  }
+  uni.setClipboardData({
+    data: pathText.value,
+    success: () => {
+      qtShowToast({ title: "路径已复制", icon: "none" });
+    },
+  });
+}
+
+function clearAll(): void {
+    qtConfirm({
+    title: "清除日志",
+    content: "将删除本地全部日志文件（含历史轮转文件），确定继续？",
+    confirmText: "清除",
+    danger: true,
+  }).then((ok: boolean) => {
+      if (!ok) return;
+      clearLogs()
+        .then((ok: boolean) => {
+          qtShowToast({ title: ok ? "日志已清除" : "清除失败，请稍后重试", icon: "none" });
+          refresh();
+        })
+        .catch(() => {
+          qtShowToast({ title: "清除失败，请稍后重试", icon: "none" });
+        });
+  });
+}
+
+onShow(() => {
+  // 权限守卫先进位：退出登录/换账号后再进来必须立刻回落到拒绝态
+  allowed.value = isQtAdmin();
+  // 页面实例是复用的，不重读就会一直显示上次进来时的旧内容
+  refresh();
+});
+</script>
+
+<style>
+.page {
+  flex: 1;
+}
+/* 顶部占用：与清除缓存页同一套大字样式 */
+.head {
+  margin-top: 32rpx;
+  padding: 0 48rpx;
+  align-items: center;
+}
+.head-value {
+  font-size: 56rpx;
+  font-weight: 600;
+}
+.head-label {
+  margin-top: 4rpx;
+  font-size: 24rpx;
+}
+.head-path {
+  margin-top: 10rpx;
+  /* 父级 align-items:center 会让 <text> 缩成内容宽，长路径不换行；Vapor 禁 max-width，用 100% + 居中 */
+  width: 100%;
+  font-size: 20rpx;
+  line-height: 28rpx;
+  text-align: center;
+}
+.actions {
+  flex-direction: row;
+  margin-top: 24rpx;
+  margin-left: 24rpx;
+  margin-right: 24rpx;
+}
+.act {
+  flex: 1;
+  margin-left: 12rpx;
+}
+.switch-row {
+  flex-direction: row;
+  align-items: center;
+  min-height: 96rpx;
+  margin-top: 24rpx;
+  margin-left: 24rpx;
+  margin-right: 24rpx;
+  padding: 16rpx 32rpx;
+  border-radius: 24rpx;
+  border-width: 1px; border-style: solid;
+}
+.switch-icon {
+  margin-right: 20rpx;
+}
+.switch-main {
+  flex: 1;
+}
+.switch-title {
+  font-size: 28rpx;
+  font-weight: 500;
+}
+.switch-desc {
+  margin-top: 6rpx;
+  font-size: 22rpx;
+  line-height: 30rpx;
+}
+/* 勾选框：仓库内没有 checkbox/switch 组件，与「清除缓存」页同一套写法 */
+.checkbox {
+  width: 44rpx;
+  height: 44rpx;
+  border-radius: 22rpx;
+  /* border-style 必须显式写：Vapor 下不写就不会绘制边框，
+     未选中态只有一圈边框、没有背景色，漏写会变成一块看不见的空白 */
+  border-style: solid;
+  border-width: 2px;
+  align-items: center;
+  justify-content: center;
+}
+.log-wrap {
+  flex: 1;
+  min-height: 0;
+  margin-top: 24rpx;
+  margin-left: 24rpx;
+  margin-right: 24rpx;
+  border-radius: 24rpx;
+  border-width: 1px; border-style: solid;
+  overflow: hidden;
+}
+.log-empty {
+  padding: 48rpx 32rpx;
+  font-size: 24rpx;
+  text-align: center;
+}
+.log {
+  flex: 1;
+  min-height: 0;
+  padding: 20rpx 24rpx;
+}
+/* 逐行：长行自己折行，行距靠 margin 给（Vapor 里 <text> 的 line-height 不可靠） */
+.log-line {
+  width: 100%;
+  margin-bottom: 6rpx;
+  font-size: 20rpx;
+  line-height: 30rpx;
+}
+.hint {
+  margin-top: 18rpx;
+  padding: 0 40rpx 32rpx;
+}
+.hint-text {
+  font-size: 22rpx;
+  line-height: 32rpx;
+}
+/* 无权限拒绝态：占满剩余空间居中；字号/颜色走内联（Vapor 文字样式不继承） */
+.denied {
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  padding: 0 64rpx;
+}
+.denied-text {
+  margin-top: 24rpx;
+  text-align: center;
+  line-height: 40rpx;
+}
+.denied-wide { padding: 0 48px; }
+.denied-text-wide { margin-top: 16px; line-height: 24px; }
+/* 宽屏下 rpx 会随窗口放大膨胀，固定 px 尺寸 */
+.head-wide { margin-top: 20px; padding: 0 32px; }
+.head-value-wide { font-size: 32px; }
+.head-label-wide { margin-top: 2px; font-size: 13px; }
+.head-path-wide { margin-top: 6px; font-size: 12px; line-height: 18px; }
+.actions-wide { margin-top: 16px; margin-left: 24px; margin-right: 24px; }
+/* 桌面指针反馈 */
+.switch-row-hover {
+  background-color: rgba(127, 127, 127, 0.10);
+}
+.switch-row-wide { min-height: 64px; margin-top: 16px; margin-left: 24px; margin-right: 24px; padding: 10px 24px; border-radius: 14px; }
+.switch-icon-wide { margin-right: 10px; }
+.switch-title-wide { font-size: 17px; }
+.switch-desc-wide { margin-top: 4px; font-size: 13px; line-height: 18px; }
+.checkbox-wide { width: 24px; height: 24px; border-radius: 12px; }
+.log-wrap-wide { margin-top: 16px; margin-left: 24px; margin-right: 24px; border-radius: 14px; }
+.log-empty-wide { padding: 28px 24px; font-size: 14px; }
+.log-line-wide { margin-bottom: 4px; font-size: 12px; line-height: 18px; }
+.hint-text-wide { font-size: 12px; line-height: 18px; }
+</style>

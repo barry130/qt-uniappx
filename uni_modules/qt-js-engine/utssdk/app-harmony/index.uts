@@ -79,8 +79,17 @@
  *        unlinkSync:5408 / mkdirSync:2578+2603 / OpenMode:148 / File.fd:5858
  *   [A5] http.createHttp:81 / request(url,options,cb):987 / destroy:1253
  *        → HttpRequestOptions.header 确为 `Object`(:238)；RequestMethod 恰好
- *          8 个取值，与 httpMethodOf 的分支一一对应；HttpDataType.STRING:2426；
- *          HttpResponse.responseCode: `ResponseCode | number`(:2506)
+ *          8 个取值，与 httpMethodOf 的分支一一对应；HttpDataType.STRING:2426 /
+ *          ARRAY_BUFFER:2483；HttpResponse.result: `string | Object | ArrayBuffer`
+ *          (:2531)、resultType: HttpDataType(:2559)、responseCode:
+ *          `ResponseCode | number`(:2506)
+ *   [A5'] buffer.from(arrayBuffer): Buffer → @ohos.buffer.d.ts:395，Buffer 有
+ *        length(:713) / readUInt8(:1743) / readUInt16BE(:1777) /
+ *        toString(encoding?)(:2148)；由 @kit.ArkTS 导出（ohos/kits/@kit.ArkTS.d.ts
+ *        的 export 清单含 buffer，与 util 同包，不引入新 kit 依赖）。
+ *        选它的理由：UTS 通用类型树里 `TypedArray` 是**空接口**
+ *        （uts/types/uts/common/TypedArray.d.ts 全文 3 行），`view[i]` 下标没有
+ *        类型声明；Buffer 的逐字节读取全是具名方法，绕开了这个不确定性。
  *   [A7] UTSHarmony.getUserAgent / getAppId / getUniRuntimeVersion → 均在
  *        UTSHarmony.d.ts:604 的导出清单里
  *   [A8] runJavaScript(script, callback: AsyncCallback<string>): void
@@ -113,6 +122,7 @@
 import { http } from '@kit.NetworkKit' // [A5]
 import { fileIo as fs } from '@kit.CoreFileKit' // [A4]
 import { util } from '@kit.ArkTS' // [A2] Uint8Array → string
+import { buffer } from '@kit.ArkTS' // [A5'] ArrayBuffer → 逐字节读取（FLAC 位深嗅探）
 import { BusinessError } from '@kit.BasicServicesKit' // [A5] 回调错误参数类型
 import { QtJsArkWebHost } from './builder.ets' // 唯一允许的 uts → ets 方向
 import { QT_JS_PRELUDE } from './prelude.uts'
@@ -129,6 +139,8 @@ import type {
 	QtJsDataDir,
 	QtJsReadTextFile,
 	QtJsWriteTextFile,
+	QtJsAppendTextFile,
+	QtJsRenamePath,
 	QtJsExists,
 	QtJsRemove,
 	QtJsMkdirs,
@@ -259,6 +271,22 @@ function fsReadText(path: string): string {
  */
 function fsWriteText(path: string, text: string): void {
 	const file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC)
+	try {
+		fs.writeSync(file.fd, text)
+	} finally {
+		fs.closeSync(file)
+	}
+}
+
+/**
+ * 追加文本（UTF-8，文件不存在则创建）。
+ * [A4 已核对] `OpenMode.APPEND = 0o2000`（`:182`，注释「Open the file in append mode.
+ * New data will be written to the end of the file.」），所以这里不必退化成
+ * 「读全文 + 拼接 + 覆盖写」。同时带上 CREATE，否则文件不存在会直接失败。
+ * 注意**不能**带 TRUNC：TRUNC 与 APPEND 同时给会把已有内容清空。
+ */
+function fsAppendText(path: string, text: string): void {
+	const file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.APPEND)
 	try {
 		fs.writeSync(file.fd, text)
 	} finally {
@@ -512,13 +540,18 @@ function defaultUserAgent(): string {
  * 两个刻意选择：
  *   · 空 body 时**不带 extraData 字段**（GET 带 extraData 在部分实现里会被忽略或报错），
  *     所以这里写了两个字面量分支；
- *   · `expectDataType: STRING`：本引擎的整条链路（信封 → unwrapEval → 上层）都按
- *     字符串设计，让模块直接把结果字符串化，省掉 ArrayBuffer → string 的转换。
+ *   · `expectDataType`：默认是 STRING —— 本引擎的整条链路（信封 → unwrapEval →
+ *     上层）都按字符串设计，让模块直接把结果字符串化，省掉 ArrayBuffer → string
+ *     的转换。**唯一例外**是 wantBytes=true：此时要 ARRAY_BUFFER，因为密码 crypto
+ *     之外的场景——FLAC 位深嗅探——必须在 UTF-8 解码**之前**看原始字节，一旦被
+ *     系统按 utf-8 解过，非法字节序列全变成 U+FFFD，字节索引就和字符索引错位了。
+ *     只有包侧的极小 Range 预检（bytes=0-63）会走到这个分支。
  *
  * `header` 的类型跟 httpHeadersOf 一起用 UTSJSONObject（不用仅 web 端支持的 Record）。
  */
-function httpOptionsOf(method: string, headers: UTSJSONObject, body: string, timeoutMs: number): http.HttpRequestOptions {
+function httpOptionsOf(method: string, headers: UTSJSONObject, body: string, timeoutMs: number, wantBytes: boolean): http.HttpRequestOptions {
 	const verb = httpMethodOf(method)
+	const dataType: http.HttpDataType = wantBytes ? http.HttpDataType.ARRAY_BUFFER : http.HttpDataType.STRING
 	if (body.length > 0) {
 		return {
 			method: verb,
@@ -526,7 +559,7 @@ function httpOptionsOf(method: string, headers: UTSJSONObject, body: string, tim
 			extraData: body,
 			connectTimeout: timeoutMs,
 			readTimeout: timeoutMs,
-			expectDataType: http.HttpDataType.STRING,
+			expectDataType: dataType,
 			usingCache: false
 		}
 	}
@@ -535,7 +568,7 @@ function httpOptionsOf(method: string, headers: UTSJSONObject, body: string, tim
 		header: headers,
 		connectTimeout: timeoutMs,
 		readTimeout: timeoutMs,
-		expectDataType: http.HttpDataType.STRING,
+		expectDataType: dataType,
 		usingCache: false
 	}
 }
@@ -776,6 +809,146 @@ function lowerJsonKeys(json: string): string {
 	return out
 }
 
+/**
+ * 取出 ARRAY_BUFFER 形态的响应体（拿不到返回 null，不 throw）。
+ *
+ * expectDataType=ARRAY_BUFFER 时 `result` 是 `string | Object | ArrayBuffer`，
+ * 所以必须做运行时判断（本仓 qt-audio-player/utssdk/app-harmony/index.uts:778
+ * 用 `instanceof ArrayBuffer` 做过同一件事）。随后 `buffer.from` 也可能因为
+ * UTS 侧的类型转换问题失败，所以整段包在 try 里 —— 拿不到就是「不支持」，
+ * 调用方按 STRING 重发。
+ */
+function rawBufferOf(resp: http.HttpResponse): buffer.Buffer | null {
+	const raw = resp.result
+	if (!(raw instanceof ArrayBuffer)) {
+		return null
+	}
+	try {
+		// 为什么绕 `buffer.from` 而不是 `new Uint8Array(buf)` 直接下标取：UTS 通用
+		// 类型树里 `TypedArray` 是**空接口**（uts/types/uts/common/TypedArray.d.ts
+		// 全文 3 行），`view[i]` 的下标运算没有类型声明；而 @ohos.buffer 的 Buffer
+		// 有明确的 readUInt8 / readUInt16BE / length / toString，逐字节全走具名方法。
+		return buffer.from(raw as ArrayBuffer)
+	} catch (e) {
+		return null
+	}
+}
+
+/**
+ * 从原始响应字节里嗅探 FLAC 位深（0 = 不是 FLAC / 头部不完整 / 数值非法）。
+ *
+ * 与 PC 侧 `commands.rs::flac_bits_of`、安卓侧 `app-android/index.uts::flacBitsOf`
+ * **逐字段对齐**（同一份契约，三边必须一起改）：STREAMINFO 是 `fLaC` 之后的第一个
+ * metadata block，固定 34 字节，所以整个头至少 4 + 4 + 34 = 42 字节；位深字段
+ * （5 bit 的 bits-1）落在第 20/21 字节，采样率（20 bit）落在第 18/19/20 字节，
+ * 0 是保留值，用来挡掉「看着像 fLaC 的随机字节」。
+ *
+ * 逐字节读一律走 `readUInt8()`：它本来就是无符号语义，不存在 Kotlin ByteArray
+ * 那种「元素是带符号 Byte，0x80 取出来是 -128」会把符号扩展带进 `<<` / `>>` 的坑。
+ */
+function flacBitsOf(data: buffer.Buffer): number {
+	const len = data.length
+	if (len < 42) return 0
+	// 'fLaC'
+	if (data.readUInt8(0) != 102) return 0
+	if (data.readUInt8(1) != 76) return 0
+	if (data.readUInt8(2) != 97) return 0
+	if (data.readUInt8(3) != 67) return 0
+	// 块头：最高位是 last-block 标志，低 7 位是类型；首个块必须是 STREAMINFO(0)
+	if ((data.readUInt8(4) & 127) != 0) return 0
+	// 块长度 24 位大端，必须是 34
+	if (data.readUInt8(5) != 0) return 0
+	if (data.readUInt8(6) != 0) return 0
+	if (data.readUInt8(7) != 34) return 0
+	// 采样率 20 bit：0 是 FLAC 保留值
+	const rate = (data.readUInt8(18) << 12) | (data.readUInt8(19) << 4) | (data.readUInt8(20) >> 4)
+	if (rate <= 0) return 0
+	// 位深 5 bit：(bits-1) = 字节 20 最低 1 位 + 字节 21 高 4 位
+	const bits = (((data.readUInt8(20) & 1) << 4) | (data.readUInt8(21) >> 4)) + 1
+	if (bits < 4) return 0
+	if (bits > 32) return 0
+	return bits
+}
+
+/**
+ * 往 headersJsonOf 生成的 JSON 里塞一个头（已存在则覆盖，保持「重复头取最后一次」）。
+ *
+ * 只在**追加**场景走字符串拼接（headersJsonOf 已经收口成 `{"k":"v",...}`，
+ * 键名都过了 JSON 序列化，所以「砍掉结尾 } 再补一对」是安全的）。替换分支必须按
+ * 引号边界找值的终点：响应头值里带逗号很常见（Cookie / Timing-Allow 等），
+ * 用「下一个逗号」当终点会把值截断成坏 JSON。
+ * 与 app-android/index.uts::injectHeader 同算法。
+ */
+function injectHeader(headersJson: string, key: string, value: string): string {
+	const k = quoteAscii(key)
+	const pair = k + ':' + quoteAscii(value)
+	const needle = k + ':'
+	const at = headersJson.indexOf(needle)
+	if (at < 0) {
+		if (headersJson == '{}') return '{' + pair + '}'
+		return headersJson.substring(0, headersJson.length - 1) + ',' + pair + '}'
+	}
+	const val = quoteAscii(value)
+	const valStart = at + needle.length
+	// 值一定是 `"..."`：从起始引号起扫到配对的结束引号（反斜杠后一位直接跳过）
+	let i = valStart + 1
+	while (i < headersJson.length) {
+		const c = headersJson.charAt(i)
+		if (c == '\\') {
+			i += 2
+			continue
+		}
+		if (c == '"') break
+		i++
+	}
+	const valEnd = i + 1
+	return headersJson.substring(0, valStart) + val + headersJson.substring(valEnd)
+}
+
+/**
+ * 「这个请求值得切 ARRAY_BUFFER 吗」：只有当请求头里带 `Range`、
+ * 且上界 <= TINY_RANGE_MAX_BYTES 时为真。
+ *
+ * 请求头在本文件里是**多行文本**（`httpHeadersOf` 收成 UTSJSONObject 之前的形态是
+ * `Name: value` 逐行），所以这里按行找 `range:`，再从值里抠出 `-` 之后的数字。
+ * 形式不符 / 上界过大 / 带 suffix 形态（`bytes=-500`）一律返回 false ——
+ * 拿不准就退回 STRING（等价于改前的旧行为），不会引入风险。
+ */
+function wantsRawBytes(headersText: string): boolean {
+	const lines = headersText.split('\n')
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i].trim()
+		const colon = line.indexOf(':')
+		if (colon <= 0) continue
+		if (lowerAscii(line.substring(0, colon)) != 'range') continue
+		return rangeEndsWithinLimit(line.substring(colon + 1).trim())
+	}
+	return false
+}
+
+/** `bytes=0-63` 这种形态的上界判定（<= TINY_RANGE_MAX_BYTES 为真） */
+function rangeEndsWithinLimit(value: string): boolean {
+	const dash = value.indexOf('-')
+	if (dash < 0) return false
+	const unit = lowerAscii(value.substring(0, dash)).trim()
+	if (unit.length == 0) return false // `bytes=-500`（取尾N字节）不当预检
+	let tail = ''
+	for (let i = dash + 1; i < value.length; i++) {
+		const c = value.charCodeAt(i)!
+		if (c >= 48 && c <= 57) {
+			tail += value.charAt(i)
+			continue
+		}
+		break
+	}
+	if (tail.length == 0) return false
+	let end = 0
+	for (let i = 0; i < tail.length; i++) {
+		end = end * 10 + (value.charCodeAt(dash + 1 + i)! - 48)
+	}
+	return end <= TINY_RANGE_MAX_BYTES
+}
+
 /** ASCII 大写转小写（其它字符（含非 ASCII）原样） */
 function lowerAscii(s: string): string {
 	let out = ''
@@ -813,6 +986,25 @@ const STALL_MS = 15000
 const DEFAULT_HTTP_TIMEOUT_MS = 15000
 /** 响应体上限（与安卓同为 8MiB）：防止一个坏 URL 把整块内存拉爆 */
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+/**
+ * FLAC 位深头名（与 app-android/index.uts:145 同名同值）。
+ *
+ * 只在「响应体确实是 FLAC 且 STREAMINFO 合法」时由宿主注入，值是 4..32 的整数。
+ * **没有这个头 === 「位深未知」**，包侧（qt-sources/src/actions/play-guard.ts 的
+ * probeMedia）遇到缺失会按 bits=null 处理，不会因此把 flac24bit 降级成 flac ——
+ * 宁可不知道，也不猜。
+ */
+const QT_FLAC_BITS_HEADER = 'x-qt-flac-bits'
+/**
+ * 「可以走 ARRAY_BUFFER 预检」的 Range 上界阈值。
+ *
+ * 只有包侧那种极小 Range 预检（`Range: bytes=0-63`，只为读 FLAC STREAMINFO）
+ * 才值得切 ARRAY_BUFFER：它最多几百字节，即使 @kit.NetworkKit 对 ArrayBuffer
+ * 的处理和 string 不一致（比如不再自动解压 gzip），损失也只是一次预检失真——
+ * 最坏情况这条线路被判死，包会换下一线路。正式播放/下载的请求永远走 STRING。
+ */
+const TINY_RANGE_MAX_BYTES = 255
 
 /**
  * 页面基地址：必须是 https 且是「自己的域」。
@@ -2128,6 +2320,11 @@ function startFireTimer(id: string): void {
  *   · gzip：**不需要手动解压**（安卓要，因为它自己声明 Accept-Encoding: gzip）。
  *   · 连接复用：安卓刻意不 disconnect 以复用 keep-alive；鸿蒙侧每个 HttpRequest
  *     用完必须 destroy（否则底层连接池随请求数增长），由 httpDestroy 收口。
+ *   · FLAC 位深嗅探（安卓得分体现 interests 一致）：只有包侧的极小 Range 预检
+ *     （`Range: bytes=0-63`）会切 ARRAY_BUFFER，在 UTF-8 解码**之前**读
+ *     STREAMINFO，命中就往响应头里补 `x-qt-flac-bits`。其余请求一律 STRING。
+ *     拿不到 ArrayBuffer（或 buffer.from 失败）就按 STRING 重发一次 —— 退化到
+ *     改前的旧行为，不会把「宿主拿不到原始字节」变成音源不可用。
  */
 function startHttp(o: UTSJSONObject): void {
 	const id = fieldStr(o, 'id')
@@ -2141,7 +2338,10 @@ function startHttp(o: UTSJSONObject): void {
 	}
 	const hostPart = hostPartOf(url)
 	const t0 = Date.now()
-	const req = newHttpRequest()
+	const headerFields = httpHeadersOf(headers)
+	// 极小 Range 预检才值得换 ARRAY_BUFFER 去拿原始字节（见 TINY_RANGE_MAX_BYTES 注释）
+	let wantBytes = wantsRawBytes(headers)
+	let req = newHttpRequest()
 	let settled = false
 	const watchdog = timerSet(() => {
 		if (settled) {
@@ -2181,25 +2381,62 @@ function startHttp(o: UTSJSONObject): void {
 		)
 		onHttpDone(id, status, headersJson, bodyText, err)
 	}
-	try {
-		const options = httpOptionsOf(method, httpHeadersOf(headers), body, timeoutMs)
-		httpRequestSend(req, url, options, (err: BusinessError, resp: http.HttpResponse) => {
-			// 成功时 err 为 null/undefined；不比较 err.message 的字段类型，统一走 errText
-			const message = err == null ? '' : errText(err)
-			if (message.length > 0) {
-				finish(0, '{}', '', message)
-				return
-			}
-			if (resp == null) {
-				finish(0, '{}', '', '请求未返回响应')
-				return
-			}
-			const probe = bodyTextOf(resp)
-			finish(statusOf(resp), headersJsonOf(resp), probe.text, probe.ok ? '' : '响应体无法转换为文本')
-		})
-	} catch (e) {
-		finish(0, '{}', '', errText(e))
+	/**
+	 * 发一次请求并处理响应。
+	 *
+	 * 为什么抽成局部闭包而不是内联：ARRAY_BUFFER 预检失败时要按 STRING **重发一次**，
+	 * 而每一个 HttpRequest 只能 request 一次且必须配一次 destroy（见 httpDestroy 注释），
+	 * 所以重发必须换一个 req —— 但 `settled` / `finish` / 看门狗是这一整条 op 共享的
+	 * （「有且只有一次 finish」是硬约束：两次回调会让同一 op resolve 两次）。故这里
+	 * 把「组装 options + 发 + 处理回调」抽出来，重发时只换 req 再调一次。
+	 */
+	const sendOnce = (): void => {
+		try {
+			const options = httpOptionsOf(method, headerFields, body, timeoutMs, wantBytes)
+			httpRequestSend(req, url, options, (err: BusinessError, resp: http.HttpResponse) => {
+				// 成功时 err 为 null/undefined；不比较 err.message 的字段类型，统一走 errText
+				const message = err == null ? '' : errText(err)
+				if (message.length > 0) {
+					finish(0, '{}', '', message)
+					return
+				}
+				if (resp == null) {
+					finish(0, '{}', '', '请求未返回响应')
+					return
+				}
+				let headersJson = headersJsonOf(resp)
+				// 非空有赖于下面两个分支必居其一；但 UTS 不做「变量一定被赋值」的流分析，
+				// 所以给个初值（初值就是「不可用」），避免为一个不可能的空值写判分支
+				let probe: TextProbe = new TextProbe(false, '')
+				if (wantBytes) {
+					// ARRAY_BUFFER 形态：必须自己解码，否则 `ArrayBuffer` 被模板字符串
+					// 化会变成 `[object ArrayBuffer]` 之类的垃圾（bodyTextOf 的兜底分支）
+					const buf = rawBufferOf(resp)
+					if (buf == null) {
+						// 拿不到字节就退回 STRING 重发一次：没有 x-qt-flac-bits 时包侧
+						// 只会把位深当未知处理，不会误判音质 —— 退化是安全的
+						console.warn('[qt-js-engine] 原始字节不可用，降级为 STRING 重试:', hostPart)
+						httpDestroy(req)
+						wantBytes = false
+						req = newHttpRequest()
+						sendOnce()
+						return
+					}
+					const bits = flacBitsOf(buf)
+					if (bits > 0) {
+						headersJson = injectHeader(headersJson, QT_FLAC_BITS_HEADER, `${bits}`)
+					}
+					probe = new TextProbe(true, buf.toString('utf-8'))
+				} else {
+					probe = bodyTextOf(resp)
+				}
+				finish(statusOf(resp), headersJson, probe.text, probe.ok ? '' : '响应体无法转换为文本')
+			})
+		} catch (e) {
+			finish(0, '{}', '', errText(e))
+		}
 	}
+	sendOnce()
 }
 
 /** HTTP 结果回投 JS（安卓 ResolveHttpTask 的对应物） */
@@ -2473,6 +2710,9 @@ export const dataDir: QtJsDataDir = function (): string {
 	return filesDirPath()
 }
 
+/** 鸿蒙公共目录需要选择器授权，不能把应用沙箱冒充公共目录。 */
+export const publicDataDir: QtJsDataDir = function (): string { return '' }
+
 export const readTextFile: QtJsReadTextFile = function (path: string, callback: QtJsFileCallback) {
 	try {
 		deliverFile(callback, true, fsReadText(path), '')
@@ -2495,6 +2735,53 @@ export const writeTextFile: QtJsWriteTextFile = function (
 			fsMkdirs(parent)
 		}
 		fsWriteText(path, text)
+		deliverFile(callback, true, '', '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+/**
+ * 追加文本（UTF-8）。文件不存在时创建，父目录不存在时先建。
+ * 与 writeTextFile 的差别只在打开模式，父目录处理逻辑完全一致（理由见 writeTextFile）。
+ */
+export const appendTextFile: QtJsAppendTextFile = function (
+	path: string,
+	text: string,
+	callback: QtJsFileCallback
+) {
+	try {
+		const parent = parentDirOf(path)
+		if (parent.length > 0 && !fsExists(parent)) {
+			fsMkdirs(parent)
+		}
+		fsAppendText(path, text)
+		deliverFile(callback, true, '', '')
+	} catch (e) {
+		deliverFile(callback, false, '', errText(e))
+	}
+}
+
+/**
+ * 改名/移动。目标父目录不存在时先建。
+ * [A4 已核对] `renameSync(oldPath: string, newPath: string): void`（`:3078`）存在，
+ * 失败靠抛异常表达（不像安卓的 renameTo 返回布尔），所以这里 try/catch 即可。
+ */
+export const renamePath: QtJsRenamePath = function (
+	oldPath: string,
+	newPath: string,
+	callback: QtJsFileCallback
+) {
+	try {
+		if (!fsExists(oldPath)) {
+			deliverFile(callback, false, '', '源路径不存在：' + oldPath)
+			return
+		}
+		const parent = parentDirOf(newPath)
+		if (parent.length > 0 && !fsExists(parent)) {
+			fsMkdirs(parent)
+		}
+		fs.renameSync(oldPath, newPath)
 		deliverFile(callback, true, '', '')
 	} catch (e) {
 		deliverFile(callback, false, '', errText(e))

@@ -1,13 +1,13 @@
 <template>
-  <qt-page-frame :max-width="760">
+  <qt-page-frame width-kind="list" :max-width="720">
   <view class="page" :class="layout.isWide ? 'page-wide' : ''">
     <!-- 顶部：概览 + 清空 -->
     <view class="summary" :class="layout.isWide ? 'summary-wide' : ''" :style="cardStyle">
-      <text class="sub" :class="layout.isWide ? 'sub-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">共 {{ rules.length }} 条屏蔽规则</text>
+      <text class="sub" :class="layout.isWide ? 'sub-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13)">共 {{ rules.length }} 条屏蔽规则</text>
       <text
         v-if="rules.length > 0"
         class="clear-link" :class="layout.isWide ? 'clear-link-wide' : ''"
-        :style="'color:' + theme.skin.textSubtle + ';'" @click="clearAll"
+        :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(24, 13)" @click="clearAll"
       >清空全部</text>
     </view>
 
@@ -19,17 +19,17 @@
       >
         <view class="rule" :class="layout.isWide ? 'rule-wide' : ''" :style="'background-color:' + theme.skin.surface + ';border-top-color:' + theme.skin.divider + ';'">
           <view class="kind-badge" :class="layout.isWide ? 'kind-badge-wide' : ''" :style="kindBadgeStyle(rule.kind)">
-            <text class="kind-text" :class="layout.isWide ? 'kind-text-wide' : ''">{{ rule.kind == "song" ? "歌" : "手" }}</text>
+            <text class="kind-text" :class="layout.isWide ? 'kind-text-wide' : ''" :style="qtFontDual(22, 13)">{{ rule.kind == "song" ? "歌" : "手" }}</text>
           </view>
           <view class="rule-info">
             <text
               class="rule-name" :class="layout.isWide ? 'rule-name-wide' : ''"
-              :style="'color:' + theme.skin.text + ';'"
+              :style="('color:' + theme.skin.text + ';') + qtFontDual(29, 16)"
               :max-lines="1"
             >{{ rule.nameRaw }}</text>
             <text
               class="rule-meta" :class="layout.isWide ? 'rule-meta-wide' : ''"
-              :style="'color:' + theme.skin.textMuted + ';'"
+              :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)"
               :max-lines="1"
             >{{ ruleMeta(rule) }}</text>
           </view>
@@ -42,26 +42,27 @@
         </view>
       </list-item>
       <list-item v-if="rules.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
-        <text class="empty-text" :style="'color:' + theme.skin.textMuted + ';'">还没有屏蔽任何歌曲或歌手</text>
-        <text class="empty-hint" :class="layout.isWide ? 'empty-hint-wide' : ''" :style="'color:' + theme.skin.textSubtle + ';'">在歌曲的长按菜单里选「屏蔽这首歌」或「屏蔽该歌手」</text>
+        <text class="empty-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(26, 14)">还没有屏蔽任何歌曲或歌手</text>
+        <text class="empty-hint" :class="layout.isWide ? 'empty-hint-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(23, 13)">在歌曲的长按菜单里选「屏蔽这首歌」或「屏蔽该歌手」</text>
       </list-item>
       <!-- 让位固定悬浮的 MiniPlayer，避免最后一行被遮住 -->
       <list-item class="foot-space" :class="layout.isWide ? 'foot-space-wide' : ''"></list-item>
     </list-view>
     <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
-    <MiniPlayer />
   </view>
   </qt-page-frame>
 </template><script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
-import MiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { ref, computed } from "vue";
 import { useDislikesStore } from "@/stores/dislikes";
+import { qtConfirm } from "@/services/confirm";
 import type { DislikeRule } from "@/stores/dislikes";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const dislikes = useDislikesStore();
 const layout = useQtLayout();
@@ -101,21 +102,20 @@ function backToTop() {
 
 function removeRule(rule: DislikeRule): void {
   dislikes.removeById(rule.id);
-  uni.showToast({ title: "已取消屏蔽", icon: "none" });
+  qtShowToast({ title: "已取消屏蔽", icon: "none" });
 }
 
 function clearAll(): void {
-  uni.showModal({
+  qtConfirm({
     title: "清空屏蔽规则",
     content: "确定取消全部屏蔽吗？被屏蔽的歌曲与歌手将恢复自动播放。",
     confirmText: "清空",
-    confirmColor: theme.skin.danger,
-    success: (res) => {
-      if (res.confirm) {
-        dislikes.clearAll();
-        uni.showToast({ title: "已清空", icon: "none" });
-      }
-    },
+    danger: true,
+  }).then((ok: boolean) => {
+    if (ok) {
+      dislikes.clearAll();
+      qtShowToast({ title: "已清空", icon: "none" });
+    }
   });
 }
 </script>
@@ -135,7 +135,7 @@ function clearAll(): void {
   align-items: center;
   justify-content: space-between;
   padding: 24rpx 28rpx;
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
   border-radius: 24rpx;
 }
 .summary-wide {
@@ -173,7 +173,7 @@ function clearAll(): void {
   flex-direction: row;
   align-items: center;
   padding: 20rpx 24rpx;
-  border-top-width: 1px;
+  border-top-width: 1px; border-top-style: solid;
 }
 .rule-wide {
   padding: 12px 16px;

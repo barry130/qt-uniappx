@@ -1,0 +1,870 @@
+<template>
+  <!-- 每日推荐（智能推荐页，2026-10-24 移植自 qt-pc DailyRecommendPage）：
+       三种引擎模式（纯规则 / 本地模型精选 / 服务端 AI，全局于音乐助手共用，见 services/ai-mode.ts），
+       三种口味（心动 / 常听 / 探索）与模式正交。列表默认按推荐顺序渲染（含开场、沉浸、
+       收束的编排），排序与搜索为纯前端能力（同歌单详情/每日新歌：标题栏搜索 + 三点排序）。
+       骨架 / hero / 吸顶操作条与 pages/daily 同一套模板（详情页一套模板）。 -->
+  <qt-page-frame
+    width-kind="detail"
+    title="每日推荐"
+    :header-actions="headerActions"
+    :header-title-visible="titleVisible"
+    :header-searching="searchOpen"
+    :header-search-value="searchQuery"
+    header-search-placeholder="搜索标题 / 歌手 / 专辑"
+    @headerAction="onHeaderAction"
+    @headerSearchInput="onHeaderSearchInput"
+    @headerSearchClose="closeSearch"
+  >
+  <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']"
+    >
+    <!-- 宽屏左栏：封面 + 元信息 + 口味/模式操作（与歌单详情 / 每日新歌同一套主从双栏） -->
+    <scroll-view v-if="layout.isWide" class="wide-left" direction="vertical" :show-scrollbar="false">
+      <view class="whero" :style="'background-color:' + themeStore.skin.surfaceStrong + ';border-color:' + themeStore.skin.border + ';'">
+        <QtSkeleton v-if="loading" tone="cover" width="238px" height="238px" radius="12px" />
+        <image v-else class="whero-cover" :src="displayPicUrl" mode="aspectFill" />
+        <template v-if="loading">
+          <view class="wsk-l1"><QtSkeleton tone="line" width="160px" height="18px" radius="4px" /></view>
+          <view class="wsk-l2"><QtSkeleton tone="line" width="220px" height="13px" radius="4px" /></view>
+          <view class="wsk-l3"><QtSkeleton tone="line" width="190px" height="13px" radius="4px" /></view>
+          <view class="wsk-l5"><QtSkeleton tone="block" width="238px" height="44px" radius="22px" /></view>
+        </template>
+        <template v-else>
+          <text class="whero-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(12)" :max-lines="1">{{ metaLine }}</text>
+          <text class="whero-title" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(18)" :max-lines="2">{{ resultTitle }}</text>
+          <text v-if="resultSummary.length > 0" class="whero-desc" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(13)" :max-lines="2">{{ resultSummary }}</text>
+          <view v-if="laneChips.length > 0" class="whero-lanes">
+            <view v-for="(lane, li) in laneChips" :key="'wl-' + li" class="lane-chip" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'">
+              <text class="lane-chip-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(11)">{{ lane }}</text>
+            </view>
+          </view>
+          <text v-if="resultProfileText.length > 0" class="whero-profile" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(11)" :max-lines="2">{{ resultProfileText }}</text>
+          <!-- 口味切换：与模式正交，切换即重新生成（force） -->
+          <view class="whero-tastes">
+            <view
+              v-for="(t, ti) in DAILY_TASTE_ORDER"
+              :key="'wt-' + ti"
+              class="taste-chip"
+              :style="tasteChipStyle(t)"
+              @click="pickTaste(t)"
+            ><text class="taste-chip-text" :style="tasteTextStyle(t)">{{ DAILY_TASTE_LABEL[t] }}</text></view>
+          </view>
+          <view class="whero-actions">
+            <qt-batch-bar
+              v-if="selecting"
+              layout="column"
+              :count="selectedCount"
+              :total="visibleSongs.length"
+              @toggle="toggleSelectAll"
+              @download="onBatchDownload"
+              @collect="openBatchCollect"
+              @cancel="exitSelect"
+            />
+            <template v-else>
+              <view class="whero-play" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="playAll">
+                <QtIcon name="play" :size="16" :color="themeStore.skin.accent" />
+                <text class="whero-play-text" :style="('color:' + themeStore.skin.accent + ';') + qtFontPx(13)">播放全部</text>
+              </view>
+              <view class="whero-acts">
+                <view class="whero-act" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="regenerate">
+                  <QtIcon name="refresh" :size="16" :color="themeStore.skin.iconMuted" />
+                  <text class="whero-act-text" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(13)">换一批</text>
+                </view>
+                <view class="whero-act whero-act-gap" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="enterSelect">
+                  <QtIcon name="check" :size="16" :color="themeStore.skin.iconMuted" />
+                  <text class="whero-act-text" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(13)">批量</text>
+                </view>
+              </view>
+              <view class="whero-tools">
+                <view class="whero-tool" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="toggleWideSearch">
+                  <QtIcon name="search" :size="16" :color="themeStore.skin.iconMuted" />
+                </view>
+                <view class="whero-tool whero-tool-gap" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="openMoreMenu">
+                  <QtIcon name="more-vert" :size="16" :color="themeStore.skin.iconMuted" />
+                </view>
+                <view class="whero-tool whero-tool-gap" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="openModeSheet">
+                  <QtIcon name="settings" :size="16" :color="themeStore.skin.iconMuted" />
+                </view>
+              </view>
+            </template>
+          </view>
+        </template>
+      </view>
+    </scroll-view>
+    <list-view id="rc-scroll" class="scroll" direction="vertical" :scroll-top="scrollTop" @scroll="onListScroll">
+      <!-- 宽屏列表顶搜索行：点左栏搜索图标后长出（窄屏搜索走框架标题栏原地换框） -->
+      <list-item v-if="layout.isWide && searchOpen && !loading && songs.length > 0" class="search-item">
+        <view class="search-row" :class="layout.isWide ? 'search-row-wide' : ''">
+          <view class="search-field" :class="layout.isWide ? 'search-field-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'">
+            <QtIcon name="search" :size="layout.isWide ? 12 : 22" :color="themeStore.skin.textMuted" />
+            <input
+              class="search-input" :class="layout.isWide ? 'search-input-wide' : ''"
+              :value="searchQuery"
+              @input="onSearchInput"
+              placeholder="搜索标题 / 歌手 / 专辑"
+              :placeholder-class="layout.isWide ? 'search-ph-wide' : 'search-ph'"
+              :style="'color:' + themeStore.skin.text + ';'"
+            />
+            <view v-if="filtering" class="search-clear" :class="layout.isWide ? 'search-clear-wide' : ''" @click="closeSearch">
+              <QtIcon name="close" :size="layout.isWide ? 12 : 22" :color="themeStore.skin.textMuted" />
+            </view>
+          </view>
+        </view>
+      </list-item>
+      <!-- 竖屏 hero：同 .hero 外框，内部骨架/成品切换 -->
+      <list-item v-if="!layout.isWide" class="hero-item">
+        <view class="hero" :style="'background-color:' + themeStore.skin.surfaceStrong + ';border-color:' + themeStore.skin.border + ';'">
+          <!-- 竖屏 hero 与歌单详情（pages/playlist）同款：方形封面 + 右侧信息区 -->
+          <QtSkeleton v-if="loading" tone="cover" width="200rpx" height="200rpx" radius="20rpx" />
+          <image v-else class="cover" :src="displayPicUrl" mode="aspectFill" />
+          <view class="hero-info">
+            <template v-if="loading">
+              <QtSkeleton tone="line" width="320rpx" height="34rpx" radius="10rpx" />
+              <view class="hsk-l2"><QtSkeleton tone="line" width="252rpx" height="22rpx" /></view>
+              <view class="hsk-l3"><QtSkeleton tone="line" width="120rpx" height="20rpx" /></view>
+            </template>
+            <template v-else>
+              <text class="title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(35, 20)" :max-lines="2">{{ resultTitle }}</text>
+              <text class="desc" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 14)" :max-lines="2">{{ resultSummary.length > 0 ? resultSummary : metaLine }}</text>
+              <text class="playcount" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 13)">{{ metaLine }}</text>
+              <view class="hero-tastes">
+                <view
+                  v-for="(t, ti) in DAILY_TASTE_ORDER"
+                  :key="'ht-' + ti"
+                  class="taste-chip"
+                  :style="tasteChipStyle(t)"
+                  @click="pickTaste(t)"
+                ><text class="taste-chip-text" :style="tasteTextStyle(t)">{{ DAILY_TASTE_LABEL[t] }}</text></view>
+              </view>
+            </template>
+          </view>
+        </view>
+      </list-item>
+      <!-- 冷启动风格选择：没有画像时的引导（qt-pc 同款：风格 chips + 按所选生成） -->
+      <list-item v-if="!loading && coldStart && styleOptions.length > 0" class="style-item" :class="layout.isWide ? 'style-item-wide' : ''">
+        <view class="style-card" :class="layout.isWide ? 'style-card-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceStrong + ';border-color:' + themeStore.skin.border + ';'">
+          <text class="style-title" :class="layout.isWide ? 'style-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(30, 16)">你爱听什么风格？</text>
+          <text class="style-hint" :class="layout.isWide ? 'style-hint-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 13)">选几个（最多 {{ DAILY_STYLE_SEED_MAX }} 个），按这些风格生成</text>
+          <view class="style-chips">
+            <view
+              v-for="(opt, oi) in styleOptions"
+              :key="'so-' + oi"
+              class="style-chip" :class="layout.isWide ? 'style-chip-wide' : ''"
+              :style="styleChipStyle(opt)"
+              @click="toggleStyle(opt)"
+            ><text class="style-chip-text" :class="layout.isWide ? 'style-chip-text-wide' : ''" :style="styleChipTextStyle(opt)">{{ opt }}</text></view>
+          </view>
+          <view class="style-go" :class="layout.isWide ? 'style-go-wide' : ''" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="applyStyleSeeds">
+            <QtIcon name="sparkles" :size="layout.isWide ? 14 : 26" :color="themeStore.skin.accent" />
+            <text class="style-go-text" :class="layout.isWide ? 'style-go-text-wide' : ''" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(25, 14)">按这些风格生成{{ stylePicked.length > 0 ? "（" + stylePicked.length + "）" : "" }}</text>
+          </view>
+        </view>
+      </list-item>
+      <!-- 生成中的进度说明（规则模式很快，基本只在本地/服务端 AI 时可见） -->
+      <list-item v-if="loading && progressText.length > 0" class="progress-item" :class="layout.isWide ? 'progress-item-wide' : ''">
+        <text class="progress-text" :class="layout.isWide ? 'progress-text-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(23, 13)">{{ progressText }}</text>
+      </list-item>
+      <list-item v-if="loading" class="sk-item">
+        <QtSkeletonList kind="song" :rows="SKELETON_ROWS" />
+      </list-item>
+      <sticky-section>
+        <sticky-header>
+          <view v-if="!loading && !layout.isWide && songs.length > 0" id="rc-head" class="list-head" :style="'background-color:' + themeStore.skin.surfaceStrong + ';border-color:' + themeStore.skin.border + ';'">
+            <qt-batch-bar
+              v-if="selecting"
+              :count="selectedCount"
+              :total="visibleSongs.length"
+              size="md"
+              @toggle="toggleSelectAll"
+              @download="onBatchDownload"
+              @collect="openBatchCollect"
+              @cancel="exitSelect"
+            />
+            <template v-else>
+              <text :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 14)">{{ countText }}</text>
+              <view class="head-actions">
+                <view class="head-btn" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="openModeSheet">
+                  <QtIcon name="settings" :size="28" :color="themeStore.skin.iconMuted" /><text class="head-btn-text" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(24, 14)">{{ modeLabel }}</text>
+                </view>
+                <view class="head-btn" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="regenerate">
+                  <QtIcon name="refresh" :size="28" :color="themeStore.skin.iconMuted" /><text class="head-btn-text" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(24, 14)">换一批</text>
+                </view>
+                <view class="play-all" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="playAll">
+                  <QtIcon name="play" :size="28" :color="themeStore.skin.accent" /><text class="play-all-text" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(24, 14)">播放</text>
+                </view>
+                <view class="head-batch" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="enterSelect">
+                  <QtIcon name="check" :size="28" :color="themeStore.skin.iconMuted" />
+                </view>
+              </view>
+            </template>
+          </view>
+        </sticky-header>
+        <!-- 推荐行：序号 + 歌名 + 「歌手 · 推荐理由」；默认推荐顺序，可搜索/前端排序 -->
+        <list-item v-for="(song, i) in visibleSongs" :key="song.platform + ':' + song.id" class="rc-item" :class="layout.isWide ? 'rc-item-wide' : ''">
+          <view class="rc-row" :class="layout.isWide ? 'rc-row-wide' : ''" @click="onRowClick(song)">
+            <view v-if="selecting" class="rc-check" :class="layout.isWide ? 'rc-check-wide' : ''" :style="'border-color:' + (isSelected(qtSongKey(song)) ? themeStore.skin.accent : themeStore.skin.border) + ';background-color:' + (isSelected(qtSongKey(song)) ? themeStore.skin.accent : 'transparent') + ';'" @click.stop="toggleSelect(qtSongKey(song))">
+              <QtIcon v-if="isSelected(qtSongKey(song))" name="check" :size="layout.isWide ? 12 : 22" color="#ffffff" />
+            </view>
+            <text v-else class="rc-idx" :class="layout.isWide ? 'rc-idx-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(24, 13)">{{ i + 1 }}</text>
+            <image class="rc-cover" :class="layout.isWide ? 'rc-cover-wide' : ''" :src="song.picUrl" mode="aspectFill" />
+            <view class="rc-info" :class="layout.isWide ? 'rc-info-wide' : ''">
+              <text class="rc-name" :class="layout.isWide ? 'rc-name-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 15)" :max-lines="1">{{ song.name }}</text>
+              <text class="rc-sub" :class="layout.isWide ? 'rc-sub-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)" :max-lines="1">{{ reasonOf(song).length > 0 ? song.singer + " · " + reasonOf(song) : song.singer }}</text>
+            </view>
+            <view class="rc-more" :class="layout.isWide ? 'rc-more-wide' : ''" @click.stop="openSheet(song)">
+              <QtIcon name="more" :size="layout.isWide ? 16 : 30" :color="themeStore.skin.iconMuted" />
+            </view>
+          </view>
+        </list-item>
+      </sticky-section>
+      <!-- 空态 / 失败态留在 sticky-section 外（鸿蒙约束：section 只能 header + v-for） -->
+      <list-item v-if="!loading && filtering && visibleSongs.length == 0" class="empty-item" :class="layout.isWide ? 'empty-item-wide' : ''">
+        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(26, 15)">没有匹配的歌曲</text>
+      </list-item>
+      <list-item v-if="!loading && errorText.length > 0" class="empty-item" :class="layout.isWide ? 'empty-item-wide' : ''">
+        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(26, 15)">{{ errorText }}</text>
+        <view class="empty-retry" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="load(true)">
+          <text class="empty-retry-text" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(25, 14)">再试一次</text>
+        </view>
+      </list-item>
+      <list-item v-if="!loading && errorText.length == 0 && songs.length == 0" class="empty-item" :class="layout.isWide ? 'empty-item-wide' : ''">
+        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(26, 15)">今天暂时没有推荐，换一批试试</text>
+      </list-item>
+      <!-- 底部口径说明（qt-pc 页脚同款文案） -->
+      <list-item v-if="!loading && songs.length > 0" class="foot-item" :class="layout.isWide ? 'foot-item-wide' : ''">
+        <text class="foot-text" :class="layout.isWide ? 'foot-text-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">候选来自全部已装音源；心动模式优先收藏（含收藏歌单）；近 {{ DAILY_HISTORY_DAYS }} 天推过的歌会排到后面，同一歌手不会连着排</text>
+      </list-item>
+    </list-view>
+    <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+    <QtActionSheet v-model:visible="sheetVisible" :title="sheetTitle()" :actions="sheetActions" @select="onSheetSelect" />
+    <!-- 三点菜单：单项「更改歌曲排序方式」，点击后打开排序面板 -->
+    <QtActionSheet
+      v-model:visible="moreMenuVisible"
+      title="列表操作"
+      :actions="moreMenuActions"
+      @select="onMoreMenuSelect"
+    />
+    <QtSortPanel
+      v-model:visible="sortSheetVisible"
+      :sort-key="sortKey"
+      :sort-desc="sortDesc"
+      @select="onSortKeySelect"
+      @desc="onSortDescSelect"
+    />
+    <!-- AI 模式设置：全局三档（规则 / 本地 / 服务端），服务端仅管理员可选；
+         模式与音乐助手共用（services/ai-mode.ts），换模式立即重新生成 -->
+    <QtActionSheet
+      v-model:visible="modeSheetVisible"
+      title="AI 模式设置"
+      :actions="modeActions"
+      :selected-index="modeSelectedIndex"
+      @select="onModeSelect"
+    />
+    <!-- 批量收藏面板：选中歌单的预勾选用「已全量收藏」判定（与每日新歌页同口径） -->
+    <QtPlaylistPicker
+      v-model:visible="batchPickerVisible"
+      :song="null"
+      :playlists="player.pickerPlaylists()"
+      :selected-ids="batchCheckedIds"
+      :batch-mode="true"
+      title="收藏到歌单"
+      :subtitle="'已选 ' + selectedCount + ' 首'"
+      @toggle="onBatchToggle"
+      @create="onBatchCreate"
+    />
+  </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
+import QtSkeleton from "@/uni_modules/qt-ui/components/qt-skeleton/qt-skeleton.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtSortPanel from "@/uni_modules/qt-ui/components/qt-sort-panel/qt-sort-panel.uvue";
+import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import { useTrackSearch } from "@/composables/use-track-search";
+import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import QtBatchBar from "@/uni_modules/qt-ui/components/qt-batch-bar/qt-batch-bar.uvue";
+import QtPlaylistPicker from "@/uni_modules/qt-ui/components/qt-playlist-picker/qt-playlist-picker.uvue";
+import { qtSongKey, useBatchSelect } from "@/uni_modules/qt-ui/composables/use-batch-select";
+import { useBatchActions } from "@/composables/use-batch-actions";
+import { useSongSheet } from "@/composables/use-song-sheet";
+import { usePlayerStore } from "@/stores/player";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import type { Playlist, Song } from "@/types/music";
+import { qtFontPx, qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtShowToast } from "@/services/toast";
+import { isQtAdmin } from "@/services/music-api";
+import { readAiMode as readMode, saveAiMode as saveMode } from "@/services/ai-mode";
+import type { AiEngineMode } from "@/services/ai-mode";
+import {
+  DAILY_HISTORY_DAYS,
+  DAILY_MODE_LABEL,
+  DAILY_STYLE_SEED_MAX,
+  DAILY_TASTE_LABEL,
+  DAILY_TASTE_ORDER,
+  clearTodayResult,
+  generateDailyRecommend,
+  loadTodayResult,
+  readTaste,
+  saveStyleSeeds,
+  saveTaste,
+} from "@/services/daily-recommend";
+import type { DailyRecommendResult, DailyTaste } from "@/services/daily-recommend";
+
+const player = usePlayerStore();
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+
+// 回到顶部
+const scrollTop = ref(0);
+const showBackToTop = ref(false);
+function onListScroll(e: any) {
+  const st = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
+  showBackToTop.value = st > 600;
+  // 标题栏露头判定：滚过操作条自然位置（headOffset）才算吸顶
+  if (!layout.isWide && headOffset.value >= 0) {
+    headScrolled.value = st >= headOffset.value;
+  }
+}
+function backToTop() {
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  showBackToTop.value = false;
+}
+
+/**
+ * 标题栏是否显示「每日推荐」：静态不显示（同歌单详情/每日新歌），只有当列表滚到
+ * 操作条（sticky-header「共 N 首」那条）吸顶固定后才把标题露出来。阈值实量非估算。
+ */
+const headOffset = ref(-1);
+const headScrolled = ref(false);
+const titleVisible = computed<boolean>(() => headScrolled.value);
+
+let headAlive = true;
+let headTimers: number[] = [];
+function clearHeadTimers(): void {
+  for (let i = 0; i < headTimers.length; i++) clearTimeout(headTimers[i]);
+  headTimers = [];
+}
+function retryMeasureHead(attempt: number): void {
+  if (!headAlive || attempt >= 5) return;
+  headTimers.push(setTimeout(() => { measureHeadOffset(attempt + 1); }, 300) as number);
+}
+function measureHeadOffset(attempt: number): void {
+  if (!headAlive || layout.isWide) return;
+  if (loading.value || songs.value.length == 0) { retryMeasureHead(attempt); return; }
+  uni.createSelectorQuery()
+    .select("#rc-scroll")
+    .boundingClientRect((listRect: UniNodeInfo) => {
+      const listTop = listRect != null ? listRect.top : 0;
+      // 嵌套一次新查询拿操作条位置：不链式 select，避免 Vapor 下多节点链的未知行为
+      uni.createSelectorQuery()
+        .select("#rc-head")
+        .boundingClientRect((headRect: UniNodeInfo) => {
+          if (headRect != null && headRect.height > 0) {
+            headOffset.value = Math.max(0, Math.round(headRect.top - listTop));
+            return;
+          }
+          retryMeasureHead(attempt);
+        })
+        .exec();
+    })
+    .exec();
+}
+
+const { sheetVisible, sheetActions, openSheet, onSheetSelect, sheetTitle } = useSongSheet();
+const SKELETON_ROWS = 8;
+
+// ==================== 结果状态 ====================
+const result = ref<DailyRecommendResult | null>(null);
+const loading = ref(true);
+const progressText = ref("");
+const errorText = ref("");
+const taste = ref<DailyTaste>(readTaste());
+const stylePicked = ref<string[]>([]);
+
+const songs = computed<Song[]>((): Song[] => {
+  // 生成中列表清空（只显示骨架），避免「规则结果 + 骨架」叠在一起
+  if (loading.value) return [];
+  const r = result.value;
+  if (r == null || r.items == null) return [];
+  const out: Song[] = [];
+  for (let i = 0; i < r.items.length; i++) out.push(r.items[i].song);
+  return out;
+});
+/** 推荐理由：按 platform+id 找回 items 里的 reason */
+function reasonOf(song: Song): string {
+  const r = result.value;
+  if (r == null) return "";
+  for (let i = 0; i < r.items.length; i++) {
+    const it = r.items[i];
+    if (it.song.platform == song.platform && it.song.id == song.id) return it.reason;
+  }
+  return "";
+}
+const displayPicUrl = computed((): string => (songs.value.length > 0 ? songs.value[0].picUrl : ""));
+
+// ==================== 列表内搜索 + 前端排序（同 pages/daily） ====================
+// 口径照抄 PC 侧 filterTracks（多词 AND，查 标题/歌手/专辑），见 composables/use-track-search
+const {
+  query: searchQuery,
+  visible: filteredSongs,
+  filtering,
+  onInput: trackSearchInput,
+  clear: clearSearch,
+} = useTrackSearch(() => songs.value);
+
+/** 实时过滤是 visibleSongs 的整组换血：先回顶再写词（§437 配方） */
+function onSearchInput(e: InputEvent): void {
+  trackSearchInput(e);
+  backToTop();
+}
+
+/** 搜索态开关：窄屏 = 框架标题栏原地变搜索框；宽屏 = 列表顶长出输入行 */
+const searchOpen = ref(false);
+function openSearch(): void {
+  if (loading.value || songs.value.length == 0) return;
+  searchOpen.value = true;
+}
+function closeSearch(): void {
+  searchOpen.value = false;
+  clearSearch();
+}
+function toggleWideSearch(): void {
+  if (searchOpen.value) closeSearch();
+  else openSearch();
+}
+/** 框架标题栏搜索框输入（窄屏；宽屏输入框直接走 onSearchInput 包装） */
+function onHeaderSearchInput(value: string): void {
+  backToTop();
+  searchQuery.value = value;
+}
+function onHeaderAction(name: string): void {
+  if (name == "search") { openSearch(); return; }
+  if (name == "more-vert") { openMoreMenu(); return; }
+}
+
+/** 标题栏右侧动作：搜索 + 三点（数据没加载完不渲染，同每日新歌口径） */
+const headerActions = computed<string[]>(() => {
+  if (loading.value || songs.value.length == 0) return [];
+  return ["search", "more-vert"];
+});
+
+/** 排序键：none = 推荐原顺序；其余纯前端排（作用在过滤后的可见集合上） */
+const sortKey = ref("none");
+const sortDesc = ref(false);
+
+const visibleSongs = computed<Song[]>(() => {
+  const list = filteredSongs.value;
+  const key = sortKey.value;
+  if (key == "none" || list.length < 2) return list;
+  const out = list.slice();
+  out.sort((a: Song, b: Song): number => {
+    let primary = 0;
+    if (key == "name") primary = a.name.localeCompare(b.name, "zh-Hans-CN");
+    else if (key == "album") primary = a.album.localeCompare(b.album, "zh-Hans-CN");
+    else primary = a.singer.localeCompare(b.singer, "zh-Hans-CN");
+    if (primary != 0) return primary;
+    return a.name.localeCompare(b.name, "zh-Hans-CN");
+  });
+  if (sortDesc.value) out.reverse();
+  return out;
+});
+
+/** 操作条计数：过滤态显示「显示 M / N 首」 */
+const countText = computed(() =>
+  filtering.value
+    ? "显示 " + visibleSongs.value.length + " / " + songs.value.length + " 首"
+    : "共 " + songs.value.length + " 首"
+);
+
+// ==================== 三点弹单项菜单，再进排序面板（与歌单详情同款） ====================
+const moreMenuVisible = ref(false);
+const moreMenuActions = computed((): SheetAction[] => [{ name: "更改歌曲排序方式" }]);
+function openMoreMenu(): void {
+  if (loading.value || songs.value.length == 0) return;
+  moreMenuVisible.value = true;
+}
+function onMoreMenuSelect(_action: SheetAction, _index: number): void {
+  moreMenuVisible.value = false;
+  sortSheetVisible.value = true;
+}
+
+const sortSheetVisible = ref(false);
+function onSortKeySelect(key: string): void {
+  // 排序 = visibleSongs 整组换血：先回顶再改 key（§437 配方）
+  backToTop();
+  sortKey.value = key;
+  if (key == "none") sortDesc.value = false;
+}
+function onSortDescSelect(desc: boolean): void {
+  backToTop();
+  sortDesc.value = desc;
+}
+
+const resultTitle = computed((): string => {
+  const r = result.value;
+  return r != null && r.title.length > 0 ? r.title : "每日推荐";
+});
+const resultSummary = computed((): string => {
+  const r = result.value;
+  return r != null ? r.summary : "";
+});
+const resultProfileText = computed((): string => {
+  const r = result.value;
+  return r != null && r.profileText != null ? r.profileText! : "";
+});
+const coldStart = computed((): boolean => {
+  const r = result.value;
+  return r != null && r.coldStart === true;
+});
+const styleOptions = computed<string[]>((): string[] => {
+  const r = result.value;
+  if (r == null || r.styleOptions == null) return [];
+  const out: string[] = [];
+  for (let i = 0; i < r.styleOptions.length; i++) out.push(r.styleOptions[i].name);
+  return out;
+});
+const laneChips = computed<string[]>((): string[] => {
+  const r = result.value;
+  if (r == null || r.styleLanes == null) return [];
+  const out: string[] = [];
+  for (let i = 0; i < r.styleLanes!.length && i < 5; i++) {
+    const lane = r.styleLanes![i];
+    out.push(lane.label + " " + lane.count);
+  }
+  return out;
+});
+const modeLabel = computed((): string => DAILY_MODE_LABEL[readMode()]);
+/** 元信息行：日期 · 模式[ · 模型] · 口味 · 共 N 首 */
+const metaLine = computed((): string => {
+  const r = result.value;
+  if (loading.value) return "生成中…";
+  const mode = DAILY_MODE_LABEL[r != null ? r.mode : readMode()];
+  const model = r != null && r.model != null && r.model.length > 0 ? " · " + r.model : "";
+  const t = DAILY_TASTE_LABEL[taste.value];
+  const date = r != null && r.date.length > 0 ? r.date : "";
+  const count = songs.value.length > 0 ? " · 共 " + songs.value.length + " 首" : "";
+  return date + " · " + mode + model + " · " + t + count;
+});
+
+// ==================== 生成 / 加载 ====================
+let running = false;
+let alive = true;
+async function generate(force: boolean, tasteOverride: DailyTaste | null): Promise<void> {
+  if (running) return;
+  running = true;
+  // 列表要整组换血（旧结果清空再填充新结果）：先回顶再动数据（§437 配方）
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  showBackToTop.value = false;
+  // 新结果换血后旧搜索词/排序口径一并复位（理由文案也随 items 全换）
+  closeSearch();
+  sortKey.value = "none";
+  sortDesc.value = false;
+  loading.value = true;
+  progressText.value = "";
+  errorText.value = "";
+  try {
+    const r = await generateDailyRecommend({
+      force,
+      taste: tasteOverride != null ? tasteOverride : taste.value,
+      onProgress: (msg: string): void => {
+        if (alive) progressText.value = msg;
+      },
+    });
+    if (!alive) return;
+    result.value = r;
+    if (tasteOverride != null) taste.value = tasteOverride;
+    exitSelect();
+    if (r.notice != null && r.notice.length > 0) qtShowToast(r.notice);
+  } catch (e) {
+    if (alive) errorText.value = "生成失败：" + (e instanceof Error ? e.message : String(e));
+  } finally {
+    running = false;
+    if (alive) {
+      loading.value = false;
+      progressText.value = "";
+    }
+  }
+}
+/** 首次进入：先吃当日缓存，没有再生成 */
+async function load(force: boolean): Promise<void> {
+  if (!force) {
+    const cached = await loadTodayResult(readMode(), taste.value);
+    if (cached != null) {
+      result.value = cached;
+      loading.value = false;
+      return;
+    }
+  }
+  generate(force, null);
+}
+/** 换一批（强制重新生成，换 variant 种子） */
+function regenerate(): void {
+  if (loading.value) return;
+  generate(true, null);
+}
+/** 切口味：保存后强制重生成 */
+function pickTaste(next: DailyTaste): void {
+  if (loading.value || next == taste.value) return;
+  saveTaste(next);
+  generate(true, next);
+}
+/** 冷启动按所选风格生成：必须先清当日缓存（loadTodayResult 会直接命中冷启动旧结果） */
+async function applyStyleSeeds(): Promise<void> {
+  if (stylePicked.value.length == 0) {
+    qtShowToast("先选几个风格");
+    return;
+  }
+  saveStyleSeeds(stylePicked.value);
+  await clearTodayResult();
+  generate(true, null);
+}
+function toggleStyle(name: string): void {
+  const i = stylePicked.value.indexOf(name);
+  if (i >= 0) stylePicked.value.splice(i, 1);
+  else if (stylePicked.value.length < DAILY_STYLE_SEED_MAX) stylePicked.value.push(name);
+}
+function styleChipStyle(name: string): string {
+  const on = stylePicked.value.indexOf(name) >= 0;
+  return "background-color:" + (on ? themeStore.skin.accent : themeStore.skin.surfaceMuted) + ";border-color:" + (on ? themeStore.skin.accent : themeStore.skin.border) + ";";
+}
+function styleChipTextStyle(name: string): string {
+  const on = stylePicked.value.indexOf(name) >= 0;
+  return "color:" + (on ? themeStore.skin.onAccent : themeStore.skin.text) + ";" + qtFontDual(23, 13);
+}
+function tasteChipStyle(t: DailyTaste): string {
+  const on = t == taste.value;
+  return "background-color:" + (on ? themeStore.skin.accentSoft : themeStore.skin.surfaceMuted) + ";border-color:" + (on ? themeStore.skin.accent : themeStore.skin.border) + ";";
+}
+function tasteTextStyle(t: DailyTaste): string {
+  const on = t == taste.value;
+  return "color:" + (on ? themeStore.skin.accent : themeStore.skin.textMuted) + ";" + qtFontDual(23, 13);
+}
+
+// ==================== AI 模式设置 ====================
+const modeSheetVisible = ref(false);
+/** 服务端 AI 仅管理员可见（qt-pc 同款门禁；规则 / 本地对所有人开放） */
+const modeActions = computed<SheetAction[]>((): SheetAction[] => {
+  const acts: SheetAction[] = [];
+  acts.push({ name: "纯规则（不联网，永远可用）", color: readMode() == "rule" ? themeStore.skin.accent : "" });
+  acts.push({ name: "本地模型精选（模型挂了自动退回规则）", color: readMode() == "local" ? themeStore.skin.accent : "" });
+  if (isQtAdmin()) acts.push({ name: "服务端 AI（需登录，走 astral）", color: readMode() == "server" ? themeStore.skin.accent : "" });
+  return acts;
+});
+const modeSelectedIndex = computed((): number => {
+  const m = readMode();
+  if (m == "local") return 1;
+  if (m == "server" && isQtAdmin()) return 2;
+  return 0;
+});
+function openModeSheet(): void {
+  modeSheetVisible.value = true;
+}
+async function onModeSelect(_action: SheetAction, index: number): Promise<void> {
+  const order: AiEngineMode[] = isQtAdmin() ? ["rule", "local", "server"] : ["rule", "local"];
+  const next = order[index];
+  if (next != readMode()) {
+    saveMode(next);
+    await clearTodayResult();
+    generate(true, null);
+  }
+}
+
+// ==================== 播放 / 批量 ====================
+function playAll(): void {
+  // 播放当前可见集合（受搜索/排序影响），与歌单详情口径一致
+  if (visibleSongs.value.length == 0) return;
+  player.play(visibleSongs.value[0], visibleSongs.value);
+}
+function onRowClick(song: Song): void {
+  if (selecting.value) toggleSelect(qtSongKey(song));
+  else player.playSingle(song);
+}
+const {
+  selecting,
+  count: selectedCount,
+  enter: enterSelect,
+  exit: exitSelect,
+  isSelected,
+  toggle: toggleSelect,
+  toggleAll,
+} = useBatchSelect();
+const batch = useBatchActions();
+const batchPickerVisible = ref(false);
+/** 已整单收藏的 Playlist id（面板预勾选） */
+const batchCheckedIds = computed<string[]>((): string[] => {
+  const selected = selectedKeysOf();
+  const out: string[] = [];
+  const lists = player.pickerPlaylists();
+  for (let i = 0; i < lists.length; i++) {
+    if (batch.isFullyCollected(lists[i].id, selected)) out.push(lists[i].id);
+  }
+  return out;
+});
+function toggleSelectAll(): void {
+  toggleAll(visibleSongs.value.map((s: Song): string => qtSongKey(s)));
+}
+function onBatchDownload(): void {
+  batch.batchDownload(selectedKeysOf());
+}
+function openBatchCollect(): void {
+  if (selectedKeysOf().length == 0) return;
+  batchPickerVisible.value = true;
+}
+function selectedKeysOf(): Song[] {
+  const out: Song[] = [];
+  for (let i = 0; i < songs.value.length; i++) {
+    if (isSelected(qtSongKey(songs.value[i]))) out.push(songs.value[i]);
+  }
+  return out;
+}
+function findPlaylistById(playlistId: string): Playlist | null {
+  const lists = player.pickerPlaylists();
+  for (let i = 0; i < lists.length; i++) {
+    if (lists[i].id == playlistId) return lists[i];
+  }
+  return null;
+}
+function onBatchToggle(playlistId: string): void {
+  const selected = selectedKeysOf();
+  if (selected.length == 0) return;
+  const target = findPlaylistById(playlistId);
+  if (target == null) return;
+  batch.toggleCollect(target, selected);
+}
+function onBatchCreate(name: string): void {
+  const selected = selectedKeysOf();
+  if (selected.length == 0) return;
+  batch.createAndCollect(selected, name);
+}
+
+// 列表一旦有数据就量操作条位置（首帧没渲染出 #rc-head 时 measureHeadOffset 自带重试）
+watch(songs, (list: Song[]) => {
+  if (list.length > 0) measureHeadOffset(0);
+});
+
+onMounted((): void => {
+  load(false);
+});
+onUnmounted((): void => {
+  alive = false;
+  headAlive = false;
+  clearHeadTimers();
+});
+</script>
+<style>
+.page { flex: 1; min-height: 0; }
+.page-wide { flex-direction: row; }
+.wide-left { width: 296px; flex-shrink: 0; }
+.whero { margin: 12px; padding: 16px; border-width: 1px; border-style: solid; border-radius: 16px; flex-direction: column; align-items: center; }
+.whero-cover { width: 238px; height: 238px; border-radius: 12px; background-color: #e6e8ee; }
+.wsk-l1 { margin-top: 14px; }
+.wsk-l2 { margin-top: 10px; }
+.wsk-l3 { margin-top: 8px; }
+.wsk-l5 { margin-top: 14px; }
+.whero-meta { margin-top: 12px; }
+.whero-title { margin-top: 4px; }
+.whero-desc { margin-top: 8px; }
+.whero-lanes { margin-top: 8px; flex-direction: row; flex-wrap: wrap; justify-content: center; }
+.lane-chip { margin: 3px; padding: 2px 8px; border-width: 1px; border-style: solid; border-radius: 10px; }
+.lane-chip-text { color: #8b93a2; }
+.whero-profile { margin-top: 6px; }
+.whero-tastes { margin-top: 10px; flex-direction: row; }
+.taste-chip { margin-left: 8px; padding: 4px 14px; border-width: 1px; border-style: solid; border-radius: 18px; }
+.taste-chip-text { color: #8b93a2; }
+.whero-actions { margin-top: 14px; width: 238px; flex-direction: column; }
+.whero-play { height: 44px; border-radius: 22px; flex-direction: row; align-items: center; justify-content: center; }
+.whero-play-text { margin-left: 6px; }
+.whero-acts { margin-top: 10px; flex-direction: row; }
+.whero-act { flex: 1; height: 40px; border-width: 1px; border-style: solid; border-radius: 20px; flex-direction: row; align-items: center; justify-content: center; }
+.whero-act-gap { margin-left: 10px; }
+.whero-act-text { margin-left: 6px; }
+.whero-tools { margin-top: 10px; flex-direction: row; justify-content: flex-end; }
+.whero-tool { width: 40px; height: 40px; border-width: 1px; border-style: solid; border-radius: 20px; align-items: center; justify-content: center; }
+.whero-tool-gap { margin-left: 10px; }
+/* 列表顶搜索行（宽屏，点左栏搜索图标后出现）——与 pages/daily 同款 */
+.search-item { padding: 20rpx 24rpx 0; }
+.search-row { width: 100%; }
+.search-row-wide { width: 100%; }
+.search-field { flex-direction: row; align-items: center; height: 72rpx; border-radius: 36rpx; border-width: 1px; border-style: solid; padding: 0 24rpx; }
+.search-field-wide { height: 36px; border-radius: 18px; padding: 0 12px; }
+.search-input { flex: 1; min-width: 0; height: 68rpx; font-size: 26rpx; }
+.search-input-wide { height: 34px; font-size: 14px; }
+.search-clear { width: 44rpx; height: 44rpx; align-items: center; justify-content: center; }
+.search-clear-wide { width: 24px; height: 24px; }
+.search-ph { color: #9aa0ad; font-size: 26rpx; }
+.search-ph-wide { color: #9aa0ad; font-size: 14px; }
+.scroll { flex: 1; min-width: 0; min-height: 0; }
+.hero-item { padding: 0; }
+/* 竖屏 hero 与歌单详情（pages/playlist .hero）完全同款 */
+.hero { padding: 40rpx 32rpx; flex-direction: row; border-width: 1px; border-style: solid; border-radius: 24rpx; }
+.cover { width: 200rpx; height: 200rpx; border-radius: 20rpx; background-color: rgba(255, 255, 255, 0.2); }
+.hero-info { flex: 1; margin-left: 26rpx; justify-content: center; }
+.hsk-l2 { margin-top: 12rpx; }
+.hsk-l3 { margin-top: 10rpx; }
+.title { }
+.desc { margin-top: 10rpx; }
+.playcount { margin-top: 8rpx; }
+.hero-tastes { margin-top: 14rpx; flex-direction: row; }
+.style-item { padding: 20rpx 24rpx 0; }
+.style-item-wide { padding: 12px 16px 0; }
+.style-card { padding: 26rpx; border-width: 1px; border-style: solid; border-radius: 24rpx; flex-direction: column; }
+.style-card-wide { padding: 14px; border-radius: 14px; }
+.style-title { }
+.style-title-wide { }
+.style-hint { margin-top: 8rpx; }
+.style-hint-wide { margin-top: 4px; }
+.style-chips { margin-top: 18rpx; flex-direction: row; flex-wrap: wrap; }
+.style-chip { margin: 0 12rpx 12rpx 0; padding: 8rpx 22rpx; border-width: 1px; border-style: solid; border-radius: 26rpx; }
+.style-chip-wide { margin: 0 6px 6px 0; padding: 4px 12px; border-radius: 14px; }
+.style-chip-text { color: #2c3242; }
+.style-chip-text-wide { }
+.style-go { margin-top: 10rpx; height: 72rpx; border-radius: 36rpx; flex-direction: row; align-items: center; justify-content: center; }
+.style-go-wide { margin-top: 8px; height: 40px; border-radius: 20px; }
+.style-go-text { margin-left: 8rpx; }
+.style-go-text-wide { margin-left: 6px; }
+.progress-item { padding: 8rpx 40rpx 0; }
+.progress-item-wide { padding: 4px 20px 0; }
+.progress-text { }
+.progress-text-wide { }
+.sk-item { padding: 8rpx 24rpx 0; }
+.list-head { height: 96rpx; padding: 0 24rpx; border-width: 1px; border-style: solid; flex-direction: row; align-items: center; }
+.head-actions { flex-direction: row; align-items: center; }
+.head-btn { margin-left: 14rpx; height: 60rpx; padding: 0 20rpx; border-width: 1px; border-style: solid; border-radius: 30rpx; flex-direction: row; align-items: center; }
+.head-btn-text { margin-left: 6rpx; }
+.play-all { margin-left: 14rpx; height: 60rpx; padding: 0 26rpx; border-radius: 30rpx; flex-direction: row; align-items: center; }
+.play-all-text { margin-left: 6rpx; }
+.head-batch { margin-left: 14rpx; width: 60rpx; height: 60rpx; border-width: 1px; border-style: solid; border-radius: 30rpx; align-items: center; justify-content: center; }
+.rc-item { padding: 6rpx 24rpx; }
+.rc-item-wide { padding: 2px 16px; }
+.rc-row { flex-direction: row; align-items: center; padding: 10rpx 0; }
+.rc-row-wide { padding: 4px 0; }
+.rc-check { width: 40rpx; height: 40rpx; border-width: 2rpx; border-style: solid; border-radius: 20rpx; align-items: center; justify-content: center; margin-right: 16rpx; }
+.rc-check-wide { width: 20px; height: 20px; border-radius: 10px; margin-right: 8px; border-width: 1px; }
+.rc-idx { width: 48rpx; text-align: center; }
+.rc-idx-wide { width: 24px; }
+.rc-cover { width: 80rpx; height: 80rpx; border-radius: 12rpx; margin-left: 12rpx; background-color: #e6e8ee; }
+.rc-cover-wide { width: 40px; height: 40px; border-radius: 6px; margin-left: 6px; }
+.rc-info { flex: 1; min-width: 0; margin-left: 18rpx; flex-direction: column; }
+.rc-info-wide { margin-left: 10px; }
+.rc-name { }
+.rc-name-wide { }
+.rc-sub { margin-top: 4rpx; }
+.rc-sub-wide { margin-top: 2px; }
+.rc-more { width: 64rpx; height: 64rpx; align-items: center; justify-content: center; }
+.rc-more-wide { width: 32px; height: 32px; }
+.empty-item { padding: 80rpx 48rpx; flex-direction: column; align-items: center; }
+.empty-item-wide { padding: 40px 24px; }
+.empty-text { text-align: center; }
+.empty-text-wide { }
+.empty-retry { margin-top: 24rpx; height: 64rpx; padding: 0 40rpx; border-radius: 32rpx; flex-direction: row; align-items: center; }
+.empty-retry-text { }
+.foot-item { padding: 24rpx 40rpx 160rpx; }
+.foot-item-wide { padding: 12px 20px 90px; }
+.foot-text { }
+.foot-text-wide { }
+</style>

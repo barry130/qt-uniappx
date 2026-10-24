@@ -4,9 +4,9 @@
     :class="variantClass"
     :style="cardStyle"
   >
-    <view v-if="title.length > 0 || description.length > 0" class="qt-card-header">
-      <text v-if="title.length > 0" class="qt-card-title" :style="'color:' + theme.skin.text + ';'">{{ title }}</text>
-      <text v-if="description.length > 0" class="qt-card-description" :style="'color:' + theme.skin.textMuted + ';'">{{ description }}</text>
+    <view v-if="title.length > 0 || description.length > 0" class="qt-card-header" :style="headerStyle">
+      <text v-if="title.length > 0" class="qt-card-title" :style="('color:' + theme.skin.text + ';') + qtFontDual(30, 15)">{{ title }}</text>
+      <text v-if="description.length > 0" class="qt-card-description" :style="descriptionStyle">{{ description }}</text>
     </view>
     <slot />
   </view>
@@ -15,6 +15,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 
 const props = defineProps<{
   title?: string;
@@ -23,6 +25,7 @@ const props = defineProps<{
   elevated?: boolean;
 }>();
 const theme = useThemeStore();
+const layout = useQtLayout();
 const title = computed((): string => props.title != null ? props.title! : "");
 const description = computed((): string => props.description != null ? props.description! : "");
 const variantClass = computed((): string => "qt-card-" + (props.variant != null ? props.variant! : "default"));
@@ -32,33 +35,54 @@ const cardStyle = computed((): string => {
   else if (props.variant == "muted") style += "background-color:" + theme.skin.surfaceMuted + ";";
   else style += "background-color:" + theme.skin.surface + ";";
   if (props.elevated == true) style += "box-shadow:" + theme.skin.shadow + ";";
+  // 内边距与圆角同样按 rpx 口径随窗口放大：字号变大后 14px 的内边距会让文字贴边。
+  // 窄屏 28rpx/24rpx 在 375dp 上等于原来的 14px/12px，手机上渲染不变。
+  if (layout.isWide) style += "padding:14px;border-radius:12px;";
+  else style += "padding:" + u(28) + "px;border-radius:" + u(24) + "px;";
   return style;
 });
+
+/**
+ * rpx → px，只用于间距（见下方样式注释里「为什么度量仍走 px」）。
+ * 直接按 windowWidth/750 换算，不假设 rpx 在大窗口封顶 —— uni-app x 不支持
+ * pages.json 的 rpxCalcMaxDeviceWidth，1rpx 恒等于 windowWidth/750 px。
+ */
+function u(rpx: number): number {
+  const w = layout.windowWidth > 0 ? layout.windowWidth : 375;
+  return Math.round((rpx / 750) * w * 100) / 100;
+}
+
+// 头部间距跟着字号走：字号在窄屏是 30rpx/24rpx（随窗口放大），间距若写死 11px/4px
+// 就会在平板上被大字号挤扁。
+const headerStyle = computed((): string =>
+  "margin-bottom:" + (layout.isWide ? 11 : u(22)) + "px;");
+const descriptionStyle = computed((): string =>
+  "color:" + theme.skin.textMuted + ";" + qtFontDual(24, 12) + "margin-top:" + (layout.isWide ? 4 : u(8)) + "px;");
 </script>
 
 <style>
 /*
   卡片度量全部用 px：Vapor 运行时只把 rpx 样式登记进页面的待重算集合，
   布局回调遍历该集合时若有新登记就会并发修改异常（详见 pages/desktop-lyric/index.uvue 顶部注释）。
-  pages.json 里 rpxCalcBaseDeviceWidth=375 / rpxCalcMaxDeviceWidth=500，
-  窗口超过 500dp 后 1rpx = 0.5px，因此这些 px 值在宽屏上与原来的 rpx 渲染完全一致。
+  但「全部 px」不等于「全部写死」：字号与内边距必须随窗口宽变化，否则 720dp 平板/折叠屏上
+  卡片标题（原来写死 15px = 17dp）会比卡片正文（30rpx = 29dp）还小 —— 层级直接反过来。
+  所以窄屏的数值由脚本按 rpx 口径换算成 px 内联（u()：rpx/750*windowWidth，与 CSS rpx 同源），
+  宽屏仍是原来那套固定 px。手机上（375dp）换算结果与改造前完全一致。
+  故意不用 rpx 写在 CSS 里：那会重新踩上面的并发修改异常。
 */
 .qt-card {
-  border-width: 1px;
-  border-radius: 12px;
-  padding: 14px;
+  border-width: 1px; border-style: solid;
   overflow: hidden;
 }
-.qt-card-header {
-  margin-bottom: 11px;
-}
+/* 圆角/内边距/头部间距/字号全部由脚本内联下发（见 cardStyle / headerStyle / descriptionStyle），
+   这里只留与窗口宽无关的项，避免同一属性两处定义、改一处忘另一处 */
 .qt-card-title {
-  font-size: 15px;
   font-weight: 650;
 }
 .qt-card-description {
-  margin-top: 4px;
-  font-size: 12px;
-  line-height: 17px;
+  /* 无单位行高 1.23 = 改造前「12px 字号经默认 1.15 倍率变 13.8px，配写死 17px 行高」的实际渲染比
+     （17 / 13.8）。不能继续写 17px：字号现在随窗口与字号档位放大，固定行高会把多行描述压在一起；
+     也不能用 1.42（17/12 的构造比），那个比值假设字号没被 fontScale 放大过。 */
+  line-height: 1.23;
 }
 </style>

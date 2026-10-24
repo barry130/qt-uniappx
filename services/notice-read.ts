@@ -41,11 +41,6 @@ function persist(): void {
   } catch (_) {}
 }
 
-/** 读取全部已读通知 ID */
-export function getReadIds(): Set<number> {
-  return new Set(load());
-}
-
 /** 标记单条已读（加入并持久化，超上限时淘汰最旧） */
 export function markRead(id: number): void {
   if (id <= 0) return;

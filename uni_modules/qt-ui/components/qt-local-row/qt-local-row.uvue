@@ -1,0 +1,167 @@
+<template>
+  <view
+    class="row" :class="isWide ? 'row-wide' : ''"
+    :hover-class="isWide ? 'row-hover' : 'none'"
+    @click="emit('tap')"
+  >
+    <view
+      v-if="selecting" class="checkbox" :class="isWide ? 'checkbox-wide' : ''"
+      :style="selected ? 'background-color:' + skin.accent + ';border-color:' + skin.accent + ';' : 'border-color:' + skin.border + ';'"
+    >
+      <QtIcon v-if="selected" name="check" :size="isWide ? 12 : 22" :color="skin.onAccent" />
+    </view>
+    <view v-if="!selecting && current" class="row-ind" :class="isWide ? 'row-ind-wide' : ''" :style="'background-color:' + skin.accent + ';'" />
+    <view class="info" :class="isWide ? 'info-wide' : ''">
+      <text
+        class="name" :class="isWide ? 'name-wide' : ''"
+        :style="('color:' + (selecting ? skin.text : (current ? skin.accent : skin.text)) + ';') + qtFontDual(28, 16)"
+        :max-lines="1"
+      >{{ title }}</text>
+      <text
+        class="meta" :class="isWide ? 'meta-wide' : ''"
+        :style="('color:' + skin.textMuted + ';') + qtFontDual(23, 13)"
+        :max-lines="1"
+      >{{ meta }}</text>
+    </view>
+    <text class="row-dur" :class="isWide ? 'row-dur-wide' : ''" :style="('color:' + skin.textMuted + ';') + qtFontDual(23, 13)">{{ durationText }}</text>
+    <view v-if="!selecting" class="row-more" :class="isWide ? 'row-more-wide' : ''" @click.stop="emit('more')">
+      <QtIcon name="more" :size="isWide ? 14 : 26" :color="skin.textMuted" />
+    </view>
+    <view class="row-divider" :class="isWide ? 'row-divider-wide' : ''" :style="'background-color:' + skin.divider + ';'" />
+  </view>
+</template>
+<script setup lang="ts">
+/**
+ * 本地音乐页专用歌曲行。
+ *
+ * 为什么要抽成组件：本地页的列表在宽屏下有两种排布（单列 / 一行两首），分组视图还要
+ * 再用一次同一行结构。若不抽组件，同一段十几行标记要在模板里抄三遍，任何一处改动都
+ * 会漏掉另外两处。行内数据全部走**扁平 props**（不接受 LocalAudioItem 类型）——
+ * qt-ui 组件不依赖 qt-app-native 的类型，才能与其它列表页共用。
+ *
+ * 选中态 / 播放中态 / 勾选态都只由 props 决定，组件自身无状态，因此 list-item 复用时
+ * 不会残留上一个条目的视觉。
+ */
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+
+const props = defineProps<{
+  title: string;
+  meta: string;
+  durationText: string;
+  /** 多选态：显示勾选框、隐藏播放中竖条与三点 */
+  selecting: boolean;
+  /** 当前行被勾选（仅 selecting 时有意义） */
+  selected: boolean;
+  /** 当前行是正在播放的曲目 */
+  current: boolean;
+}>();
+const emit = defineEmits<{ tap: []; more: [] }>();
+
+const layout = useQtLayout();
+const theme = useThemeStore();
+const isWide = computed((): boolean => layout.isWide);
+const skin = computed(() => theme.skin);
+</script>
+<style>
+.row {
+  flex-direction: row;
+  align-items: center;
+  padding: 22rpx 20rpx;
+}
+.row-wide {
+  padding: 12px 14px;
+}
+/* 桌面指针反馈：只在宽屏启用（手机上 hover-class 会在点按瞬间闪一下，观感不对） */
+.row-hover {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+/* 播放中行的左侧 accent 竖条：绝对定位贴行左缘，出现/消失不引起布局位移 */
+.row-ind {
+  position: absolute;
+  left: 0;
+  top: 20rpx;
+  bottom: 20rpx;
+  width: 6rpx;
+  border-radius: 3rpx;
+}
+.row-ind-wide {
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 1.5px;
+}
+/* 分隔线内嵌到文字起始处，比全宽分隔线更有层次 */
+.row-divider {
+  position: absolute;
+  left: 40rpx;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+}
+.row-divider-wide {
+  left: 34px;
+}
+/* 时长右对齐：音乐列表通用范式，文件大小不再占用行空间 */
+.row-dur {
+  margin-left: 12rpx;
+  font-size: 23rpx;
+}
+.row-dur-wide {
+  margin-left: 8px;
+  font-size: 13px;
+}
+/* 行尾三点：单曲菜单（播放/移除）；选择态隐藏只留勾选框 */
+.row-more {
+  align-items: center;
+  justify-content: center;
+  padding: 12rpx;
+  margin-left: 4rpx;
+}
+.row-more-wide {
+  padding: 8px;
+  margin-left: 2px;
+}
+.info {
+  flex: 1;
+  min-width: 0;
+  margin-left: 20rpx;
+  margin-right: 16rpx;
+}
+.info-wide {
+  margin-left: 14px;
+  margin-right: 12px;
+}
+.name {
+  font-size: 28rpx;
+  font-weight: 500;
+}
+.name-wide {
+  font-size: 16px;
+}
+.meta {
+  margin-top: 6rpx;
+  font-size: 23rpx;
+}
+.meta-wide {
+  margin-top: 4px;
+  font-size: 13px;
+}
+.checkbox {
+  width: 44rpx;
+  height: 44rpx;
+  border-radius: 22rpx;
+  /* border-style 必须显式写，否则 Vapor 下边框不绘制（未选中态会完全看不见） */
+  border-style: solid;
+  border-width: 2px;
+  align-items: center;
+  justify-content: center;
+}
+.checkbox-wide {
+  width: 24px;
+  height: 24px;
+  border-radius: 12px;
+}
+</style>

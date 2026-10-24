@@ -52,6 +52,17 @@ export interface Notice {
   firstLoginOnly?: number;
   /** 通告栏是否跑马灯 0-否 1-是 */
   marquee?: number;
+  /**
+   * 开屏弹窗读秒（秒）。仅「首次启动免责声明」使用：NULL 或 0 = 不读秒，确认键立即可点。
+   * 客户端会夹在 0..60（见 stores/disclaimer.ts），别指望后台填 600 能生效。
+   */
+  readSeconds?: number;
+  /**
+   * 条款版本号。**非空 = 这条公告是「首次启动免责声明」**，由它唯一判定：
+   * 客户端记住已接受的版本，版本号变了才重新弹一次。
+   * 普通公告请留空，否则会被当成声明从开屏队列里摘走。
+   */
+  termsVersion?: string;
   /** 生效时间 */
   effectiveStart?: string;
   /** 失效时间 */

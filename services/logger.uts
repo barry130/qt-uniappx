@@ -1,0 +1,623 @@
+/**
+ * 本地日志（发行版可查现场）
+ *
+ * 为什么需要这个文件：**发行包没有控制台**。Android 的 logcat / 鸿蒙的 hilog 只在
+ * 连着电脑调试时能看，用户装的是正式包，出问题时既没有 devtools 也没有日志工具，
+ * 报障时只剩一句「播放不了」。所以要把关键链路落到应用私有目录的文件里，
+ * 让用户能在设置页看到路径、复制出来发给我们。
+ *
+ * 与 qt-stat 的分工：qt-stat 是**上报到服务器**的错误采集（/api/v1/app/stat/report），
+ * 只覆盖可捕获的 JS/UTS 运行错误，且要联网、要用户同意；这里是**本机文件**，
+ * 记录的是「这台设备上到底走了哪条路」，不依赖网络，也包含 qt-stat 不收的普通信息日志。
+ *
+ * 文件布局（应用私有目录，路径由 qt-js-engine 插件的 dataDir() 给出）：
+ *   logs/quietmusic.log      当前日志
+ *   logs/quietmusic.log.1    上一份（越大的编号越旧）
+ *   logs/quietmusic.log.2
+ *   logs/quietmusic.log.3    最旧的一份，再轮转时被删掉
+ *
+ * 轮转策略（对齐 qt-pc 的 file_logger.rs，但更省空间）：
+ *   - 按**大小**轮转，不按日期——手机上很难保证「每天启动一次」，
+ *     而按大小能给出确定的上限：MAX_FILE_BYTES × (MAX_BACKUPS + 1) ≈ 2MB；
+ *   - 重启**不截断**，追加写。用户「重启一次再报障」是最常见的路径，
+ *     截断会把上一次启动的现场冲掉；
+ *   - 写失败一律静默（打 console 兜底），绝不让日志本身把主流程带崩。
+ *
+ * 并发：所有写操作串行化到一条 Promise 队列上。轮转是「删除 + 改名 + 追加」三步，
+ * 两个写同时进来会出现「A 判定了要轮转、B 已经把新内容追加进去、A 再把它改名」这种
+ * 丢日志的竞态，所以必须排队。
+ *
+ * 为什么不用 uni.getFileSystemManager()：跨端可用性不确定（现有代码也刻意回避它），
+ * 统一走 qt-js-engine 插件（Android java.io / 鸿蒙 CoreFileKit），与音源包存储同一条路。
+ */
+
+// #ifdef APP-ANDROID || APP-HARMONY
+import {
+  dataDir as nativeDataDir,
+  appendTextFile as nativeAppendTextFile,
+  renamePath as nativeRenamePath,
+  remove as nativeRemove,
+  listDir as nativeListDir,
+  readTextFile as nativeReadTextFile,
+} from "@/uni_modules/qt-js-engine";
+// #endif
+
+import { getClientUt, getClientDevice, getClientOs } from "@/services/client-info";
+import { getCurrentVersionName, getCurrentVersionCode } from "@/services/app-version";
+
+/** 日志目录名（应用私有目录下） */
+const LOG_DIR_NAME = "logs";
+/** 当前日志文件名 */
+const LOG_FILE_NAME = "quietmusic.log";
+/** 单个文件上限：1MB 足够放下几万行，超了才轮转 */
+const MAX_FILE_BYTES = 1024 * 1024;
+/** 保留的历史份数（加上当前文件共 MAX_BACKUPS + 1 份） */
+const MAX_BACKUPS = 3;
+/** 单行上限：堆栈可能很长，截断避免一行吃掉整个文件 */
+const MAX_LINE_CHARS = 4000;
+/** 调试日志开关的存储键 */
+const DEBUG_KEY = "qt-log-debug";
+
+/** 日志级别（数值越大越严重，用于按级别过滤） */
+export const LOG_DEBUG = "debug";
+export const LOG_INFO = "info";
+export const LOG_WARN = "warn";
+export const LOG_ERROR = "error";
+
+/** 级别 → 单字母（对齐 qt-pc 的 5 字符宽级别列，手机屏幕窄所以压到 1 个字母） */
+function levelChar(level: string): string {
+  if (level == LOG_DEBUG) return "D";
+  if (level == LOG_WARN) return "W";
+  if (level == LOG_ERROR) return "E";
+  return "I";
+}
+
+function levelRank(level: string): number {
+  if (level == LOG_DEBUG) return 0;
+  if (level == LOG_WARN) return 2;
+  if (level == LOG_ERROR) return 3;
+  return 1;
+}
+
+// ==================== 平台文件 API ====================
+
+/** 目录项：name 文件名，dir 是否目录，size 字节数 */
+type LogDirEntry = {
+  name: string;
+  dir: boolean;
+  size: number;
+};
+
+// #ifdef APP-ANDROID || APP-HARMONY
+function fsDataDir(): string {
+  return nativeDataDir();
+}
+
+/** 追加一行（文件不存在会自动创建，父目录也会自动建） */
+function fsAppend(path: string, text: string): Promise<boolean> {
+  return new Promise<boolean>((resolve, reject) => {
+    nativeAppendTextFile(path, text, (ok: boolean, value: string, error: string) => {
+      if (ok) {
+        resolve(true);
+      } else {
+        reject(new Error(error));
+      }
+    });
+  });
+}
+
+function fsRename(oldPath: string, newPath: string): Promise<boolean> {
+  return new Promise<boolean>((resolve, reject) => {
+    nativeRenamePath(oldPath, newPath, (ok: boolean, value: string, error: string) => {
+      if (ok) {
+        resolve(true);
+      } else {
+        reject(new Error(error));
+      }
+    });
+  });
+}
+
+/** 删除（不存在也算成功，与插件语义一致） */
+function fsRemove(path: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    nativeRemove(path, (ok: boolean, value: string, error: string) => {
+      resolve(ok);
+    });
+  });
+}
+
+/** 列目录（目录不存在返回空数组；解析失败也返回空数组） */
+function fsList(dir: string): Promise<LogDirEntry[]> {
+  return new Promise<LogDirEntry[]>((resolve) => {
+    nativeListDir(dir, (ok: boolean, value: string, error: string) => {
+      if (!ok) {
+        resolve([] as LogDirEntry[]);
+        return;
+      }
+      const out: LogDirEntry[] = [];
+      try {
+        const arr = JSON.parse(value) as UTSJSONObject[];
+        for (let i = 0; i < arr.length; i++) {
+          const o = arr[i];
+          const name = o.get("name") as string | null;
+          if (name == null) continue;
+          const isDir = o.get("dir") as boolean | null;
+          const size = o.get("size") as number | null;
+          out.push({
+            name: name,
+            dir: isDir == true,
+            size: size != null ? size : 0,
+          } as LogDirEntry);
+        }
+      } catch (_) {}
+      resolve(out);
+    });
+  });
+}
+
+/** 读全文（文件不存在 / 读失败返回空串，不 reject：调用方是展示逻辑，不该被异常打断） */
+function fsReadText(path: string): Promise<string> {
+  return new Promise<string>((resolve) => {
+    nativeReadTextFile(path, (ok: boolean, value: string, error: string) => {
+      resolve(ok ? value : "");
+    });
+  });
+}
+// #endif
+
+// #ifndef APP-ANDROID || APP-HARMONY
+function fsDataDir(): string {
+  return "";
+}
+
+function fsAppend(path: string, text: string): Promise<boolean> {
+  return Promise.resolve(false);
+}
+
+function fsRename(oldPath: string, newPath: string): Promise<boolean> {
+  return Promise.resolve(false);
+}
+
+function fsRemove(path: string): Promise<boolean> {
+  return Promise.resolve(false);
+}
+
+function fsList(dir: string): Promise<LogDirEntry[]> {
+  return Promise.resolve([] as LogDirEntry[]);
+}
+
+function fsReadText(path: string): Promise<string> {
+  return Promise.resolve("");
+}
+// #endif
+
+// ==================== 路径 ====================
+
+/** 日志目录绝对路径（空串 = 当前平台不可用，如 H5） */
+export function logDir(): string {
+  const base = fsDataDir();
+  if (base.length == 0) return "";
+  return base + "/" + LOG_DIR_NAME;
+}
+
+/** 当前日志文件绝对路径（空串 = 当前平台不可用） */
+export function logPath(): string {
+  const dir = logDir();
+  if (dir.length == 0) return "";
+  return dir + "/" + LOG_FILE_NAME;
+}
+
+/** 历史文件路径：序号 1..MAX_BACKUPS */
+function backupPath(index: number): string {
+  return logPath() + "." + index;
+}
+
+// ==================== 状态 ====================
+
+/** 是否已初始化（initLogger 幂等） */
+let gInited = false;
+/** 是否记录 debug 级（默认关，设置页可开） */
+let gDebug = false;
+/** 串行写队列（见文件头「并发」） */
+let gQueue: Promise<boolean> = Promise.resolve(true);
+
+/** 设置 debug 级别（持久化，重启后保留） */
+export function setLogDebug(on: boolean): void {
+  gDebug = on;
+  try {
+    uni.setStorageSync(DEBUG_KEY, on ? "1" : "0");
+  } catch (_) {}
+}
+
+/** 当前是否记录 debug 级 */
+export function isLogDebug(): boolean {
+  return gDebug;
+}
+
+// ==================== 时间 ====================
+
+/** 两位补零（不用 padStart，保持只用最基础的字符串 API） */
+function two(n: number): string {
+  return n < 10 ? "0" + n : "" + n;
+}
+
+/** 三位补零（毫秒） */
+function three(n: number): string {
+  if (n < 10) return "00" + n;
+  if (n < 100) return "0" + n;
+  return "" + n;
+}
+
+/** "YYYY-MM-DD HH:MM:SS.mmm"（本地时间，与 qt-pc 的 file_logger.rs 同格式） */
+function stamp(): string {
+  const d = new Date();
+  return (
+    d.getFullYear() +
+    "-" +
+    two(d.getMonth() + 1) +
+    "-" +
+    two(d.getDate()) +
+    " " +
+    two(d.getHours()) +
+    ":" +
+    two(d.getMinutes()) +
+    ":" +
+    two(d.getSeconds()) +
+    "." +
+    three(d.getMilliseconds())
+  );
+}
+
+// ==================== 值描述 ====================
+
+/**
+ * 把一个任意值描述成可读文本。
+ *
+ * 教训来自 qt-pc（src/main.tsx describeReason）：`String(reason)` 会把
+ * `[object Object]` / `false` 压成一句没用的东西，而 Promise 拒绝值往往没有 stack，
+ * 「事后完全无法定位」。所以这里按类型分别处理：Error 取 message+stack，
+ * 对象转 JSON 并带上构造器名，布尔/数字/字符串标出类型。
+ */
+export function describeValue(v: any): string {
+  if (v == null) return "null";
+  if (v instanceof Error) {
+    const e = v as Error;
+    const msg = e.message != null ? e.message : "";
+    const st = e.stack != null ? e.stack : "";
+    return st.length > 0 ? "Error: " + msg + "\n" + st : "Error: " + msg;
+  }
+  const t = typeof v;
+  if (t == "string") return v as string;
+  if (t == "boolean") return "boolean " + (v as boolean).toString();
+  if (t == "number") return "number " + (v as number).toString();
+  if (t == "function") return "function";
+  let json = "";
+  try {
+    json = JSON.stringify(v);
+  } catch (_) {
+    json = "";
+  }
+  if (json.length == 0 || json == "{}") {
+    // JSON.stringify(Error) 得到 "{}" 是已知坑；走到这里说明确实没有可序列化字段
+    return "object " + json;
+  }
+  return "object " + json;
+}
+
+// ==================== 轮转 ====================
+
+/**
+ * 按需轮转。返回是否发生了轮转。
+ * 顺序：删最旧的 → 从大到小依次改名 → 腾出当前文件名。
+ */
+async function rotateIfNeeded(): Promise<boolean> {
+  const dir = logDir();
+  const path = logPath();
+  if (dir.length == 0 || path.length == 0) return false;
+
+  const entries = await fsList(dir);
+  let size = 0;
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (!e.dir && e.name == LOG_FILE_NAME) {
+      size = e.size;
+      break;
+    }
+  }
+  if (size < MAX_FILE_BYTES) return false;
+
+  // 最旧的一份直接删掉，给后面的改名腾位置
+  await fsRemove(backupPath(MAX_BACKUPS));
+  for (let i = MAX_BACKUPS - 1; i >= 1; i--) {
+    // 改名失败（比如该份不存在）不算错，继续往前挪
+    try {
+      await fsRename(backupPath(i), backupPath(i + 1));
+    } catch (_) {}
+  }
+  try {
+    await fsRename(path, backupPath(1));
+  } catch (_) {
+    // 当前文件挪不走（极少见）：不阻断写入，继续往原文件追加，
+    // 结果是这个文件会略超上限，但日志不丢——比丢日志好。
+  }
+  return true;
+}
+
+// ==================== 域名脱敏 ====================
+
+/**
+ * 日志里不允许出现自家域名（canace.cn，含子域）。
+ *
+ * 规则：定位 "canace.cn" 后把前面的子域（astral. / quietmusic.）连同协议头
+ * （https:// / http://）一起往前吃掉，只留 /api/v1/xxx 这样的接口路径；
+ * 裸出现的域名同样删干净。
+ *
+ * 为什么放在 logLine 这个唯一落盘入口做：http.ts 的「[QT Music API] <URL> → 状态码」、
+ * 「请求失败 <URL>」、升级 / 音源包等所有调用点都经过这里，一处生效全部覆盖，
+ * 调用方不必各自拼「只要路径」的 URL。readLogs 展示前再脱敏一遍，
+ * 盖住这次改动之前已经写进文件的历史行（复制走的也是 readLogs 的结果）。
+ */
+const DOMAIN_MARKER = "canace.cn";
+
+/** host 字符集（字母 / 数字 / '-' / '.'）：判断子域边界用，避免逐字符比大小写 */
+const HOST_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.";
+
+function isHostCharAt(s: string, i: number): boolean {
+  return HOST_CHARS.indexOf(s.charAt(i)) >= 0;
+}
+
+function scrubDomain(text: string): string {
+  let out = text;
+  let idx = out.indexOf(DOMAIN_MARKER);
+  while (idx >= 0) {
+    // 往前吃子域（astral. / quietmusic.），非 host 字符（'/'、空格、中文等）即边界
+    let start = idx;
+    while (start > 0 && isHostCharAt(out, start - 1)) {
+      start--;
+    }
+    // host 前面若是协议头，连协议一起删：https://astral.canace.cn/api/v1/x → /api/v1/x
+    if (start >= 8 && out.substring(start - 8, start) == "https://") {
+      start -= 8;
+    } else if (start >= 7 && out.substring(start - 7, start) == "http://") {
+      start -= 7;
+    }
+    out = out.substring(0, start) + out.substring(idx + DOMAIN_MARKER.length);
+    idx = out.indexOf(DOMAIN_MARKER);
+  }
+  return out;
+}
+
+// ==================== 写入 ====================
+
+/** 真正落盘的一行（不含换行处理，调用方已拼好） */
+async function writeLine(line: string): Promise<boolean> {
+  const path = logPath();
+  if (path.length == 0) return false;
+  await rotateIfNeeded();
+  try {
+    await fsAppend(path, line + "\n");
+    return true;
+  } catch (e) {
+    // 日志写不进去（磁盘满、权限异常…）不能让主流程受影响，只在控制台留一句
+    console.log("[Logger] 写日志失败：" + describeValue(e));
+    return false;
+  }
+}
+
+/**
+ * 记一行日志（唯一入口，其余都是它的包装）。
+ *
+ * @param level debug / info / warn / error
+ * @param tag 模块标签，用方括号风格不带括号，如 "SourceEngine"
+ * @param message 正文；超长会截断
+ */
+export function logLine(level: string, tag: string, message: string): void {
+  if (level == LOG_DEBUG && !gDebug) return;
+  // 落盘前统一脱敏：任何调用点拼进来的 URL 都不会带着域名进文件
+  let text = scrubDomain(message);
+  if (text.length > MAX_LINE_CHARS) {
+    text = text.substring(0, MAX_LINE_CHARS) + "…(截断)";
+  }
+  const line = stamp() + " " + levelChar(level) + " [" + tag + "] " + text;
+  // 控制台镜像：调试时连着电脑也能直接看到，发行包里没有控制台也无害
+  console.log(line);
+  gQueue = gQueue.then((): Promise<boolean> => writeLine(line)).catch(() => false);
+}
+
+/** 记一行并附上异常对象（异常走 describeValue，避免 [object Object]） */
+export function logError(tag: string, message: string, err: any): void {
+  logLine(LOG_ERROR, tag, message + " → " + describeValue(err));
+}
+
+/** 记一行并附上任意上下文值 */
+export function logWith(tag: string, message: string, extra: any): void {
+  logLine(LOG_INFO, tag, message + " → " + describeValue(extra));
+}
+
+// 下面几个是给调用点用的短名包装：迁移 console.* 时不必每次写全 level 常量，
+// 也统一了「值怎么描述」的规则（永远走 describeValue，不会出现 [object Object]）。
+
+export function logInfo(tag: string, message: string): void {
+  logLine(LOG_INFO, tag, message);
+}
+
+export function logWarn(tag: string, message: string): void {
+  logLine(LOG_WARN, tag, message);
+}
+
+export function logErr(tag: string, message: string): void {
+  logLine(LOG_ERROR, tag, message);
+}
+
+/** warn + 一个上下文值 */
+export function logWarnV(tag: string, message: string, value: any): void {
+  logLine(LOG_WARN, tag, message + " → " + describeValue(value));
+}
+
+/** error + 异常对象（最常用：catch 里那一句） */
+export function logErrV(tag: string, message: string, value: any): void {
+  logError(tag, message, value);
+}
+
+// ==================== 存量调用点迁移入口 ====================
+
+/**
+ * 从消息里拆出开头的 `[标签] `，剩下的当正文。
+ *
+ * 项目里 200 多处 console.* 的惯例就是「消息自带 [Tag] 前缀」，逐条手改成
+ * logInfo("Tag", ...) 既费力又容易在多行字符串拼接上改错。所以给一个机械替换
+ * 入口：`console.log(` → `logMsg(`，标签自动认出来。没写前缀的归到 App。
+ */
+function splitTag(message: string): string[] {
+  if (message.length > 2 && message.charAt(0) == "[") {
+    const end = message.indexOf("] ");
+    if (end > 0) {
+      return [message.substring(1, end), message.substring(end + 2)];
+    }
+  }
+  return ["App", message];
+}
+
+/** 迁移入口：info 级，消息自带 `[标签] ` */
+export function logMsg(message: string, extra: any = null): void {
+  const parts = splitTag(message);
+  const body = extra != null ? parts[1] + " " + describeValue(extra) : parts[1];
+  logLine(LOG_INFO, parts[0], body);
+}
+
+/** 迁移入口：warn 级 */
+export function logMsgWarn(message: string, extra: any = null): void {
+  const parts = splitTag(message);
+  const body = extra != null ? parts[1] + " " + describeValue(extra) : parts[1];
+  logLine(LOG_WARN, parts[0], body);
+}
+
+/** 迁移入口：error 级 */
+export function logMsgErr(message: string, extra: any = null): void {
+  const parts = splitTag(message);
+  const body = extra != null ? parts[1] + " " + describeValue(extra) : parts[1];
+  logLine(LOG_ERROR, parts[0], body);
+}
+
+// ==================== 生命周期 ====================
+
+/**
+ * 启动时初始化：读回 debug 开关，写一条会话头。
+ * 幂等，重复调用无副作用。
+ */
+export function initLogger(): void {
+  if (gInited) return;
+  gInited = true;
+  try {
+    const saved = uni.getStorageSync(DEBUG_KEY) as string | null;
+    gDebug = saved == "1";
+  } catch (_) {}
+  const path = logPath();
+  if (path.length == 0) {
+    // 当前平台没有可写目录（H5 / 小程序）：只保留控制台镜像，不报错
+    console.log("[Logger] 当前平台不支持本地日志文件");
+    return;
+  }
+  let env = getClientUt();
+  const version = getCurrentVersionName();
+  const code = getCurrentVersionCode();
+  const device = getClientDevice();
+  const os = getClientOs();
+  let head = "===== 启动 " + (version.length > 0 ? version : "-");
+  if (code > 0) head = head + " (" + code + ")";
+  if (env.length > 0) head = head + " " + env;
+  if (os.length > 0) head = head + " " + os;
+  if (device.length > 0) head = head + " " + device;
+  head = head + " 调试=" + (gDebug ? "开" : "关") + " =====";
+  logLine(LOG_INFO, "Logger", head);
+  logLine(LOG_INFO, "Logger", "日志文件 " + path);
+}
+
+/**
+ * 等待队列里已排的日志全部落盘。
+ * App onHide / 退出前调用：进程被杀时未落盘的行会丢，但已经排进队列的必须写完。
+ */
+export function flushLogs(): Promise<boolean> {
+  return gQueue;
+}
+
+/** 当前日志占用字节数（含历史份；用于设置页展示） */
+export async function logBytes(): Promise<number> {
+  const dir = logDir();
+  if (dir.length == 0) return 0;
+  const entries = await fsList(dir);
+  let total = 0;
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (e.dir) continue;
+    if (e.name != LOG_FILE_NAME && e.name.indexOf(LOG_FILE_NAME + ".") != 0) continue;
+    total += e.size;
+  }
+  return total;
+}
+
+/**
+ * 清空全部日志（含历史份）。
+ * 走同一条队列，避免「清空」和正在排队的追加交错。
+ */
+export function clearLogs(): Promise<boolean> {
+  const task = async (): Promise<boolean> => {
+    const dir = logDir();
+    if (dir.length == 0) return false;
+    await fsRemove(logPath());
+    for (let i = 1; i <= MAX_BACKUPS; i++) {
+      await fsRemove(backupPath(i));
+    }
+    return true;
+  };
+  gQueue = gQueue.then(task).catch(() => false);
+  return gQueue;
+}
+
+/** 日志页最多展示的行数（当前文件末尾这些行） */
+const VIEW_MAX_LINES = 400;
+/**
+ * 日志页单次读取上限。整份文件（1MB）塞进一个 <text> 会让排版明显卡顿，
+ * 而且单行上限是 4000 字符、400 行最坏能有 1.6MB，所以按字符数再兜一道底。
+ */
+const VIEW_MAX_CHARS = 64 * 1024;
+
+/**
+ * 读当前日志的尾部若干行，供设置页里的日志页展示。
+ *
+ * 走队列：读之前先等已排队的写落盘，否则刚触发的操作（用户点完按钮立刻进日志页）
+ * 会看不到自己那一行——那正是用户来查的那一行。
+ *
+ * 返回的每一行都已去掉行尾换行；空文件返回空数组。
+ */
+export async function readLogs(): Promise<string[]> {
+  try {
+    await gQueue;
+  } catch (_) {}
+  const path = logPath();
+  if (path.length == 0) return [] as string[];
+  let text = await fsReadText(path);
+  if (text.length == 0) return [] as string[];
+  // 历史行兜底：脱敏生效前写进文件的行可能还带完整域名，展示/复制前再盖一遍
+  text = scrubDomain(text);
+  if (text.length > VIEW_MAX_CHARS) {
+    text = text.substring(text.length - VIEW_MAX_CHARS);
+    // 截断点很可能落在一行中间，丢掉残行，避免首行显示半条日志
+    const nl = text.indexOf("\n");
+    if (nl >= 0) text = text.substring(nl + 1);
+  }
+  const all = text.split("\n");
+  const out: string[] = [];
+  for (let i = 0; i < all.length; i++) {
+    const line = all[i];
+    if (line.length > 0) out.push(line);
+  }
+  if (out.length <= VIEW_MAX_LINES) return out;
+  return out.slice(out.length - VIEW_MAX_LINES);
+}
+
+/** 日志目录是否已就绪（设置页据此决定入口是显示占用还是提示不支持） */
+export function logSupported(): boolean {
+  return logPath().length > 0;
+}

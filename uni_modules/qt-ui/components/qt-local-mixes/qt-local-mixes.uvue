@@ -1,0 +1,208 @@
+<template>
+  <view v-if="mixes.length > 0" class="local-mixes" :class="layout.isWide ? 'local-mixes-wide' : (props.embedded == true ? 'local-mixes-embedded' : '')">
+    <view class="local-mixes-head" :class="layout.isWide ? 'local-mixes-head-wide' : ''">
+      <view class="local-mixes-copy">
+        <!-- kicker 配色跟随宿主：竖屏其他区块用 accent（.section-kicker 的取色），
+             宽屏其他面板用弱化灰（.wide-kicker 的取色），否则这一块会在白卡群里跳出来 -->
+        <text class="local-mixes-kicker" :class="layout.isWide ? 'local-mixes-kicker-wide' : ''" :style="('color:' + (layout.isWide ? theme.skin.textSubtle : theme.skin.accent) + ';') + qtFontDual(19, 11)">Local picks</text>
+        <text class="local-mixes-title" :class="layout.isWide ? 'local-mixes-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(34, 18)">为你整理</text>
+      </view>
+      <text class="local-mixes-hint" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(21, 13)">根据本机收听记录</text>
+    </view>
+    <!-- 横滑架与首页「推荐歌单」同构：方形封面（四张竖切片按 2x2 拼贴）+ 两行标题 + 一行副标题，
+         卡宽/间距/架高全部由宿主按同一套计算值传入（cardWidth / contentWidth），
+         因此换成白色卡片容器后不会比旁边的区块宽出 26rpx，卡面尺寸也完全对齐。 -->
+    <scroll-view class="local-mixes-rail" direction="horizontal" :show-scrollbar="false" :style="'width:' + railWidth + 'px;height:' + railHeight + 'px;'">
+      <view class="local-mixes-row" :style="'width:' + railContentWidth + 'px;'">
+        <view v-for="(mix, mixIndex) in mixes" :key="mix.key" class="local-mix-card" :style="'width:' + cardWidth + 'px;margin-right:' + cardGap + 'px;'" :hover-class="layout.isWide ? 'local-mix-card-hover' : 'none'" @click="openMix(mixIndex)">
+          <view class="local-mix-covers" :class="layout.isWide ? 'local-mix-covers-wide' : ''" :style="'width:' + cardWidth + 'px;height:' + cardWidth + 'px;background-color:' + theme.skin.coverPlaceholder + ';'">
+            <view v-for="coverIndex in coverSlots" :key="coverIndex" class="local-mix-cover-cell" :style="'width:' + ((coverIndex == 1 || coverIndex == 3) ? lastCellWidth : cellWidth) + 'px;height:' + ((coverIndex < 2) ? cellWidth : lastRowHeight) + 'px;margin-right:' + ((coverIndex == 0 || coverIndex == 2) ? coverGap : 0) + 'px;margin-top:' + ((coverIndex < 2) ? 0 : coverGap) + 'px;'">
+              <image v-if="coverAt(mix, coverIndex) != ''" class="local-mix-cover" :src="coverAt(mix, coverIndex)" mode="aspectFill" @error="onCoverError(mix, coverIndex)" />
+              <QtIcon v-else name="music" :size="layout.isWide ? 16 : 30" :color="theme.skin.iconMuted" />
+            </view>
+          </view>
+          <text class="local-mix-name" :class="layout.isWide ? 'local-mix-name-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(32, 13)" :max-lines="2">{{ mix.title }}</text>
+          <text class="local-mix-subtitle" :class="layout.isWide ? 'local-mix-subtitle-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(23, 11)" :max-lines="1">{{ mix.subtitle }}</text>
+        </view>
+      </view>
+    </scroll-view>
+
+    <view v-if="sheetVisible && selectedMix != null" class="local-mix-mask" :class="layout.isWide ? 'local-mix-mask-wide' : ''" :style="'background-color:' + theme.skin.scrim + ';'" @click="closeSheet">
+      <view class="local-mix-sheet" :class="layout.isWide ? 'local-mix-sheet-wide' : ''" :style="sheetStyle" @click.stop>
+        <view class="local-mix-sheet-head" :class="layout.isWide ? 'local-mix-sheet-head-wide' : ''" :style="'border-bottom-color:' + theme.skin.divider + ';'">
+          <view class="local-mix-sheet-title-wrap">
+            <text class="local-mix-sheet-title" :style="('color:' + theme.skin.text + ';') + qtFontDual(31, 17)" :max-lines="1">{{ selectedMix.title }}</text>
+            <text class="local-mix-sheet-subtitle" :class="layout.isWide ? 'local-mix-sheet-subtitle-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(21, 12)" :max-lines="1">{{ selectedMix.subtitle }}</text>
+          </view>
+          <QtIcon name="close" :size="layout.isWide ? 20 : 30" :color="theme.skin.iconMuted" @click="closeSheet" />
+        </view>
+        <view class="local-mix-play-all" :class="layout.isWide ? 'local-mix-play-all-wide' : ''" :style="'background-color:' + theme.skin.accentSoft + ';'" @click="playAll">
+          <QtIcon name="play" :size="layout.isWide ? 16 : 24" :color="theme.skin.accent" />
+          <text class="local-mix-play-all-text" :class="layout.isWide ? 'local-mix-play-all-text-wide' : ''" :style="('color:' + theme.skin.accent + ';') + qtFontDual(25, 14)">全部播放</text>
+        </view>
+        <scroll-view class="local-mix-song-list" direction="vertical" :show-scrollbar="false">
+          <view v-for="(song, songIndex) in selectedMix.songs" :key="song.platform + ':' + song.id" class="local-mix-song-row" :class="layout.isWide ? 'local-mix-song-row-wide' : ''" :style="'border-bottom-color:' + theme.skin.divider + ';'" @click="playAt(songIndex)">
+            <text class="local-mix-song-index" :class="layout.isWide ? 'local-mix-song-index-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(22, 12)">{{ songIndex + 1 }}</text>
+            <image class="local-mix-song-cover" :class="layout.isWide ? 'local-mix-song-cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
+            <view class="local-mix-song-info">
+              <text class="local-mix-song-name" :style="('color:' + theme.skin.text + ';') + qtFontDual(27, 14)" :max-lines="1">{{ song.name }}</text>
+              <text class="local-mix-song-singer" :class="layout.isWide ? 'local-mix-song-singer-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 11)" :max-lines="1">{{ song.singer }}</text>
+            </view>
+            <QtIcon name="play" :size="layout.isWide ? 16 : 22" :color="theme.skin.iconMuted" />
+          </view>
+        </scroll-view>
+      </view>
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
+import { computed, ref } from "vue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtContentWidth, qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { usePlayerStore } from "@/stores/player";
+import type { LocalMix } from "@/services/local-mixes";
+import type { Song } from "@/types/music";
+
+/**
+ * cardWidth：宿主若按自己的卡片尺度算好了卡宽（首页会传「推荐歌单」同一个 shelfCardWidth /
+ * widePlaylistCardWidth），直接用，保证两个区块的卡面尺寸完全一致；没传才回落到组件内估算。
+ */
+const props = defineProps<{ mixes: LocalMix[]; embedded?: boolean; contentWidth?: number; cardWidth?: number }>();
+const layout = useQtLayout();
+const theme = useThemeStore();
+const player = usePlayerStore();
+/** 四格 2x2：0 1 在第一行，2 3 在第二行 */
+const coverSlots = [0, 1, 2, 3];
+const failedCovers = ref<Set<string>>(new Set());
+const sheetVisible = ref(false);
+const selectedIndex = ref(-1);
+const selectedMix = computed<LocalMix | null>(() => selectedIndex.value >= 0 && selectedIndex.value < props.mixes.length ? props.mixes[selectedIndex.value] : null);
+const railWidth = computed<number>(() => {
+  if (props.contentWidth != null && props.contentWidth > 0) return props.contentWidth;
+  // 没有外部传入内容宽时读统一令牌（含 rail 扣除），不再自己按 1360 反算
+  return Math.max(320, qtContentWidth("grid") - (layout.isWide ? 32 : qtRpx(48)));
+});
+const cardWidth = computed<number>(() => {
+  const given = props.cardWidth;
+  if (given != null && given > 0) return given;
+  return layout.isWide ? Math.max(170, Math.min(260, Math.floor((railWidth.value - 36) / 3.2))) : Math.max(172, Math.floor((railWidth.value - qtRpx(14)) / 2.5));
+});
+/** 卡间距与首页横滑架同一个 rpx 值（14rpx / 宽屏 12px），横向节奏才和旁边区块一致 */
+const cardGap = computed<number>(() => layout.isWide ? 12 : qtRpx(14));
+/** 四张封面拼进同一个方形里按 2x2 排布（各自 aspectFill 裁满），拼成一张「合辑封面」 */
+const coverGap = computed<number>(() => layout.isWide ? 3 : qtRpx(4));
+/** 第一行/第一列格子的边长：方形总宽减一道缝后对半开 */
+const cellWidth = computed<number>(() => Math.max(30, Math.floor((cardWidth.value - coverGap.value) / 2)));
+/** 第二列与第二行吃掉取整余数，否则右/下边缘会漏出 1-2px 的占位底色 */
+const lastCellWidth = computed<number>(() => Math.max(30, cardWidth.value - cellWidth.value - coverGap.value));
+const lastRowHeight = computed<number>(() => Math.max(30, cardWidth.value - cellWidth.value - coverGap.value));
+/** 架高 = 封面方图 + 两行标题 + 一行副标题 + 间距：竖屏 12+2x42+6+30=132rpx 留到 140rpx；
+    宽屏 7+2x17+3+16=60px 留到 64px。矮了会裁掉最后一行副标题 */
+const railHeight = computed<number>(() => cardWidth.value + (layout.isWide ? 64 : qtRpx(140)));
+/** 抽屉高度照 qt-listen-detail：竖屏吃满 0.88 窗口高（原来 0.82 只露四行半，用户反馈「下滑范围小了」），
+    宽屏仍是 0.92。列表不再算死像素高，改由 flex:1 吃满头部/全部播放条之外的剩余空间。 */
+const sheetHeight = computed<number>(() => Math.max(layout.isWide ? 520 : 420, Math.floor(layout.windowHeight * (layout.isWide ? 0.92 : 0.88))));
+/** 抽屉尺寸一次算全：宽屏宽度走 QT_SHEET_WIDTH.drawer 契约并夹到窗口内 */
+const sheetStyle = computed((): string => {
+  let style = "height:" + sheetHeight.value + "px;background-color:" + theme.skin.sheetSurface + ";";
+  if (layout.isWide) style += "width:" + qtSheetWidth("drawer") + "px;";
+  return style;
+});
+const railContentWidth = computed<number>(() => props.mixes.length * (cardWidth.value + cardGap.value));
+
+function coverAt(mix: LocalMix, index: number): string {
+  const url = index < mix.coverUrls.length ? mix.coverUrls[index] : "";
+  return failedCovers.value.has(mix.key + ":" + index) ? "" : url;
+}
+function onCoverError(mix: LocalMix, index: number): void {
+  failedCovers.value.add(mix.key + ":" + index);
+}
+function openMix(index: number): void {
+  selectedIndex.value = index;
+  sheetVisible.value = true;
+}
+function closeSheet(): void {
+  sheetVisible.value = false;
+  selectedIndex.value = -1;
+}
+async function playAt(index: number): Promise<void> {
+  const mix = selectedMix.value;
+  if (mix == null || index < 0 || index >= mix.songs.length) return;
+  closeSheet();
+  try { await player.playReportSongs(mix.songs, index); } catch (_) { qtShowToast({ title: "该合辑暂时无法播放", icon: "none" }); }
+}
+async function playAll(): Promise<void> {
+  await playAt(0);
+}
+</script>
+
+<style>
+/* 区块外壳：首页把它放进 .section / .wide-panel 白色卡片里，所以 embedded / wide 时
+   自身内边距清零，内外边距、圆角、底色全部由宿主卡片负责（与其他区块同一套容器）。 */
+.local-mixes { padding: 24rpx 26rpx 8rpx; }
+.local-mixes-embedded { padding: 0; }
+.local-mixes-wide { padding: 0; }
+/* 标题区到内容区的间距：其他区块是 .section-head（无下边距）+ .shelf-scroll（margin-top:22rpx），
+   这里合成一个 margin-bottom，取同一个 22rpx，整页的标题-内容节奏才一致 */
+.local-mixes-head { flex-direction: row; align-items: flex-end; justify-content: space-between; margin-bottom: 22rpx; }
+.local-mixes-head-wide { margin-bottom: 12px; }
+.local-mixes-copy { flex-direction: column; }
+/* 字重与 .section-kicker / .section-title（800）、.wide-kicker / .wide-panel-title（700）对齐 */
+.local-mixes-kicker { font-weight: 800; }
+.local-mixes-kicker-wide { font-weight: 700; }
+.local-mixes-title { margin-top: 6rpx; font-weight: 800; }
+.local-mixes-title-wide { margin-top: 3px; font-weight: 700; }
+.local-mixes-hint { margin-bottom: 2rpx; }
+.local-mixes-rail { }
+.local-mixes-row { flex-direction: row; }
+/* 卡本身不再自己套一层描边小卡：与 .shelf-card / .wide-playlist-card 一致，
+   只有封面 + 文字，容器语言交给宿主卡片 */
+.local-mix-card-hover { background-color: rgba(255, 255, 255, 0.06); border-radius: 12px; }
+/* 四张封面拼成一个方形封面：外框圆角裁切，内部 2x2 各自 aspectFill（换行靠 flex-wrap） */
+.local-mix-covers { flex-direction: row; flex-wrap: wrap; align-content: flex-start; border-radius: 16rpx; overflow: hidden; }
+.local-mix-covers-wide { border-radius: 10px; }
+.local-mix-cover-cell { align-items: center; justify-content: center; overflow: hidden; }
+.local-mix-cover { width: 100%; height: 100%; }
+/* 与 .shelf-name（32rpx/600，行高 42rpx，两行）/ .shelf-count（23rpx）同规格 */
+.local-mix-name { margin-top: 12rpx; line-height: 42rpx; font-weight: 600; text-overflow: ellipsis; }
+.local-mix-name-wide { margin-top: 7px; line-height: 17px; }
+.local-mix-subtitle { margin-top: 6rpx; line-height: 30rpx; text-overflow: ellipsis; }
+.local-mix-subtitle-wide { margin-top: 3px; line-height: 16px; }
+.local-mix-mask { position: fixed; left: 0; top: 0; right: 0; bottom: 0; justify-content: flex-end; z-index: 999; }
+.local-mix-mask-wide { flex-direction: row; }
+.local-mix-sheet { width: 100%; flex-direction: column; border-radius: 30rpx 30rpx 0 0; overflow: hidden; padding-bottom: env(safe-area-inset-bottom); }
+.local-mix-sheet-wide {
+  /* 宽度改由 sheetStyle 内联给出（走 qtSheetWidth 契约，窄窗口自动夹紧） */
+  height: 100%;
+  border-radius: 0;
+  padding-bottom: 0;
+}
+.local-mix-sheet-head { flex-direction: row; align-items: center; padding: 26rpx 30rpx 18rpx; border-bottom-width: 1rpx; border-bottom-style: solid; }
+.local-mix-sheet-head-wide { padding: 16px 20px 12px; border-bottom-width: 1px; }
+.local-mix-sheet-title-wrap { flex: 1; }
+.local-mix-sheet-title { font-weight: 700; }
+.local-mix-sheet-subtitle { margin-top: 6rpx; }
+.local-mix-sheet-subtitle-wide { margin-top: 4px; }
+.local-mix-play-all { flex-direction: row; align-items: center; justify-content: center; height: 82rpx; margin: 18rpx 26rpx 10rpx; border-radius: 14rpx; }
+.local-mix-play-all-wide { height: 48px; margin: 12px 16px 8px; border-radius: 8px; }
+.local-mix-play-all-text { margin-left: 10rpx; font-weight: 600; }
+.local-mix-play-all-text-wide { margin-left: 6px; }
+/* 列表吃满头部与「全部播放」之外的剩余高度（同 qt-listen-detail 的 .detail-scroll），
+   不再算死像素高：抽屉变高后能多露两行，矮屏也不会溢出 */
+.local-mix-song-list { flex: 1; min-height: 0; }
+.local-mix-song-row { flex-direction: row; align-items: center; height: 116rpx; padding: 0 28rpx; border-bottom-width: 1rpx; border-bottom-style: solid; }
+.local-mix-song-row-wide { height: 62px; padding: 0 20px; border-bottom-width: 1px; }
+.local-mix-song-index { width: 42rpx; text-align: center; }
+.local-mix-song-index-wide { width: 26px; }
+.local-mix-song-cover { width: 80rpx; height: 80rpx; margin: 0 18rpx; border-radius: 10rpx; }
+.local-mix-song-cover-wide { width: 44px; height: 44px; margin: 0 12px; border-radius: 7px; }
+.local-mix-song-info { flex: 1; overflow: hidden; }
+.local-mix-song-name { font-weight: 500; text-overflow: ellipsis; }
+.local-mix-song-singer { margin-top: 7rpx; text-overflow: ellipsis; }
+.local-mix-song-singer-wide { margin-top: 4px; }
+</style>

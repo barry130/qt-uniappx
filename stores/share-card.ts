@@ -1,5 +1,6 @@
 import { reactive } from "vue";
 import type { Song } from "@/types/music";
+import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
 
 /**
  * 分享卡片状态：歌曲菜单/播放页的「分享」入口把目标歌挂进来后跳独立页面，
@@ -14,7 +15,7 @@ class ShareCardStore {
   open(song: Song | null): void {
     if (song == null) return;
     this.song = song;
-    uni.navigateTo({
+    uni.navigateTo({ animationType: qtNavAnimation(),
       url: "/pages/share-card/index",
     });
   }

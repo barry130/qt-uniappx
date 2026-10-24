@@ -1,14 +1,21 @@
 <template>
   <view
-    v-if="player.current != null"
-    class="fab-right" :class="layout.isWide ? 'fab-right-wide' : ''"
-    :style="'left:' + fabX + 'px;top:' + fabY + 'px;'"
-    @touchstart="onTouchStart"
-    @touchmove="onTouchMove"
-    @touchend="onTouchEnd"
-    @click="openPlayer"
+    v-if="player.current != null && !layout.isWide"
+    class="mini-player-host"
+    :style="hostStyle"
   >
     <view
+      class="fab-right"
+      :class="miniExpanded ? (layout.isWide ? 'mini-player-wide' : 'mini-player') : (layout.isWide ? 'fab-right-wide' : '')"
+      :style="containerStyle"
+      @touchstart="onTouchStart"
+      @touchmove="onTouchMove"
+      @touchend="onTouchEnd"
+      @touchcancel="onTouchEnd"
+      @click.stop="onContainerClick"
+    >
+    <view
+      v-if="!miniExpanded"
       class="fab-inner"
       :class="layout.isWide ? 'fab-inner-wide' : ''"
       :style="'background-color:' + theme.skin.mediaSurface + ';border-color:' + theme.skin.mediaBorder + ';'"
@@ -16,38 +23,158 @@
       <view class="fab-cover-spin" :class="layout.isWide ? 'fab-cover-spin-wide' : ''" :style="discStyle">
         <image class="fab-cover" :class="layout.isWide ? 'fab-cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="currentCover()" mode="aspectFill" />
       </view>
-      <view class="fab-state" :class="layout.isWide ? 'fab-state-wide' : ''" :style="'background-color:' + (player.playing ? theme.skin.mediaControl : theme.skin.mediaScrim) + ';'">
+      <view
+        class="fab-state"
+        :class="layout.isWide ? 'fab-state-wide' : ''"
+        :style="'background-color:' + (player.playing ? theme.skin.mediaControl : theme.skin.mediaScrim) + ';'"
+        @click.stop="togglePlayback"
+      >
         <QtIcon :name="player.playing ? 'pause' : 'play'" :size="layout.isWide ? 20 : 26" :color="theme.skin.mediaText" />
       </view>
     </view>
+
+    <view
+      v-else
+      class="mini-player-inner"
+      :class="[layout.isWide ? 'mini-player-inner-wide' : '', miniEdgeSide == 'right' ? (layout.isWide ? 'mini-player-inner-right-wide' : 'mini-player-inner-right') : '']"
+      :style="'background-color:' + theme.skin.mediaSurface + ';border-color:' + theme.skin.mediaBorder + ';'"
+    >
+      <view class="mini-cover-wrap" :class="layout.isWide ? 'mini-cover-wrap-wide' : ''" :style="discStyle">
+        <image class="mini-cover" :class="layout.isWide ? 'mini-cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="currentCover()" mode="aspectFill" />
+      </view>
+      <view class="mini-copy" :class="layout.isWide ? 'mini-copy-wide' : ''">
+        <text class="mini-title" :class="layout.isWide ? 'mini-title-wide' : ''" :style="miniTitleStyle" :max-lines="1">{{ currentName() }}</text>
+        <text class="mini-artist" :class="layout.isWide ? 'mini-artist-wide' : ''" :style="miniArtistStyle" :max-lines="1">{{ currentArtist() }}</text>
+      </view>
+      <view
+        class="mini-action"
+        :class="layout.isWide ? 'mini-action-wide' : ''"
+        :style="'background-color:' + theme.skin.mediaControl + ';'"
+        @click.stop="togglePlayback"
+      >
+        <QtIcon :name="player.playing ? 'pause' : 'play'" :size="layout.isWide ? 18 : 24" :color="theme.skin.mediaText" />
+      </view>
+      <view
+        class="mini-action"
+        :class="layout.isWide ? 'mini-action-wide' : ''"
+        :style="'background-color:' + theme.skin.mediaControl + ';'"
+        @click.stop="nextTrack"
+      >
+        <QtIcon name="skip-forward" :size="layout.isWide ? 18 : 24" :color="theme.skin.mediaText" />
+      </view>
+      <view
+        class="mini-progress-track"
+        :class="layout.isWide ? 'mini-progress-track-wide' : ''"
+        :style="progressTrackStyle"
+      >
+        <view
+          class="mini-progress-fill"
+          :class="layout.isWide ? 'mini-progress-fill-wide' : ''"
+          :style="progressStyle"
+        ></view>
+      </view>
+    </view>
+  </view>
   </view>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { computed, watch, onMounted, onUnmounted } from "vue";
 import { usePlayerStore } from "@/stores/player";
-import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
-import { qtSideNavWidth } from "@/uni_modules/qt-ui/composables/use-qt-tab-bar";
-import { qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtLayout, qtRailWidth } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
+import {
+  miniFabX,
+  miniFabY,
+  miniExpanded,
+  miniEdgeSide,
+  miniEdgeAnimating,
+  miniRenderWidth,
+  miniRenderHeight,
+  miniRotateDeg,
+  miniCurrentWidth,
+  miniCurrentHeight,
+  miniPlayerMount,
+  miniPlayerUnmount,
+  miniPlayerSetPlaying,
+  ensureMiniPositioned,
+  onMiniWindowResize,
+  onMiniPlayerHidden,
+  miniSyncRenderSize,
+  miniSnapToNearestEdge,
+  miniExpandFromFab,
+  miniCollapse,
+} from "@/uni_modules/qt-ui/services/mini-player-singleton";
+import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+
+/**
+ * 歌名/歌手字号跟全局缩放（class 里的 27/22rpx、14/12px 只是基准值）。
+ * 行高按同倍率联动，否则「很大」档下字形高度超过 class 的 38/30rpx 行高，
+ * 单行文本上下会被裁掉（同页头 tab / 免责声明标题的联动先例）。
+ */
+const miniTitleStyle = computed((): string => {
+  const s = fontScale.scale;
+  const line = layout.isWide
+    ? "line-height:" + Math.round(20 * s * 100) / 100 + "px;"
+    : "line-height:" + Math.round(38 * s * 100) / 100 + "rpx;";
+  return ("color:" + theme.skin.mediaText + ";") + qtFontDual(27, 14) + line;
+});
+const miniArtistStyle = computed((): string => {
+  const s = fontScale.scale;
+  const line = layout.isWide
+    ? "line-height:" + Math.round(17 * s * 100) / 100 + "px;"
+    : "line-height:" + Math.round(30 * s * 100) / 100 + "rpx;";
+  return ("color:" + theme.skin.mediaMuted + ";") + qtFontDual(22, 12) + line;
+});
+
+/**
+ * 悬浮播放器（紧凑/medium 视口）。
+ *
+ * 2026-10-24 改造：本组件在**每个页面**的 qt-page-frame 里都挂一份，但全部
+ * 实例渲染 mini-player-singleton.ts 里的同一份共享状态（位置/展开/吸附侧/
+ * 渲染尺寸/旋转角）。不再有「显示权注册 + 栈顶路由轮询」的交接协议 ——
+ * 页面进出时的闪烁正是那个协议造成的（出栈页卸载后球才补挂、切 Tab 靠
+ * 轮询补挂，中间是几百毫秒的空洞）。现在：
+ *   - 页面栈里被盖住的实例本来就在下层窗口里，看不到，无需隐藏；
+ *   - 转场动画期间新旧两页各有一个像素级一致的球，随页面一起运动，
+ *     视觉上就是同一个球；
+ *   - 第 2 个页面起没有初始化阶段，球出现即在正确位置。
+ * 平台教训仍适用：宿主 fixed + 子级 absolute（鸿蒙 fixed 嵌 fixed 命中失效）、
+ * 首帧窗口尺寸不可信（初始化重试 + 落盘护栏，全在 store 里）。
+ */
 
 const player = usePlayerStore();
 const layout = useQtLayout();
 const theme = useThemeStore();
 
-/** 悬浮球尺寸（rpx）与默认边距（rpx） */
-const FAB_SIZE = 120;
-const LEFT_MARGIN = 28;
-const BOTTOM_MARGIN = 150;
-/** 位置持久化 key */
-const POS_KEY = "qt-mini-player-fab";
+const progressRatio = computed((): number => {
+  const duration = player.duration;
+  if (duration <= 0) return 0;
+  return Math.max(0, Math.min(1, player.progress / duration));
+});
+const progressTrackStyle = computed((): string => "background-color:" + theme.skin.mediaScrim + ";");
+const progressStyle = computed((): string => "width:" + Math.round(progressRatio.value * 100) + "%;background-color:" + theme.skin.accent + ";");
 
+const hostStyle = computed((): string => {
+  // 宿主始终只覆盖球或展开条本身；展开时不能铺满窗口，否则会截获页面滚动。
+  return "left:" + miniFabX.value + "px;top:" + miniFabY.value + "px;right:auto;bottom:auto;width:" + miniRenderWidth.value + "px;height:" + miniRenderHeight.value + "px;pointer-events:auto;";
+});
 
+const containerStyle = computed((): string => {
+  const width = miniRenderWidth.value;
+  const height = miniRenderHeight.value;
+  const radius = height / 2;
+  const transition = miniEdgeAnimating.value
+    ? "transition: left 0.22s ease-out, top 0.22s ease-out, width 0.22s ease-out, height 0.22s ease-out, border-radius 0.22s ease-out;"
+    : "";
+  // 子级用 absolute 铺满宿主（宿主已经 fixed 并带 left/top），这里不能再写 left/top，
+  // 否则会在宿主偏移之上再偏移一次，命中测试区域与视觉错位（鸿蒙上表现为点不到）。
+  return "left:0;top:0;width:" + width + "px;height:" + height + "px;border-radius:" + radius + "px;" + transition;
+});
 
-/** 悬浮球当前位置（px，left/top） */
-const fabX = ref(0);
-const fabY = ref(0);
+const discStyle = computed((): string => "transform: rotate(" + miniRotateDeg.value + "deg);");
 
 let startX = 0;
 let startY = 0;
@@ -56,79 +183,12 @@ let origY = 0;
 let dragging = false;
 let moved = false;
 
-// qtRpx 读的是非响应源（uni.getWindowInfo），computed 内必须显式读一次
-// layout.windowWidth 才会在窗口尺寸变化时重算（拖拽边界钳制依赖它）
-const FAB_PX = computed((): number => {
-  layout.windowWidth;
-  return layout.isWide ? 72 : qtRpx(FAB_SIZE);
-});
-
-/** 封面播放旋转（vinyl 效果）：requestAnimationFrame 驱动，仅在播放时旋转 */
-const rotateDeg = ref(0);
-let lastRotateTime = 0;
-let rotationTimer: number | null = null;
-const discStyle = computed(() => "transform: rotate(" + rotateDeg.value + "deg);");
-const rotateStep = (timestamp: number) => {
-  if (lastRotateTime == 0) lastRotateTime = timestamp;
-  const dt = timestamp - lastRotateTime;
-  lastRotateTime = timestamp;
-  if (player.playing && dt > 0) {
-    // 约 12 度/秒，按实际经过时间计算，保证不同帧率下速度一致
-    rotateDeg.value = (rotateDeg.value + dt * 0.012) % 360;
-  }
-  rotationTimer = requestAnimationFrame(rotateStep);
-};
-const startSpin = () => {
-  if (rotationTimer != null) return;
-  lastRotateTime = 0;
-  rotationTimer = requestAnimationFrame(rotateStep);
-};
-const stopSpin = () => {
-  if (rotationTimer != null) {
-    cancelAnimationFrame(rotationTimer);
-    rotationTimer = null;
-  }
-};
-
-/** 初始化位置：优先使用用户上次拖动的坐标，否则默认左侧 */
-function initPosition(): void {
-  const win = uni.getWindowInfo();
-  let x = qtRpx(LEFT_MARGIN);
-  let y = win.windowHeight - (layout.isWide ? 96 : qtRpx(BOTTOM_MARGIN)) - FAB_PX.value;
-  if (layout.isWide) {
-    // 宽屏 tab 页左侧有导航 rail（>=860dp 为 208px 完整 rail，否则 64px 图标栏），
-    // 悬浮球默认落在 rail 右侧，避免压在导航上
-    x = qtSideNavWidth(win.windowWidth) + 16;
-  }
-  try {
-    const saved = uni.getStorageSync(POS_KEY) as string;
-    if (saved.length > 0) {
-      const parts = saved.split(",");
-      if (parts.length == 2) {
-        const sx = parseFloat(parts[0]);
-        const sy = parseFloat(parts[1]);
-        if (!isNaN(sx) && !isNaN(sy)) {
-          x = sx;
-          y = sy;
-        }
-      }
-    }
-  } catch (_) {}
-  if (layout.isWide) {
-    // 旧记录可能是在竖屏下拖到左缘的，宽屏一律让开 rail，避免压在导航上
-    const railEnd = qtSideNavWidth(win.windowWidth) + 8;
-    if (x < railEnd) x = railEnd + 8;
-  }
-  fabX.value = x;
-  fabY.value = y;
-}
-
 function onTouchStart(event: UniTouchEvent): void {
   const touch = event.touches[0];
   startX = touch.clientX;
   startY = touch.clientY;
-  origX = fabX.value;
-  origY = fabY.value;
+  origX = miniFabX.value;
+  origY = miniFabY.value;
   dragging = true;
   moved = false;
 }
@@ -139,40 +199,71 @@ function onTouchMove(event: UniTouchEvent): void {
   const dx = touch.clientX - startX;
   const dy = touch.clientY - startY;
   // 超过阈值视为拖动，避免误判为点击
-  if (!moved && Math.abs(dx) > 10 && Math.abs(dy) > 10) {
+  if (!moved && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) {
     moved = true;
   }
   if (!moved) return;
   const win = uni.getWindowInfo();
+  const minX = layout.isWide ? qtRailWidth() + 8 : 0;
   let nx = origX + dx;
   let ny = origY + dy;
-  nx = Math.max(0, Math.min(nx, win.windowWidth - FAB_PX.value));
-  ny = Math.max(0, Math.min(ny, win.windowHeight - FAB_PX.value));
-  fabX.value = nx;
-  fabY.value = ny;
+  nx = Math.max(minX, Math.min(nx, win.windowWidth - miniCurrentWidth.value));
+  ny = Math.max(0, Math.min(ny, win.windowHeight - miniCurrentHeight.value));
+  miniFabX.value = nx;
+  miniFabY.value = ny;
 }
 
 function onTouchEnd(): void {
   if (!dragging) return;
   dragging = false;
-  // 拖动结束后持久化位置
+  // 拖动结束后吸附最近一侧并落盘（store 内部处理动画与持久化）
   if (moved) {
-    try {
-      uni.setStorageSync(POS_KEY, Math.round(fabX.value) + "," + Math.round(fabY.value));
-    } catch (_) {}
+    miniSnapToNearestEdge();
   }
 }
 
-/** 打开播放页；若为拖动手势则忽略点击 */
-function openPlayer(): void {
+function onContainerClick(): void {
   if (moved) {
     moved = false;
     return;
   }
-  // 栈顶已是播放页时不再 push：本组件被 11 个页面引用，且页面上没有「已在播放页」的守卫，
+  if (!miniExpanded.value) {
+    // 展开前先吸附到最近一侧；播放条从该侧向内容区展开（store 处理动画起点）
+    miniExpandFromFab();
+    return;
+  }
+  openPlayer();
+}
+
+function togglePlayback(): void {
+  player.toggle();
+}
+
+function nextTrack(): void {
+  player.next(false);
+}
+
+function currentName(): string {
+  const current = player.current;
+  return current != null ? current.name : "正在播放";
+}
+
+function currentArtist(): string {
+  const current = player.current;
+  return current != null ? current.singer : "";
+}
+
+/** 打开播放页；若为拖动手势则忽略点击 */
+function openPlayer(): void {
+  // 先收起（共享状态幂等）：球回到当前吸附侧，右侧展开条不留悬空位置
+  miniCollapse();
+  if (moved) {
+    moved = false;
+    return;
+  }
+  // 栈顶已是播放页时不再 push：本组件被所有页面引用，页面上没有「已在播放页」的守卫，
   // 连点悬浮球会堆叠出多个播放页实例 —— 每个实例各自 ensureLyric 取一遍歌词、
-  // 各起一套定时器与逐字 rAF。真机表现就是同一首歌的「命中预热缓存」日志重复出现，
-  // 内存与后台任务随栈深线性增长。返回键本来就能回到已有实例，无需再叠一层。
+  // 各起一套定时器与逐字 rAF。返回键本来就能回到已有实例，无需再叠一层。
   try {
     const pages = getCurrentPages();
     if (pages.length > 0) {
@@ -181,7 +272,7 @@ function openPlayer(): void {
       if (route != null && route == "pages/player/index") return;
     }
   } catch (_) {}
-  uni.navigateTo({ url: "/pages/player/index" });
+  uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/player/index" });
 }
 
 function currentCover(): string {
@@ -189,29 +280,54 @@ function currentCover(): string {
   return current != null ? current.picUrl : "";
 }
 
+function onOutsideClick(): void {
+  miniCollapse();
+}
+
 onMounted(() => {
-  initPosition();
-  // 已处于播放状态则立即开始旋转封面
-  if (player.playing) startSpin();
+  // 登记渲染实例（旋转 rAF 的引用计数）+ 确保共享状态已初始化（幂等，
+  // 只有全站第一次挂载才会真正初始化，后续页面零延迟直接渲染）
+  miniPlayerMount();
+  if (miniRenderWidth.value <= 0) miniSyncRenderSize();
+  ensureMiniPositioned();
+  uni.$on("qt-mini-player-outside-click", onOutsideClick);
 });
 
 watch(() => player.playing, (playing) => {
-  if (playing) startSpin();
-  else stopSpin();
+  miniPlayerSetPlaying(playing);
+});
+
+watch(() => [layout.windowWidth, layout.windowHeight], () => {
+  onMiniWindowResize();
 });
 
 onUnmounted(() => {
-  stopSpin();
+  uni.$off("qt-mini-player-outside-click", onOutsideClick);
+  miniPlayerUnmount();
+  onMiniPlayerHidden();
 });
 </script>
 
 <style>
-.fab-right {
+.mini-player-host {
   position: fixed;
   z-index: 998;
+  pointer-events: auto;
+}
+.fab-right {
+  /* 必须用 absolute 而不是 fixed：鸿蒙（uni-app x）上 fixed 宿主里的 fixed 子节点
+     命中测试会失效，触摸直接穿透到下层页面（2026-10-19 真机实证：点悬浮球完全没反应，
+     同一位置的榜单行反而被点开）。宿主 .mini-player-host 已经是 fixed 且按 left/top
+     定位，子级用 absolute 铺满宿主即可，视觉与交互在四端一致。 */
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 998;
+  pointer-events: auto;
   width: 120rpx;
   height: 120rpx;
   border-radius: 60rpx;
+  overflow: hidden;
 }
 .fab-inner {
   width: 120rpx;
@@ -221,7 +337,7 @@ onUnmounted(() => {
   align-items: center;
   /* shadow removed: Android 点击穿透（见 ui-review.md P0-1） */
   overflow: hidden;
-  border-width: 2rpx;
+  border-width: 2rpx; border-style: solid;
 }
 /* 旋转放在外层容器上，比 image 组件更稳定地支持 transform */
 .fab-cover-spin {
@@ -248,8 +364,31 @@ onUnmounted(() => {
 }
 
 .fab-right-wide { width: 72px; height: 72px; border-radius: 36px; }
-.fab-inner-wide { width: 72px; height: 72px; border-radius: 36px; border-width: 1px; }
+.fab-inner-wide { width: 72px; height: 72px; border-radius: 36px; border-width: 1px; border-style: solid; }
 .fab-cover-spin-wide { width: 72px; height: 72px; border-radius: 36px; }
 .fab-cover-wide { width: 72px; height: 72px; border-radius: 36px; }
 .fab-state-wide { width: 34px; height: 34px; border-radius: 17px 0 17px 0; }
+
+.mini-player { width: 620rpx; height: 112rpx; border-radius: 56rpx; }
+.mini-player-wide { width: 360px; height: 56px; border-radius: 28px; }
+.mini-player-inner { position: relative; width: 620rpx; height: 112rpx; border-radius: 56rpx; border-width: 2rpx; border-style: solid; flex-direction: row; align-items: center; padding-left: 16rpx; padding-right: 14rpx; }
+.mini-player-inner-wide { position: relative; width: 360px; height: 56px; border-radius: 28px; border-width: 1px; padding-left: 8px; padding-right: 7px; }
+.mini-player-inner-right { flex-direction: row-reverse; padding-left: 14rpx; padding-right: 16rpx; }
+.mini-player-inner-right-wide { flex-direction: row-reverse; padding-left: 7px; padding-right: 8px; }
+.mini-cover-wrap { width: 80rpx; height: 80rpx; border-radius: 40rpx; overflow: hidden; flex-shrink: 0; }
+.mini-cover-wrap-wide { width: 42px; height: 42px; border-radius: 21px; }
+.mini-cover { width: 80rpx; height: 80rpx; border-radius: 40rpx; }
+.mini-cover-wide { width: 42px; height: 42px; border-radius: 21px; }
+.mini-copy { flex: 1; height: 72rpx; justify-content: center; padding-left: 16rpx; padding-right: 12rpx; overflow: hidden; }
+.mini-copy-wide { height: 42px; padding-left: 10px; padding-right: 6px; }
+.mini-title { font-size: 27rpx; line-height: 38rpx; font-weight: 600; }
+.mini-title-wide { font-size: 14px; line-height: 20px; }
+.mini-artist { font-size: 22rpx; line-height: 30rpx; }
+.mini-artist-wide { font-size: 12px; line-height: 17px; }
+.mini-action { width: 64rpx; height: 64rpx; border-radius: 32rpx; justify-content: center; align-items: center; margin-left: 8rpx; }
+.mini-action-wide { width: 34px; height: 34px; border-radius: 17px; margin-left: 5px; }
+.mini-progress-track { position: absolute; left: 84rpx; right: 156rpx; bottom: 7rpx; height: 4rpx; border-radius: 2rpx; overflow: hidden; }
+.mini-progress-fill { height: 4rpx; border-radius: 2rpx; }
+.mini-progress-track-wide { left: 50px; right: 78px; bottom: 4px; height: 2px; border-radius: 1px; }
+.mini-progress-fill-wide { height: 2px; border-radius: 1px; }
 </style>

@@ -1,0 +1,584 @@
+<template>
+  <view class="page">
+    <!-- 宽屏 / 三栏中栏内容超出可视高度时能下滑；中栏高度由 .qt-page-frame-snav-body 撑满 -->
+    <scroll-view class="body" :class="inPane ? 'body-pane' : ''" direction="vertical" :show-scrollbar="false">
+    <!--
+      宽屏整页形态两列：左列「用户卡 + 五宫格」，右列「功能分组」。
+      分列在标记层写死而不是 flex-wrap：三张卡高度不等（用户卡 130、五宫格 100、
+      分组 256），自动折行会在矮的一侧留下大片等高空白。
+      三栏中栏（inPane）恒为单列：这一栏只有约 400px，按宽度判两列必然算错。
+      单列时 .cols 是纵向容器、列宽样式为空串，卡片自身的 16px 外边距照旧生效，
+      竖屏观感与抽出组件前完全一致，不需要第二份标记。
+    -->
+    <view class="cols" :class="twoColumn ? 'cols-2' : ''" :style="twoColumn ? colsStyle : ''">
+      <view class="col" :style="twoColumn ? colStyle : ''">
+    <!-- 容器一：用户信息。未登录点击进登录注册页；已登录点击进用户信息页 -->
+    <view class="profile" :class="[layout.isWide ? 'profile-wide' : '', twoColumn ? 'card-col' : '', inPane ? 'profile-pane' : '']" :style="cardStyleFor('/pages/user/index')" @click="onProfileTap">
+      <view class="avatar" :class="[layout.isWide ? 'avatar-wide' : '', inPane ? 'avatar-pane' : '']" :style="'background-color:' + themeStore.skin.accent + ';'">
+        <image
+          :src="avatarUrl.length > 0 ? avatarUrl : DEFAULT_AVATAR_ASSET"
+          class="avatar-img" :class="[layout.isWide ? 'avatar-img-wide' : '', inPane ? 'avatar-img-pane' : '']"
+          mode="aspectFill"
+        />
+      </view>
+      <view class="info" :class="[layout.isWide ? 'info-wide' : '', inPane ? 'info-pane' : '']">
+        <text class="name" :class="[layout.isWide ? 'name-wide' : '']" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(31, 22)">{{
+          loggedIn ? nickname : "登录后同步收藏与歌单"
+        }}</text>
+        <text class="sub" :class="[layout.isWide ? 'sub-wide' : '']" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 15)">{{
+          loggedIn ? "轻听音乐账户 · 个人主页" : "点击登录"
+        }}</text>
+      </view>
+      <QtIcon v-if="!inPane" name="chevron-right" :size="30" :color="themeStore.skin.iconMuted" />
+    </view>
+
+    <!-- 容器二：签到 / 收藏 / 本地 / 最近播放 / 下载 五宫格 -->
+    <view class="tiles" :class="[layout.isWide ? 'tiles-wide' : '', twoColumn ? 'card-col' : '', inPane ? 'tiles-pane' : '']" :style="cardStyle">
+      <view class="tile" @click="doDaka" :hover-class="layout.isWide ? 'tile-hover' : 'none'">
+        <view class="tile-icon" :class="[layout.isWide ? 'tile-icon-wide' : '', inPane ? 'tile-icon-pane' : '']" :style="tileIconStyle">
+          <QtIcon name="check" :size="inPane ? 18 : (layout.isWide ? 20 : 38)" :color="themeStore.skin.accent" />
+        </view>
+        <text class="tile-label" :class="[layout.isWide ? 'tile-label-wide' : '']" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(25, 15)">签到</text>
+        <text class="tile-count" :class="[layout.isWide ? 'tile-count-wide' : '']" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">{{ todayDakaDone ? "已签" : dakaDays + " 天" }}</text>
+      </view>
+      <view class="tile" :style="tileStyleFor('/pages/collection/index')" @click="goCollection" :hover-class="layout.isWide ? 'tile-hover' : 'none'">
+        <view class="tile-icon" :class="[layout.isWide ? 'tile-icon-wide' : '', inPane ? 'tile-icon-pane' : '']" :style="tileIconStyle">
+          <QtIcon name="heart" :size="inPane ? 18 : (layout.isWide ? 20 : 38)" :color="themeStore.skin.accent" />
+        </view>
+        <text class="tile-label" :class="[layout.isWide ? 'tile-label-wide' : '']" :style="('color:' + tileLabelColor('/pages/collection/index') + ';') + qtFontDual(25, 15)">收藏</text>
+        <text class="tile-count" :class="[layout.isWide ? 'tile-count-wide' : '']" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">{{ likedCount }}</text>
+      </view>
+      <view class="tile" :style="tileStyleFor('/pages/local/index')" @click="goLocal" :hover-class="layout.isWide ? 'tile-hover' : 'none'">
+        <view class="tile-icon" :class="[layout.isWide ? 'tile-icon-wide' : '', inPane ? 'tile-icon-pane' : '']" :style="tileIconStyle">
+          <QtIcon name="folder" :size="inPane ? 18 : (layout.isWide ? 20 : 38)" :color="themeStore.skin.accent" />
+        </view>
+        <text class="tile-label" :class="[layout.isWide ? 'tile-label-wide' : '']" :style="('color:' + tileLabelColor('/pages/local/index') + ';') + qtFontDual(25, 15)">本地</text>
+        <text class="tile-count" :class="[layout.isWide ? 'tile-count-wide' : '']" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">扫描播放</text>
+      </view>
+      <view class="tile" :style="tileStyleFor('/pages/history/index')" @click="goRecent" :hover-class="layout.isWide ? 'tile-hover' : 'none'">
+        <view class="tile-icon" :class="[layout.isWide ? 'tile-icon-wide' : '', inPane ? 'tile-icon-pane' : '']" :style="tileIconStyle">
+          <QtIcon name="clock" :size="inPane ? 18 : (layout.isWide ? 20 : 38)" :color="themeStore.skin.accent" />
+        </view>
+        <text class="tile-label" :class="[layout.isWide ? 'tile-label-wide' : '']" :style="('color:' + tileLabelColor('/pages/history/index') + ';') + qtFontDual(25, 15)">最近播放</text>
+        <text class="tile-count" :class="[layout.isWide ? 'tile-count-wide' : '']" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">{{ player.history.length }} 首</text>
+      </view>
+      <view class="tile" :style="tileStyleFor('/pages/download/index')" @click="goDownload" :hover-class="layout.isWide ? 'tile-hover' : 'none'">
+        <view class="tile-icon" :class="[layout.isWide ? 'tile-icon-wide' : '', inPane ? 'tile-icon-pane' : '']" :style="tileIconStyle">
+          <QtIcon name="download" :size="inPane ? 18 : (layout.isWide ? 20 : 38)" :color="themeStore.skin.accent" />
+        </view>
+        <text class="tile-label" :class="[layout.isWide ? 'tile-label-wide' : '']" :style="('color:' + tileLabelColor('/pages/download/index') + ';') + qtFontDual(25, 15)">下载</text>
+        <text class="tile-count" :class="[layout.isWide ? 'tile-count-wide' : '']" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">{{ downloads.items.length }}</text>
+      </view>
+    </view>
+
+      </view>
+      <view class="col col-right" :style="twoColumn ? rightColStyle : ''">
+    <!-- 容器三：音乐助手（2026-10-24 起全量开放，无权限/未登录由助手页自行提示）/ 听歌报告 / 设置 / 意见反馈 / 关于轻听 -->
+    <view class="group" :class="[layout.isWide ? 'group-wide' : '', twoColumn ? 'card-col' : '', inPane ? 'group-pane' : '']" :style="cardStyle">
+      <view class="cell" :class="[layout.isWide ? 'cell-wide' : '', inPane ? 'cell-pane' : '']" :style="cellStyleFor('/pages/ai-assistant/index')" @click="goAiAssistant">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '', inPane ? 'cell-icon-pane' : '']" name="music" :size="inPane ? 22 : 36" :color="themeStore.skin.accent" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + cellTitleColor('/pages/ai-assistant/index') + ';') + qtFontDual(28, 17)">音乐助手</text>
+        <text v-if="!inPane" class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(24, 13)">说出想听的</text>
+        <QtIcon v-if="!inPane" name="chevron-right" :size="28" :color="themeStore.skin.iconMuted" />
+      </view>
+      <view class="cell" :class="[layout.isWide ? 'cell-wide' : '', inPane ? 'cell-pane' : '']" :style="cellStyleFor('/pages/stats/index')" @click="goStats">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '', inPane ? 'cell-icon-pane' : '']" name="chart" :size="inPane ? 22 : 36" :color="themeStore.skin.accent" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + cellTitleColor('/pages/stats/index') + ';') + qtFontDual(28, 17)">听歌报告</text>
+        <text v-if="!inPane" class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(24, 13)">{{ player.history.length }} 首记录</text>
+        <QtIcon v-if="!inPane" name="chevron-right" :size="28" :color="themeStore.skin.iconMuted" />
+      </view>
+      <view class="cell" :class="[layout.isWide ? 'cell-wide' : '', inPane ? 'cell-pane' : '']" :style="cellStyleFor('/pages/settings/index')" @click="goSettings">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '', inPane ? 'cell-icon-pane' : '']" name="settings" :size="inPane ? 22 : 36" :color="themeStore.skin.accent" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 17)">设置</text>
+        <view v-if="sourceUpdateStore.updatePending" class="cell-dot" />
+        <QtIcon v-if="!inPane" name="chevron-right" :size="28" :color="themeStore.skin.iconMuted" />
+      </view>
+      <view class="cell" :class="[layout.isWide ? 'cell-wide' : '', inPane ? 'cell-pane' : '']" :style="cellStyleFor('/pages/feedback/index')" @click="goFeedback">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '', inPane ? 'cell-icon-pane' : '']" name="feedback" :size="inPane ? 22 : 36" :color="themeStore.skin.accent" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + cellTitleColor('/pages/feedback/index') + ';') + qtFontDual(28, 17)">意见反馈</text>
+        <QtIcon v-if="!inPane" name="chevron-right" :size="28" :color="themeStore.skin.iconMuted" />
+      </view>
+      <view class="cell cell-no-border" :class="[layout.isWide ? 'cell-wide' : '', inPane ? 'cell-pane' : '']" :style="cellStyleFor('/pages/about/index')" @click="goAbout">
+        <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '', inPane ? 'cell-icon-pane' : '']" name="info" :size="inPane ? 22 : 36" :color="themeStore.skin.accent" />
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + cellTitleColor('/pages/about/index') + ';') + qtFontDual(28, 17)">关于轻听</text>
+        <QtIcon v-if="!inPane" name="chevron-right" :size="28" :color="themeStore.skin.iconMuted" />
+      </view>
+    </view>
+      </view>
+    </view>
+    </scroll-view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, watch, onMounted } from "vue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtContentWidth, QT_GUTTER_PX } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
+import { qtTopRoute, qtIsProfileRoute } from "@/uni_modules/qt-ui/composables/qt-page-chrome";
+import { qtShowToast } from "@/services/toast";
+import { usePlayerStore } from "@/stores/player";
+import { useDownloadsStore } from "@/stores/downloads";
+import { useSourceUpdateStore } from "@/stores/source-update";
+import { accountApi, persistUserRoles } from "@/services/music-api";
+import { getAccessToken } from "@/services/auth";
+import { getCachedAvatar, DEFAULT_AVATAR_ASSET } from "@/services/media";
+import { meCached } from "@/services/user-cache";
+
+/**
+ * 「我的」总览（用户卡 + 五宫格 + 功能分组）。
+ *
+ * 为什么单独抽成组件（2026-10-19，与设置总览同一套三栏逻辑）：宽屏三栏模式下它
+ * 要同时出现在两个地方：
+ *   1. `/pages/profile/index` 自己（整页即总览；宽屏三栏启用时页面把自己的那一份
+ *      藏起来、由框架在中栏渲染，避免两份并存）
+ *   2. 我的页族子页（收藏/本地/下载/最近播放/听歌报告/音乐助手/反馈/关于/个人信息）
+ *      的**中间栏**，由 qt-page-frame 代渲染，activeRoute 标出当前项
+ * 两处必须是同一份 UI 与同一份实时数据（昵称/头像/签到/计数），抄两份必然漂移。
+ *
+ * 刷新口径：组件可能被框架渲染在族子页的中间栏（没有页面事件可听），
+ * 只能靠 refreshKey 属性把「宿主页面显示过」这个事件传进来，变更时重新拉取；
+ * 首次挂载也拉一次（与设置总览同一套机制）。
+ */
+const props = defineProps<{
+  /** 宿主页面每次 onShow 递增；变更即重新拉取头像 / 昵称 / 签到 */
+  refreshKey?: number;
+  /**
+   * 渲染在**框架三栏的中间栏**里（宽约 400px）。
+   *
+   * 三个必须的分支差异：
+   * 1. 强制单列 —— 中间栏里按宽度判 twoColumn 必然算错（这一栏只有 400px）；
+   * 2. 隐藏行尾摘要与箭头 —— 「说出想听的」「N 首记录」在 400px 里挤掉标题；
+   * 3. 紧凑尺寸 —— 卡片外边距清零、行高 52px、图标 22px（与设置中栏同规格）。
+   */
+  inPane?: boolean;
+  /**
+   * 当前所在的我的族子页路由（如 `/pages/collection/index`）。
+   * 三栏模式下中栏一直显示、右栏换页，用户需要一眼看出「现在停在哪一项」。
+   * 不传则退化为读页面栈栈顶（本组件在「我的」页里整页渲染时栈顶就是总览自己，
+   * 此时没有任何项命中，不会误亮）。
+   */
+  activeRoute?: string;
+}>();
+
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+const player = usePlayerStore();
+const downloads = useDownloadsStore();
+const sourceUpdateStore = useSourceUpdateStore();
+
+const token = ref("");
+const userInfo = ref<any>(null);
+const storedNickname = ref("");
+// 展示头像：先取缓存（上传成功时已写入），refreshKey 变更时再向 /me 刷新
+const avatarUrl = ref(getCachedAvatar());
+
+async function fetchUserInfo() {
+  const accessToken = getAccessToken();
+  if (!accessToken) {
+    token.value = "";
+    userInfo.value = null;
+    // 退出登录/未登录时清掉本组件缓存的展示头像与昵称：否则「我的」总览常驻内存，
+    // avatarUrl 仍是上一账号的头像 URL，模板就走不到默认 logo 回退。
+    avatarUrl.value = "";
+    if (storedNickname.value.length > 0) storedNickname.value = "";
+    return;
+  }
+  token.value = accessToken;
+  // /me 走启动/登录时写入的缓存（本次运行只查一次接口），缓存缺失才联网补拉
+  const res = await meCached();
+  if (res == null) {
+    const localNick = uni.getStorageSync("qt-nickname") as string;
+    if (localNick != null && localNick.length > 0) storedNickname.value = localNick;
+    return;
+  }
+  const user = res.get("user") as UTSJSONObject | null;
+  if (user != null) {
+    userInfo.value = user;
+    // roles 在 /me 响应的 data 根层（与 user/expiresIn 并列），不在 user 对象里
+    persistUserRoles(res);
+    const nick = user.get("nickname") as string | null;
+    if (nick != null && nick.length > 0) {
+      storedNickname.value = nick;
+      uni.setStorageSync("qt-nickname", nick);
+    }
+    const email = user.get("email") as string | null;
+    if (email != null && email.length > 0) uni.setStorageSync("qt-email", email);
+    // 头像只在是 http(s) 直链时展示，其他形态（旧服务端路径/空）回退本地默认资源
+    const rawAvatar = user.get("avatar") as string | null;
+    const avatar = rawAvatar != null ? rawAvatar : "";
+    avatarUrl.value = avatar.startsWith("http") ? avatar : "";
+    if (avatarUrl.value.length > 0) uni.setStorageSync("qt-avatar", avatarUrl.value);
+  }
+}
+
+const nickname = computed<string>(() => {
+  if (userInfo.value != null) {
+    const nick = userInfo.value.get("nickname") as string | null;
+    if (nick != null && nick.length > 0) return nick;
+  }
+  return storedNickname.value.length > 0 ? storedNickname.value : "轻听用户";
+});
+
+const loggedIn = computed<boolean>((): boolean => token.value.length > 0);
+
+// 收藏数：自建歌单 + 收藏的远程歌单
+const likedCount = computed<number>((): number => player.localPlaylists.length + player.savedPlaylists.length);
+
+// ==================== 三栏中栏的「当前项」高亮 ====================
+
+const routeNow = computed<string>((): string => {
+  const given = props.activeRoute;
+  if (given != null && given.length > 0) return given;
+  return qtTopRoute();
+});
+
+/** 某个入口是否就是当前所在页（签到是动作不跳页，永不命中） */
+function routeActive(page: string): boolean {
+  return page.length > 0 && page == routeNow.value;
+}
+
+/** 用户卡在「个人信息」页时整卡换强调底色（与设置中栏同口径） */
+function cardStyleFor(page: string): string {
+  const bg = routeActive(page) ? themeStore.skin.accentSoft : themeStore.skin.surface;
+  return "background-color:" + bg + ";border-color:" + themeStore.skin.border + ";box-shadow:0 10rpx 30rpx " + themeStore.skin.shadow + ";";
+}
+
+/** 卡片统一样式（颜色全部来自当前皮肤） */
+const cardStyle = computed<string>((): string => cardStyleFor(""));
+const tileIconStyle = computed<string>((): string => "background-color:" + themeStore.skin.accentSoft + ";");
+
+/** 当前项的宫格给一行淡淡的强调底色 —— 深色皮肤下只有文字变色不够醒目 */
+function tileStyleFor(page: string): string {
+  if (!routeActive(page)) return "";
+  return "background-color:" + themeStore.skin.accentSoft + ";border-radius:12px;";
+}
+function tileLabelColor(page: string): string {
+  return routeActive(page) ? themeStore.skin.accent : themeStore.skin.text;
+}
+
+/** 分组行的分隔线颜色；当前项再叠一层强调底色 */
+function cellStyleFor(page: string): string {
+  const base = "border-bottom-color:" + themeStore.skin.divider + ";";
+  if (!routeActive(page)) return base;
+  return base + "background-color:" + themeStore.skin.accentSoft + ";";
+}
+function cellTitleColor(page: string): string {
+  return routeActive(page) ? themeStore.skin.accent : themeStore.skin.text;
+}
+
+//
+// 两列门限按**可用宽度**判，不按窗口宽度判：三栏模式下窗口仍是 1280 但右栏只有约 400，
+// 若按窗口判会算出两列各 320 直接横向溢出。判据 = 内容列宽减两侧留白与中间间距后
+// 仍能放下两个最小分组列宽（420 × 2）。三栏收窄后自然退回单列。
+// 三栏中栏（inPane）恒为单列。
+//
+const twoColumn = computed((): boolean => {
+  if (props.inPane == true) return false;
+  return qtContentWidth("grid") - QT_GUTTER_PX * 2 - 16 >= 420 * 2;
+});
+const colWidthPx = computed((): number => {
+  const inner = qtContentWidth("grid") - QT_GUTTER_PX * 2 - 16;
+  const w = Math.floor(inner / 2);
+  return w > 320 ? w : 320;
+});
+const colStyle = computed((): string => twoColumn.value ? "width:" + colWidthPx.value + "px;flex-shrink:0;" : "");
+const rightColStyle = computed((): string => twoColumn.value ? "width:" + colWidthPx.value + "px;flex-shrink:0;margin-left:16px;" : "");
+const colsStyle = computed((): string => twoColumn.value ? "padding-left:" + QT_GUTTER_PX + "px;padding-right:" + QT_GUTTER_PX + "px;" : "");
+
+// ==================== 签到 ====================
+
+const dakaLoading = ref(false);
+const todayDakaDone = ref(false);
+const dakaDays = ref(0);
+
+async function fetchDakaInfo() {
+  if (!loggedIn.value) return;
+  try {
+    const res = await accountApi.dakaInfo();
+    const days = res.get("days") as number | null;
+    const todayDone = res.get("todayDone") as boolean | null;
+    if (days != null) dakaDays.value = days;
+    todayDakaDone.value = todayDone != null ? todayDone : false;
+  } catch (_) {
+    // 忽略错误
+  }
+}
+
+/** 点击宫格即签到（未登录先去登录） */
+async function doDaka() {
+  if (!loggedIn.value) {
+    uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/login/index" });
+    return;
+  }
+  if (dakaLoading.value || todayDakaDone.value) {
+    qtShowToast({ title: "今日已签到", icon: "none" });
+    return;
+  }
+  dakaLoading.value = true;
+  try {
+    const now = new Date();
+    const time = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0") + "-" + String(now.getDate()).padStart(2, "0");
+    // type: "0" 正常签到（必传，后端依赖该字段）
+    await accountApi.daka({ time, type: "0" } as UTSJSONObject);
+    todayDakaDone.value = true;
+    dakaDays.value = dakaDays.value + 1;
+    qtShowToast({ title: "签到成功！", icon: "success" });
+  } catch (error) {
+    qtShowToast({ title: (error as Error).message || "签到失败", icon: "none" });
+  } finally {
+    dakaLoading.value = false;
+  }
+}
+
+// ==================== 跳转 ====================
+
+/**
+ * 打开一个我的族子页。两种入口，跳法不同（与设置总览同一套口径）：
+ * - 从「我的」总览页（tab）点进去：navigateTo，返回键回到总览。
+ * - 已经处在**某个我的族子页**（三栏模式的中间栏里点）：redirectTo 就地替换右栏。
+ *   否则收藏、本地、下载……会层层堆栈，返回键要按很多次才退得出去，
+ *   而宽屏下中栏本来就一直显示、用户要的是「右栏换一页」。
+ * 宽屏另用 qtNavAnimation() 关掉横滑动画，中栏因此视觉静止。
+ */
+function goPage(url: string): void {
+  const top = qtTopRoute();
+  if (qtIsProfileRoute(top) && top != "/pages/profile/index") {
+    if (top == url) return;
+    uni.redirectTo({ animationType: qtNavAnimation(), url: url });
+    return;
+  }
+  uni.navigateTo({ animationType: qtNavAnimation(), url: url });
+}
+
+/** 用户卡点击：已登录进用户信息页（含修改资料/退出），未登录进登录注册页 */
+function onProfileTap() {
+  if (loggedIn.value) {
+    goPage("/pages/user/index");
+  } else {
+    goPage("/pages/login/index");
+  }
+}
+function goCollection() {
+  goPage("/pages/collection/index");
+}
+function goLocal() {
+  goPage("/pages/local/index");
+}
+function goRecent() {
+  goPage("/pages/history/index");
+}
+/** 听歌报告（年度统计页）：此前只有用户信息页里有入口，移动端首页/我的都点不到 */
+function goStats() {
+  goPage("/pages/stats/index");
+}
+function goDownload() {
+  goPage("/pages/download/index");
+}
+function goAiAssistant() {
+  goPage("/pages/ai-assistant/index");
+}
+function goFeedback() {
+  goPage("/pages/feedback/index");
+}
+function goAbout() {
+  goPage("/pages/about/index");
+}
+/**
+ * 设置入口属于**设置页族**自己的三栏（rail + 设置总览 + 设置子页），
+ * 不做 redirectTo 就地替换 —— 那会把我的族右栏换成另一套几何；
+ * navigateTo 保持两套三栏各自完整，返回键回到我的族。
+ */
+function goSettings() {
+  uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/settings/index" });
+}
+
+// ==================== 刷新 ====================
+
+// 音乐助手入口 2026-10-24 起对全部用户展示（随每日推荐一起全量开放）；
+// 无权限/未登录时由助手页自身给出提示，入口不再隐藏。
+const aiAvailable = ref(true);
+
+function refreshAll(): void {
+  fetchUserInfo();
+  fetchDakaInfo();
+  aiAvailable.value = true;
+}
+onMounted((): void => {
+  refreshAll();
+});
+watch([(): number => (props.refreshKey != null ? props.refreshKey! : 0)], (): void => {
+  refreshAll();
+});
+</script>
+
+<style>
+.page {
+  flex: 1;
+  min-height: 0;
+}
+.body {
+  flex: 1;
+  min-width: 0;
+  padding-bottom: 220rpx;
+}
+
+/* ===== 容器一：用户信息 ===== */
+/* 宽度必须和下面两组卡一致：竖屏 24rpx 侧边距 + 24rpx 圆角（2026-10 用户反馈
+   「上面用户信息框和下面的宽度不一致」后统一）。内容左边距仍与分组卡对齐。 */
+.profile {
+  margin-left: 24rpx;
+  margin-right: 24rpx;
+  padding: 56rpx 32rpx 44rpx;
+  flex-direction: row;
+  align-items: center;
+  border-width: 1px; border-style: solid;
+  border-radius: 24rpx;
+}
+.avatar {
+  width: 110rpx;
+  height: 110rpx;
+  justify-content: center;
+  align-items: center;
+  border-radius: 36rpx;
+  overflow: hidden;
+}
+.avatar-img {
+  width: 110rpx;
+  height: 110rpx;
+  border-radius: 36rpx;
+}
+.info {
+  margin-left: 28rpx;
+  flex: 1;
+}
+.name {
+  font-size: 31rpx;
+  font-weight: 700;
+}
+.sub {
+  margin-top: 13rpx;
+  font-size: 23rpx;
+}
+
+/* ===== 容器二：五宫格 ===== */
+.tiles {
+  margin: 20rpx 24rpx 0;
+  padding: 30rpx 0 26rpx;
+  flex-direction: row;
+  align-items: center;
+  border-radius: 24rpx;
+  border-width: 1px; border-style: solid;
+}
+/* 桌面指针反馈：只在宽屏启用 */
+.tile-hover {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+.tile {
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.tile-icon {
+  width: 84rpx;
+  height: 84rpx;
+  border-radius: 26rpx;
+  align-items: center;
+  justify-content: center;
+}
+.tile-label {
+  margin-top: 14rpx;
+  font-size: 25rpx;
+  font-weight: 600;
+}
+.tile-count {
+  margin-top: 6rpx;
+  font-size: 21rpx;
+}
+
+/* ===== 容器三：功能分组 ===== */
+.group {
+  margin-top: 20rpx;
+  border-radius: 24rpx;
+  margin-left: 24rpx;
+  margin-right: 24rpx;
+  overflow: hidden;
+  border-width: 1px; border-style: solid;
+}
+.cell {
+  height: 96rpx;
+  padding: 0 32rpx;
+  flex-direction: row;
+  align-items: center;
+  border-bottom-width: 1px; border-bottom-style: solid;
+}
+.cell-no-border {
+  border-bottom-width: 0;
+}
+.cell-dot {
+  width: 16rpx;
+  height: 16rpx;
+  border-radius: 8rpx;
+  background-color: #ff4b4b;
+}
+.cell-icon {
+  margin-right: 20rpx;
+}
+.cell-title {
+  flex: 1;
+  font-size: 28rpx;
+  font-weight: 500;
+}
+.cell-value {
+  font-size: 24rpx;
+  margin-right: 8rpx;
+}
+
+/* ===== 宽屏整页形态 ===== */
+/* 三张卡片（用户/磁贴/分组）宽屏统一左右 16px 边距，宽度一致 */
+.profile-wide { margin-left: 16px; margin-right: 16px; padding: 34px 28px 26px; border-radius: 16px; }
+.avatar-wide { width: 72px; height: 72px; border-radius: 24px; }
+.avatar-img-wide { width: 72px; height: 72px; border-radius: 24px; }
+.info-wide { margin-left: 18px; }
+.name-wide { font-size: 22px; }
+.sub-wide { margin-top: 8px; font-size: 15px; }
+.tiles-wide { margin-top: 14px; margin-left: 16px; margin-right: 16px; padding: 20px 0 16px; border-radius: 16px; }
+.tile-icon-wide { width: 52px; height: 52px; border-radius: 16px; }
+.tile-label-wide { margin-top: 10px; font-size: 15px; }
+.tile-count-wide { margin-top: 4px; font-size: 12px; }
+.group-wide { margin-top: 14px; margin-left: 16px; margin-right: 16px; border-radius: 16px; }
+.cell-wide { height: 64px; padding-left: 24px; padding-right: 24px; }
+.cell-title-wide { font-size: 17px; }
+.cell-value-wide { font-size: 13px; margin-right: 6px; }
+.cell-icon-wide { margin-right: 10px; }
+
+/* ===== 宽屏整页两列 ===== */
+/* align-items: flex-start 必须显式写：Vapor flex 默认 stretch，会把矮的右列拉成
+   和左列等高，右列卡片下方露出一整块卡片同色的空白。 */
+.cols { flex-direction: column; }
+.cols-2 { flex-direction: row; align-items: flex-start; justify-content: center; }
+.col { flex-direction: column; }
+.col-right { flex-direction: column; }
+/* 两列时卡片不再带左右外边距：列宽已经把「两侧 24px 留白 + 中间 16px 间距」扣掉了，
+   再带 16px 会双重缩进，右列被挤出内容列。写在 .xx-wide 之后靠源码顺序覆盖。 */
+.card-col { margin-left: 0; margin-right: 0; }
+
+/* ===== 三栏中栏（inPane）=====
+   这一栏约 400px，是「导航」不是「阅读」：卡片紧凑、行更密、隐藏行尾摘要与箭头
+   （与设置总览中栏同规格）。卡片左右外边距清零 —— 中栏当作独立面板来排，
+   再带 16px 每行就窄一圈。写在 .xx-wide 之后靠源码顺序覆盖。 */
+.body-pane { padding-bottom: 24px; }
+.profile-pane { margin-top: 0; margin-left: 0; margin-right: 0; padding: 16px 14px 14px; border-radius: 12px; }
+.avatar-pane { width: 48px; height: 48px; border-radius: 16px; }
+.avatar-img-pane { width: 48px; height: 48px; border-radius: 16px; }
+.info-pane { margin-left: 12px; }
+.tiles-pane { margin-top: 10px; margin-left: 0; margin-right: 0; padding: 12px 0 10px; border-radius: 12px; }
+.tile-icon-pane { width: 36px; height: 36px; border-radius: 12px; }
+.group-pane { margin-top: 10px; margin-left: 0; margin-right: 0; border-radius: 12px; }
+.cell-pane { height: 52px; padding-left: 14px; padding-right: 14px; }
+.cell-icon-pane { margin-right: 10px; }
+</style>

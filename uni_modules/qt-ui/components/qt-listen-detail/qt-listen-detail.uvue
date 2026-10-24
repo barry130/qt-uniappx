@@ -1,0 +1,227 @@
+<template>
+  <view class="detail-mask" :class="layout.isWide ? 'detail-mask-wide' : ''" :style="'background-color:' + theme.skin.scrim + ';'" @click="close">
+    <view class="detail-panel" :style="panelStyle" @click.stop>
+      <view class="detail-header" :style="'border-color:' + theme.skin.divider + ';'">
+        <view v-if="target != ''" class="detail-icon-button" @click="back">
+          <QtIcon name="chevron-left" :size="layout.isWide ? 20 : 32" :color="theme.skin.text" />
+        </view>
+        <text class="detail-title" :style="textStyle(30, 18)" :max-lines="1">{{ heading }}</text>
+        <view class="detail-icon-button" @click="close"><QtIcon name="close" :size="layout.isWide ? 20 : 32" :color="theme.skin.textMuted" /></view>
+      </view>
+      <scroll-view :key="kind + ':' + target" class="detail-scroll" direction="vertical" :show-scrollbar="false">
+        <view class="detail-content" :style="contentStyle">
+          <template v-if="kind == 'info'">
+            <text class="detail-section" :style="textStyle(27, 16)">怎样统计</text>
+            <text class="detail-copy" :style="mutedStyle">播放次数在自然播完，或实际收听达到 30 秒且至少播完一半时登记；失败、立即跳过和拖动不会计入。</text>
+            <text class="detail-copy" :style="mutedStyle">时长只累计实际听过的秒数，暂停、缓冲和拖动进度不计入。从记录时长的版本升级后开始累计，旧记录不补算，因此有次数但时长为零属于正常情况。</text>
+            <text class="detail-copy" :style="mutedStyle">同一首歌在不同音源下分别统计；歌手按歌曲里的歌手名称归并，合作歌手保留原署名。</text>
+            <text class="detail-section" :style="textStyle(27, 16)">统计存档</text>
+            <text class="detail-copy" :style="mutedStyle">{{ storageLabel }}</text>
+            <text v-if="stats.storagePath != ''" class="detail-copy" :style="mutedStyle">{{ stats.storagePath }}</text>
+            <text class="detail-copy" :style="mutedStyle">成功保存到公共目录后，卸载不会删除该文件；重装后重新授予所有文件访问权限即可读取。未授权或写入失败时暂存应用目录。</text>
+            <view v-if="stats.storagePath != ''" class="detail-primary" :style="'background-color:' + theme.skin.accentSoft + ';'" @click="openPermissions">
+              <text class="detail-settings-label" :style="accentStyle">前往权限设置</text>
+              <QtIcon name="chevron-right" :size="layout.isWide ? 18 : 28" :color="theme.skin.accent" />
+            </view>
+          </template>
+          <template v-else>
+            <template v-if="target != '' && selected != null">
+              <view class="detail-identity">
+                <image v-if="picture(selected!) != ''" class="detail-cover" :style="largeCoverStyle" :src="picture(selected!)" mode="aspectFill" @error="imageFailed(selected!)" />
+                <view v-else class="detail-cover detail-placeholder" :style="largeCoverStyle + 'background-color:' + theme.skin.accentSoft + ';'">
+                  <QtIcon :name="categoryIcon(kind)" :size="layout.isWide ? 26 : 42" :color="theme.skin.accent" />
+                </view>
+                <view class="detail-identity-text">
+                  <text class="detail-name" :style="textStyle(32, 20)" :max-lines="2">{{ entryName(selected!) }}</text>
+                  <text class="detail-copy" :style="mutedStyle" :max-lines="2">{{ selectedSubtitle }}</text>
+                </view>
+              </view>
+              <view class="detail-metrics" :style="'background-color:' + theme.skin.surfaceMuted + ';'">
+                <view class="detail-metric">
+                  <text class="detail-number" :style="textStyle(34, 22)">{{ selected!.count }} 次</text>
+                  <text class="detail-copy" :style="mutedStyle">累计播放</text>
+                </view>
+                <view class="detail-metric">
+                  <text class="detail-number" :style="textStyle(30, 18)">{{ reportDuration(selected!.seconds) }}</text>
+                  <text class="detail-copy" :style="mutedStyle">实际听歌时长</text>
+                </view>
+              </view>
+              <text class="detail-copy" :style="mutedStyle">占全部播放次数 {{ playShare }}%</text>
+              <template v-if="kind == 'songs'">
+                <text class="detail-section" :style="textStyle(27, 16)">歌曲信息</text>
+                <text class="detail-copy" :style="mutedStyle">歌手：{{ selected!.subtitle || '未知歌手' }}</text>
+                <text class="detail-copy" :style="mutedStyle">专辑：{{ selected!.song!.album || '暂无专辑信息' }}</text>
+                <text class="detail-copy" :style="mutedStyle">音源：{{ sourceLabel(selected!.platform) }}</text>
+                <view class="detail-primary" :style="'background-color:' + theme.skin.accentSoft + ';'" @click="playEntry(selected!)">
+                  <QtIcon name="play" :size="layout.isWide ? 18 : 28" :color="theme.skin.accent" />
+                  <text class="detail-play-label" :style="accentStyle">{{ loadingKey == selected!.id ? '正在获取播放地址' : '播放这首歌' }}</text>
+                </view>
+              </template>
+            </template>
+            <view v-if="target == '' || kind != 'songs'" class="detail-list-head">
+              <text class="detail-section detail-list-title" :style="textStyle(26, 15)">{{ target == '' ? '全部排行' : '听过的歌曲' }} · {{ rows.length }}</text>
+              <view class="detail-sort" :style="'background-color:' + theme.skin.surfaceMuted + ';'">
+                <view class="detail-sort-item" :style="order == 'count' ? 'background-color:' + theme.skin.accentSoft + ';' : ''" @click="setOrder('count')"><text :style="order == 'count' ? accentStyle : mutedStyle">次数</text></view>
+                <view class="detail-sort-item" :style="order == 'seconds' ? 'background-color:' + theme.skin.accentSoft + ';' : ''" @click="setOrder('seconds')"><text :style="order == 'seconds' ? accentStyle : mutedStyle">时长</text></view>
+              </view>
+            </view>
+            <template v-if="target == '' || kind != 'songs'">
+              <view v-for="(entry, index) in visibleRows" :key="entry.id" class="detail-row" :style="rowStyle" @click="openEntry(entry)">
+                <text class="detail-rank" :style="textStyle(24, 14)">{{ index + 1 }}</text>
+                <image v-if="rowPicture(entry) != ''" class="detail-row-cover" :style="rowCoverStyle" :src="rowPicture(entry)" mode="aspectFill" @error="failedImages.push(rowPicture(entry))" />
+                <view v-else class="detail-row-cover detail-placeholder" :style="rowCoverStyle + 'background-color:' + theme.skin.accentSoft + ';'">
+                  <QtIcon :name="categoryIcon(rowsKind)" :size="layout.isWide ? 18 : 28" :color="theme.skin.accent" />
+                </view>
+                <view class="detail-row-body">
+                  <text class="detail-row-name" :style="textStyle(22, 15)" :max-lines="1">{{ rowName(entry) }}</text>
+                  <text class="detail-row-sub" :style="rowSubStyle" :max-lines="1">{{ rowsKind == 'songs' ? entry.subtitle + ' · ' + sourceLabel(entry.platform) : entry.tracks + ' 首歌曲' }}</text>
+                  <text class="detail-row-sub" :style="rowSubStyle">{{ entry.count }} 次 · {{ reportDuration(entry.seconds) }}</text>
+                </view>
+                <view v-if="rowsKind == 'songs'" class="detail-icon-button detail-row-icon" @click.stop="playEntry(entry)">
+                  <QtIcon :name="loadingKey == entry.id ? 'loader' : 'play'" :size="layout.isWide ? 20 : 26" :color="theme.skin.accent" />
+                </view>
+                <QtIcon v-else name="chevron-right" :size="layout.isWide ? 16 : 26" :color="theme.skin.textSubtle" />
+              </view>
+              <text v-if="rows.length == 0" class="detail-copy" :style="mutedStyle">暂时没有播放记录</text>
+              <view v-if="visibleRows.length < rows.length" class="detail-more" @click="limit += 50"><text :style="accentStyle">加载更多（已显示 {{ visibleRows.length }} / {{ rows.length }}）</text></view>
+            </template>
+            <text v-if="target != '' && selected == null" class="detail-copy" :style="mutedStyle">这条统计记录已清除</text>
+          </template>
+        </view>
+      </scroll-view>
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed, ref, watch } from "vue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { useListenStatsStore } from "@/stores/listen-stats";
+import { useSourceRegistryStore } from "@/stores/source-registry";
+import { reportEntries, reportTracks, reportDuration, reportSourceIcon } from "@/services/listen-report";
+import type { ReportEntry } from "@/services/listen-report";
+import type { Song } from "@/types/music";
+import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
+
+const props = defineProps<{ kind: string; target: string; loadingKey: string }>();
+const emit = defineEmits<{ close: []; play: [song: Song] }>();
+const layout = useQtLayout();
+const theme = useThemeStore();
+const stats = useListenStatsStore();
+const registry = useSourceRegistryStore();
+const kind = ref(props.kind);
+const target = ref(props.target);
+const trail = ref<{ kind: string; target: string }[]>([]);
+const order = ref("count");
+const limit = ref(50);
+const failedImages = ref<string[]>([]);
+const heading = computed((): string => kind.value == "info" ? "统计说明" : target.value != "" ?
+  (kind.value == "songs" ? "歌曲详情" : kind.value == "artists" ? "歌手详情" : "音源详情") :
+  (kind.value == "songs" ? "歌曲排行" : kind.value == "artists" ? "歌手排行" : "音源排行"));
+const all = computed(() => reportEntries(stats.songs, kind.value, "count"));
+const selected = computed((): ReportEntry | null => all.value.find((entry) => entry.id == target.value) ?? null);
+const rowsKind = computed((): string => target.value == "" ? kind.value : "songs");
+const rows = computed(() => reportEntries(target.value == "" ? stats.songs : reportTracks(stats.songs, kind.value, target.value), rowsKind.value, order.value));
+const visibleRows = computed(() => rows.value.slice(0, limit.value));
+const selectedSubtitle = computed((): string => selected.value == null ? "" : kind.value == "songs" ? selected.value!.subtitle : selected.value!.tracks + " 首歌曲 · 点击下方歌曲查看详情");
+const playShare = computed((): string => {
+  let total = 0;
+  for (let i = 0; i < stats.songs.length; i++) total += stats.songs[i].count;
+  return total > 0 && selected.value != null ? (selected.value!.count * 100 / total).toFixed(1) : "0";
+});
+const panelStyle = computed((): string => {
+  const height = Math.round(layout.windowHeight * (layout.isWide ? 1 : 0.88));
+  return "height:" + height + "px;background-color:" + theme.skin.sheetSurface + ";" +
+    (layout.isWide ? "width:" + Math.min(560, Math.round(layout.windowWidth * 0.75)) + "px;border-radius:0;" : "width:" + layout.windowWidth + "px;border-radius:24px 24px 0 0;");
+});
+const contentStyle = computed((): string => "padding:" + (layout.isWide ? "12px 24px 28px" : "16px 12px 28px") + ";");
+const rowStyle = computed((): string => "padding:" + (layout.isWide ? "12px 0" : "11px 0") + ";border-color:" + theme.skin.divider + ";");
+const rowCoverStyle = computed((): string => "width:34px;height:34px;border-radius:" + (rowsKind.value == "artists" ? 17 : 7) + "px;");
+const largeCoverStyle = computed((): string => "width:68px;height:68px;border-radius:" + (kind.value == "artists" ? 34 : 14) + "px;");
+const mutedStyle = computed(() => "color:" + theme.skin.textMuted + ";" + qtFontDual(22, 13));
+/** 列表副行：比正文说明再小一档，三行并排时才不会挤 */
+const rowSubStyle = computed(() => "color:" + theme.skin.textMuted + ";" + qtFontDual(19, 13));
+const accentStyle = computed(() => "color:" + theme.skin.accent + ";" + qtFontDual(24, 14));
+const storageLabel = computed((): string => {
+  if (stats.publicSaved) return "已保存到公共目录";
+  if (stats.storagePath == "") {
+    // #ifdef APP-ANDROID
+    return "当前基座尚不支持公共存档，请更新应用或重新制作自定义基座。统计已暂存应用目录，卸载会丢失。";
+    // #endif
+    // #ifndef APP-ANDROID
+    return "此平台暂存应用目录";
+    // #endif
+  }
+  return "暂存应用目录，请检查所有文件访问权限";
+});
+watch(() => target.value, () => { limit.value = 50; order.value = "count"; });
+function textStyle(compact: number, wide: number): string { return "color:" + theme.skin.text + ";" + qtFontDual(compact, wide); }
+function sourceLabel(id: string): string { return registry.label(id) || id.toUpperCase(); }
+function entryName(entry: ReportEntry): string { return kind.value == "sources" ? sourceLabel(entry.id) : entry.name; }
+function rowName(entry: ReportEntry): string { return rowsKind.value == "sources" ? sourceLabel(entry.id) : entry.name; }
+function rawPicture(entry: ReportEntry, category: string): string {
+  return category == "artists" ? stats.artistPic(entry.id) : category == "sources" ? reportSourceIcon(entry.id) : entry.song?.picUrl ?? "";
+}
+function picture(entry: ReportEntry): string { const url = rawPicture(entry, kind.value); return failedImages.value.includes(url) ? "" : url; }
+function rowPicture(entry: ReportEntry): string { const url = rawPicture(entry, rowsKind.value); return failedImages.value.includes(url) ? "" : url; }
+function imageFailed(entry: ReportEntry): void { failedImages.value.push(rawPicture(entry, kind.value)); }
+function close(): void { emit("close"); }
+function back(): void {
+  const previous = trail.value.pop();
+  if (previous != null) { kind.value = previous.kind; target.value = previous.target; }
+  else target.value = "";
+}
+function openEntry(entry: ReportEntry): void {
+  trail.value.push({ kind: kind.value, target: target.value });
+  kind.value = rowsKind.value;
+  target.value = entry.id;
+  if (kind.value == "artists") {
+    const tracks = reportTracks(stats.songs, "artists", entry.id);
+    if (tracks.length > 0) stats.ensureArtistPic(tracks[0].song);
+  }
+}
+function setOrder(value: string): void { order.value = value; limit.value = 50; }
+function playEntry(entry: ReportEntry): void { if (entry.song != null && props.loadingKey == "") emit("play", entry.song!); }
+function openPermissions(): void { close(); uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/permissions/index" }); }
+function categoryIcon(category: string): string { return category == "artists" ? "mic" : category == "sources" ? "disc" : "music"; }
+</script>
+
+<style>
+.detail-mask { position:fixed; left:0; right:0; top:0; bottom:0; z-index:1000; justify-content:flex-end; }
+.detail-mask-wide { flex-direction:row; }
+.detail-panel { overflow:hidden; padding-bottom:env(safe-area-inset-bottom); }
+.detail-header { flex-direction:row; align-items:center; padding:12px 16px; border-bottom-width:1px; border-bottom-style:solid; }
+.detail-title { flex:1; font-weight:650; }
+.detail-icon-button { width:40px; height:40px; justify-content:center; align-items:center; flex-shrink:0; }
+/* 只缩小列表行右侧的播放/箭头容器，页头与详情页的按钮保持 40px 触区 */
+.detail-row-icon { width:30px; height:30px; }
+.detail-scroll { flex:1; min-height:0; }
+.detail-content { flex-shrink:0; }
+.detail-section { font-weight:600; margin-top:20px; margin-bottom:8px; }
+.detail-copy { margin-top:8px; line-height:1.6; }
+.detail-identity { flex-direction:row; align-items:center; margin-top:8px; }
+.detail-cover { flex-shrink:0; }
+.detail-placeholder { justify-content:center; align-items:center; }
+.detail-identity-text { flex:1; margin-left:16px; overflow:hidden; }
+.detail-name { font-weight:650; }
+.detail-metrics { flex-direction:row; border-radius:14px; padding:16px 12px; margin-top:20px; }
+.detail-metric { flex:1; padding:0 4px; }
+.detail-number { font-weight:650; }
+.detail-primary { flex-direction:row; justify-content:center; align-items:center; padding:16px; border-radius:12px; margin-top:24px; }
+.detail-list-head { flex-direction:row; align-items:center; margin-top:16px; }
+.detail-list-title { flex:1; margin-top:0; margin-bottom:0; }
+.detail-sort { flex-direction:row; border-radius:10px; padding:3px; }
+.detail-sort-item { padding:6px 10px; border-radius:8px; }
+.detail-row { flex-direction:row; align-items:center; border-bottom-width:1px; border-bottom-style:solid; }
+.detail-rank { width:20px; flex-shrink:0; }
+.detail-row-cover { flex-shrink:0; }
+.detail-row-body { flex:1; margin-left:9px; overflow:hidden; }
+.detail-row-name { font-weight:500; }
+.detail-row-sub { margin-top:3px; }
+.detail-more { padding:20px 0; align-items:center; }
+.detail-play-label { margin-left:10px; }
+.detail-settings-label { margin-right:10px; }
+</style>

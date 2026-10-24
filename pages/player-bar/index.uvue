@@ -1,10 +1,52 @@
 <template>
-  <qt-page-frame :max-width="640">
+  <qt-page-frame width-kind="flow">
   <view class="page">
     <scroll-view class="list" :class="layout.isWide ? 'list-wide' : ''" direction="vertical" :show-scrollbar="false">
+      <!-- 宽屏两列（≥1280）：左列是按钮开关组，右列是「恢复默认」+ 说明。
+           单列时这 7 行在 1920 下拉成 1312px 宽、每行右侧空 600px。 -->
+      <view v-if="twoColumn" class="cols">
+        <view class="col" :style="colStyle">
+          <view class="group group-wide group-col" :style="groupStyle">
+            <view class="cell cell-wide" :style="cellStyle">
+              <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">已展示 {{ barToolCounted }}/{{ maxVisible }} 个，关掉的按钮播放页不再显示</text>
+            </view>
+            <view
+              v-for="(tool, index) in barTools"
+              :key="tool.id"
+              class="cell cell-wide"
+              :class="index == barTools.length - 1 ? 'cell-no-border' : ''"
+              :style="cellStyle"
+              @click="toggleBarTool(tool.id)"
+            >
+              <QtIcon class="cell-icon cell-icon-wide" :name="tool.icon" :size="36" :color="toolColor(index)" />
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ tool.label }}</text>
+              <view class="cell-right">
+                <text class="cell-value cell-value-wide" :style="('color:' + barToolColor(tool.id) + ';') + qtFontDual(24, 14)">{{ barToolText(tool.id) }}</text>
+              </view>
+            </view>
+          </view>
+        </view>
+        <view class="col col-right" :style="colStyle">
+          <view class="group group-wide group-col" :style="groupStyle">
+            <view class="cell cell-no-border cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="resetDefault">
+              <QtIcon class="cell-icon cell-icon-wide" name="refresh" :size="36" color="#7c6cf2" />
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">恢复默认展示</text>
+              <view class="cell-right">
+                <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+              </view>
+            </view>
+          </view>
+          <view class="hint hint-col">
+            <text class="hint-text hint-text-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">播放页进度条上方那一行、以及横屏控制行右侧那一组，都按这里的开关渲染。最多同时展示 {{ maxVisible }} 个。</text>
+          </view>
+        </view>
+      </view>
+
+      <!-- 竖屏 / 中等宽度：单列（原样） -->
+      <view v-else>
       <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
         <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle">
-          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">已展示 {{ barToolCounted }}/{{ maxVisible }} 个，关掉的按钮播放页不再显示</text>
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">已展示 {{ barToolCounted }}/{{ maxVisible }} 个，关掉的按钮播放页不再显示</text>
         </view>
         <view
           v-for="(tool, index) in barTools"
@@ -15,17 +57,17 @@
           @click="toggleBarTool(tool.id)"
         >
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" :name="tool.icon" :size="36" :color="toolColor(index)" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">{{ tool.label }}</text>
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ tool.label }}</text>
           <view class="cell-right">
-            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="'color:' + barToolColor(tool.id) + ';'">{{ barToolText(tool.id) }}</text>
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + barToolColor(tool.id) + ';') + qtFontDual(24, 14)">{{ barToolText(tool.id) }}</text>
           </view>
         </view>
       </view>
 
       <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
-        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="resetDefault">
+        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="resetDefault">
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="refresh" :size="36" color="#7c6cf2" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">恢复默认展示</text>
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">恢复默认展示</text>
           <view class="cell-right">
             <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
           </view>
@@ -33,16 +75,19 @@
       </view>
 
       <view class="hint">
-        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">播放页进度条上方那一行、以及横屏控制行右侧那一组，都按这里的开关渲染。最多同时展示 {{ maxVisible }} 个。</text>
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">播放页进度条上方那一行、以及横屏控制行右侧那一组，都按这里的开关渲染。最多同时展示 {{ maxVisible }} 个。</text>
+      </view>
       </view>
     </scroll-view>
   </view>
   </qt-page-frame>
 </template>
 <script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtContentWidth, QT_GUTTER_PX } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { computed, ref } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
@@ -54,6 +99,7 @@ import {
   usePlayerBarStore,
 } from "@/stores/player-bar";
 import { isQtAdmin } from "@/services/music-api";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const playerBar = usePlayerBarStore();
 /** playUrl 开关只对 qt_admin 展示（与播放页的入口可见性同一权限来源） */
@@ -84,7 +130,7 @@ function toolColor(index: number): string {
 function toggleBarTool(id: string): void {
   const ok = playerBar.toggle(id, countedTool);
   if (!ok) {
-    uni.showToast({ title: "最多展示 " + maxVisible + " 个，请先关掉一个", icon: "none" });
+    qtShowToast({ title: "最多展示 " + maxVisible + " 个，请先关掉一个", icon: "none" });
   }
 }
 function barToolText(id: string): string {
@@ -95,8 +141,21 @@ function barToolColor(id: string): string {
 }
 function resetDefault(): void {
   playerBar.reset();
-  uni.showToast({ title: "已恢复默认展示", icon: "none" });
+  qtShowToast({ title: "已恢复默认展示", icon: "none" });
 }
+//
+// 两列门限按**可用宽度**判，不按窗口宽度判：三栏模式下窗口仍是 1280 但右栏只有约 400，
+// 若按窗口判会算出两列各 320 直接横向溢出。判据 = 内容列宽减两侧留白与中间间距后
+// 仍能放下两个最小分组列宽（420 × 2）。三栏收窄后自然退回单列。
+//
+const twoColumn = computed((): boolean => qtContentWidth("flow") - QT_GUTTER_PX * 2 - 16 >= 420 * 2);
+
+/** 两列列宽：`flex-shrink:0` 必须写，否则两列按内容 min-content 比例收缩 → 不等宽 */
+const colStyle = computed<string>(() => {
+  const inner = qtContentWidth("flow") - QT_GUTTER_PX * 2 - 16;
+  const w = Math.floor(inner / 2);
+  return "width:" + (w > 320 ? w : 320) + "px;flex-shrink:0;";
+});
 
 onShow(() => {
   // 权限缓存可能在「我的」页刷新过；展示集也可能被播放页或其它入口改过。
@@ -125,7 +184,7 @@ onShow(() => {
   border-radius: 24rpx;
   overflow: hidden;
 
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
 
 }
 .cell {
@@ -133,7 +192,11 @@ onShow(() => {
   padding: 0 32rpx;
   flex-direction: row;
   align-items: center;
-  border-bottom-width: 1px;
+  border-bottom-width: 1px; border-bottom-style: solid;
+}
+/* 桌面指针反馈：只在宽屏启用（手机上 hover-class 会在点按瞬间闪一下） */
+.cell-hover {
+  background-color: rgba(255, 255, 255, 0.06);
 }
 .cell-no-border {
   border-bottom-width: 0;
@@ -165,6 +228,30 @@ onShow(() => {
 .hint {
   margin-top: 18rpx;
   padding: 0 40rpx;
+}
+.hint-col {
+  margin-top: 14px;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+/* 两列：列内纵向堆叠、顶端对齐（默认 stretch 会把右列拉高露出分组底色） */
+.cols {
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: center;
+  padding-left: 24px;
+  padding-right: 24px;
+}
+.col {
+  flex-direction: column;
+}
+.col-right {
+  margin-left: 16px;
+}
+/* 两列里的分组不再带左右外边距：列宽已经把 24px 留白与 16px 间距算进去了 */
+.group-col {
+  margin-left: 0;
+  margin-right: 0;
 }
 .hint-text {
   font-size: 22rpx;

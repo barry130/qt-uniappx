@@ -42,6 +42,12 @@ const ICON_BODIES: Record<string, string> = {
   close: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
   check: '<polyline points="20 6 9 17 4 12"/>',
   more: '<circle cx="5" cy="12" r="1.6" fill="' + COLOR_TOKEN + '" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="' + COLOR_TOKEN + '" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="' + COLOR_TOKEN + '" stroke="none"/>',
+  // 竖排三点：歌单详情右上角的排序入口（用户要求横排改竖排）
+  "more-vert": '<circle cx="12" cy="5" r="1.6" fill="' + COLOR_TOKEN + '" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="' + COLOR_TOKEN + '" stroke="none"/><circle cx="12" cy="19" r="1.6" fill="' + COLOR_TOKEN + '" stroke="none"/>',
+  // 宫格（分类入口）：2×2 圆角方块
+  grid: '<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>',
+  // 耳机（播放量徽标）：头梁弧线 + 两只耳罩
+  headset: '<path d="M4 14v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="4" height="6" rx="1.5"/><rect x="17" y="14" width="4" height="6" rx="1.5"/>',
   search: '<circle cx="11" cy="11" r="7"/><line x1="16.2" y1="16.2" x2="21" y2="21"/>',
   trash: '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>',
   // 设置：滑块形态，纯基本图元，小尺寸下比齿轮更清晰
@@ -99,8 +105,12 @@ const ICON_BODIES: Record<string, string> = {
   // （about / 忘记密码 / 侧边栏 / 升级弹窗 / 登录页），避免出现手绘的近似图形。
   // 加载指示器：一段圆弧 + 端点，配合旋转动画构成转圈效果
   loader: '<path d="M12 3a9 9 0 0 1 8.5 6"/><line x1="20.5" y1="9" x2="20.6" y2="9.1"/>',
+  // 警示：圆 + 感叹号。qt-toast-host 的出错档使用（对应 qt-pc 的 CircleAlert）
+  alert: '<circle cx="12" cy="12" r="9"/><line x1="12" y1="7.5" x2="12" y2="13.5"/><line x1="12" y1="16.6" x2="12.01" y2="16.6"/>',
   // 火箭：列表「回到顶部」悬浮按钮使用（单头朝上，竖立火箭）
   rocket: '<path d="M12 2.8c2.6 2 4 4.8 4 7.7l-1.1 3.9H9.1L8 10.5c0-2.9 1.4-5.7 4-7.7z"/><circle cx="12" cy="9.4" r="1.6"/><path d="M8.6 14.4 5.8 18M15.4 14.4 18.2 18"/><path d="M9.4 18.2h5.2"/>',
+  // 星火：AI 助手入口使用（对应 qt-pc AiAssistantPage 的 Sparkles）
+  sparkles: '<path d="M9.9 15.5A2 2 0 0 0 8.5 14.1L2.4 12.5a.5.5 0 0 1 0-1L8.5 9.9A2 2 0 0 0 9.9 8.5l1.6-6.1a.5.5 0 0 1 1 0L14.1 8.5A2 2 0 0 0 15.5 9.9l6.1 1.6a.5.5 0 0 1 0 1L15.5 14.1a2 2 0 0 0-1.4 1.4l-1.6 6.1a.5.5 0 0 1-1 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/>',
 };
 
 /**
@@ -190,7 +200,3 @@ export function iconSrc(name: string, color: string = "#ffffff", strokeWidth: nu
   return src;
 }
 
-/** 判断图标是否已定义，便于开发期自检 */
-export function hasIcon(name: string): boolean {
-  return (ICON_BODIES[name] ?? "").length > 0;
-}

@@ -147,16 +147,6 @@ export function clearPagedAllJob(key: string): void {
   jobValues.splice(at, 1);
 }
 
-/** 清空全部缓存任务（切账号等场景） */
-export function clearPagedAllJobs(): void {
-  for (let i = 0; i < jobValues.length; i++) {
-    const job = jobValues[i] as PagedAllJob;
-    job.cancelled = true;
-  }
-  jobKeys.splice(0, jobKeys.length);
-  jobValues.splice(0, jobValues.length);
-}
-
 function trimJobs(): void {
   while (jobKeys.length > PAGED_ALL_JOB_CAP) {
     const drop = jobValues[0] as PagedAllJob;

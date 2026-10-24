@@ -4,38 +4,56 @@
   - 为什么不用 qt-song-row：qt-song-row 内部含有 qt-action-sheet（sheetVisible 状态），
     在 list-view 复用时该状态不会重置，导致首条颤抖/错乱。本组件剔除所有内部状态，
     供 list-view 长列表使用，复用安全。
-  - 交互：整行点击触发 @play 播放。
+  - 交互：整行点击触发 @play 播放；`selecting` 时改为切换勾选（@select），
+    并且隐藏红心 / 更多，避免误触与「选择态还能收藏单曲」的语义混乱。
   用法：
     <qt-song-row-lite :song="song" :showBadge="false" @play="play(song)" />
+    <qt-song-row-lite :song="song" :selecting="selecting" :selected="isSel(song)" @select="toggleSelect(song)" />
 -->
 <template>
   <view
     class="lite-row"
     :class="layout.isWide ? 'lite-row-wide' : ''"
     :style="'background-color:' + themeStore.skin.surface + ';border-top-color:' + themeStore.skin.divider + ';'"
-    @click="emit('play')"
+    :hover-class="layout.isWide ? 'lite-row-hover' : 'none'"
+    @click="onRowTap"
   >
+    <view v-if="selecting" class="lite-check" :class="layout.isWide ? 'lite-check-wide' : ''">
+      <qt-checkbox :checked="selected" :size="layout.isWide ? 'sm' : 'md'" @change="onCheckTap" />
+    </view>
     <view class="lite-cover-wrap" :class="layout.isWide ? 'lite-cover-wrap-wide' : ''">
       <image class="lite-cover" :class="layout.isWide ? 'lite-cover-wide' : ''" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
       <view v-if="showBadge" class="lite-badge" :class="layout.isWide ? 'lite-badge-wide' : ''" :style="badgeStyle">
-        <text class="lite-badge-text" :class="layout.isWide ? 'lite-badge-text-wide' : ''" :style="'color:#ffffff;'">{{ shortName(song.platform) }}</text>
+        <text class="lite-badge-text" :class="layout.isWide ? 'lite-badge-text-wide' : ''" :style="('color:#ffffff;') + qtFontDual(18, 10)">{{ shortName(song.platform) }}</text>
       </view>
     </view>
     <view class="lite-info">
-      <text
-        class="lite-name" :class="layout.isWide ? 'lite-name-wide' : ''"
-        :style="'color:' + (disliked ? themeStore.skin.textMuted : themeStore.skin.text) + ';'"
-        :max-lines="1"
-        >{{ song.name }}</text
-      >
+      <view class="lite-name-row">
+        <text
+          class="lite-name" :class="layout.isWide ? 'lite-name-wide' : ''"
+          :style="('color:' + (disliked ? themeStore.skin.textMuted : themeStore.skin.text) + ';') + qtFontDual(29, 17)"
+          :max-lines="1"
+          >{{ song.name }}</text
+        >
+        <!-- 平台简写常驻：所有歌曲列表都要能一眼看出这首来自哪个源（网易云 / QQ / 酷狗…）。
+             跟在歌名后面、随歌名走，而不是钉死在行右缘——歌名短时小签紧贴歌名，
+             歌名长时歌名自己省略（flex-shrink:1 + min-width:0），小签永不被挤掉（flex-shrink:0）。
+             不拼进歌名同一段文本，是因为会被 :max-lines="1" 的省略号吃掉。 -->
+        <text
+          class="lite-tag" :class="layout.isWide ? 'lite-tag-wide' : ''"
+          :style="('color:' + platformColor(song.platform) + ';border-color:' + platformColor(song.platform) + ';') + qtFontDual(19, 11)"
+          :max-lines="1"
+          >{{ shortName(song.platform) }}</text
+        >
+      </view>
       <text
         class="lite-meta" :class="layout.isWide ? 'lite-meta-wide' : ''"
-        :style="'color:' + themeStore.skin.textMuted + ';'"
+        :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 14)"
         :max-lines="1"
         >{{ song.singer }}{{ song.album.length > 0 ? " - " + song.album : "" }}</text
       >
     </view>
-    <view class="lite-actions" :class="layout.isWide ? 'lite-actions-wide' : ''">
+    <view v-if="!selecting" class="lite-actions" :class="layout.isWide ? 'lite-actions-wide' : ''">
       <QtIcon
         class="lite-heart" :class="layout.isWide ? 'lite-heart-wide' : ''"
         :name="liked ? 'heart-fill' : 'heart'"
@@ -63,18 +81,47 @@ import { usePlayerStore } from "@/stores/player";
 import { useDislikesStore } from "@/stores/dislikes";
 import { platformShort, platformColor } from "@/services/platform";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtCheckbox from "@/uni_modules/qt-ui/components/qt-checkbox/qt-checkbox.uvue";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const props = defineProps<{
   song: Song;
   showBadge?: boolean;
   usePicker?: boolean;
+  /** 批量选择态：整行点击改为切换勾选，左侧出现勾选框，右侧动作按钮隐藏 */
+  selecting?: boolean;
+  /** 当前行是否已勾选（仅 selecting 时有意义） */
+  selected?: boolean;
 }>();
-const emit = defineEmits<{ play: []; more: [Song]; pick: [Song, any] }>();
+const emit = defineEmits<{ play: []; more: [Song]; pick: [Song, any]; select: [] }>();
 
 const themeStore = useThemeStore();
 const layout = useQtLayout();
 const player = usePlayerStore();
 const dislikes = useDislikesStore();
+
+const selecting = computed((): boolean => props.selecting === true);
+const selected = computed((): boolean => props.selected === true);
+
+/**
+ * 整行点击：选择态下切换勾选，普通态下播放。
+ * 选择态**不发** play——批量整理列表时误触播放会打断当前播放且难以撤销。
+ */
+function onRowTap(): void {
+  if (selecting.value) {
+    emit('select');
+    return;
+  }
+  emit('play');
+}
+
+/**
+ * 勾选框自身的点击：`qt-checkbox` 内部已 `@click.stop`，不会冒泡到整行，
+ * 所以这里必须自己转发一次，否则「精准点在方框上」会毫无反应。
+ */
+function onCheckTap(): void {
+  emit('select');
+}
 
 const liked = computed(() => player.isLiked(props.song));
 // 不喜欢列表：命中任何规则（歌或歌手）→ 歌名置灰提示（读 store 是既有先例，见 liked）
@@ -109,11 +156,18 @@ function shortName(platform: string): string {
   padding: 0 32rpx;
   flex-direction: row;
   align-items: center;
-  border-top-width: 1px;
+  border-top-width: 1px; border-top-style: solid;
 }
 .lite-cover-wrap {
   position: relative;
   margin-right: 22rpx;
+}
+/* 选择态勾选框：与 pages/local 的选择态同构——固定宽度占位，勾选/取消不顶动右侧信息 */
+.lite-check {
+  width: 56rpx;
+  margin-right: 16rpx;
+  align-items: center;
+  justify-content: center;
 }
 .lite-cover {
   width: 88rpx;
@@ -134,15 +188,34 @@ function shortName(platform: string): string {
   flex: 1;
   overflow: hidden;
 }
+/* 歌名与平台小签同行：小签跟在歌名后（不钉死行右缘），歌名长时自行省略、给小签让位 */
+.lite-name-row {
+  flex-direction: row;
+  align-items: center;
+}
 .lite-name {
   font-size: 29rpx;
   font-weight: 500;
   text-overflow: ellipsis;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
 }
 .lite-meta {
   margin-top: 10rpx;
   font-size: 23rpx;
   text-overflow: ellipsis;
+}
+/* 平台简写小签：flex-shrink:0 保证它永不被歌名挤成 0 宽——
+   否则「所有列表都能看到平台」就落空了 */
+.lite-tag {
+  flex-shrink: 0;
+  margin-left: 12rpx;
+  padding: 0 8rpx;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 6rpx;
+  font-size: 19rpx;
 }
 .lite-actions {
   flex-direction: row;
@@ -153,13 +226,17 @@ function shortName(platform: string): string {
 }
 
 .lite-row-wide { height: 82px; padding-left: 24px; padding-right: 24px; }
+.lite-check-wide { width: 34px; margin-right: 10px; }
 .lite-cover-wrap-wide { margin-right: 16px; }
 .lite-cover-wide { width: 58px; height: 58px; border-radius: 10px; }
 .lite-name-wide { font-size: 17px; }
 .lite-meta-wide { margin-top: 6px; font-size: 14px; }
+.lite-tag-wide { margin-left: 8px; padding: 0 5px; border-radius: 4px; font-size: 11px; }
 .lite-actions-wide { min-width: 78px; }
 .lite-heart-wide { margin-right: 12px; }
 .lite-more-wide { margin-right: 0; }
 .lite-badge-wide { padding: 2px 6px; border-radius: 0 4px 0 6px; }
-.lite-badge-text-wide { font-size: 10px; }
+.lite-badge-text-wide { font-size: 11px; }
+/* 桌面指针反馈：只在宽屏启用（手机上 hover-class 会在点按瞬间闪一下，观感不对） */
+.lite-row-hover { background-color: rgba(255, 255, 255, 0.06); }
 </style>

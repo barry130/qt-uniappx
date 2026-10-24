@@ -32,18 +32,22 @@ export type InstallApkNative = (filePath: string) => boolean;
  * @param dirType 目录类型：download=Download 根目录 / music=Music 根目录
  * @param fileName 完整文件名，必须带真实扩展名（如 "周杰伦 - 晴天.flac" 或 "轻听_v3.1.0.apk"）
  * @param subDir 公共根目录下的子目录（可含层级），不传时默认 "轻听"
- * @returns 成功返回真实文件路径（或 content:// URI）；失败返回空字符串
+ * @param absDir 用户自定义的绝对目录（来自 pickDirectory）。非空时**忽略** dirType/subDir，
+ *   直接写入该目录；Android 需要「所有文件访问」权限，否则写入失败 resolve 空字符串。
+ *   鸿蒙 / iOS 没有自定义目录能力，该参数被忽略。
+ * @returns 成功 resolve 真实文件路径（或 content:// URI）；失败 resolve 空字符串
  */
-export type SaveToPublicMedia = (tempPath: string, dirType: string, fileName: string, subDir?: string) => string;
+export type SaveToPublicMedia = (tempPath: string, dirType: string, fileName: string, subDir?: string, absDir?: string) => Promise<string>;
 
 /**
  * 确保具备写公共目录的权限。
- * Android 10+（API 29+）走 MediaStore 无需任何权限，直接返回 true；
- * Android 9-（API 28-）需要 WRITE_EXTERNAL_STORAGE：已授权返回 true，未授权时拉起系统权限弹窗并返回 false。
- * 非 Android 平台恒返回 false。
+ * Android 10+（API 29+）走 MediaStore 无需任何权限，直接 resolve true；
+ * Android 9-（API 28-）需要 WRITE_EXTERNAL_STORAGE：已授权 resolve true，未授权时拉起系统权限弹窗并 resolve false。
+ * 鸿蒙需要 READ_WRITE_DOWNLOAD_DIRECTORY：未授权时拉起系统权限弹窗，用户同意后 resolve true。
+ * iOS 不支持公共目录，恒 resolve false。
  * @returns 是否已具备写入能力
  */
-export type EnsurePublicDirPermission = () => boolean;
+export type EnsurePublicDirPermission = () => Promise<boolean>;
 
 /**
  * 打开本应用的系统通知设置页。
@@ -111,6 +115,14 @@ export type LocalAudioItem = {
 	size?: number;
 	/** 修改时间（秒，Android DATE_MODIFIED）；旧版本缓存的数据可能没有该字段，排序时按未知处理 */
 	mtime?: number;
+	/**
+	 * 媒体库的 is_music 标记：1=音乐，0=非音乐，-1=媒体库没有该列或为 NULL（未知）。
+	 *
+	 * 注意它**不能**用来判断「是不是系统音」：Android 的 is_music 是目录启发式的产物，
+	 * 落在 Ringtones/ 下的完整歌曲同样是 0，而应用按钮音效常常是 1。默认过滤按路径做，
+	 * 该字段仅作诊断/展示用途。旧版本缓存的数据没有该字段，读取时按 -1 处理。
+	 */
+	isMusic?: number;
 };
 
 /**
@@ -141,6 +153,20 @@ export type DeleteLocalMediaResult = {
  * iOS：本地音频库恒为空，此入口实际不会命中，恒返回全部 failed。
  */
 export type DeleteLocalMedia = (items: LocalAudioItem[]) => DeleteLocalMediaResult;
+
+/**
+ * 按文件绝对路径批量删除若干媒体文件（下载管理用：下载记录只持久化了路径，没有 LocalAudioItem）。
+ * 统一入口，单个文件也可传一个元素的数组。
+ *
+ * Android：应用自有文件（本应用通过 MediaStore 写入的下载文件）按 DATA 列反查
+ * Downloads/Audio 集合的 content URI 后 ContentResolver.delete 删条目（连磁盘文件一起删），
+ * 再按 File.delete() 兜底；本应用写入的文件无分区存储限制，不会触发
+ * RecoverableSecurityException，因此与 deleteLocalMedia 不同，**不引导**「所有文件访问」设置页。
+ * 鸿蒙：直接 fileIo.unlinkSync 按路径删（公共下载目录需已持有 READ_WRITE_DOWNLOAD_DIRECTORY，
+ * 下载时已申请；私有目录文件不受影响）。
+ * iOS：不支持，恒返回全部 failed。
+ */
+export type DeleteMediaByPath = (paths: string[]) => DeleteLocalMediaResult;
 
 /**
  * 强制窗口回归传统布局模式（decorFitsSystemWindows = true）。
@@ -176,12 +202,53 @@ export type PickFileResult = {
 };
 
 /**
- * 打开系统文件选择器选一个 js/文本文件并读回全文。
- * Android 走 ACTION_OPEN_DOCUMENT + contentResolver（不限 MIME：文件管理器
- * 对 .js 的归类五花八门，宁宽勿漏，内容由调用方校验）；选中后读为 UTF-8 文本
- * 回调。iOS 恒回调 ok=false（本项目以 Android 为主）。
+ * 打开系统文件选择器选一个 .js 文件并读回全文。
+ * Android 走 ACTION_OPEN_DOCUMENT + contentResolver，只列出 JavaScript MIME，
+ * 并在读取前校验 .js 后缀（不区分大小写）；内容由调用方继续校验。
+ * iOS 恒回调 ok=false（本项目以 Android 为主）。
  */
 export type PickJsFile = (onResult: (result: PickFileResult) => void) => void;
+
+/** 系统目录选择器的结果 */
+export type PickDirectoryResult = {
+	/** 选中并拿到可写目录 */
+	ok: boolean;
+	/** 选中目录的绝对路径（Android 由 document URI 反解而来；拿不到真实路径时为空） */
+	path: string;
+	/** 目录显示名（用于界面展示，拿不到时为空） */
+	name: string;
+	/** 失败/取消原因（用户取消时 ok=false） */
+	message: string;
+};
+
+/**
+ * 打开系统文件管理器选一个目录，供下载落盘使用。
+ *
+ * Android 走 ACTION_OPEN_DOCUMENT_TREE，把返回的 document URI 通过
+ * DocumentsContract.getTreeDocumentId 反解成真实绝对路径（primary:Download/QtMusic
+ * → /storage/emulated/0/Download/QtMusic）。反解出真实路径（而不是长期持有 URI）是
+ * 有意为之：写文件走 java.io.File 直写，不需要 takePersistableUriPermission，
+ * 也就不受「重启后授权失效」影响 —— 代价是必须先拿到「所有文件访问」
+ * （MANAGE_EXTERNAL_STORAGE），由调用方在选目录前先引导授权。
+ *
+ * 鸿蒙走 DocumentViewPicker（selectMode=FOLDER）+ fileShare.persistPermission 持久化
+ * 目录授权，回传的是**目录 URI**（不是普通路径）。这是 phone 上唯一能写到公共目录的
+ * 路线：`ohos.permission.READ_WRITE_DOWNLOAD_DIRECTORY` 是 2in1 专属权限，在 phone 上
+ * 系统判 INVALID（hilog：`... not support.` / `result: [2]`），所以系统 Download 目录
+ * 在手机上根本写不进去，必须由用户显式选目录并持久化授权。
+ * iOS 无公共目录落盘路径，恒回调 ok=false。调用方据此保持固定目录。
+ */
+export type PickDirectory = (onResult: (result: PickDirectoryResult) => void) => void;
+
+/**
+ * 把已保存的自定义目录 URI 喂回原生层（鸿蒙专用）。
+ *
+ * 为什么需要：原生变量不跨进程，而 `persistPermission` 授予的 URI 授权每次启动都要
+ * `activatePermission` 激活一次。JS 侧把 URI 存在 uni storage（qt-download-dir），
+ * 启动/进下载页时调这里恢复；空串表示恢复默认目录。
+ * 其它平台空实现（Android 存的是真实路径，不经过原生变量）。
+ */
+export type SetCustomDirUri = (uri: string) => void;
 
 /**
  * 单条权限的当前授权状态（设置页「权限管理」用）。

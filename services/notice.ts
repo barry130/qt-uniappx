@@ -6,8 +6,11 @@
 import { apiRequest } from "./http";
 import { getAccessToken, isLoggedIn } from "./auth";
 import { openInBrowser } from "./app-native";
+import { logErrV, logWarnV } from "./logger";
 import type { Notice, NoticeDispatch } from "@/types/notice";
 import { getCurrentVersionCode } from "@/services/app-version";
+import { qtShowToast } from "@/services/toast";
+import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
 
 /**
  * 打开公告跳转目标
@@ -20,10 +23,10 @@ export function openNoticeUrl(url?: string): void {
     openInBrowser(url);
     return;
   }
-  uni.navigateTo({
+  uni.navigateTo({ animationType: qtNavAnimation(),
     url,
     fail: () => {
-      uni.showToast({ title: "链接无法打开", icon: "none" });
+      qtShowToast({ title: "链接无法打开", icon: "none" });
     },
   });
 }
@@ -64,6 +67,8 @@ export function noticeDisplay(n: Notice): number {
 export async function fetchActiveNotices(versionCode?: number): Promise<Notice[]> {
   try {
     const code = versionCode ?? getCurrentVersionCode();
+    // 不做本地缓存：反馈回复等点对点通知靠这里下发，缓存 1 小时会让用户
+    // 半天看不到新回复（用户实测反馈过）。请求本身很轻，每次进首页拉一次可接受。
     const extra = new UTSJSONObject();
     if (isLoggedIn()) {
       const token = getAccessToken();
@@ -86,10 +91,10 @@ export async function fetchActiveNotices(versionCode?: number): Promise<Notice[]
     if (raw != null && Array.isArray(raw)) {
       return raw as Notice[];
     }
-    console.log("[Notice] fetchActiveNotices raw:", response);
+    logWarnV("Notice", "fetchActiveNotices 响应不是数组", response);
     return [];
   } catch (e) {
-    console.log("[Notice] fetchActiveNotices error", e);
+    logErrV("Notice", "fetchActiveNotices 失败", e);
     return [];
   }
 }
@@ -197,7 +202,7 @@ export async function fetchMessageCenter(): Promise<Notice[]> {
     }
     return [];
   } catch (e) {
-    console.log("[Notice] fetchMessageCenter error", e);
+    logErrV("Notice", "fetchMessageCenter 失败", e);
     return [];
   }
 }
@@ -219,7 +224,7 @@ export async function fetchUnreadCount(): Promise<number> {
     if (typeof raw === "number") return raw;
     return 0;
   } catch (e) {
-    console.log("[Notice] fetchUnreadCount error", e);
+    logErrV("Notice", "fetchUnreadCount 失败", e);
     return 0;
   }
 }
@@ -228,11 +233,6 @@ export async function fetchUnreadCount(): Promise<number> {
 
 /** 通告栏是否已在本会话关闭（内存标志） */
 let noticeBarClosedInSession = false;
-
-/** 重置通告栏会话状态（页面 onShow 可调用） */
-export function resetNoticeBarSession(): void {
-  // 不自动重置，保持会话级
-}
 
 /** 关闭通告栏（本次会话不再显示） */
 export function closeNoticeBarSession(): void {

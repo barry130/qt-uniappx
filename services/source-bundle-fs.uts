@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 音源包本地存储（目录布局 + 读写 + 本地状态，schema 3 统一包模型）
  *
  * 统一包模型（2026-10，与 qt-pc 同源）：
@@ -52,6 +52,8 @@ import {
   listDir as nativeListDir,
 } from "@/uni_modules/qt-js-engine";
 // #endif
+
+import { logInfo, logWarnV } from "@/services/logger";
 
 const UNSUPPORTED = "当前平台不支持音源包存储";
 const ROOT_NAME = "source-bundle";
@@ -401,7 +403,7 @@ async function migrateLegacy(old: UTSJSONObject, schema: number): Promise<void> 
   gState = state;
   await saveLocalState(state);
   await pruneOrphans();
-  console.log(`[SourceBundleFs] schema ${schema} → 3 迁移完成`);
+  logInfo("SourceBundleFs", `schema ${schema} → 3 迁移完成`);
 }
 
 /** 目录改名迁移用：from 存在且 to 不存在时把 from 改成 to（读出重写，跨设备安全） */
@@ -425,7 +427,7 @@ async function validateOnDisk(state: SourceLocalState): Promise<void> {
     if (ok) {
       kept.push(p);
     } else {
-      console.log(`[SourceBundleFs] 包 ${p.id} 的主体产物不在盘上，已剔除`);
+      logWarnV("SourceBundleFs", `包 ${p.id} 的主体产物不在盘上，已剔除`, "");
       if (state.activeId == p.id) state.activeId = "";
       if (state.activeMetaId == p.id) state.activeMetaId = "";
     }
@@ -605,15 +607,6 @@ export async function removePack(id: string): Promise<boolean> {
   return saveLocalState(next);
 }
 
-/**
- * 清掉全部音源包（回到「未安装/停用」）：state.json 重置、install/ 整棵删除。
- * 排查/迁移用；正常卸载走 removePack（逐包）。
- */
-export async function clearAllPacks(): Promise<void> {
-  gState = emptyState();
-  await fsRemove(packageRoot());
-}
-
 /** 清理孤儿目录：install/ 下不在 packs 里的目录（上次卸载/落盘中断的残留） */
 export async function pruneOrphans(): Promise<void> {
   const names = await fsListNames(installDir());
@@ -666,11 +659,6 @@ export function writeTextFileAt(path: string, text: string): Promise<boolean> {
 /** 按绝对路径删除文件/目录 */
 export function removeFileAt(path: string): Promise<boolean> {
   return fsRemove(path);
-}
-
-/** 按绝对路径判断存在 */
-export function existsFileAt(path: string): Promise<boolean> {
-  return fsExists(path);
 }
 
 // ==================== 坏版本名单（按包独立） ====================

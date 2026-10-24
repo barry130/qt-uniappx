@@ -14,9 +14,20 @@ export function resolveUrl(path: string): string {
     : API_BASE_URL + path;
 }
 
+/**
+ * 日志用的 URL：去掉 query（? 之后）。
+ * 失败日志是 ERROR 级、必落盘且在日志页可见，query 里常带分页/筛选参数
+ * （甚至会带搜索词），落盘只保留 path——排障要的路由形状和路径 ID 都在。
+ */
+function logUrl(url: string): string {
+  const q = url.indexOf("?");
+  return q >= 0 ? url.substring(0, q) : url;
+}
+
 import { getAccessToken, saveTokens, clearTokens, parseTokenResponse, isTokenExpired, shouldRefreshToken } from "./auth";
 import { mergeClientHeaders } from "./client-info";
 import { qtDiag } from "./diag";
+import { logErrV } from "./logger";
 
 /**
  * 是否为本机配置的 astral 网关请求。
@@ -214,82 +225,122 @@ function requestWithRefresh(
     header: headers,
     timeout: REFRESH_TIMEOUT_MS,
     success: (response) => {
-      // 响应体（含登录态/收藏等用户数据）只进诊断通道，不落常规日志：
-      // 发布版 console 全量打印既是噪音也是信息面
-      console.log("[QT Music API]", url, response.statusCode);
-      qtDiag("[QT Music API] " + url + " → " + response.statusCode);
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        // 尝试从响应体提取后端的具体错误信息（如参数校验失败）
-        let serverMsg = "";
-        try {
-          const errBody = response.data as UTSJSONObject;
-          const msg = errBody.get("msg") as string | null;
-          const msgAlt = msg != null ? msg : (errBody.get("message") as string | null);
-          if (msgAlt != null && msgAlt.length > 0) serverMsg = msgAlt;
-        } catch (_) {}
-        reject(new Error(serverMsg.length > 0 ? serverMsg : "HTTP " + response.statusCode));
-        return;
-      }
-      let body = new UTSJSONObject();
+      // 整个 success 回调必须兜住异常：success 是 uni.request 的原生回调，
+      // 回调里抛出的错误既不会转成 reject、也不会冒泡到任何地方，Promise 就永久悬空。
+      // 真机症状就是「请求 200 之后一片安静、页面一直停在骨架」（消息中心即此案）。
       try {
-        body = response.data as UTSJSONObject;
-      } catch (_) {
-        // 非 JSON 的 2xx 响应体（网关错误页等）：reject 而不是让回调抛错挂起 Promise
-        reject(new Error("响应数据格式异常"));
-        return;
+        handleResponse(url, response, data, method, auth, resolve, reject, retry, extraHeaders);
+      } catch (e) {
+        logErrV("QT Music", "响应处理异常 " + logUrl(url), e);
+        reject(new Error("响应处理异常"));
       }
-      const code = body.get("code");
-      // 401 未授权：尝试刷新 token
-      if (code != null && (code as number) === 401) {
-        if (!retry) {
-          clearTokens();
-          uni.removeStorageSync("qt-token");
-          reject(new Error("登录状态已失效"));
-          return;
-        }
-        // 检查是否有 refresh token
-        const refreshToken = uni.getStorageSync("qt-refresh-token") as string;
-        if (refreshToken.length === 0) {
-          clearTokens();
-          uni.removeStorageSync("qt-token");
-          reject(new Error("登录状态已失效，请重新登录"));
-          return;
-        }
-        // 如果已经在刷新，加入等待队列
-        if (isRefreshing) {
-          pendingRequests.push({ resolve, reject, path: url, data, method, auth, extraHeaders });
-          return;
-        }
-        // 开始刷新
-        isRefreshing = true;
-        tryRefreshToken().then((result) => {
-          settleAfterRefresh(
-            result,
-            () => requestWithRefresh(url, data, method, auth, resolve, reject, false, extraHeaders),
-            reject,
-          );
-        }).catch(() => {
-          settleAfterRefresh("network", () => {}, reject);
-        });
-        return;
-      }
-      // 其他业务错误（后端 QtRestResp：200 成功，300/401 等失败；兼容网关 code=0 约定）
-      const codeNum = code != null ? (code as number) : 200;
-      if (codeNum !== 0 && codeNum !== 200) {
-        // 非 0/200 code 视为业务错误，不触发刷新
-        const message = body.get("msg") as string | null;
-        const messageAlt = message != null ? message : (body.get("message") as string | null);
-        reject(new Error(messageAlt != null ? messageAlt : "请求失败"));
-        return;
-      }
-      const responseData = body.get("data");
-      resolve((responseData != null ? responseData : body) as UTSJSONObject);
     },
     fail: (error) => {
-      console.log("[QT Music Request Failed]", error);
+      // 网络层失败是用户报障里最高频的一类（「什么都刷不出来」），必须落盘：
+      // errMsg 里带具体原因（超时 / 域名解析 / 连接被拒），比一句「请求失败」有用得多
+      logErrV("QT Music", "请求失败 " + logUrl(url), error);
       reject(new Error("网络请求失败"));
     },
   });
+}
+
+// 把 uni.request 给的响应体归一成真正的 UTSJSONObject（带 .get/.set）。
+// uni-app x 的 JS 运行时里 uni.request 已经把 JSON 解析成了**普通对象**，
+// 直接 body.get(...) 会抛 TypeError: body.get is not a function —— 见
+// jsonValueToUtso 的注释：普通对象只保证下标访问，不保证 UTSJSONObject 方法。
+function asUtso(raw: any): UTSJSONObject {
+  if (raw == null) return new UTSJSONObject();
+  const probe: any = raw;
+  if (typeof probe.get == "function" && typeof probe.set == "function") {
+    return raw as UTSJSONObject;
+  }
+  const converted = jsonValueToUtso(raw);
+  if (converted == null) return new UTSJSONObject();
+  return converted as UTSJSONObject;
+}
+
+function handleResponse(
+  url: string,
+  response: any,
+  data: UTSJSONObject,
+  method: string,
+  auth: boolean,
+  resolve: (value: UTSJSONObject) => void,
+  reject: (reason?: any) => void,
+  retry: boolean,
+  extraHeaders: UTSJSONObject | null,
+): void {
+  // 响应体（含登录态/收藏等用户数据）只进诊断通道，不落常规日志：
+  // 发布版全量打印响应体既是噪音也是信息面。这里只记 URL 与状态码——
+  // 状态码就足以判断「是网络没通、还是后端 4xx/5xx」，而 URL 能定位到具体接口。
+  qtDiag("[QT Music API] " + url + " → " + response.statusCode);
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    // 尝试从响应体提取后端的具体错误信息（如参数校验失败）
+    let serverMsg = "";
+    try {
+      const errBody = asUtso(response.data);
+      const msg = errBody.get("msg") as string | null;
+      const msgAlt = msg != null ? msg : (errBody.get("message") as string | null);
+      if (msgAlt != null && msgAlt.length > 0) serverMsg = msgAlt;
+    } catch (_) {}
+    reject(new Error(serverMsg.length > 0 ? serverMsg : "HTTP " + response.statusCode));
+    return;
+  }
+  let body = new UTSJSONObject();
+  try {
+    // 归一化：普通对象 → UTSJSONObject，否则下面每一次 body.get 都会抛错
+    body = asUtso(response.data);
+  } catch (_) {
+    // 非 JSON 的 2xx 响应体（网关错误页等）：reject 而不是让回调抛错挂起 Promise
+    reject(new Error("响应数据格式异常"));
+    return;
+  }
+  const code = body.get("code");
+  // 401 未授权：尝试刷新 token
+  if (code != null && (code as number) === 401) {
+    if (!retry) {
+      clearTokens();
+      uni.removeStorageSync("qt-token");
+      reject(new Error("登录状态已失效"));
+      return;
+    }
+    // 检查是否有 refresh token
+    const refreshToken = uni.getStorageSync("qt-refresh-token") as string;
+    if (refreshToken.length === 0) {
+      clearTokens();
+      uni.removeStorageSync("qt-token");
+      reject(new Error("登录状态已失效，请重新登录"));
+      return;
+    }
+    // 如果已经在刷新，加入等待队列
+    if (isRefreshing) {
+      pendingRequests.push({ resolve, reject, path: url, data, method, auth, extraHeaders });
+      return;
+    }
+    // 开始刷新
+    isRefreshing = true;
+    tryRefreshToken().then((result) => {
+      settleAfterRefresh(
+        result,
+        () => requestWithRefresh(url, data, method, auth, resolve, reject, false, extraHeaders),
+        reject,
+      );
+    }).catch(() => {
+      settleAfterRefresh("network", () => {}, reject);
+    });
+    return;
+  }
+  // 其他业务错误（后端 QtRestResp：200 成功，300/401 等失败；兼容网关 code=0 约定）
+  const codeNum = code != null ? (code as number) : 200;
+  if (codeNum !== 0 && codeNum !== 200) {
+    // 非 0/200 code 视为业务错误，不触发刷新
+    const message = body.get("msg") as string | null;
+    const messageAlt = message != null ? message : (body.get("message") as string | null);
+    reject(new Error(messageAlt != null ? messageAlt : "请求失败"));
+    return;
+  }
+  const responseData = body.get("data");
+  resolve((responseData != null ? responseData : body) as UTSJSONObject);
 }
 
 export function apiRequest(

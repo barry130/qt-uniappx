@@ -1,9 +1,9 @@
 <!--
   宽屏侧边导航 rail（平板 / 横屏 / 车机）
-  仅在 layout.isWide 时由 tab 页（发现 / 音乐库 / 我的）挂载，取代底部原生 tabbar；
-  手机竖屏不渲染，仍用原生 tabbar。
-  窗口 >= 860dp 用完整 rail（带品牌与文字），更窄的宽屏（横屏手机、车机矮窗）
-  退化为 64px 图标栏，避免占用过多横向空间。
+  由 qt-page-frame 在 layout.isWide 时挂载，覆盖 tab 页与所有普通页面；宽屏取代底部
+  原生 tabbar，手机竖屏不渲染，仍用原生 tabbar。
+  medium（600–899dp）退化为 64px 图标栏；wide/desktop（>=900dp）使用完整 rail
+  （品牌与文字），避免中等宽度窗口被导航栏挤占。
   本组件只在宽屏渲染，因此内部尺寸直接用 px。
 -->
 <template>
@@ -11,8 +11,8 @@
     <view v-if="!compact" class="qsn-brand">
       <image class="qsn-logo" src="/static/icon/xxxhdpi.png" mode="aspectFill" />
       <view class="qsn-brand-copy">
-        <text class="qsn-brand-name" :style="'color:' + theme.skin.text + ';'">轻听</text>
-        <text class="qsn-brand-sub" :style="'color:' + theme.skin.textSubtle + ';'">你的私人音乐台</text>
+        <text class="qsn-brand-name" :style="('color:' + theme.skin.text + ';') + qtFontPx(17)">轻听</text>
+        <text class="qsn-brand-sub" :style="('color:' + theme.skin.textSubtle + ';') + qtFontPx(11)">你的私人音乐台</text>
       </view>
     </view>
     <image v-else class="qsn-logo qsn-logo-compact" src="/static/icon/xxxhdpi.png" mode="aspectFill" />
@@ -24,6 +24,7 @@
           v-for="tab in tabs"
           :key="tab.page"
           class="qsn-item"
+          :hover-class="compact ? 'none' : 'qsn-item-hover'"
           :style="itemActive(tab.page) ? 'background-color:' + theme.skin.accentSoft + ';' : ''"
           @click="goTab(tab.page)"
         >
@@ -31,7 +32,7 @@
           <text
             v-if="!compact"
             class="qsn-label"
-            :style="'color:' + (itemActive(tab.page) ? theme.skin.accent : theme.skin.textSubtle) + ';'"
+            :style="('color:' + (itemActive(tab.page) ? theme.skin.accent : theme.skin.textSubtle) + ';') + qtFontPx(14)"
           >{{ tab.label }}</text>
           <view v-if="hasDot(tab.page)" class="qsn-dot" />
         </view>
@@ -44,10 +45,12 @@
           v-for="tool in tools"
           :key="tool.page"
           class="qsn-item"
+          :hover-class="compact ? 'none' : 'qsn-item-hover'"
+          :style="itemActive(tool.page) ? 'background-color:' + theme.skin.accentSoft + ';' : ''"
           @click="goPage(tool.page)"
         >
-          <QtIcon :name="tool.icon" :size="compact ? 24 : 20" :color="theme.skin.iconMuted" />
-          <text v-if="!compact" class="qsn-label" :style="'color:' + theme.skin.textSubtle + ';'">{{ tool.label }}</text>
+          <QtIcon :name="tool.icon" :size="compact ? 24 : 20" :color="itemActive(tool.page) ? theme.skin.accent : theme.skin.iconMuted" />
+          <text v-if="!compact" class="qsn-label" :style="('color:' + (itemActive(tool.page) ? theme.skin.accent : theme.skin.textSubtle) + ';') + qtFontPx(14)">{{ tool.label }}</text>
         </view>
       </view>
     </scroll-view>
@@ -61,21 +64,37 @@ import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useSourceStore } from "@/stores/source";
 import { useSourceRegistryStore } from "@/stores/source-registry";
+import { qtFontPx } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtRailNavigate, qtRailSwitchTab } from "@/uni_modules/qt-ui/composables/qt-nav";
+import { qtIsSettingsRoute, qtIsProfileRoute } from "@/uni_modules/qt-ui/composables/qt-page-chrome";
 
 const props = defineProps<{
   /** 当前 tab 页路由，用于高亮（如 /pages/home/index） */
   current?: string;
   /** 需要亮红点的 tab 路由列表（与 current 同格式，如 /pages/profile/index） */
   dots?: string[];
+  /**
+   * 兼容旧调用方保留（当前已不参与计算）。
+   * `pages.json` 全局改成 `navigationStyle: custom` 后，所有页面区都从窗口顶缘
+   * 开始（原生导航栏没了），rail 必须恒为状态栏让位，否则品牌 logo 会被状态栏
+   * 的时间/信号图标压住。所以下面固定按状态栏高度加 padding-top。
+   */
+  insetTop?: boolean;
 }>();
 
 const layout = useQtLayout();
 const theme = useThemeStore();
-const compact = computed((): boolean => layout.windowWidth < 860);
-/** 固定在窗口左缘（不随 qt-page-frame 限宽居中），高度盖满内容区 */
+
+// rail 工具入口宽屏下走 qt-wide-workspace 就地托管（不再创建原生页面，也就不需要
+// 预热页面树；旧的 qt-page-preload.ts 已删除 —— uni.preloadPage 在 uni-app x 不支持，
+// 就地托管后宽屏连预热的目标都不存在了）。
+const compact = computed((): boolean => layout.sizeClass == "medium");
+/** 固定在窗口左缘（不随 qt-page-frame 限宽居中），上下贴边撑满页面区 */
 const railStyle = computed((): string => {
+  // 恒加状态栏高度：全站 navigationStyle=custom 后页面区从窗口顶缘起，
+  // rail 不主动让位就会被状态栏文字压住（历史实现只在发现的 3 个页面让位）。
   const sb = qtStatusBarPx();
-  return "padding-top:" + sb + "px;height:" + layout.windowHeight + "px;background-color:" + theme.skin.surfaceInset + ";border-right-color:" + theme.skin.divider + ";";
+  return "padding-top:" + sb + "px;background-color:" + theme.skin.surfaceInset + ";border-right-color:" + theme.skin.divider + ";";
 });
 
 type NavItem = { page: string; label: string; icon: string };
@@ -89,7 +108,7 @@ const tabs: NavItem[] = [
 // 每日推荐/歌单广场按当前源判断（页面数据取自当前源）。
 const ALL_TOOLS: NavItem[] = [
   { page: "/pages/search/index", label: "搜索", icon: "search" },
-  { page: "/pages/daily/index", label: "每日推荐", icon: "calendar" },
+  { page: "/pages/daily/index", label: "每日新歌", icon: "calendar" },
   { page: "/pages/playlists/index", label: "歌单广场", icon: "disc" },
   { page: "/pages/chart/index", label: "排行榜", icon: "trending" },
   { page: "/pages/settings/index", label: "设置", icon: "settings" },
@@ -108,18 +127,33 @@ const tools = computed<NavItem[]>(() => {
 });
 
 function itemActive(page: string): boolean {
-  return props.current == page;
+  if (props.current == null) return false;
+  if (props.current == page) return true;
+  // 设置族 / 我的族在宽屏是三栏：rail 只是第一栏，
+  // 用户在 /pages/play-settings、/pages/collection 这类族子页时对应入口必须保持高亮，
+  // 否则左侧导航会显示成「什么都没选中」，用户不知道自己还在哪里。
+  if (page == "/pages/settings/index" && qtIsSettingsRoute(props.current)) return true;
+  if (page == "/pages/profile/index" && qtIsProfileRoute(props.current)) return true;
+  return false;
 }
 function hasDot(page: string): boolean {
   if (props.dots == null) return false;
   const bare = page.charAt(0) == "/" ? page.substring(1) : page;
-  return props.dots.indexOf(bare) >= 0;
+  // dots 的产生方（qt-page-frame 的 railDots）带开头斜杠，这里对元素也归一一次，
+  // 否则 "/pages/profile/index" 对 "pages/profile/index" 恒 indexOf 不到，红点永不显示
+  for (let i = 0; i < props.dots.length; i++) {
+    const d = props.dots[i];
+    if ((d.charAt(0) == "/" ? d.substring(1) : d) == bare) return true;
+  }
+  return false;
 }
 function goTab(page: string): void {
-  uni.switchTab({ url: page });
+  if (props.current == page) return;
+  qtRailSwitchTab(page);
 }
 function goPage(page: string): void {
-  uni.navigateTo({ url: page });
+  if (props.current == page) return;
+  qtRailNavigate(page);
 }
 </script>
 
@@ -128,13 +162,14 @@ function goPage(page: string): void {
   position: fixed;
   left: 0;
   top: 0;
+  bottom: 0;
   z-index: 900;
   width: 208px;
   flex-shrink: 0;
   padding: 14px 10px;
   flex-direction: column;
   align-items: stretch;
-  border-right-width: 1px;
+  border-right-width: 1px; border-right-style: solid;
 }
 .qsn-compact {
   width: 64px;
@@ -180,6 +215,10 @@ function goPage(page: string): void {
   flex-direction: row;
   align-items: center;
   border-radius: 10px;
+}
+/* 桌面指针反馈：收起成图标轨（compact）时不启用，只图标没有文字时整块变色反而显脏 */
+.qsn-item-hover {
+  background-color: rgba(255, 255, 255, 0.06);
 }
 .qsn-dot {
   position: absolute;

@@ -63,6 +63,7 @@ import {
   PACK_KIND_META,
 } from "@/services/source-bundle-fs";
 import { PACK_VERIFY_NACL_SRC } from "@/services/pack-verify-nacl";
+import { logErr, logErrV, logInfo, logWarn, logWarnV } from "@/services/logger";
 
 /** 与插件 interface.uts 对应的结构类型（服务层不引插件类型，避免跨模块类型耦合） */
 type EngineInfo = { engine: string; version: string; hostApiVersion: number; probe: string };
@@ -184,11 +185,6 @@ export function engineVersion(): string {
   return gEngineVersion;
 }
 
-/** 引擎内核标识：固定 webview-v8（系统 WebView 的 V8/JIT）。真机排查第一眼看这个 */
-export function engineName(): string {
-  return gEngineName;
-}
-
 /** 引擎里已注入的播放包 id（"" = 未注入；与 activeId 比对即「待生效」） */
 export function loadedPlayPackId(): string {
   return gPlayPackLoadedId;
@@ -197,11 +193,6 @@ export function loadedPlayPackId(): string {
 /** 引擎里已注入的播放包版本号（0 = 未注入） */
 export function loadedPlayPackCode(): number {
   return gPlayPackLoadedCode;
-}
-
-/** 引擎里实际装载的 meta 来源 id（"" = 未装数据包，数据面下线；与 activeMetaId 比对即「待生效」） */
-export function loadedMetaId(): string {
-  return gMetaLoadedId;
 }
 
 /** 引擎里实际装载的 meta 版本号（0 = 未装） */
@@ -239,7 +230,7 @@ function msgOf(e: any): string {
 function fail(message: string): void {
   gStatus = "failed";
   gLastError = message;
-  console.log("[SourceEngine] " + message);
+  logErr("SourceEngine", message);
 }
 
 // ==================== 插件回调 → Promise ====================
@@ -363,7 +354,7 @@ export async function ensurePackVerifier(): Promise<boolean> {
   if (!(await ensureEngine())) return false;
   try {
     if (PACK_VERIFY_NACL_SRC.length < 1000) {
-      console.log("[SourceEngine] 验签器内嵌常量异常：" + String(PACK_VERIFY_NACL_SRC.length));
+      logErrV("SourceEngine", "验签器内嵌常量异常", PACK_VERIFY_NACL_SRC.length);
       return false;
     }
     const asset = PACK_VERIFY_NACL_SRC;
@@ -388,11 +379,11 @@ export async function ensurePackVerifier(): Promise<boolean> {
     if (ok) {
       gVerifierGlobal = name;
     } else {
-      console.log("[SourceEngine] 验签器装载/自检失败：" + probe);
+      logErrV("SourceEngine", "验签器装载/自检失败", probe);
     }
     return ok;
   } catch (e) {
-    console.log("[SourceEngine] 验签器装载异常：" + String(e));
+    logErrV("SourceEngine", "验签器装载异常", e);
     return false;
   }
 }
@@ -425,14 +416,12 @@ export function ensureEngine(): Promise<boolean> {
       // 反复被隔离说明包/线路有系统性问题：不再重建，明确失败等用户手动重启。
       // 保持 gStatus = "ready"（而不是 failed），这样窗口过期后还能自动恢复。
       gLastError = `引擎多次被隔离（脚本执行超时），已暂停自动重建；请在设置里切换/重装播放包重建引擎`;
-      console.log("[SourceEngine] " + gLastError);
+      logWarn("SourceEngine", gLastError);
       return Promise.resolve(false);
     }
     gRevivesInWindow += 1;
     gLastReviveAt = now;
-    console.log(
-      `[SourceEngine] 引擎已被隔离（脚本执行超时），自动重建（本窗口第 ${gRevivesInWindow}/${MAX_REVIVES_PER_WINDOW} 次）`,
-    );
+    logWarn("SourceEngine", `引擎已被隔离（脚本执行超时），自动重建（本窗口第 ${gRevivesInWindow}/${MAX_REVIVES_PER_WINDOW} 次）`);
     gStatus = "idle";
     resetLoadedState();
     gLastError = "";
@@ -478,9 +467,7 @@ async function bootEngine(): Promise<boolean> {
     gEngineName = info.engine;
     gLastError = "";
     gStatus = "idle";
-    console.log(
-      `[SourceEngine] 引擎就绪：${info.engine} ${info.version}（hostApiVersion ${info.hostApiVersion}，probe "${info.probe}"）`,
-    );
+    logInfo("SourceEngine", `引擎就绪：${info.engine} ${info.version}（hostApiVersion ${info.hostApiVersion}，probe "${info.probe}"）`);
     return true;
   } catch (e) {
     gLoadFailure = "engine";
@@ -539,7 +526,7 @@ async function resolveMetaText(): Promise<{ id: string; code: number; text: stri
   if (text.length > 0 && header != null && header.kind == PACK_KIND_META) {
     return { id: pack.id, code: header.versionCode, text: text };
   }
-  console.log(`[SourceEngine] meta 包 ${pack.id} 不可用（文件缺失或包头非法）`);
+  logWarnV("SourceEngine", `meta 包 ${pack.id} 不可用（文件缺失或包头非法）`, "");
   return null;
 }
 
@@ -554,7 +541,7 @@ async function loadMetaIntoEngine(): Promise<boolean> {
         gStatus = "idle";
         gLoadFailure = "missing";
         gLastError = "未安装数据包：在线搜索/歌单/歌词及在线播放不可用，可在 设置 → 音源包管理 安装";
-        console.log("[SourceEngine] " + gLastError);
+        logWarn("SourceEngine", gLastError);
         return false;
       }
       // 生效包在列表里但文件没了/包头坏了：按坏包处理（可卸载后重装）
@@ -584,10 +571,7 @@ async function loadMetaIntoEngine(): Promise<boolean> {
     gStatus = "ready";
     gLastError = "";
     const revision = info.get("metaRevision");
-    console.log(
-      `[SourceEngine] meta 已装载：${meta.id} v${meta.code}` +
-        `（${name}，metaRevision=${revision}，hostApiVersion ${HOST_API_VERSION}）`,
-    );
+    logInfo("SourceEngine", `meta 已装载：${meta.id} v${meta.code}（${name}，metaRevision=${revision}，hostApiVersion ${HOST_API_VERSION}）`);
     return true;
   } catch (e) {
     // 装载阶段抛错多为包文本本身非法（插件 compile 校验不过）；环境级故障
@@ -703,9 +687,7 @@ async function applyPlayPackInEngine(pack: SourcePackMeta): Promise<boolean> {
     gStatus = "ready";
     gLastError = "";
     gLoadFailure = "";
-    console.log(
-      `[SourceEngine] 播放包已注入：${pack.id}（${pack.versionName}，code ${pack.versionCode}；装载 ${loadCost}ms）`,
-    );
+    logInfo("SourceEngine", `播放包已注入：${pack.id}（${pack.versionName}，code ${pack.versionCode}；装载 ${loadCost}ms）`);
     return true;
   } catch (e) {
     // 装载阶段失败：包体语法错/缺工厂按包问题处理；其余（引擎/超时）也算装载失败
@@ -724,7 +706,7 @@ function emitPlayPackMissing(): void {
   if (now - gLastMissingEmitAt < 10000) return;
   gLastMissingEmitAt = now;
   gLastError = "未安装播放音源包：在线播放需要在 设置 → 音源包管理 安装并启用播放音源包";
-  console.log("[SourceEngine] " + gLastError);
+  logWarn("SourceEngine", gLastError);
   uni.$emit(PLAY_PACK_MISSING_EVENT);
 }
 
@@ -742,9 +724,9 @@ export async function unloadPlayPack(): Promise<void> {
       await callInvoke("uninstallPlayPack", "[]", LOAD_CHAIN_TIMEOUT_MS);
     }
   } catch (e) {
-    console.log(`[SourceEngine] uninstallPlayPack 失败（${msgOf(e)}），将在下次注入时覆盖`);
+    logWarnV("SourceEngine", "uninstallPlayPack 失败，将在下次注入时覆盖", msgOf(e));
   }
-  console.log(`[SourceEngine] 播放包已卸载：${loaded}`);
+  logInfo("SourceEngine", `播放包已卸载：${loaded}`);
 }
 
 /**
@@ -934,7 +916,7 @@ export async function getPlayUrlByEngineResult(
     // 宿主据此不把本首计入熔断，而是原地等网络重试。
     // 单曲取不到不算引擎故障，不写 failed。
     // 错误文本里带歌/音质定位 + bundle 侧的逐线路追踪（meta 会把 trace 拼进 error）
-    console.log(`[SourceEngine] 引擎取链失败：${message}（${song.platform} @${quality}「${song.name} ${song.singer}」id=${song.id}）`);
+    logErr("SourceEngine", `引擎取链失败：${message}（${song.platform} @${quality}「${song.name} ${song.singer}」id=${song.id}）`);
     return { url: "", stalled: message.indexOf(STALLED_MARKER) >= 0, line: null, size: null, actualQuality: "" };
   }
   try {
@@ -1024,7 +1006,7 @@ export async function prewarm(): Promise<void> {
     if (pack == null) return;
     await ensurePlayPackLoaded();
   } catch (e) {
-    console.log("[SourceEngine] 预热失败：" + msgOf(e));
+    logErrV("SourceEngine", "预热失败", msgOf(e));
   }
 }
 

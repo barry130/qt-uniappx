@@ -1,35 +1,128 @@
 <template>
-  <qt-page-frame :max-width="640">
+  <qt-page-frame width-kind="flow">
   <view class="page">
     <scroll-view class="list" :class="layout.isWide ? 'list-wide' : ''" direction="vertical" :show-scrollbar="false">
+      <!-- 宽屏两列（≥1280）：左列「汇总 + 可申请权限」，右列「系统级权限 + 后台保活」。
+           单列时这些组在 1920 下拉成 1312px 宽、每行右侧空出 600px，安卓那 10 项
+           权限要滚两屏。按组切（顺序前缀），不拆断任何一组，也不拆断状态胶囊。 -->
+      <view v-if="twoColumn" class="cols" :style="colsStyle">
+        <view class="col" :style="colStyle">
+          <view class="group group-wide group-col" :style="groupStyle">
+            <view class="cell cell-no-border cell-wide" :style="cellStyle">
+              <QtIcon class="cell-icon cell-icon-wide" name="info" :size="36" :color="theme.skin.accent" />
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">共 {{ permCount }} 项权限，已授权 {{ grantedCount() }} 项</text>
+              <view class="cell-right">
+                <text class="cell-chip cell-chip-wide" :style="(chipStyle(pendingColor(), pendingBg())) + qtFontDual(22, 13)">{{ pendingText() }}</text>
+                <view class="cell-arrow cell-arrow-wide"></view>
+              </view>
+            </view>
+          </view>
+          <view class="group group-wide group-col" :style="groupStyle">
+            <view
+              v-for="(perm, index) in applyPerms"
+              :key="perm.id"
+              class="cell cell-wide"
+              :class="index == applyPerms.length - 1 ? 'cell-no-border' : ''"
+              :style="cellStyle"
+              @click="onPermTap(perm)"
+            >
+              <QtIcon class="cell-icon cell-icon-wide" :name="perm.icon" :size="36" :color="perm.color" />
+              <view class="cell-main">
+                <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ perm.label }}</text>
+                <text class="cell-desc cell-desc-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">{{ perm.desc }}</text>
+              </view>
+              <view class="cell-right">
+                <text class="cell-chip cell-chip-wide" :style="(chipStyle(statusColor(perm.id), statusBg(perm.id))) + qtFontDual(22, 13)">{{ statusText(perm.id) }}</text>
+                <view class="cell-arrow cell-arrow-wide">
+                  <QtIcon v-if="actionableOf(perm.id)" name="chevron-right" :size="16" :color="theme.skin.iconMuted" />
+                </view>
+              </view>
+            </view>
+          </view>
+        </view>
+        <view class="col col-right" :style="colStyle">
+          <view v-if="systemPerms.length > 0" class="group group-wide group-col" :style="groupStyle">
+            <view
+              v-for="(perm, index) in systemPerms"
+              :key="perm.id"
+              class="cell cell-wide"
+              :class="index == systemPerms.length - 1 ? 'cell-no-border' : ''"
+              :style="cellStyle"
+              @click="onPermTap(perm)"
+            >
+              <QtIcon class="cell-icon cell-icon-wide" :name="perm.icon" :size="36" :color="perm.color" />
+              <view class="cell-main">
+                <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ perm.label }}</text>
+                <text class="cell-desc cell-desc-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">{{ perm.desc }}</text>
+              </view>
+              <view class="cell-right">
+                <text class="cell-chip cell-chip-wide" :style="(chipStyle(statusColor(perm.id), statusBg(perm.id))) + qtFontDual(22, 13)">{{ statusText(perm.id) }}</text>
+                <view class="cell-arrow cell-arrow-wide"></view>
+              </view>
+            </view>
+          </view>
+          <view class="group group-wide group-col" :style="groupStyle">
+            <view v-if="!harmony" class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="openBatteryOptimization">
+              <QtIcon class="cell-icon cell-icon-wide" name="rocket" :size="36" color="#4fb186" />
+              <view class="cell-main">
+                <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">电池优化白名单</text>
+                <text class="cell-desc cell-desc-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">加入白名单后，后台播放不易被系统回收</text>
+              </view>
+              <view class="cell-right">
+                <text class="cell-chip cell-chip-wide" :style="(chipStyle(batteryColor(), batteryBg())) + qtFontDual(22, 13)">{{ batteryText() }}</text>
+                <view class="cell-arrow cell-arrow-wide">
+                  <QtIcon name="chevron-right" :size="16" :color="theme.skin.iconMuted" />
+                </view>
+              </view>
+            </view>
+            <view class="cell cell-no-border cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="openAutoStart">
+              <QtIcon class="cell-icon cell-icon-wide" name="refresh" :size="36" color="#9b82d9" />
+              <view class="cell-main">
+                <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">自启动管理</text>
+                <text class="cell-desc cell-desc-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">允许开机自启，避免系统限制后台运行</text>
+              </view>
+              <view class="cell-right">
+                <text class="cell-chip cell-chip-wide" :style="(chipStyle(theme.skin.textMuted, theme.skin.surfaceMuted)) + qtFontDual(22, 13)">去设置</text>
+                <view class="cell-arrow cell-arrow-wide">
+                  <QtIcon name="chevron-right" :size="16" :color="theme.skin.iconMuted" />
+                </view>
+              </view>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 竖屏 / 中等宽度：单列（原样） -->
+      <view v-else>
       <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
         <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle">
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="info" :size="36" :color="theme.skin.accent" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">共 {{ permCount }} 项权限，已授权 {{ grantedCount() }} 项</text>
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">共 {{ permCount }} 项权限，已授权 {{ grantedCount() }} 项</text>
           <view class="cell-right">
-            <text class="cell-chip" :class="layout.isWide ? 'cell-chip-wide' : ''" :style="chipStyle(pendingColor(), pendingBg())">{{ pendingText() }}</text>
+            <text class="cell-chip" :class="layout.isWide ? 'cell-chip-wide' : ''" :style="(chipStyle(pendingColor(), pendingBg())) + qtFontDual(22, 13)">{{ pendingText() }}</text>
             <!-- 汇总行不给箭头，但同样占位，保证所有行右边缘一条线 -->
             <view class="cell-arrow" :class="layout.isWide ? 'cell-arrow-wide' : ''"></view>
           </view>
         </view>
       </view>
 
+      <!-- 可申请权限：系统里有开关，点击直达授权页 -->
       <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
         <view
-          v-for="(perm, index) in perms"
+          v-for="(perm, index) in applyPerms"
           :key="perm.id"
           class="cell"
-          :class="[layout.isWide ? 'cell-wide' : '', index == perms.length - 1 ? 'cell-no-border' : '']"
+          :class="[layout.isWide ? 'cell-wide' : '', index == applyPerms.length - 1 ? 'cell-no-border' : '']"
           :style="cellStyle"
           @click="onPermTap(perm)"
         >
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" :name="perm.icon" :size="36" :color="perm.color" />
           <view class="cell-main">
-            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">{{ perm.label }}</text>
-            <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ perm.desc }}</text>
+            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ perm.label }}</text>
+            <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">{{ perm.desc }}</text>
           </view>
           <view class="cell-right">
-            <text class="cell-chip" :class="layout.isWide ? 'cell-chip-wide' : ''" :style="chipStyle(statusColor(perm.id), statusBg(perm.id))">{{ statusText(perm.id) }}</text>
+            <text class="cell-chip" :class="layout.isWide ? 'cell-chip-wide' : ''" :style="(chipStyle(statusColor(perm.id), statusBg(perm.id))) + qtFontDual(22, 13)">{{ statusText(perm.id) }}</text>
             <!-- 箭头位固定占宽：有没有箭头右边缘都对齐，不会一行凸一行缩 -->
             <view class="cell-arrow" :class="layout.isWide ? 'cell-arrow-wide' : ''">
               <QtIcon v-if="actionableOf(perm.id)" name="chevron-right" :size="layout.isWide ? 16 : 28" :color="theme.skin.iconMuted" />
@@ -38,29 +131,53 @@
         </view>
       </view>
 
-      <!-- 后台保活：不是 manifest 里声明的权限，只能跳系统设置页，所以和上面的运行时权限分开一组 -->
-      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
-        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="openBatteryOptimization">
-          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="rocket" :size="36" color="#4fb186" />
+      <!-- 系统级权限（鸿蒙）：安装即授予、系统不提供开关，单独成组避免与可申请权限混排 -->
+      <view v-if="systemPerms.length > 0" class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view
+          v-for="(perm, index) in systemPerms"
+          :key="perm.id"
+          class="cell"
+          :class="[layout.isWide ? 'cell-wide' : '', index == systemPerms.length - 1 ? 'cell-no-border' : '']"
+          :style="cellStyle"
+          @click="onPermTap(perm)"
+        >
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" :name="perm.icon" :size="36" :color="perm.color" />
           <view class="cell-main">
-            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">电池优化白名单</text>
-            <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">加入白名单后，后台播放不易被系统回收</text>
+            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ perm.label }}</text>
+            <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">{{ perm.desc }}</text>
           </view>
           <view class="cell-right">
-            <text class="cell-chip" :class="layout.isWide ? 'cell-chip-wide' : ''" :style="chipStyle(batteryColor(), batteryBg())">{{ batteryText() }}</text>
+            <text class="cell-chip" :class="layout.isWide ? 'cell-chip-wide' : ''" :style="(chipStyle(statusColor(perm.id), statusBg(perm.id))) + qtFontDual(22, 13)">{{ statusText(perm.id) }}</text>
+            <view class="cell-arrow" :class="layout.isWide ? 'cell-arrow-wide' : ''"></view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 后台保活：不是权限声明里的条目，只能跳系统设置页，所以和上面的权限分开一组。
+           鸿蒙没有「电池优化白名单」这个概念（长时任务由系统按 backgroundModes 保活），
+           该行只在安卓显示；自启动两端都有。 -->
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view v-if="!harmony" class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="openBatteryOptimization">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="rocket" :size="36" color="#4fb186" />
+          <view class="cell-main">
+            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">电池优化白名单</text>
+            <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">加入白名单后，后台播放不易被系统回收</text>
+          </view>
+          <view class="cell-right">
+            <text class="cell-chip" :class="layout.isWide ? 'cell-chip-wide' : ''" :style="(chipStyle(batteryColor(), batteryBg())) + qtFontDual(22, 13)">{{ batteryText() }}</text>
             <view class="cell-arrow" :class="layout.isWide ? 'cell-arrow-wide' : ''">
               <QtIcon name="chevron-right" :size="layout.isWide ? 16 : 28" :color="theme.skin.iconMuted" />
             </view>
           </view>
         </view>
-        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" @click="openAutoStart">
+        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="openAutoStart">
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="refresh" :size="36" color="#9b82d9" />
           <view class="cell-main">
-            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="'color:' + theme.skin.text + ';'">自启动管理</text>
-            <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">允许开机自启，避免系统限制后台运行</text>
+            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">自启动管理</text>
+            <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">允许开机自启，避免系统限制后台运行</text>
           </view>
           <view class="cell-right">
-            <text class="cell-chip" :class="layout.isWide ? 'cell-chip-wide' : ''" :style="chipStyle(theme.skin.textMuted, theme.skin.surfaceMuted)">去设置</text>
+            <text class="cell-chip" :class="layout.isWide ? 'cell-chip-wide' : ''" :style="(chipStyle(theme.skin.textMuted, theme.skin.surfaceMuted)) + qtFontDual(22, 13)">去设置</text>
             <view class="cell-arrow" :class="layout.isWide ? 'cell-arrow-wide' : ''">
               <QtIcon name="chevron-right" :size="layout.isWide ? 16 : 28" :color="theme.skin.iconMuted" />
             </view>
@@ -68,43 +185,58 @@
         </view>
       </view>
 
+      </view>
+
+      <!-- 说明文字：单列在两列分支之外、仍在最下方通栏，两列时不拆断 -->
       <view class="hint">
-        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">带箭头的项点一下可跳到系统里对应的授权页面。部分权限由系统版本决定是否适用，标「系统版本不适用」的项无需处理；标「无法确定」的项本机查不到状态，请到系统设置里确认。</text>
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">带箭头的项点一下可跳到系统里对应的授权页面。部分权限由系统版本决定是否适用，标「系统版本不适用」的项无需处理；标「无法确定」的项本机查不到状态，请到系统设置里确认。</text>
       </view>
       <view class="hint">
-        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">网络访问、前台服务、媒体播放前台服务、唤醒锁定这四项在安装时即已授予，系统不提供开关。电池优化白名单与自启动管理由厂商系统控制，需要手动去系统设置里放行。</text>
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">{{ normalHintText() }}</text>
+      </view>
+      <view class="hint">
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">{{ keepAliveHintText() }}</text>
       </view>
     </scroll-view>
   </view>
   </qt-page-frame>
 </template>
 <script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
+import { qtConfirm } from "@/services/confirm";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
-import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtTwoColumn } from "@/uni_modules/qt-ui/composables/use-qt-columns";
+import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { computed, ref } from "vue";
 import { onShow } from "@dcloudio/uni-app";
-import { openPermissionSettings, queryPermissionStates, isIgnoringBatteryOptimizations, openBatteryOptimizationSettings, openAutoStartSettings } from "@/services/app-native";
+import { openPermissionSettings, queryPermissionStates, isIgnoringBatteryOptimizations, openBatteryOptimizationSettings, openAutoStartSettings, isHarmonyOs } from "@/services/app-native";
 import { desktopLyric } from "@/services/desktop-lyric";
 import type { PermissionState } from "@/uni_modules/qt-app-native";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
-/** 一条权限的展示信息。id 必须与 manifest.json 的声明串逐字一致 */
+/**
+ * 一条权限的展示信息。id 必须与「本端」权限声明文件里的串逐字一致：
+ * 安卓 = manifest.json 的 app-android.distribute.permissions；
+ * 鸿蒙 = harmony-configs/entry/src/main/module.json5 的 requestPermissions。
+ */
 type PermMeta = {
   id: string;
   label: string;
   desc: string;
   icon: string;
   color: string;
-  /** 普通权限：安装即授予，系统不提供开关，点击只做说明 */
+  /** 系统级权限：安装即授予，系统不提供开关，点击只做说明 */
   normal: boolean;
 };
 
 /**
- * 与 manifest.json 的 app-android.distribute.permissions 一一对应（10 条）。
+ * 安卓：与 manifest.json 的 app-android.distribute.permissions 一一对应（10 条）。
  * 顺序按「用户能感知到的功能」排：先在线功能，再本地文件，最后后台保活。
+ * ⚠️ 这一组是历史清单，保持原样不动。
  */
-const perms: PermMeta[] = [
+const androidPerms: PermMeta[] = [
   {
     id: "android.permission.INTERNET",
     label: "网络访问",
@@ -132,7 +264,7 @@ const perms: PermMeta[] = [
   {
     id: "android.permission.MANAGE_EXTERNAL_STORAGE",
     label: "所有文件访问",
-    desc: "删除由其它应用创建的音频文件",
+    desc: "删除其它应用创建的音频；更改下载保存位置",
     icon: "trash",
     color: "#d97b66",
     normal: false,
@@ -187,7 +319,131 @@ const perms: PermMeta[] = [
   },
 ];
 
-const layout = useQtLayout();
+/**
+ * 鸿蒙·可申请权限（user_grant）：系统里有开关，点击可直达授权页。
+ *
+ * ⚠️ 「下载目录 / 文档目录」这两条权限是 **2in1（PC/平板）专属**：在 phone 设备上
+ * 系统直接判 INVALID，授权弹窗不出选项就关掉（2026-10-19 真机实证，hilog：
+ * `ohos.permission.READ_WRITE_DOWNLOAD_DIRECTORY not support.` /
+ * `terminate session with result, resultCode: 0, reqPerms: [...], result: [2].`），
+ * 用户看到的就是「点击无反应」。所以这两条在手机上**不给点**，只作为说明项展示，
+ * 并在 onPermTap 里引导到「下载设置 → 更改位置」（那里走 DocumentViewPicker +
+ * persistPermission，是 phone 上真正能写公共目录的路线）。
+ *
+ * 真机上它们的状态恒为 applicable=false（selfPermissionStatus 返回 2/3），页面会
+ * 自动显示「当前系统版本不需要该权限」，这里保留条目是为了让 2in1 设备仍能看到开关。
+ */
+const harmonyApplyPerms: PermMeta[] = [
+  {
+    id: "ohos.permission.READ_WRITE_DOWNLOAD_DIRECTORY",
+    label: "下载目录",
+    desc: "2in1 设备专用；手机上请在「下载设置 → 更改位置」里选目录",
+    icon: "download",
+    color: "#9b82d9",
+    normal: false,
+  },
+  {
+    id: "ohos.permission.READ_WRITE_DOCUMENTS_DIRECTORY",
+    label: "文档目录",
+    desc: "2in1 设备专用；手机上用系统选择器授权具体目录",
+    icon: "folder",
+    color: "#5f9ea0",
+    normal: false,
+  },
+];
+
+/**
+ * 鸿蒙·系统级权限（system_grant）：安装时由系统自动授予，用户无法（也无需）开关。
+ * 单独成组展示，不与可申请权限混排——避免用户在一个没有开关的清单里反复找开关。
+ *
+ * 为什么是这 7 条：本项目实际会用到、且第三方应用**可申请**（availableLevel = normal）
+ * 的全部系统级权限。刻意不列 ohos.permission.SYSTEM_FLOAT_WINDOW（悬浮窗）与
+ * ohos.permission.READ_AUDIO：它们的 availableLevel 是 system_basic，只对系统应用开放，
+ * 普通应用根本申请不到，列出来只会误导用户去系统里找一个不存在的开关。
+ * 桌面歌词在鸿蒙上改由系统媒体面板（AVSession）渲染，本来也不需要悬浮窗权限。
+ */
+const harmonySystemPerms: PermMeta[] = [
+  {
+    id: "ohos.permission.INTERNET",
+    label: "网络访问",
+    desc: "搜索、在线播放、下载与歌词获取",
+    icon: "globe",
+    color: "#6d8fd6",
+    normal: true,
+  },
+  {
+    id: "ohos.permission.GET_NETWORK_INFO",
+    label: "网络状态",
+    desc: "区分 Wi-Fi / 移动网络，提示音质与流量",
+    icon: "gauge",
+    color: "#5f9ea0",
+    normal: true,
+  },
+  {
+    id: "ohos.permission.KEEP_BACKGROUND_RUNNING",
+    label: "后台播放保活",
+    desc: "退到后台或熄屏后继续播放",
+    icon: "rocket",
+    color: "#4fb186",
+    normal: true,
+  },
+  {
+    id: "ohos.permission.RUNNING_LOCK",
+    label: "运行锁",
+    desc: "播放期间持有运行锁，不被系统冻结",
+    icon: "lock",
+    color: "#6d8fd6",
+    normal: true,
+  },
+  {
+    id: "ohos.permission.MODIFY_AUDIO_SETTINGS",
+    label: "音频设置",
+    desc: "调节音量与音频焦点",
+    icon: "sliders",
+    color: "#4fb186",
+    normal: true,
+  },
+  {
+    id: "ohos.permission.ACCESS_CAR_AUDIO",
+    label: "车机音频",
+    desc: "车机版接管车机音频通道（手机端不适用）",
+    icon: "disc",
+    color: "#d99b3f",
+    normal: true,
+  },
+  {
+    id: "ohos.permission.FILE_ACCESS_PERSIST",
+    label: "文件访问持久化",
+    desc: "记住已授权的文件，重启后无需再次选择",
+    icon: "copy",
+    color: "#d97b66",
+    normal: true,
+  },
+];
+
+/** 本端是否为鸿蒙。平台判别收敛在 UTS 服务里，页面不写 #ifdef（AGENTS.md 要求） */
+const harmony = isHarmonyOs();
+
+/** 数组拼接：不用 concat，避免 Vapor 下对原型方法的额外要求 */
+function mergePerms(a: PermMeta[], b: PermMeta[]): PermMeta[] {
+  const out: PermMeta[] = [];
+  for (let i = 0; i < a.length; i++) {
+    out.push(a[i]);
+  }
+  for (let i = 0; i < b.length; i++) {
+    out.push(b[i]);
+  }
+  return out;
+}
+
+/** 鸿蒙把可申请与系统级分成两组；安卓维持原来的一整组 */
+const applyPerms: PermMeta[] = harmony ? harmonyApplyPerms : androidPerms;
+const systemPerms: PermMeta[] = harmony ? harmonySystemPerms : [];
+/** 全量清单：汇总计数与状态查询都用它，顺序 = 可申请在前、系统级在后 */
+const perms: PermMeta[] = harmony ? mergePerms(harmonyApplyPerms, harmonySystemPerms) : androidPerms;
+
+/** 宽屏两列（≥1280）：布局档位、列宽与两列容器留白全部来自公共口径 */
+const { layout, twoColumn, colStyle, colsStyle } = useQtTwoColumn();
 const theme = useThemeStore();
 const groupStyle = computed<string>(() => "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";");
 const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
@@ -221,14 +477,14 @@ function chipStyle(fg: string, bg: string): string {
 function openBatteryOptimization(): void {
   const ok = openBatteryOptimizationSettings();
   if (!ok) {
-    uni.showToast({ title: "无法打开系统设置，请手动在 设置→电池 中放行", icon: "none" });
+    qtShowToast({ title: "无法打开系统设置，请手动在 设置→电池 中放行", icon: "none" });
   }
 }
 /** 去厂商自启动管理页（原生侧逐个 ROM 试，全落空会降级到应用详情页） */
 function openAutoStart(): void {
   const ok = openAutoStartSettings();
   if (!ok) {
-    uni.showToast({ title: "当前系统不支持跳转，请在系统设置中手动允许自启动", icon: "none" });
+    qtShowToast({ title: "当前系统不支持跳转，请在系统设置中手动允许自启动", icon: "none" });
   }
 }
 
@@ -297,6 +553,29 @@ function pendingBg(): string {
   return pendingCount() == 0 ? theme.skin.surfaceMuted : theme.skin.dangerSoft;
 }
 
+/**
+ * 系统级权限说明。两端的系统级权限数量与名称都不同，文案跟着清单走，
+ * 否则会出现「文案里点了四项，清单里有七项」这种对不上的情况。
+ */
+function normalHintText(): string {
+  if (harmony) {
+    return "系统级权限（已自动授予）由鸿蒙在安装时即授予，系统不提供开关，列在这里只为让您知道本应用用到了哪些能力。";
+  }
+  return "网络访问、前台服务、媒体播放前台服务、唤醒锁定这四项在安装时即已授予，系统不提供开关。";
+}
+
+/**
+ * 后台保活说明。鸿蒙没有「电池优化白名单」这个概念——后台播放靠 module.json5 里声明的
+ * backgroundModes: audioPlayback（长时任务）由系统保活，不需要用户手动放行，
+ * 所以那一行在鸿蒙上不显示，文案也不能再提它。
+ */
+function keepAliveHintText(): string {
+  if (harmony) {
+    return "后台播放由系统的长时任务（audioPlayback）保活，无需手动放行；自启动管理由系统控制，需要时请到系统设置里开启。";
+  }
+  return "电池优化白名单与自启动管理由厂商系统控制，需要手动去系统设置里放行。";
+}
+
 /** 单条权限状态胶囊的底色，与 statusColor 同口径 */
 function statusBg(id: string): string {
   const st = stateOf(id);
@@ -320,17 +599,33 @@ function actionableOf(id: string): boolean {
 }
 
 function onPermTap(perm: PermMeta): void {
+  // 鸿蒙这两条目录权限在 phone 上是 INVALID（点系统设置也不会弹选项），
+  // 与其让用户点了没反应，不如直接引导到真正能用的路径：应用内选目录。
+  if (harmony && (perm.id == "ohos.permission.READ_WRITE_DOWNLOAD_DIRECTORY"
+      || perm.id == "ohos.permission.READ_WRITE_DOCUMENTS_DIRECTORY")) {
+        qtConfirm({
+      title: "请用应用内选择目录",
+      content: "系统不向手机应用开放「下载目录 / 文档目录」授权（该权限仅 2in1 设备可用）。"
+        + "要保存到公共目录，请在「设置 → 下载设置 → 更改位置」里选一个目录，"
+        + "应用会记住这次授权。",
+      confirmText: "去设置",
+      cancelText: "取消",
+    }).then((ok: boolean) => {
+        if (ok) uni.navigateTo({ url: "/pages/download-settings/index", animationType: qtNavAnimation() });
+    });
+    return;
+  }
   const st = stateOf(perm.id);
   if (st != null && st.unknown) {
-    uni.showToast({ title: "本机查不到该权限状态，请在系统设置中确认", icon: "none" });
+    qtShowToast({ title: "本机查不到该权限状态，请在系统设置中确认", icon: "none" });
     return;
   }
   if (st != null && !st.applicable) {
-    uni.showToast({ title: "当前系统版本不需要该权限", icon: "none" });
+    qtShowToast({ title: "当前系统版本不需要该权限", icon: "none" });
     return;
   }
   if (perm.normal) {
-    uni.showToast({ title: "安装时即已授予，系统不提供开关", icon: "none" });
+    qtShowToast({ title: "安装时即已授予，系统不提供开关", icon: "none" });
     return;
   }
   // 悬浮窗是 ROM 差异最大的一个：vivo/小米/OPPO/华为 各把开关藏在自家管家应用里，
@@ -339,13 +634,13 @@ function onPermTap(perm: PermMeta): void {
   if (perm.id == "android.permission.SYSTEM_ALERT_WINDOW") {
     const okOverlay = desktopLyric.requestPermission();
     if (!okOverlay) {
-      uni.showToast({ title: "无法打开系统设置，请手动在应用权限页开启悬浮窗", icon: "none" });
+      qtShowToast({ title: "无法打开系统设置，请手动在应用权限页开启悬浮窗", icon: "none" });
     }
     return;
   }
   const ok = openPermissionSettings(perm.id);
   if (!ok) {
-    uni.showToast({ title: "无法打开系统设置，请手动在应用权限页开启", icon: "none" });
+    qtShowToast({ title: "无法打开系统设置，请手动在应用权限页开启", icon: "none" });
   }
 }
 
@@ -373,7 +668,7 @@ onShow(() => {
   border-radius: 24rpx;
   overflow: hidden;
 
-  border-width: 1px;
+  border-width: 1px; border-style: solid;
 
 }
 .cell {
@@ -381,7 +676,11 @@ onShow(() => {
   padding: 16rpx 32rpx;
   flex-direction: row;
   align-items: center;
-  border-bottom-width: 1px;
+  border-bottom-width: 1px; border-bottom-style: solid;
+}
+/* 桌面指针反馈：只在宽屏启用（手机上 hover-class 会在点按瞬间闪一下） */
+.cell-hover {
+  background-color: rgba(255, 255, 255, 0.06);
 }
 .cell-no-border {
   border-bottom-width: 0;
@@ -436,6 +735,23 @@ onShow(() => {
 .hint-text {
   font-size: 22rpx;
   line-height: 32rpx;
+}
+/* 两列：列内纵向堆叠、顶端对齐（默认 stretch 会把右列拉高露出分组底色） */
+.cols {
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: center;
+}
+.col {
+  flex-direction: column;
+}
+.col-right {
+  margin-left: 16px;
+}
+/* 两列里的分组不再带左右外边距：列宽已经把 24px 留白与 16px 间距算进去了 */
+.group-col {
+  margin-left: 0;
+  margin-right: 0;
 }
 .hint-text-wide {
   font-size: 12px;

@@ -1,0 +1,758 @@
+<template>
+  <qt-page-frame width-kind="list">
+    <view class="page" :class="themeStore.dark ? 'page-dark' : ''">
+      <!-- 顶部：标题 + 历史 + 新对话 -->
+      <view class="topbar" :class="[themeStore.dark ? 'topbar-dark' : '', layout.isWide ? 'topbar-wide' : '']">
+        <view class="topbar-main" :class="layout.isWide ? 'topbar-main-wide' : ''">
+          <text class="title" :class="layout.isWide ? 'title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(34, 19)">{{ agentName }}</text>
+          <text class="subtitle" :class="layout.isWide ? 'subtitle-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(22, 12)">说出想听的，我来挑歌</text>
+        </view>
+        <view class="topbar-actions" :class="layout.isWide ? 'topbar-actions-wide' : ''">
+          <view class="icon-btn" :class="layout.isWide ? 'icon-btn-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';'" @tap="toggleHistory">
+            <QtIcon name="clock" :size="layout.isWide ? 18 : 34" :color="themeStore.skin.iconMuted" />
+          </view>
+          <view class="icon-btn" :class="layout.isWide ? 'icon-btn-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';'" @tap="onNewConversation">
+            <QtIcon name="edit" :size="layout.isWide ? 18 : 34" :color="themeStore.skin.iconMuted" />
+          </view>
+        </view>
+      </view>
+
+      <!-- 历史会话浮层：只做选择/删除，不做重命名（重命名在长按里更省事，这里先不做） -->
+      <view v-if="historyOpen" class="history-mask" @tap="closeHistory">
+        <view class="history-panel" :class="[themeStore.dark ? 'history-panel-dark' : '', layout.isWide ? 'history-panel-wide' : '']" :style="'background-color:' + themeStore.skin.surface + ';' + historyPanelMaxHeight" @tap.stop="noop">
+          <text class="history-title" :class="layout.isWide ? 'history-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(27, 15)">历史对话</text>
+          <scroll-view class="history-list" direction="vertical" :show-scrollbar="false">
+            <view v-if="conversations.length == 0" class="history-empty">
+              <text class="history-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(24, 13)">还没有历史对话</text>
+            </view>
+            <view
+              v-for="c in conversations"
+              :key="c.id"
+              class="history-item"
+              :class="[layout.isWide ? 'history-item-wide' : '', c.id == activeConversationId ? 'history-item-active' : '']"
+              :style="c.id == activeConversationId ? 'background-color:' + themeStore.skin.accentSoft + ';' : ''"
+              @tap="onPickConversation(c.id)"
+            >
+              <text class="history-item-text" :class="layout.isWide ? 'history-item-text-wide' : ''" :max-lines="1" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 14)">{{ c.title.length > 0 ? c.title : '未命名对话' }}</text>
+              <view class="history-del" @tap.stop="onDeleteConversation(c.id)">
+                <QtIcon name="trash" :size="layout.isWide ? 16 : 30" :color="themeStore.skin.iconMuted" />
+              </view>
+            </view>
+          </scroll-view>
+        </view>
+      </view>
+
+      <!-- 主区：空态引导 or 消息流 -->
+      <view v-if="loading" class="center-block">
+        <QtLoading :visible="true" :size="layout.isWide ? 34 : 64" :color="themeStore.skin.accent" />
+      </view>
+
+      <view v-else-if="error.length > 0 && isEmpty" class="center-block">
+        <QtIcon name="alert" :size="layout.isWide ? 44 : 76" color="#c3c9d6" />
+        <text class="center-text" :class="layout.isWide ? 'center-text-wide' : ''" :style="qtFontDual(25, 14)">{{ error }}</text>
+        <view class="retry-btn" :class="layout.isWide ? 'retry-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @tap="onRetry">
+          <text class="retry-text" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(25, 14)">重试</text>
+        </view>
+      </view>
+
+      <scroll-view
+        v-else
+        class="msg-scroll"
+        direction="vertical"
+        :show-scrollbar="false"
+        :scroll-into-view="scrollAnchor"
+        :scroll-with-animation="true"
+        @scroll="onMsgScroll"
+      >
+        <!-- 空态：给几个可直接点的起点，比空白输入框友好 -->
+        <view v-if="isEmpty" class="intro" :class="layout.isWide ? 'intro-wide' : ''">
+          <QtIcon name="music" :size="layout.isWide ? 40 : 76" :color="themeStore.skin.accent" />
+          <text class="intro-title" :class="layout.isWide ? 'intro-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(30, 17)">想听什么？</text>
+          <text class="intro-sub" :class="layout.isWide ? 'intro-sub-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 13)">描述场景、心情或歌手，我会从你已装的音源里找歌</text>
+          <view class="chips" :class="layout.isWide ? 'chips-wide' : ''">
+            <view
+              v-for="(s, si) in suggestions"
+              :key="'sg' + si"
+              class="chip"
+              :class="layout.isWide ? 'chip-wide' : ''"
+              :style="'background-color:' + themeStore.skin.surfaceMuted + ';'"
+              @tap="onPickSuggestion(s)"
+            >
+              <text class="chip-text" :class="layout.isWide ? 'chip-text-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(23, 13)">{{ s }}</text>
+            </view>
+          </view>
+        </view>
+
+        <view
+          v-for="(m, mi) in messages"
+          :key="'m' + mi"
+          class="msg-row"
+          :class="[m.role == 'USER' ? 'msg-row-user' : 'msg-row-ai', layout.isWide ? 'msg-row-wide' : '']"
+        >
+          <!-- 用户气泡 -->
+          <view v-if="m.role == 'USER'" class="bubble-user" :class="layout.isWide ? 'bubble-user-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';' + bubbleUserMaxWidth">
+            <text class="bubble-user-text" :class="layout.isWide ? 'bubble-user-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(27, 15)">{{ m.content }}</text>
+          </view>
+
+          <!-- 助手气泡 -->
+          <view v-else class="bubble-ai" :class="[themeStore.dark ? 'bubble-ai-dark' : '', layout.isWide ? 'bubble-ai-wide' : '']" :style="'background-color:' + themeStore.skin.surface + ';' + bubbleAiMaxWidth">
+            <!-- 思考/工具进度 -->
+            <view v-if="m.progress.length > 0" class="typing" :class="layout.isWide ? 'typing-wide' : ''">
+              <QtLoading :visible="true" :size="layout.isWide ? 14 : 28" :color="themeStore.skin.accent" />
+              <text class="typing-text" :class="layout.isWide ? 'typing-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 13)">{{ m.progress }}</text>
+            </view>
+
+            <!-- 正文 -->
+            <text v-if="m.content.length > 0" class="bubble-ai-text" :class="layout.isWide ? 'bubble-ai-text-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(27, 15)">{{ m.content }}</text>
+
+            <!-- 结构化块：只美化认识的 song_list，其余类型按标题原样提示 -->
+            <view v-for="(b, bi) in m.blocks" :key="'b' + mi + '-' + bi" class="block" :class="layout.isWide ? 'block-wide' : ''">
+              <text v-if="b.type != 'song_list' && b.title.length > 0" class="block-title" :class="layout.isWide ? 'block-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 14)">{{ b.title }}</text>
+              <view v-if="b.type == 'song_list'" class="block-songs">
+                <qt-song-row-lite
+                  v-for="(s, sj) in songsOfBlock(b)"
+                  :key="'s' + mi + '-' + bi + '-' + sj"
+                  :song="s"
+                  :show-badge="true"
+                  @play="onPlaySong(s)"
+                  @more="onSongMore(s)"
+                />
+              </view>
+            </view>
+
+            <!-- 引用（答疑类智能体才会给，音乐助手一般没有；有就照实展示） -->
+            <view v-if="m.citations.length > 0" class="cites" :class="layout.isWide ? 'cites-wide' : ''">
+              <text class="cites-title" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">参考</text>
+              <text v-for="(c, ci) in m.citations" :key="'c' + mi + '-' + ci" class="cite-line" :max-lines="2" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(21, 12)">{{ (ci + 1) + '. ' + c.title }}</text>
+            </view>
+
+            <!-- 动作按钮：白名单由后端过滤，这里只负责执行与禁用态 -->
+            <view v-if="m.actions.length > 0" class="acts" :class="layout.isWide ? 'acts-wide' : ''">
+              <view
+                v-for="(a, ai) in m.actions"
+                :key="'a' + mi + '-' + ai"
+                class="act"
+                :class="[layout.isWide ? 'act-wide' : '', !canAction(a.type) ? 'act-off' : '']"
+                :style="canAction(a.type) ? 'border-color:' + themeStore.skin.accent + ';' : 'border-color:' + themeStore.skin.border + ';'"
+                @tap="onAction(a, mi)"
+              >
+                <text
+                  class="act-text"
+                  :class="layout.isWide ? 'act-text-wide' : ''"
+                  :style="(canAction(a.type) ? 'color:' + themeStore.skin.accent + ';' : 'color:' + themeStore.skin.textSubtle + ';') + qtFontDual(23, 13)"
+                >{{ actionText(a) }}</text>
+              </view>
+            </view>
+
+            <!-- 底部：状态 / 反馈 -->
+            <view class="ai-foot" :class="layout.isWide ? 'ai-foot-wide' : ''">
+              <text v-if="statusText(m.status).length > 0" class="ai-status" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">{{ statusText(m.status) }}</text>
+              <view v-else class="ai-foot-actions">
+                <view v-if="feedbackOn && m.id > 0" class="mini-btn" @tap="onLike(mi, true)">
+                  <QtIcon name="heart" :size="layout.isWide ? 14 : 28" :color="themeStore.skin.iconMuted" />
+                  <text class="mini-btn-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">有用</text>
+                </view>
+                <view v-if="feedbackOn && m.id > 0" class="mini-btn" @tap="onLike(mi, false)">
+                  <QtIcon name="ban" :size="layout.isWide ? 14 : 28" :color="themeStore.skin.iconMuted" />
+                  <text class="mini-btn-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">没用</text>
+                </view>
+              </view>
+            </view>
+          </view>
+        </view>
+
+        <!-- 滚动锚点：交替 id 强制造滚动到底 -->
+        <view :id="scrollAnchor" class="anchor" />
+      </scroll-view>
+
+      <!-- 输入区 -->
+      <view class="composer" :class="[themeStore.dark ? 'composer-dark' : '', layout.isWide ? 'composer-wide' : '']" :style="'background-color:' + themeStore.skin.surface + ';'">
+        <view class="composer-box" :class="layout.isWide ? 'composer-box-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';'">
+          <textarea
+            class="composer-input"
+            :class="layout.isWide ? 'composer-input-wide' : ''"
+            :value="draft"
+            :placeholder="sending ? '正在生成，可以先停一下' : '想听什么？'"
+            :placeholder-class="layout.isWide ? 'ph-wide' : 'ph'"
+            :maxlength="2000"
+            :auto-height="true"
+            :style="('color:' + themeStore.skin.text + ';') + qtFontDual(27, 15)"
+            @input="onDraftInput"
+          />
+        </view>
+        <view
+          v-if="sending"
+          class="send-btn"
+          :class="layout.isWide ? 'send-btn-wide' : ''"
+          :style="'background-color:' + themeStore.skin.surfaceStrong + ';'"
+          @tap="onStop"
+        >
+          <QtIcon name="pause" :size="layout.isWide ? 18 : 34" :color="themeStore.skin.text" />
+        </view>
+        <view
+          v-else
+          class="send-btn"
+          :class="[layout.isWide ? 'send-btn-wide' : '', draft.trim().length == 0 ? 'send-btn-off' : '']"
+          :style="'background-color:' + (draft.trim().length == 0 ? themeStore.skin.surfaceMuted : themeStore.skin.accent) + ';'"
+          @tap="onSend"
+        >
+          <QtIcon name="arrow-up" :size="layout.isWide ? 18 : 34" :color="draft.trim().length == 0 ? themeStore.skin.iconMuted : themeStore.skin.onAccent" />
+        </view>
+      </view>
+    </view>
+    <!-- 候选歌行「…」的操作表：useSongSheet 只管状态，渲染必须在这里补一份，
+         否则 onSongMore 只改内部 ref，用户看不到任何东西（审查发现的死按钮） -->
+    <QtActionSheet v-model:visible="songSheet.sheetVisible" :title="songSheet.sheetTitle()" :actions="songSheet.sheetActions" @select="songSheet.onSheetSelect" />
+  </qt-page-frame>
+</template>
+
+<script setup lang="ts">
+import { ref, computed } from "vue";
+import { onShow, onUnload } from "@dcloudio/uni-app";
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
+import QtSongRowLite from "@/uni_modules/qt-ui/components/qt-song-row-lite/qt-song-row-lite.uvue";
+import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtTrackPage } from "@/uni_modules/qt-stat";
+import { qtShowToast } from "@/services/toast";
+import { qtConfirm } from "@/services/confirm";
+import { usePlayerStore } from "@/stores/player";
+import { useSongSheet } from "@/composables/use-song-sheet";
+import { actionText, statusText, songsOfBlock, useAiChat } from "@/composables/use-ai-chat";
+import type { AiAction } from "@/types/ai";
+import type { Song } from "@/types/music";
+
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+
+// 鸿蒙端 max-width / max-height 不支持百分比（仅 number|pixel），历史面板高度与
+// 气泡上限改在脚本里换算成 px 绑定；Android 端百分比本可用，但同一份模板两端
+// 都要编译，按更严的约束写（同 sticky-section 的跨端处理）
+const historyPanelMaxHeight = computed((): string => "max-height:" + Math.floor(layout.windowHeight * 0.6) + "px;");
+const bubbleUserMaxWidth = computed((): string => "max-width:" + Math.floor(layout.windowWidth * (layout.isWide ? 0.62 : 0.78)) + "px;");
+const bubbleAiMaxWidth = computed((): string => "max-width:" + Math.floor(layout.windowWidth * (layout.isWide ? 0.72 : 0.88)) + "px;");
+const player = usePlayerStore();
+const songSheet = useSongSheet();
+
+const chat = useAiChat();
+const {
+  agent,
+  capabilities,
+  agentName,
+  conversations,
+  activeConversationId,
+  messages,
+  suggestions,
+  isEmpty,
+  loading,
+  sending,
+  error,
+} = chat;
+
+const draft = ref("");
+const historyOpen = ref(false);
+/** 交替锚点：同一个 id 反复赋值不会触发滚动，必须换 id */
+const scrollAnchor = ref("anchor-a");
+let anchorFlip = false;
+
+const feedbackOn = computed((): boolean => {
+  const c = capabilities.value;
+  return c != null ? c.feedbackEnabled : false;
+});
+
+/**
+ * 只放行这一端真的会执行的 4 类动作。
+ *
+ * 后端白名单还有 OPEN_ALBUM / OPEN_PLAYLIST，但本端没有对应详情页，
+ * 按钮置灰比点了没反应好——回执也就不会把「没做的事」记成采纳。
+ */
+function canAction(type: string): boolean {
+  return (
+    type == "PLAY_SONG" ||
+    type == "PLAY_LIST" ||
+    type == "ADD_TO_QUEUE" ||
+    type == "SEARCH_MUSIC" ||
+    type == "OPEN_ARTIST"
+  );
+}
+
+onShow(() => {
+  qtTrackPage("pages/ai-assistant/index");
+  // 只在首次进入初始化：重复 init 会把正在跑的对话清掉
+  if (agent.value == null) {
+    chat.init();
+  }
+});
+
+onUnload(() => {
+  chat.dispose();
+});
+
+function onDraftInput(e: InputEvent): void {
+  draft.value = String((e.detail as any).value ?? "");
+}
+
+function onPickSuggestion(text: string): void {
+  draft.value = text;
+  onSend();
+}
+
+function onSend(): void {
+  const text = draft.value.trim();
+  if (text.length == 0 || sending.value) return;
+  draft.value = "";
+  chat.send(text);
+  bumpAnchor();
+}
+
+function onStop(): void {
+  chat.stop();
+}
+
+function onRetry(): void {
+  chat.init();
+}
+
+/** 消息变了就滚到底（交替锚点） */
+function bumpAnchor(): void {
+  anchorFlip = !anchorFlip;
+  scrollAnchor.value = anchorFlip ? "anchor-b" : "anchor-a";
+}
+
+function onMsgScroll(): void {}
+
+function toggleHistory(): void {
+  historyOpen.value = !historyOpen.value;
+  if (historyOpen.value) chat.loadConversations();
+}
+
+function closeHistory(): void {
+  historyOpen.value = false;
+}
+
+function noop(): void {}
+
+function onPickConversation(id: number): void {
+  historyOpen.value = false;
+  chat.openConversation(id);
+}
+
+function onNewConversation(): void {
+  historyOpen.value = false;
+  draft.value = "";
+  chat.newConversation();
+}
+
+function onDeleteConversation(id: number): void {
+  qtConfirm({
+    title: "删除对话",
+    content: "删除后不可恢复，确定吗？",
+    confirmText: "删除",
+    danger: true,
+  }).then((ok) => {
+    if (ok) chat.removeConversation(id);
+  });
+}
+
+/**
+ * 把 song_list 块里的候选还原成本端 Song。
+ *
+ * 块里的 data.items 是后端原样落库的候选对象（sourceId/songId/name/...），
+ * 字段名与 `MusicCandidate` 一致，映射逻辑统一放在 composable 里。
+ */
+function onPlaySong(song: Song): void {
+  player.playSingle(song);
+}
+
+function onSongMore(song: Song): void {
+  songSheet.openSheet(song);
+}
+
+function onAction(action: AiAction, index: number): void {
+  if (!canAction(action.type)) {
+    qtShowToast({ title: "这个动作在本端还不支持", icon: "none" });
+    return;
+  }
+  chat.runAction(action, index);
+  bumpAnchor();
+}
+
+function onLike(index: number, good: boolean): void {
+  chat.like(index, good);
+}
+</script>
+
+<style>
+.page {
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+/* 顶部 */
+.topbar {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20rpx 28rpx 12rpx;
+}
+.topbar-main {
+  flex-direction: column;
+  flex: 1;
+}
+.title {
+  color: #191d26;
+  font-size: 34rpx;
+  font-weight: 600;
+}
+.subtitle {
+  margin-top: 4rpx;
+  color: #6b7385;
+  font-size: 22rpx;
+}
+.topbar-actions {
+  flex-direction: row;
+  align-items: center;
+}
+.icon-btn {
+  width: 64rpx;
+  height: 64rpx;
+  margin-left: 16rpx;
+  border-radius: 32rpx;
+  justify-content: center;
+  align-items: center;
+}
+
+/* 历史浮层 */
+.history-mask {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.35);
+  z-index: 20;
+  justify-content: center;
+  align-items: center;
+}
+.history-panel {
+  width: 78%;
+  background-color: #ffffff;
+  border-radius: 20rpx;
+  padding: 24rpx;
+  flex-direction: column;
+}
+.history-title {
+  color: #191d26;
+  font-size: 27rpx;
+  font-weight: 600;
+  margin-bottom: 12rpx;
+}
+.history-list {
+  flex-direction: column;
+}
+.history-empty {
+  padding: 40rpx 0;
+  justify-content: center;
+  align-items: center;
+}
+.history-empty-text {
+  color: #6b7385;
+  font-size: 24rpx;
+}
+.history-item {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20rpx 16rpx;
+  border-radius: 12rpx;
+}
+.history-item-text {
+  flex: 1;
+  color: #191d26;
+  font-size: 26rpx;
+}
+.history-del {
+  width: 56rpx;
+  height: 56rpx;
+  justify-content: center;
+  align-items: center;
+}
+
+/* 空态 / 错误 */
+.center-block {
+  flex: 1;
+  justify-content: center;
+  align-items: center;
+  padding: 60rpx 40rpx;
+}
+.center-text {
+  margin-top: 24rpx;
+  color: #6b7385;
+  font-size: 25rpx;
+  text-align: center;
+  line-height: 1.6;
+}
+.retry-btn {
+  margin-top: 28rpx;
+  padding: 16rpx 48rpx;
+  border-radius: 32rpx;
+  justify-content: center;
+  align-items: center;
+}
+.retry-text {
+  color: #ffffff;
+  font-size: 25rpx;
+  font-weight: 600;
+}
+
+/* 空态引导 */
+.intro {
+  padding: 60rpx 32rpx 20rpx;
+  justify-content: center;
+  align-items: center;
+}
+.intro-title {
+  margin-top: 24rpx;
+  color: #191d26;
+  font-size: 30rpx;
+  font-weight: 600;
+}
+.intro-sub {
+  margin-top: 10rpx;
+  color: #6b7385;
+  font-size: 23rpx;
+  text-align: center;
+  line-height: 1.5;
+}
+.chips {
+  margin-top: 28rpx;
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.chip {
+  margin: 8rpx;
+  padding: 14rpx 24rpx;
+  border-radius: 28rpx;
+  background-color: #f2f4f8;
+}
+.chip-text {
+  color: #191d26;
+  font-size: 23rpx;
+}
+
+/* 消息流 */
+.msg-scroll {
+  flex: 1;
+  min-height: 0;
+}
+.msg-row {
+  margin-top: 20rpx;
+  padding: 0 24rpx;
+}
+.msg-row-user {
+  align-items: flex-end;
+}
+.msg-row-ai {
+  align-items: flex-start;
+}
+.bubble-user {
+  padding: 18rpx 22rpx;
+  border-radius: 20rpx;
+  background-color: #4f7cf7;
+}
+.bubble-user-text {
+  color: #ffffff;
+  font-size: 27rpx;
+  line-height: 1.5;
+}
+.bubble-ai {
+  padding: 20rpx;
+  border-radius: 20rpx;
+  background-color: #ffffff;
+  flex-direction: column;
+}
+.bubble-ai-text {
+  color: #191d26;
+  font-size: 27rpx;
+  line-height: 1.6;
+}
+.typing {
+  flex-direction: row;
+  align-items: center;
+  margin-bottom: 12rpx;
+}
+.typing-text {
+  margin-left: 12rpx;
+  color: #6b7385;
+  font-size: 23rpx;
+}
+
+/* 结构化块 */
+.block {
+  margin-top: 16rpx;
+  flex-direction: column;
+}
+.block-title {
+  color: #191d26;
+  font-size: 26rpx;
+  font-weight: 600;
+  margin-bottom: 8rpx;
+}
+.block-songs {
+  flex-direction: column;
+}
+
+/* 引用 */
+.cites {
+  margin-top: 16rpx;
+  padding-top: 12rpx;
+  border-top-width: 1px;
+  border-top-style: solid;
+  border-top-color: #e8ebf2;
+  flex-direction: column;
+}
+.cites-title {
+  color: #8b93a6;
+  font-size: 21rpx;
+  margin-bottom: 6rpx;
+}
+.cite-line {
+  color: #6b7385;
+  font-size: 21rpx;
+  line-height: 1.5;
+}
+
+/* 动作 */
+.acts {
+  margin-top: 16rpx;
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.act {
+  margin: 8rpx 12rpx 0 0;
+  padding: 12rpx 22rpx;
+  border-radius: 26rpx;
+  border-width: 1px;
+  border-style: solid;
+  border-color: #4f7cf7;
+}
+.act-off {
+  border-color: #dfe3ec;
+}
+.act-text {
+  font-size: 23rpx;
+}
+
+/* 消息脚 */
+.ai-foot {
+  margin-top: 14rpx;
+  flex-direction: row;
+  align-items: center;
+}
+.ai-foot-actions {
+  flex-direction: row;
+  align-items: center;
+}
+.ai-status {
+  color: #8b93a6;
+  font-size: 21rpx;
+}
+.mini-btn {
+  flex-direction: row;
+  align-items: center;
+  margin-right: 24rpx;
+}
+.mini-btn-text {
+  margin-left: 6rpx;
+  color: #8b93a6;
+  font-size: 21rpx;
+}
+
+.anchor {
+  height: 24rpx;
+}
+
+/* 输入区 */
+.composer {
+  flex-direction: row;
+  align-items: flex-end;
+  padding: 16rpx 20rpx;
+  border-top-width: 1px;
+  border-top-style: solid;
+  border-top-color: #e8ebf2;
+  background-color: #ffffff;
+}
+.composer-box {
+  flex: 1;
+  padding: 14rpx 20rpx;
+  border-radius: 20rpx;
+  background-color: #f2f4f8;
+}
+.composer-input {
+  width: 100%;
+  max-height: 200rpx;
+  color: #191d26;
+  font-size: 27rpx;
+  line-height: 1.5;
+}
+.ph {
+  color: #9aa2b3;
+}
+.send-btn {
+  width: 72rpx;
+  height: 72rpx;
+  margin-left: 14rpx;
+  border-radius: 36rpx;
+  justify-content: center;
+  align-items: center;
+  background-color: #4f7cf7;
+}
+.send-btn-off {
+  background-color: #f2f4f8;
+}
+
+/* Vapor 宽屏：px 覆盖 rpx */
+.topbar-wide { padding: 14px 24px 8px; }
+.topbar-main-wide { flex-direction: column; }
+.title-wide { font-size: 19px; }
+.subtitle-wide { font-size: 12px; margin-top: 2px; }
+.topbar-actions-wide { flex-direction: row; }
+.icon-btn-wide { width: 34px; height: 34px; border-radius: 17px; margin-left: 8px; }
+.history-panel-wide { width: 420px; border-radius: 12px; padding: 14px; }
+.history-title-wide { font-size: 15px; margin-bottom: 6px; }
+.history-item-wide { padding: 10px 8px; border-radius: 8px; }
+.history-item-text-wide { font-size: 14px; }
+.center-text-wide { font-size: 14px; margin-top: 12px; }
+.retry-btn-wide { margin-top: 14px; padding: 9px 24px; border-radius: 16px; }
+.intro-wide { padding: 32px 24px 10px; }
+.intro-title-wide { font-size: 17px; margin-top: 12px; }
+.intro-sub-wide { font-size: 13px; margin-top: 5px; }
+.chips-wide { margin-top: 14px; flex-direction: row; }
+.chip-wide { margin: 4px; padding: 7px 12px; border-radius: 14px; }
+.chip-text-wide { font-size: 13px; }
+.msg-row-wide { margin-top: 12px; padding: 0 24px; }
+.bubble-user-wide { padding: 10px 14px; border-radius: 12px; }
+.bubble-user-text-wide { font-size: 15px; }
+.bubble-ai-wide { padding: 14px; border-radius: 12px; }
+.bubble-ai-text-wide { font-size: 15px; }
+.typing-wide { margin-bottom: 8px; }
+.typing-text-wide { font-size: 13px; margin-left: 8px; }
+.block-title-wide { font-size: 14px; margin-bottom: 4px; }
+.cites-wide { margin-top: 8px; padding-top: 6px; }
+.block-wide { margin-top: 8px; }
+.acts-wide { margin-top: 10px; flex-direction: row; }
+.act-wide { margin: 4px 8px 0 0; padding: 6px 12px; border-radius: 14px; }
+.act-text-wide { font-size: 13px; }
+.ai-foot-wide { margin-top: 8px; }
+.composer-wide { padding: 10px 20px; }
+.composer-box-wide { padding: 8px 12px; border-radius: 12px; }
+.composer-input-wide { font-size: 15px; max-height: 120px; }
+.send-btn-wide { width: 38px; height: 38px; border-radius: 19px; margin-left: 10px; }
+.ph-wide { color: #9aa2b3; }
+</style>

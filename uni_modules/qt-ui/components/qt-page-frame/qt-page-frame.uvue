@@ -1,5 +1,5 @@
 <template>
-  <view class="qt-page-frame" :style="rootStyle">
+  <view class="qt-page-frame" :style="rootStyle" @click="onFrameClick">
     <image
       v-if="backgroundImage.length > 0"
       class="qt-page-frame-wallpaper"
@@ -11,38 +11,909 @@
       class="qt-page-frame-overlay"
       :style="overlayStyle"
     />
-    <view class="qt-page-frame-content" :class="layout.isWide ? 'qt-page-frame-wide' : ''" :style="contentStyle">
-      <slot />
+    <!-- 宽屏全局左侧导航：挂在框架层，39 个页面一次覆盖。
+         导航是 position:fixed，页面切换时用宽屏瞬切（见 qt-nav.ts），
+         不再横向滑入；两页的 rail 同坐标重叠，于是它在任何页面看起来都是同一个、静止的。 -->
+    <qt-side-nav
+      v-if="showRail"
+      :current="currentRoute"
+      :dots="railDots"
+      :inset-top="true"
+    />
+    <view class="qt-page-frame-shell" :style="shellStyle">
+      <!-- 手机档标题栏。
+           全站 navigationStyle=custom 之后原生导航栏消失，返回键和页面标题都没有了。
+           宽屏不画（rail 就是导航、标题对桌面软件是噪音，用户明确要求「所有页面不需要
+           上面的标题」）；手机档必须有，否则二级页无处可退。 -->
+      <view v-if="showBar" class="qt-page-frame-bar" :style="barStyle">
+        <view
+          v-if="canGoBack"
+          class="qt-page-frame-back"
+          :hover-class="'qt-page-frame-back-hover'"
+          @click="onBack"
+        >
+          <!-- 竖屏 size 单位是 rpx（见 qt-icon.uvue：isWide ? px : rpx），44rpx 约 21px，
+               是标准返回键大小；原先写 22（rpx）只有约 11px，用户反馈「返回按钮太小」 -->
+          <QtIcon name="chevron-left" :size="layout.isWide ? 22 : 44" :color="theme.skin.text" />
+        </view>
+        <!-- 搜索态：标题栏原地换成一个搜索框（页面传 barSearching 才出现）。
+             这样「搜索」不再占列表一行，静态看列表就是纯列表。
+             输入框是**受控**的（:value 由页面持有），点右侧的关闭图标发 close 事件由页面清空收摊。 -->
+        <view
+          v-if="searching"
+          class="qt-page-frame-search"
+          :style="'background-color:' + theme.skin.surfaceMuted + ';border-color:' + theme.skin.border + ';'"
+        >
+          <view class="qt-page-frame-search-go" @click="onSearchConfirm">
+            <QtIcon name="search" :size="44" :color="theme.skin.textMuted" />
+          </view>
+          <input
+            class="qt-page-frame-search-input"
+            :value="barSearchValue"
+            :focus="true"
+            confirm-type="search"
+            @input="onSearchInput"
+            @confirm="onSearchConfirm"
+            :placeholder="barSearchPlaceholder"
+            :placeholder-class="'qt-page-frame-search-ph'"
+            :style="'color:' + theme.skin.text + ';'"
+          />
+          <view
+            v-for="(chipText, chipIndex) in headerChips"
+            :key="'qt-frame-chip-' + chipIndex"
+            class="qt-page-frame-chip"
+            :class="chipOn(chipIndex) ? 'qt-page-frame-chip-on' : ''"
+            :style="chipStyle(chipIndex)"
+            @click="onChipTap(chipIndex)"
+          ><text class="qt-page-frame-chip-text" :style="chipTextStyle(chipIndex)">{{ chipText }}</text></view>
+          <view class="qt-page-frame-search-clear" @click="onSearchClose">
+            <QtIcon name="close" :size="32" :color="theme.skin.textMuted" />
+          </view>
+        </view>
+        <template v-else>
+          <!-- 标题与右侧动作中间那一格：标题不画时它仍在，负责把动作推到右边。
+               headerChips 非空时这一格改画可横滑的药丸行（排行榜页的音源切换 tab），
+               标题让位：横屏一栏放不下「返回 + 标题 + N 个药丸」。 -->
+          <view class="qt-page-frame-mid">
+            <text
+              v-if="barTitle.length > 0 && headerChips.length == 0"
+              class="qt-page-frame-title"
+              :max-lines="1"
+              :style="('color:' + theme.skin.text + ';') + qtFont(34)"
+            >{{ barTitle }}</text>
+            <!-- 横滑 scroll-view 必须给显式 px 宽（见 measureChipRow）：
+                 flex:1 在标题栏这种自适应宽容器里解析不出，实测整条 0 宽 -->
+            <scroll-view
+              v-if="headerChips.length > 0"
+              class="qt-page-frame-chip-row"
+              :style="chipRowStyle"
+              direction="horizontal"
+              :show-scrollbar="false"
+              :scroll-left="chipScrollLeft"
+              :scroll-with-animation="true"
+              @scroll="onChipRowScroll"
+            >
+              <!-- 关键结构（对齐首页歌单架 shelf-scroll/shelf-row 的可用先例）：
+                   scroll-view 里必须再包一层「显式 px 宽的内行」，内容才真的可滚；
+                   不包的话子项被视口裁掉，滚不动也居中不了 -->
+              <view class="qt-page-frame-chip-inner" :style="'width:' + chipContentWidth + 'px;' + chipRowInline">
+                <view
+                  v-for="(chipText, chipIndex) in headerChips"
+                  :key="'qt-frame-barchip-' + chipIndex"
+                  class="qt-page-frame-chip qt-page-frame-barchip"
+                  :style="chipBoxInline"
+                  @click="onChipTap(chipIndex)"
+                ><text class="qt-page-frame-chip-text" :style="barChipTextStyle(chipIndex)">{{ chipText }}</text></view>
+              </view>
+            </scroll-view>
+          </view>
+          <!-- 页面动作图标（右侧）。只有显式传 headerActions 的页面才渲染，
+               其余页面一行都不多 —— 39 个页面的标题栏外观与改造前完全一致。 -->
+          <view v-if="actions.length > 0" class="qt-page-frame-actions">
+            <view
+              v-for="name in actions"
+              :key="name"
+              class="qt-page-frame-action"
+              :hover-class="'qt-page-frame-action-hover'"
+              @click="onAction(name)"
+            >
+              <QtIcon :name="name" :size="44" :color="theme.skin.icon" />
+            </view>
+          </view>
+        </template>
+      </view>
+      <view
+        class="qt-page-frame-content"
+        :class="framed ? 'qt-page-frame-wide' : ''"
+        :style="contentStyle"
+      >
+        <!-- 宽屏三栏的第 2 栏：**族总览本身**（设置页族是设置总览；我的页族是「我的」总览）。
+             用户要求（原话，设置族）：「设置页改为三个页面，左边导航栏，中间整体的设置页，
+             右边是如果设置页有新打开页面，则显示设置页下的页面」—— 我的页族沿用同一套
+             逻辑。中栏不是一列精简导航，而是与 hub 页完全相同的那一份总览（同一个组件，
+             数据、行尾摘要、红点全部实时），右栏才是从总览点开的子页。
+             这里只留一个 <slot />（不按分支各写一份）：Vapor 下同一组件的两个
+             分支各挂一份 slot，实际渲染的永远是先出现的那个。 -->
+        <view class="qt-page-frame-row" :class="showSplit ? 'qt-page-frame-row-split' : ''">
+          <view v-if="showSplit" class="qt-page-frame-snav" :style="snavStyle">
+            <!-- 总览页首次进入也必须占据三栏的中栏；否则第一次进入会先看到一张横跨两栏的旧式双列页，进入子页后又突然变成三栏。 -->
+            <qt-settings-overview
+              v-if="showSettingsSplit"
+              class="qt-page-frame-snav-body"
+              :in-pane="true"
+              :active-route="currentRoute"
+              :refresh-key="props.refreshKey"
+            />
+            <qt-profile-overview
+              v-else-if="showProfileSplit"
+              class="qt-page-frame-snav-body"
+              :in-pane="true"
+              :active-route="currentRoute"
+              :refresh-key="props.refreshKey"
+            />
+          </view>
+          <view class="qt-page-frame-pane" :class="showSettingsSplit && isSettingsOverview ? 'qt-page-frame-pane-empty' : ''">
+            <slot v-if="!showSettingsSplit || !isSettingsOverview" />
+            <view v-if="showSettingsSplit && isSettingsOverview" class="qt-page-frame-empty-pane" />
+          </view>
+        </view>
+      </view>
     </view>
+    <!-- 宽屏常驻底部播放栏：挂在框架层，10 个带 MiniPlayer 的页面一次覆盖。
+         改造前只有 72px 浮动圆球，桌面语义差（要先点球展开、再点条进页），
+         且逐页 import 导致 10 个挂载点各自维护位置状态。 -->
+    <qt-player-bar v-if="showPlayerBar" />
+    <!-- 紧凑/medium 悬浮播放球：挂在框架层，全站页面一次覆盖。
+         组件内部自带 v-if（有当前歌曲 + 非宽屏），沉浸页（播放页）由下面的
+         !fullWidth 排除。所有页面渲染 mini-player-singleton.ts 里的同一份
+         共享状态（位置/展开/旋转），页面进出不再有「显示权交接」的闪烁
+         （2026-10-24 改造，详见 mini-player-singleton.ts 头注释）。 -->
+    <qt-mini-player v-if="!fullWidth" />
+    <!-- 底部居中轻提示：挂在框架层，全站带 pages 的页面一次覆盖（详见 qt-toast-host 注释） -->
+    <qt-toast-host />
+    <!-- 应用内确认弹窗：替代 uni.showModal（原生弹窗不跟字号缩放、不跟深色主题） -->
+    <qt-confirm-host />
+    <!-- 应用内底部操作表：替代 uni.showActionSheet（原生弹窗不跟字号缩放、不跟深色主题） -->
+    <qt-action-sheet-host />
+    <!-- 首次启动免责声明：正文与读秒都由后台下发（判定见 stores/disclaimer.ts）。
+         挂在 slot 之后 = 同一 z-index 时压过页面自己的全屏弹窗（开屏公告 / 升级弹窗），
+         首启时三个浮层可能同时排队，声明必须是最后看到的那一层。 -->
+    <qt-first-run-disclaimer
+      :visible="disclaimerStore.visible"
+      :notice="disclaimerStore.notice"
+      @accepted="onDisclaimerAccepted"
+    />
   </view>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtLayout, qtStatusBarPx, qtRpx, QT_PLAYER_BAR_HEIGHT_PX } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import {
+  qtContentWidthRaw,
+  qtContentPadLeft,
+  qtPushContentWidthCap,
+  qtUpdateContentWidthCap,
+  qtClearContentWidthCap,
+  QT_SPLIT_NAV_WIDTH,
+  QT_SPLIT_NAV_GAP,
+  QT_SPLIT_PANE_MIN,
+} from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import {
+  qtPageHasSelfHeader,
+  qtPageTitleless,
+  qtCurrentPageTitle,
+  qtPageStackDepth,
+  qtIsSettingsRoute,
+  qtIsProfileRoute,
+  qtTopRoute,
+} from "@/uni_modules/qt-ui/composables/qt-page-chrome";
+import {
+  qtWideToolActive,
+  qtWideToolRoute,
+  qtIsWideToolHost,
+} from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
+import { qtNavAnimation, qtSwitchTab } from "@/uni_modules/qt-ui/composables/qt-nav";
+import { qtFont, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { useSourceUpdateStore } from "@/stores/source-update";
+import { usePlayerStore } from "@/stores/player";
+import { useDisclaimerStore } from "@/stores/disclaimer";
+import QtToastHost from "@/uni_modules/qt-ui/components/qt-toast-host/qt-toast-host.uvue";
+import QtConfirmHost from "@/uni_modules/qt-ui/components/qt-confirm-host/qt-confirm-host.uvue";
+import QtActionSheetHost from "@/uni_modules/qt-ui/components/qt-action-sheet-host/qt-action-sheet-host.uvue";
+import QtFirstRunDisclaimer from "@/uni_modules/qt-ui/components/qt-first-run-disclaimer/qt-first-run-disclaimer.uvue";
+import QtSideNav from "@/uni_modules/qt-ui/components/qt-side-nav/qt-side-nav.uvue";
+import QtPlayerBar from "@/uni_modules/qt-ui/components/qt-player-bar/qt-player-bar.uvue";
+import QtMiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
+import QtSettingsOverview from "@/uni_modules/qt-ui/components/qt-settings-overview/qt-settings-overview.uvue";
+import QtProfileOverview from "@/uni_modules/qt-ui/components/qt-profile-overview/qt-profile-overview.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 
+/**
+ * 页面外壳（内容宽度政策 + 全局导航 + 常驻底栏 + 标题栏）。
+ *
+ * 宽度政策：`widthKind` 决定档位上限（见 use-qt-widths.ts 的 WIDTH_RANGES），
+ * `maxWidth` 只能收紧不能放宽，`fullWidth` 完全不限宽（沉浸媒体页）。
+ * 内容列居中位置减掉 rail，不再让窄内容列压到左侧导航上。
+ */
 const props = defineProps<{
-  /** 宽屏时内容列的最大宽度（px / dp），仅在窗口比它更宽时生效 */
+  /** 内容形态档位，决定宽度上限；默认 flow（分组卡片流，最大 1440） */
+  widthKind?: string;
+  /** 额外收紧上限（px）；仅在上限比档位上限更小时生效 */
   maxWidth?: number;
-  /** 沉浸式页面不限制内容列宽度 */
+  /** 沉浸式页面：不限宽，也不减 rail（由页面自己做布局） */
   fullWidth?: boolean;
+  /** 兼容旧调用方保留（全站 custom 后 rail 恒为状态栏让位） */
+  insetTop?: boolean;
+  /** 高亮用的路由；不传则由 getCurrentPages() 推断 */
+  current?: string;
+  /** 手机档标题；不传则按路由取 qt-page-chrome 里的静态表 / 运行期覆盖值 */
+  title?: string;
+  /** 宿主页面显示时递增；设置总览中栏也要跟着重新对账 */
+  refreshKey?: number;
+  /**
+   * 标题是否显示。默认 true（所有既有页面不变）。
+   * 传 false 时标题栏只留返回键与右侧动作 —— 给「标题由页面自己决定何时出现」的
+   * 页面用（歌单详情：未吸顶前不显示标题，吸顶后才显示）。
+   * 与 `title` 的区别：`title` 管文案，这个管「画不画」；传空串的 title 仍会回落到
+   * 静态标题表，所以不能用空串表达「不显示」。
+   */
+  headerTitleVisible?: boolean;
+  /**
+   * 标题栏右侧的动作图标名（QtIcon 的 name，见 services/icons.ts）。
+   * 不传或空数组时不渲染任何按钮，标题栏与改造前完全一致。
+   */
+  headerActions?: string[];
+  /** 标题栏是否原地切换成搜索框（页面持有输入值与开关状态） */
+  headerSearching?: boolean;
+  /** 搜索框受控值 */
+  headerSearchValue?: string;
+  /** 搜索框占位文案 */
+  headerSearchPlaceholder?: string;
+  /**
+   * 搜索框右侧的文字小药丸（与输入框同排）。搜索页把「音源切换」「聚合搜索开关」
+   * 收进标题栏时用；不传不渲染，既有页面不受影响。
+   */
+  headerChipTexts?: string[];
+  /** 各药丸的选中态（与 headerChipTexts 按下标对应）；选中 = accent 底 */
+  headerChipActives?: boolean[];
+}>();
+
+const emit = defineEmits<{
+  /** 点了右侧动作图标；回传图标名，页面自己分发 */
+  headerAction: [name: string];
+  /** 搜索框输入；回传当前文本（页面负责写回 headerSearchValue） */
+  headerSearchInput: [value: string];
+  /** 点了搜索框里的关闭图标：页面清空关键词并关闭搜索态 */
+  headerSearchClose: [];
+  /** 搜索提交：点左侧放大镜或键盘的「搜索」键 */
+  headerSearchConfirm: [];
+  /** 点了第 index 个药丸 */
+  headerChipTap: [index: number];
 }>();
 
 const theme = useThemeStore();
 const layout = useQtLayout(720);
-const maxWidth = computed((): number => props.maxWidth != null ? props.maxWidth! : 1280);
+
+/**
+ * 首次启动免责声明。放在 store 里而不是组件里：`qt-page-frame` 在每个页面各挂一份，
+ * 而「该不该弹」只能有一份判断，不能让每个页面各算各的（否则同一条声明会弹多次）。
+ */
+const disclaimerStore = useDisclaimerStore();
+function onDisclaimerAccepted(): void {
+  // 用函数包一层而不是直接传 `disclaimerStore.accept`：模板里传方法引用会丢 `this`，
+  // 而 accept() 要读写组件内的 pending / notice。
+  disclaimerStore.accept();
+}
+const sourceUpdateStore = useSourceUpdateStore();
+
+/**
+ * rail 红点：音源包有新包待生效时给「我的」亮红点。
+ * 原来只有 home / profile 各自算一份（`sourceUpdateStore.updatePending`），
+ * 现在 rail 由框架统一挂，红点也必须上收到框架，否则从别的页面进 rail 时红点消失。
+ */
+const railDots = computed((): string[] => sourceUpdateStore.updatePending ? ["/pages/profile/index"] : []);
+
 const fullWidth = computed((): boolean => props.fullWidth == true);
+const kind = computed((): string => props.widthKind != null && props.widthKind.length > 0 ? props.widthKind! : "flow");
+
+/**
+ * 被托管的工具页要把「自己是谁」在 setup 阶段固定下来。
+ *
+ * 宽屏工具入口走 qt-wide-workspace 的**就地托管**（同窗口换内容，不新建 Activity，
+ * 因此没有系统起始窗白帧）。工具页此时是 page-as-component 形态：页面栈顶仍是宿主 tab
+ * 页，`getCurrentPages()` 推断出来的是**宿主**路由 —— rail 高亮、设置三栏、宽度档位会
+ * 全错。这里在 setup 时读一次托管状态，只有「托管进行中 + 栈顶就是宿主页」这个时机
+ * 创建出来的框架层（也就是覆盖层里那一份）才认领工具路由：
+ *   - 宿主页自己的框架层早在托管开始前就创建了 → 空串，行为完全不变；
+ *   - 从工具页里再跳出去的普通页面（歌曲页、歌单页……）栈顶不是宿主页 → 空串，正确；
+ *   - 覆盖层里每个工具页只在首次打开时创建一次，各自认领自己的路由；保活机制下
+ *     切换工具不再重建组件（见 qt-wide-workspace.uvue），认领结果持续有效。
+ */
+const hostedRoute = (qtWideToolActive() && qtIsWideToolHost(qtTopRoute())) ? qtWideToolRoute() : "";
+
+/** 宽屏才挂 rail；沉浸页与显式禁用的页面不挂 */
+const showRail = computed((): boolean => layout.isWide && !fullWidth.value);
+
+/**
+ * 宽屏常驻底栏。
+ * 沉浸页（播放页）自己有一整套播放控制，再贴一条底栏是重复的；
+ * 其余宽屏页面统一挂载，页面里原来的 qt-mini-player 在宽屏下不再渲染浮动球
+ * （见 qt-mini-player.uvue 的 v-if 里 `!layout.isWide`），避免两套播放入口并存。
+ * 没有当前歌曲时不挂、也不留底部空带 —— 否则每页底部都多出一条 64px 死区。
+ */
+const player = usePlayerStore();
+const showPlayerBar = computed((): boolean => layout.isWide && !fullWidth.value && player.current != null);
+
+/**
+ * 当前路由：优先用调用方传的，否则从页面栈推断。
+ * 页面栈在 setup 阶段已就绪（uni-app x 的页面实例先入栈再渲染）。
+ */
+const currentRoute = computed((): string => {
+  if (props.current != null && props.current.length > 0) return props.current!;
+  // 就地托管的工具页：路由由托管状态给定，不能从页面栈推断（栈顶是宿主 tab 页）
+  if (hostedRoute.length > 0) return hostedRoute;
+  try {
+    const pages = getCurrentPages();
+    if (pages.length > 0) {
+      const r = pages[pages.length - 1].route;
+      if (r != null) return "/" + r;
+    }
+  } catch (_) {}
+  return "";
+});
+
+/**
+ * 页面是否自带顶部区域（发现 / 我的 / 播放页）。
+ * 这三页自己已经加了状态栏留白，框架再加一次会出现一条空白带。
+ */
+const selfHeader = computed((): boolean => qtPageHasSelfHeader(currentRoute.value));
+
+/** 是否需要「限宽 + 居中」：沉浸页和手机档都不限宽 */
+const framed = computed((): boolean => !fullWidth.value && layout.isWide);
+
+/* 三栏几何契约（设置页族与我的页族共用）：中栏 400 / 间距 16 / 右栏最小 460，
+   统一从 use-qt-widths.ts 引入；页面侧的 qtSplitActive 用同一组数字判三栏是否启用。 */
+
+/**
+ * 最终内容列宽度：档位上限与页面收紧值取小。
+ * **必须走 qtContentWidthRaw**：设置页族的三栏外壳会通过 qtPushContentWidthCap 把
+ * 内容宽度限制成右栏宽（见 use-qt-widths.ts），框架若读被限制后的值，内容列会被
+ * 越缩越小（外壳缩 → 框架缩 → 外壳再缩）。
+ */
+const contentWidthPx = computed((): number => {
+  // 设置/我的页族宽屏三栏：内容列宽统一按 flow 档算，不受子页自己的 width-kind 与
+  // `max-width` 影响。这两样都是「整页单栏」时代的可读性收窄 —— logs 用 prose
+  // （上限 640）、source-pack / dislikes 传 max-width 720 —— 留着它们会让三栏
+  // 判据 400+16+460=876 永远不成立，从总览点进这些子页时整页铺开、中栏
+  // 直接消失（真机实测）。三栏形态下可读性由右栏自己承接，不需要整页收窄。
+  if (layout.isWide && (qtIsSettingsRoute(currentRoute.value) || qtIsProfileRoute(currentRoute.value))) {
+    const flowWidth = qtContentWidthRaw("flow");
+    if (flowWidth >= QT_SPLIT_NAV_WIDTH + QT_SPLIT_NAV_GAP + QT_SPLIT_PANE_MIN) return flowWidth;
+  }
+  const cap = qtContentWidthRaw(kind.value);
+  if (props.maxWidth == null) return cap;
+  return props.maxWidth < cap ? props.maxWidth : cap;
+});
+
 const backgroundImage = computed((): string => theme.skin.backgroundImage != null ? theme.skin.backgroundImage : "");
 const rootStyle = computed((): string => "background-color:" + theme.skin.background + ";");
 const overlayStyle = computed((): string => "background-color:" + theme.skin.overlay + ";");
+
+/**
+ * 宽屏必须让出状态栏：全站 custom 后页面区从窗口顶缘开始，内容列直接顶到
+ * 时间/信号图标下面。窄屏由下面的标题栏自己让位，所以只在宽屏加。
+ */
+const shellStyle = computed((): string => {
+  if (!layout.isWide) return "";
+  if (selfHeader.value) return "";
+  return "padding-top:" + qtStatusBarPx() + "px;";
+});
+
+/** 手机档标题栏：宽屏不画；自带顶部区域的页面不画；沉浸页不画 */
+const showBar = computed((): boolean => {
+  if (layout.isWide) return false;
+  if (fullWidth.value) return false;
+  if (selfHeader.value) return false;
+  return true;
+});
+
+const barStyle = computed((): string => {
+  const sb = qtStatusBarPx();
+  // 高度必须显式算上状态栏让位：uni-app x 默认 border-box（css_diff_web.md:32，
+  // 与 Web 的 content-box 相反），固定 44px 会把 padding-top 也算进 44 里，
+  // 内容区只剩 44-状态栏 的窄条，返回键和标题被上下裁掉（真机截图实证：
+  // 标题只露出下半截）。sb 取不到（0）时退化为原来的 44。
+  // 内容区高走 qtRpx(88)：与 .qt-page-frame-back 的 88rpx 同源，宽窗口下随整页放大
+  // （原来写死 44px，720dp 窗口上标题栏只占 3.4% 高度、看起来极小）。
+  const barBody = qtRpx(88);
+  return "height:" + (sb + barBody) + "px;padding-top:" + sb + "px;background-color:" + theme.skin.background + ";border-bottom-color:" + theme.skin.divider + ";";
+});
+
+/**
+ * 标题文字。`qtPageTitleless` 的页面（音乐助手）自带头部文案，
+ * 这里只留返回箭头、不写标题，避免双标题。
+ */
+const barTitle = computed((): string => {
+  if (qtPageTitleless(currentRoute.value)) return "";
+  // 显式关掉标题的页面：连静态表都不查（歌单详情吸顶前就是这样）
+  if (props.headerTitleVisible === false) return "";
+  if (props.title != null && props.title.length > 0) return props.title!;
+  return qtCurrentPageTitle(currentRoute.value);
+});
+
+/**
+ * 标题栏右侧动作图标。
+ *
+ * 为什么用 props 传图标名数组、再发一个 `headerAction` 事件回页面，而不是插槽：
+ * 全仓 39 个 .uvue 里**没有任何具名插槽**用例（`<slot />` 只有 3 处，且都是默认插槽），
+ * 而 Vapor 运行时对同一组件多分支各挂一份 slot 的行为有已知坑（见本文件 L76 注释）。
+ * 给框架加具名插槽等于让 39 个页面共用的外壳走一条没人验证过的编译路径，风险远大于收益。
+ * 图标名 + 事件则完全落在既有能力里（QtIcon 的 ICON_BODIES、组件的 defineEmits）。
+ */
+const actions = computed((): string[] => props.headerActions != null ? props.headerActions! : []);
+
+/** 搜索态：标题栏原地换成搜索框 */
+const searching = computed((): boolean => props.headerSearching == true);
+const barSearchValue = computed((): string => props.headerSearchValue != null ? props.headerSearchValue! : "");
+const barSearchPlaceholder = computed((): string =>
+  props.headerSearchPlaceholder != null && props.headerSearchPlaceholder!.length > 0
+    ? props.headerSearchPlaceholder!
+    : "搜索"
+);
+
+function onAction(name: string): void {
+  emit("headerAction", name);
+}
+
+function onSearchInput(e: InputEvent): void {
+  emit("headerSearchInput", String((e.detail as any).value ?? ""));
+}
+
+function onSearchClose(): void {
+  emit("headerSearchClose");
+}
+
+/** 搜索框右侧药丸（音源切换 / 聚合开关这类「开关型」入口收进标题栏用） */
+const headerChips = computed((): string[] => props.headerChipTexts != null ? props.headerChipTexts! : []);
+function chipOn(index: number): boolean {
+  const acts = props.headerChipActives;
+  return acts != null && index < acts.length && acts[index] == true;
+}
+function chipStyle(index: number): string {
+  return chipOn(index)
+    ? "background-color:" + theme.skin.accent + ";border-color:" + theme.skin.accent + ";"
+    : "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";";
+}
+function chipTextStyle(index: number): string {
+  return "color:" + (chipOn(index) ? theme.skin.onAccent : theme.skin.textMuted) + ";";
+}
+
+/** 非搜索态标题栏的「文字 tab」样式（用户定稿，QQ 音乐那种：无底无框，
+ *  选中 = 主题色加粗，未选中 = 弱化灰）——和搜索框里的药丸是两套外观。
+ *  字号走 chipFontRpx（放不下时 measureChipRow 会逐档调小，保证全称 tab 能整行放下）。
+ *
+ *  行高/盒子高必须跟着字号一起算：类里的 .qt-page-frame-chip-text 固定
+ *  line-height:30rpx，而 tab 字号走 qtFont（标准档 30rpx × 1.15 ≈ 34.5rpx），
+ *  行高小于字号时字形上下会被裁掉 —— 用户报的「上下没显示全」就是这个，
+ *  跟左右宽度无关。 */
+const chipLineRpx = computed((): number => {
+  const scaled = chipFontRpx.value * fontScale.scale;
+  return Math.round(scaled * 1.35 * 100) / 100;
+});
+/** chip 盒子高（rpx）：行高 + 上下 4rpx 呼吸位，下限 52rpx（与搜索框同档） */
+const chipBoxRpx = computed((): number => {
+  const h = chipLineRpx.value + 8;
+  return h > 52 ? h : 52;
+});
+/** chip 行 / 内行高（rpx）：盒子高 + 12rpx 留白，下限 64rpx */
+const chipRowRpx = computed((): number => {
+  const h = chipBoxRpx.value + 12;
+  return h > 64 ? h : 64;
+});
+const chipBoxInline = computed((): string => {
+  return "height:" + chipBoxRpx.value + "rpx;background-color:transparent;border-width:0;";
+});
+const chipRowInline = computed((): string => {
+  return "height:" + chipRowRpx.value + "rpx;";
+});
+
+function barChipTextStyle(index: number): string {
+  const on = chipOn(index);
+  return "color:" + (on ? theme.skin.accent : theme.skin.textMuted)
+    + ";font-weight:" + (on ? "600" : "400")
+    + ";line-height:" + chipLineRpx.value + "rpx;"
+    + qtFont(chipFontRpx.value);
+}
+function onSearchConfirm(): void {
+  emit("headerSearchConfirm");
+}
+function onChipTap(index: number): void {
+  emit("headerChipTap", index);
+  // 点谁就立刻居中谁，不等 props 回传：父组件把 actives 更新回来再靠 watch 兜底，
+  // 但 props 数组的深 watch 在 uvue 里不保证触发（实测切源后不滚），这里主动滚
+  centerChipIndex(index);
+}
+
+// ── 标题栏药丸行：实测宽度 + 选中项居中（用户定稿「能左右滚动，选择项居中」）──
+const chipRowWidth = ref(0);
+// 内行真实内容宽（实测）：估算值偏小会让 scroll-view 以为「装得下」→ 不能滑 + 尾字符被裁
+const chipContentMeasured = ref(0);
+// 各 tab 在内容坐标系里的实测左缘（centerChipIndex 优先用，估算只作兜底）
+const chipLefts = ref<number[]>([]);
+// 标题栏 tab 字号档（rpx 基准，qtFont 会再乘全局字号倍率）。
+// 从大到小排；预测/实测都只在这三档里取，落到最小档仍放不下才靠横滑。
+const CHIP_FONT_TIERS_RPX: number[] = [30, 28, 26];
+
+/** 可用行宽（px，与 layout.windowWidth 同单位）：窗口宽 − 返回键 − 栏内边距 − 右侧动作。
+ *  标题栏结构是固定的（.qt-page-frame-bar 里 返回键 + flex:1 的 mid + 动作图标），
+ *  所以这一格宽度首帧就能算出来，不用等 boundingClientRect。
+ *  换算用 layout.windowWidth（与 CSS rpx 同源，见 use-qt-layout 的 qtRpx 注释），
+ *  这样窗口一变宽度，预测档位就跟着重算。 */
+const chipRowAvailPx = computed((): number => {
+  const u = layout.windowWidth / 750;
+  let w = layout.windowWidth - (88 + 8 + 24) * u;
+  const acts = props.headerActions;
+  if (acts != null) w -= acts.length * 88 * u;
+  return w > 0 ? w : 0;
+});
+
+/** 单颗 tab 在给定基准字号下的估算宽（px）：CJK ≈ 1em，ASCII ≈ 0.56em，
+ *  加左右内边距（10rpx×2）与左边距（6rpx）。字号变了估算值也跟着变。 */
+function chipEstWidthAt(label: string, baseRpx: number): number {
+  const rpxPx = layout.windowWidth / 750;
+  const fontPx = baseRpx * fontScale.scale * rpxPx;
+  let w = (10 + 10 + 6) * rpxPx;
+  for (let c = 0; c < label.length; c++) {
+    w += label.charCodeAt(c) > 255 ? fontPx : fontPx * 0.56;
+  }
+  return w;
+}
+
+function estimateChipsWidth(baseRpx: number): number {
+  let total = 4;
+  for (let i = 0; i < headerChips.value.length; i++) total += chipEstWidthAt(headerChips.value[i], baseRpx);
+  return total;
+}
+
+/** 首帧就该是最终字号：**预测**能放下的最大档，而不是先按最大档渲染、量完再降档。
+ *  用户报的「进去和最终效果不一样」就是这个跳变：进去时 30 档只露出 3 颗，
+ *  量完降档后变成 5 颗一行。预测只看窗口宽/字数/字号倍率，全部首帧可知，
+ *  所以第一帧渲染出来就是降档后的样子。 */
+const chipFontPredictedRpx = computed((): number => {
+  const avail = chipRowAvailPx.value;
+  if (avail <= 0 || headerChips.value.length == 0) return CHIP_FONT_TIERS_RPX[0];
+  // 1.05 安全余量：估算按「CJK = 1em」取值，个别字形的实际宽度会比 1em 略宽。
+  // 宁可预测得保守一点（一次就落到最终档），也不要先渲染大一档、200ms 后再降档跳一下。
+  for (let i = 0; i < CHIP_FONT_TIERS_RPX.length; i++) {
+    if (estimateChipsWidth(CHIP_FONT_TIERS_RPX[i]) * 1.05 <= avail) return CHIP_FONT_TIERS_RPX[i];
+  }
+  return CHIP_FONT_TIERS_RPX[CHIP_FONT_TIERS_RPX.length - 1];
+});
+
+/** 实测兜底的降档结果（0 = 没降）。预测毕竟按字宽估，某个字形宽的音源名仍可能超宽，
+ *  这时 measureChipRow 实测再降一档 —— 只会比预测更小，不会跳回去。 */
+const chipFontMeasuredRpx = ref(0);
+const chipFontRpx = computed((): number => {
+  const base = chipFontPredictedRpx.value;
+  const m = chipFontMeasuredRpx.value;
+  return m > 0 && m < base ? m : base;
+});
+const chipScrollLeft = ref(0);
+// 用户手动横滑后的真实偏移：scroll 事件里只写普通变量（不写 ref，避免每次滚动
+// 都回写 :scroll-left 跟用户抢滚动），居中计算时用它当基准
+let chipLeftNow = 0;
+// 宽度实测后显式给；高度同理按字号算（固定 64rpx 在大字号档下会把 tab 上下裁掉）
+const chipRowStyle = computed((): string => {
+  const w = chipRowWidth.value > 0 ? "width:" + chipRowWidth.value + "px;" : "flex:1;";
+  return w + "height:" + chipRowRpx.value + "rpx;";
+});
+let chipMeasureTimer = 0;
+
+/** 单个 tab 的估算宽度（px）：按当前生效字号算（见 chipEstWidthAt），
+ *  仅作实测前的初值，真实内容宽由 measureChipRow() 实测后覆盖 */
+function chipEstWidth(label: string): number {
+  return chipEstWidthAt(label, chipFontRpx.value);
+}
+
+/** 内行显式宽：优先用实测（量最后一颗 tab 的右缘），还没量到时退回估算 + 余量 */
+const chipContentWidth = computed((): number => {
+  if (chipContentMeasured.value > 0) return chipContentMeasured.value;
+  let total = 12;
+  for (let i = 0; i < headerChips.value.length; i++) total += chipEstWidth(headerChips.value[i]);
+  return total;
+});
+
+function onChipRowScroll(e: any): void {
+  const d = e.detail != null ? e.detail : null;
+  if (d != null) chipLeftNow = Number(d.scrollLeft ?? 0);
+}
+
+/** 量出药丸行真实宽度（scroll-view 的显式 px 宽）+ 内行真实内容宽，随后把选中 tab 滚到行中央 */
+function measureChipRow(attempt: number): void {
+  if (headerChips.value.length == 0) return;
+  let rowLeft = -1;
+  const query = uni.createSelectorQuery();
+  query.select(".qt-page-frame-chip-row").boundingClientRect((rect: UniNodeInfo | null) => {
+    if (rect != null && rect.width > 0) {
+      chipRowWidth.value = rect.width;
+      rowLeft = Number(rect.left);
+      centerActiveChip(rect.width);
+      return;
+    }
+    if (attempt < 3) {
+      chipMeasureTimer = setTimeout(() => { measureChipRow(attempt + 1); }, 150) as unknown as number;
+    } else {
+      // 实测失败兜底：行宽按「窗口宽 - 返回键（88rpx≈44px）」估
+      chipRowWidth.value = 0;
+      centerActiveChip(layout.windowWidth - 44);
+    }
+  });
+  // 内行宽不能靠估算（字号缩放/字形宽度都会让估算偏小：尾部字符被裁 + scroll-view
+  // 以为装得下 → 滚不动），量最后一颗 tab 的右缘相对行左缘的距离；顺带记下每颗
+  // tab 的实测左缘，居中计算就不用按字数猜宽度了。
+  //
+  // 坐标换算必须加 scrollLeft：boundingClientRect 给的是**屏幕坐标**，行一旦滚动过，
+  // chip 的屏幕位置就整体左移，直接用 rect.left - row.left 当「内容坐标」会把每颗
+  // tab 的位置都算小一个 scrollLeft，居中越滚越偏（实测表现为选中第一项时左边被
+  // 裁掉半个 tab）。chipLeftNow 是 @scroll 里记的当前偏移，正好用来还原。
+  query.selectAll(".qt-page-frame-barchip").boundingClientRect((rects: UniNodeInfo[]) => {
+    if (rowLeft < 0 || rects.length == 0) return;
+    const offset = chipLeftNow;
+    const lefts: number[] = [];
+    for (let i = 0; i < rects.length; i++) lefts.push(Number(rects[i].left) - rowLeft + offset);
+    chipLefts.value = lefts;
+    const measured = Number(rects[rects.length - 1].right) - rowLeft + offset;
+    if (measured > 0) chipContentMeasured.value = measured + 2;
+    // 放不下就降一档字号再测（降档会改变实测值，靠 watch(chipFontRpx) 触发下一轮）
+    fitChipFont(measured, chipRowWidth.value, lefts.length);
+  });
+  query.exec();
+}
+
+/**
+ * 实测兜底降档：**只在预测之外**再降一档。
+ *
+ * 字号档首选由 chipFontPredictedRpx 首帧预测（窗口宽 + 字数 + 字号倍率全部可知），
+ * 所以正常情况这里永远不会触发 —— 用户看到的进去/最终一致。
+ * 但估算毕竟按「CJK = 1em」估，遇到全角标点密集或超长音源名仍可能超宽，
+ * 这时按实测再降一档（只降不升，不会再跳回去）。降到最小档仍放不下就靠横滑。
+ */
+function fitChipFont(contentWidth: number, rowWidth: number, chipCount: number): void {
+  if (contentWidth <= 0 || rowWidth <= 0 || chipCount != headerChips.value.length) return;
+  // 布局未稳定时的实测值不可信（刚 mount / 旋转中是 0 或很小的过渡值）：
+  // 行宽小到不可能装下任何 tab 时直接跳过，免得误降档
+  if (rowWidth < 100) return;
+  if (contentWidth <= rowWidth) return; // 放得下，保持当前档
+  const cur = chipFontRpx.value;
+  let idx = CHIP_FONT_TIERS_RPX.indexOf(cur);
+  if (idx < 0) idx = 0;
+  if (idx + 1 >= CHIP_FONT_TIERS_RPX.length) return; // 已是最小档，横滑兜底
+  chipFontMeasuredRpx.value = CHIP_FONT_TIERS_RPX[idx + 1];
+  chipContentMeasured.value = 0;
+  chipLefts.value = [];
+}
+
+/**
+ * 选中 tab 滚到行中央。各 tab 宽度用估算（同一字号：CJK ≈ 1em，ASCII ≈ 0.55em，
+ * 加 18rpx×2 内边距）——不依赖逐个量 tab 矩形（selectAll 量出来的 rect 时机不稳，
+ * 实测切源后居中不生效）；行宽用实测值。偏移以内容坐标计，用户手滑的基准由
+ * @scroll 记进 chipLeftNow。
+ */
+function centerActiveChip(rowWidthPx: number): void {
+  const acts = props.headerChipActives;
+  if (acts == null || rowWidthPx <= 0) return;
+  let active = -1;
+  for (let i = 0; i < acts.length; i++) {
+    if (acts[i] == true) { active = i; break; }
+  }
+  if (active >= 0) centerChipIndex(active, rowWidthPx);
+}
+
+/** 把第 index 个 tab 滚到行中央（onChipTap 直接调，不等父组件回传 actives）。
+ *  tab 位置优先用 measureChipRow 实测的 chipLefts（字号缩放/字形都不影响），
+ *  没量到时退回按字数估算。 */
+function centerChipIndex(index: number, rowWidthPx: number): void {
+  if (rowWidthPx <= 0) rowWidthPx = chipRowWidth.value > 0 ? chipRowWidth.value : layout.windowWidth - 44;
+  if (index < 0 || index >= headerChips.value.length) return;
+  let chipStart = 0;
+  let chipWidth = 0;
+  const measured = chipLefts.value;
+  if (measured.length == headerChips.value.length) {
+    chipStart = measured[index];
+    chipWidth = (index + 1 < measured.length ? measured[index + 1] : chipContentWidth.value) - chipStart;
+  } else {
+    for (let i = 0; i < headerChips.value.length; i++) {
+      const w = chipEstWidth(headerChips.value[i]);
+      if (i == index) {
+        chipWidth = w;
+        break;
+      }
+      chipStart += w;
+    }
+  }
+  let target = chipStart + chipWidth / 2 - rowWidthPx / 2;
+  const maxLeft = Math.max(0, chipContentWidth.value - rowWidthPx);
+  if (target < 0) target = 0;
+  if (target > maxLeft) target = maxLeft;
+  // 这里曾经有一句「用户手滑过头不往回拽」（target < chipLeftNow 时改回 chipLeftNow）：
+  // 它会让「点左边的 tab 滚不回去」——只要用户手动滑过，点第一个 tab 后 target 归 0
+  // 却被改回当前位置，左侧 tab 永远半截被裁。居中就是居中，用户的滑动不该否决它。
+  // scroll-left 与当前值相同不会触发回滚（用户手动滑走后再选中同一项的场景），偏 0.1 兜底
+  const bound = target == chipScrollLeft.value ? target + 0.1 : target;
+  chipLeftNow = bound;
+  chipScrollLeft.value = bound;
+}
+
+onMounted(() => {
+  chipMeasureTimer = setTimeout(() => { measureChipRow(0); }, 200) as unknown as number;
+});
+watch(() => props.headerChipActives, () => {
+  if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
+  chipMeasureTimer = setTimeout(() => { measureChipRow(0); }, 120) as unknown as number;
+}, { deep: true });
+// 标签集变化（包列表换源/换字体档）也要重测 + 重新居中
+watch(headerChips, () => {
+  // 换了源清单就作废上一组的实测降档结果（新名字可能更短），预测值会自动重算
+  chipFontMeasuredRpx.value = 0;
+  chipContentMeasured.value = 0;
+  chipLefts.value = [];
+  if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
+  chipMeasureTimer = setTimeout(() => { measureChipRow(0); }, 200) as unknown as number;
+});
+// 字号档变化（预测降档 / 实测兜底降档 / 全局字号档切换）后重测，直到放得下
+watch(chipFontRpx, () => {
+  chipContentMeasured.value = 0;
+  chipLefts.value = [];
+  if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
+  chipMeasureTimer = setTimeout(() => { measureChipRow(0); }, 120) as unknown as number;
+});
+// 全局字号档变了，实测兜底结论作废（预测值会随 fontScale 自动重算）
+watch(() => fontScale.scale, () => {
+  chipFontMeasuredRpx.value = 0;
+  chipContentMeasured.value = 0;
+  chipLefts.value = [];
+  if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
+  chipMeasureTimer = setTimeout(() => { measureChipRow(0); }, 200) as unknown as number;
+});
+// 旋转/分屏后行宽变了，重测 + 重新居中（预测值也跟着 windowWidth 重算）
+watch(() => layout.windowWidth, () => {
+  chipRowWidth.value = 0;
+  chipFontMeasuredRpx.value = 0;
+  chipContentMeasured.value = 0;
+  chipLefts.value = [];
+  if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
+  chipMeasureTimer = setTimeout(() => { measureChipRow(0); }, 300) as unknown as number;
+});
+
+/**
+ * 是否画返回箭头。
+ *
+ * 不能按「页面栈深度 > 1」判定：真机实测窄屏二级页（从首页 navigateTo 进搜索页）
+ * 渲染出来时 `getCurrentPages()` 还只有 1 项 —— 页面实例的 setup/onMounted 早于
+ * 新页面入栈，于是返回键永远不画，二级页在手机上没有退路。改成按**页面身份**判定：
+ * 手机档下凡是框架要画标题栏的页面（即非 self-header、非沉浸页），都是被
+ * navigateTo 推进来的二级页，一律给返回键；点的时候再真读一次栈深决定动作
+ * （栈深为 1 说明是深链直达，退回首页 tab）。
+ */
+const canGoBack = computed((): boolean => showBar.value);
+
+function onBack(): void {
+  if (qtPageStackDepth() > 1) {
+    uni.navigateBack({ animationType: qtNavAnimation() });
+    return;
+  }
+  qtSwitchTab("/pages/home/index");
+}
+
+function onFrameClick(): void {
+  // 播放条展开时，页面外的点击由唯一活动实例收缩播放条；不覆盖页面滚动。
+  uni.$emit("qt-mini-player-outside-click");
+}
+
 const contentStyle = computed((): string => {
-  if (!layout.isWide || fullWidth.value) return "";
-  // 宽屏统一内容列宽度：页面自带的 max-width 只能更宽、不能更窄，
-  // 否则各页容器宽窄不一（设置 760 / 排行榜 1280 …），切换页面时宽度跳变
-  const effective = Math.max(maxWidth.value, 1360);
-  const width = layout.windowWidth < effective ? layout.windowWidth : effective;
-  return "width:" + width + "px;";
+  // 有底栏时把内容区上收 64px：内容是 flex:1 的竖向容器，padding-bottom 会让内部的
+  // scroll-view / list-view 变矮，滚动内容自然停在底栏上方，不会出现「最后一行被底栏盖住」。
+  // 不给滚动内容加 padding 的另一个原因：页面里已有 .foot-space 一类尾部占位，
+  // 两处都加会叠出一条空白带。
+  const bottom = showPlayerBar.value ? "padding-bottom:" + QT_PLAYER_BAR_HEIGHT_PX + "px;" : "";
+  if (!framed.value) return bottom;
+  const width = contentWidthPx.value;
+  // 内容列居中在「rail 右侧的可用区」，不是居中在整个窗口（否则窄内容列会压到 rail 上）。
+  // maxWidth 收紧后实际宽度可能小于档位宽，居中必须按**实际宽度**算。
+  // 余量也必须用 raw：设置页族外壳会调 qtPushContentWidthCap 把内容宽收窄成右栏宽，
+  // 那是给「页面内部怎么排列」用的；框架这一层的列位置不能跟着缩，否则居中量算成负数。
+  const left = qtContentPadLeft(kind.value) + Math.floor((qtContentWidthRaw(kind.value) - width) / 2);
+  return "width:" + width + "px;margin-left:" + left + "px;" + bottom;
+});
+
+/**
+ * 宽屏三栏的第 2 栏 —— **族总览本身**（设置页族是设置总览；我的页族是「我的」总览）。
+ *
+ * 用户要求（原话，设置族）：「设置页改为三个页面，左边导航栏，中间整体的设置页，右边是
+ * 如果设置页有新打开页面，则显示设置页下的页面」；我的页族（2026-10-19 起）沿用
+ * 同一套逻辑与几何。三栏分别是：
+ *   第 1 栏 全局 rail（上面已挂）
+ *   第 2 栏 与 hub 页完全相同的那一份总览（同一个组件）
+ *   第 3 栏 从总览点开的子页（slot）
+ *
+ * 为什么画在框架层而不是每页套一个外壳组件：族是多个独立路由
+ * （Android 的 navigationStyle 运行期改不了，页面作为组件又会让 onShow 失效，
+ * 而族子页几乎全靠 onShow 对账收藏/缓存/权限/计数状态）。画在框架层则
+ * 族内页面一行都不用改，且切换时中栏的位置、宽度、内容完全一致。
+ *
+ * 总览页首次进入也要占据固定的中栏；右栏暂时留空，进入子页后只替换右栏。
+ * 这样首次进入与后续子页保持同一套三栏几何，不会先显示整页双列再突然收窄。
+ * 「我的」hub 的 slot 不隐藏：页面里还挂着宽屏工具托管层（qt-wide-workspace），
+ * 页面自己用 qtSplitActive 把整页总览让给中栏，slot 里只剩托管层与宽屏自隐的 tab bar。
+ */
+const isSettingsRoute = computed((): boolean => qtIsSettingsRoute(currentRoute.value));
+const isSettingsOverview = computed((): boolean => currentRoute.value == "/pages/settings/index");
+const isProfileRoute = computed((): boolean => qtIsProfileRoute(currentRoute.value));
+
+/** 是否拆三栏：宽屏 + 族路由（设置/我的）+ 外层内容足够放下中栏与右栏 */
+const showSettingsSplit = computed((): boolean => {
+  if (!layout.isWide) return false;
+  if (!isSettingsRoute.value) return false;
+  return contentWidthPx.value >= QT_SPLIT_NAV_WIDTH + QT_SPLIT_NAV_GAP + QT_SPLIT_PANE_MIN;
+});
+const showProfileSplit = computed((): boolean => {
+  if (!layout.isWide) return false;
+  if (!isProfileRoute.value) return false;
+  return contentWidthPx.value >= QT_SPLIT_NAV_WIDTH + QT_SPLIT_NAV_GAP + QT_SPLIT_PANE_MIN;
+});
+const showSplit = computed((): boolean => showSettingsSplit.value || showProfileSplit.value);
+
+/** 第 3 栏（子页内容）可用宽度 */
+const paneWidthPx = computed((): number => {
+  if (!showSplit.value) return contentWidthPx.value;
+  const w = contentWidthPx.value - QT_SPLIT_NAV_WIDTH - QT_SPLIT_NAV_GAP;
+  return w > 0 ? w : contentWidthPx.value;
+});
+
+/**
+ * 把「内容宽度」压到第 3 栏宽。
+ *
+ * 子页内部仍按 qtContentWidth 算两列列宽、栅格列数、标题折行阈值。不压的话
+ * 右栏里的页面会按整条内容列宽（约 1024）排版：两列各 480 塞进 728 的右栏，
+ * 右列直接被裁掉一半。压到右栏宽后，页面自己就会算成「宽 728 → 两列各 340」
+ * 或者干脆退回单列，一行页面代码都不用改。
+ *
+ * 框架自身读的是 qtContentWidthRaw（见 contentWidthPx），所以不会自我缩小。
+ */
+const paneCapToken = ref<number>(0);
+function syncPaneCap(): void {
+  const px = showSplit.value ? paneWidthPx.value : 0;
+  // 首次挂载 push 一层；之后只**就地更新**这层。窗口尺寸变化会反复触发 watch，
+  // 每次 push 会让上限栈无限增长（虽然生效值取最后一条，但内存与诊断都脏）。
+  if (paneCapToken.value == 0) {
+    paneCapToken.value = qtPushContentWidthCap(px);
+  } else {
+    qtUpdateContentWidthCap(paneCapToken.value, px);
+  }
+}
+onMounted((): void => {
+  syncPaneCap();
+});
+onUnmounted((): void => {
+  qtClearContentWidthCap(paneCapToken.value);
+  if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
+});
+watch([showSplit, paneWidthPx], (): void => {
+  syncPaneCap();
+});
+
+/**
+ * 第 2 栏的框：定宽 + 与第 3 栏之间的间隔 + 右侧分隔线。
+ * 内边距只留 12px —— 这一栏里放的是一整份族总览（自带分组外边距与卡片底色），
+ * 当作独立面板来排，不要再加一层厚留白。
+ * 自带顶部区域的族 hub（「我的」页）宽屏下框架不叠状态栏留白（selfHeader 页
+ * 由页面自己让位，而页面自己的总览此时已让给中栏），中栏必须自己让出状态栏。
+ */
+const snavStyle = computed((): string => {
+  const top = selfHeader.value ? "padding-top:" + (qtStatusBarPx() + 12) + "px;" : "";
+  return "width:" + QT_SPLIT_NAV_WIDTH + "px;margin-right:" + QT_SPLIT_NAV_GAP + "px;" + top + "border-right-color:" + theme.skin.divider + ";";
 });
 </script>
 
@@ -72,6 +943,157 @@ const contentStyle = computed((): string => {
   height: 100%;
   z-index: 1;
 }
+.qt-page-frame-shell {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  flex-direction: column;
+  position: relative;
+  z-index: 2;
+}
+/* 手机档标题栏：内容区 88rpx（375dp 基准下 = 44px）；状态栏让位（padding-top）与总高
+   都由内联 barStyle 给 —— uni-app x 默认 border-box，高度必须跟着状态栏走，
+   写死 44 会把内容压扁（见 barStyle 注释）。
+   2026-10-20：本栏只在 `!layout.isWide` 的手机档渲染，而手机档整页内容都是 rpx，
+   原来的 px 尺寸（高 44、标题 17px）在 720dp 窗口上会显得极小（用户原话
+   「页面标题很小」），改为 rpx 后与整页同步放大；375dp 手机上 rpx 乘 0.5 等于原 px，
+   渲染结果不变。 */
+.qt-page-frame-bar {
+  flex-direction: row;
+  align-items: center;
+  flex-shrink: 0;
+  padding-left: 8rpx;
+  padding-right: 24rpx;
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+}
+/* 返回键触摸区：88rpx（= 375dp 手机上的 44px，移动端最小舒适点击尺寸 iOS HIG）。
+   图标 44rpx 居中放在这里，视觉上比原来 22rpx 明显大一档 */
+.qt-page-frame-back {
+  width: 88rpx;
+  height: 88rpx;
+  align-items: center;
+  justify-content: center;
+  border-radius: 28rpx;
+}
+.qt-page-frame-back-hover {
+  background-color: rgba(127, 127, 127, 0.14);
+}
+/* 标题与动作之间的弹性格：标题不画时它仍然占位，把动作推到右缘。
+   flex:1 从 .qt-page-frame-title 挪到这里 —— 标题本身不再需要 flex。 */
+.qt-page-frame-mid {
+  flex: 1;
+  min-width: 0;
+  flex-direction: row;
+  align-items: center;
+  overflow: hidden;
+}
+.qt-page-frame-title {
+  /* 单行省略号：max-lines 是 text 组件属性（CSS lines 不生效），配合宽度约束 + ellipsis。
+     同 qt-batch-bar / qt-feedback-card 的验证过写法。 */
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 34rpx;
+  font-weight: 600;
+  margin-left: 8rpx;
+  text-overflow: ellipsis;
+}
+/* 右侧动作图标（只有显式传 headerActions 的页面才有）。
+   88rpx 触摸区与返回键同尺寸，两个图标之间不留额外间距（各自 88rpx 已经够分开）。 */
+.qt-page-frame-actions {
+  flex-direction: row;
+  align-items: center;
+  flex-shrink: 0;
+}
+.qt-page-frame-action {
+  width: 88rpx;
+  height: 88rpx;
+  align-items: center;
+  justify-content: center;
+  border-radius: 28rpx;
+}
+.qt-page-frame-action-hover {
+  background-color: rgba(127, 127, 127, 0.14);
+}
+/* 搜索态：标题栏原地换成一个输入框（页面点搜索图标切进来）。
+   高度 68rpx 居中在 88rpx 的栏里，左右与返回键的视觉间距由 padding 给。 */
+.qt-page-frame-search {
+  flex: 1;
+  min-width: 0;
+  flex-direction: row;
+  align-items: center;
+  height: 68rpx;
+  margin-left: 8rpx;
+  padding-left: 20rpx;
+  padding-right: 8rpx;
+  border-radius: 34rpx;
+  border-width: 1px;
+  border-style: solid;
+}
+.qt-page-frame-search-input {
+  flex: 1;
+  min-width: 0;
+  margin-left: 12rpx;
+  height: 52rpx;
+  font-size: 27rpx;
+}
+.qt-page-frame-search-ph {
+  color: #9aa1b1;
+  font-size: 27rpx;
+}
+.qt-page-frame-search-clear {
+  width: 60rpx;
+  height: 60rpx;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+/* 搜索框左侧放大镜：搜索页常驻搜索态时它就是「搜索按钮」（88rpx 触摸区与返回键同档） */
+.qt-page-frame-search-go {
+  width: 60rpx;
+  height: 60rpx;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+/* 搜索框右侧药丸：开关型入口（音源切换 / 聚合搜索）；
+   高度 52rpx 与输入框同档，选中态 accent 底 + onAccent 字由内联给 */
+.qt-page-frame-chip {
+  height: 52rpx;
+  /* 10rpx 窄边距：标题栏 tab（全称 4-5 字）要在 393dp 手机上尽量一行放下，
+     超出仍靠横滑兜底 */
+  padding: 0 10rpx;
+  margin-left: 6rpx;
+  align-items: center;
+  justify-content: center;
+  border-radius: 26rpx;
+  border-width: 1px;
+  border-style: solid;
+  flex-shrink: 0;
+}
+/* 选中态（.qt-page-frame-chip-on 只作标记，底色/描边/字色由内联 chipStyle 给）。
+   注意：标题栏 tab（.qt-page-frame-barchip 里的 text）的行高/字号都由
+   barChipTextStyle 内联覆盖（跟着字号倍数走），这里的固定值只服务搜索态药丸。 */
+.qt-page-frame-chip-text {
+  font-size: 24rpx;
+  line-height: 30rpx;
+}
+/* 标题栏药丸行（非搜索态）：横滑 scroll-view；宽度由脚本实测后显式给（chipRowStyle）。
+   两个坑都踩过：① flex:1 在标题栏这种自适应宽容器里解析不出（整条 0 宽）；
+   ② scroll-view 默认 flex-direction 是 column，不显式改 row 的话药丸竖着摞、
+   只露出第一颗，其余被标题栏裁掉 */
+.qt-page-frame-chip-row {
+  height: 64rpx;
+  flex-direction: row;
+  align-items: center;
+}
+/* scroll-view 的内容行：显式 px 宽由脚本给（chipContentWidth 估算），必须成行 */
+.qt-page-frame-chip-inner {
+  height: 64rpx;
+  flex-direction: row;
+  align-items: center;
+}
 .qt-page-frame-content {
   flex: 1;
   width: 100%;
@@ -82,6 +1104,48 @@ const contentStyle = computed((): string => {
   z-index: 2;
 }
 .qt-page-frame-wide {
-  align-self: center;
+  align-self: flex-start;
+}
+/* 内容区里的一行：默认只有 slot（单栏），设置子页时多出左侧导航 */
+.qt-page-frame-row {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  flex-direction: column;
+}
+.qt-page-frame-row-split {
+  flex-direction: row;
+  align-items: stretch;
+}
+/* 设置总览那一栏（三栏的第 2 栏）。
+   这一栏里放的是一整份设置总览组件（自带分组卡片与滚动），所以自身只负责
+   定宽、右侧分隔线、以及让子组件撑满可用高度（否则内部的 scroll-view 拿不到
+   确定高度，滚不动，超出的分组会被裁掉）。
+   不写栏标题：用户明确要求「所有页面不需要上面的标题」，而且中栏放的就是设置
+   总览本身 —— 它作为整页渲染时也没有标题，加一个「设置」反而让中栏比右栏多出
+   一行，两栏首卡对不齐。 */
+.qt-page-frame-snav {
+  flex-direction: column;
+  flex-shrink: 0;
+  padding-top: 4px;
+  border-right-width: 1px;
+  border-right-style: solid;
+}
+.qt-page-frame-snav-body {
+  flex: 1;
+  min-height: 0;
+}
+/* 子页内容（三栏的第 3 栏）；单栏时就是普通的内容容器 */
+.qt-page-frame-pane {
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+.qt-page-frame-pane-empty {
+  min-width: 0;
+}
+.qt-page-frame-empty-pane {
+  flex: 1;
+  min-height: 0;
 }
 </style>

@@ -32,7 +32,7 @@ import { getCurrentVersionCode, getCurrentVersionName } from "@/services/app-ver
 import { musicApi } from "@/services/music-api";
 import type { SourcePackMeta } from "@/services/source-bundle-fs";
 import type { PackHeaderInfo } from "@/services/source-pack-header";
-import { parsePackHeader } from "@/services/source-pack-header";
+import { parsePackHeader, UNSUPPORTED_PACK_MESSAGE, isJsPackFileName } from "@/services/source-pack-header";
 import {
   localState,
   packs,
@@ -71,6 +71,7 @@ import {
 } from "@/services/source-bundle-fs";
 import { verifyOfficialSignature, splitSignatureBlock } from "@/services/pack-signature";
 import { scanPackText } from "@/services/pack-safety";
+import { logErrV, logInfo, logWarn, logWarnV } from "@/services/logger";
 import {
   ensurePlayPackLoaded,
   unloadPlayPack,
@@ -92,10 +93,6 @@ import {
  * 鸿蒙只能取 1106 —— 1104 早在 V20261008001__platform_linux_macos.sql 里给了 Linux。
  */
 export const PLATFORM_ANDROID = 1101;
-export const PLATFORM_IOS = 1102;
-export const PLATFORM_WINDOWS = 1103;
-export const PLATFORM_LINUX = 1104;
-export const PLATFORM_MACOS = 1105;
 export const PLATFORM_HARMONY = 1106;
 
 /**
@@ -160,7 +157,7 @@ function bumpPacksChanged(): void {
   gPacksEpoch++;
   musicApi.clearPlayUrlCache();
   uni.$emit(SOURCE_PACKS_CHANGED_EVENT);
-  console.log(`[SourceUpdate] 包态已变更（epoch ${gPacksEpoch}），广播页面重拉`);
+  logInfo("SourceUpdate", `包态已变更（epoch ${gPacksEpoch}），广播页面重拉`);
 }
 
 // ==================== 可用更新（提示 + 手动确认） ====================
@@ -382,26 +379,6 @@ function isSecurePackLink(url: string): boolean {
 }
 
 /**
- * 从 https 直链安装一个包（官方发布直链、第三方作者的分发链接都走这里）。
- * 明文 http 已被 isSecurePackLink 拒绝（理由见该函数）。下载走 uni.downloadFile，
- * 不加统一客户端头（第三方直链带自定义头会坏签名/表单校验）。
- */
-export async function installFromUrl(url: string, smokeSongs: Song[]): Promise<SourceApplyResult> {
-  const link = url.trim();
-  if (link.length == 0) {
-    return applyResult(false, 0, "链接不能为空");
-  }
-  if (!isSecurePackLink(link)) {
-    return applyResult(false, 0, "只支持 https:// 直链（明文 http 已禁用）");
-  }
-  const text = await downloadPackText(link);
-  if (text.length == 0) {
-    return applyResult(false, 0, "下载失败，请检查链接是否可直连");
-  }
-  return await installFromText(text, smokeSongs, "url", link);
-}
-
-/**
  * 下载一个音源包全文（https 直链校验 + uni.downloadFile 临时文件 + 读回 + 清理）。
  * 管理页「安装预览」流程复用：先拿到全文解析包头给用户确认，确认后再走
  * installFromText 落盘。返回空串 = 下载失败（含被 https 闸门拒绝）。
@@ -417,29 +394,20 @@ export async function downloadPackText(url: string): Promise<string> {
 }
 
 /**
- * 从本地 js 文件安装：Android 系统选择器（qt-app-native pickJsFile）拿到的
- * content URI 只有一次读权限，原生侧已把全文读回，直接走 installFromText。
- * fileName 仅作来源备注记录（展示用）。
- */
-export async function installFromLocalFile(content: string, smokeSongs: Song[], fileName: string): Promise<SourceApplyResult> {
-  if (content.trim().length == 0) {
-    return applyResult(false, 0, "未选择文件");
-  }
-  return await installFromText(content, smokeSongs, "file", fileName);
-}
-
-/**
  * 从文本安装（统一管线的入口：解析头 → 校验 → 落盘 → 登记 → 按需生效）。
  * source/ref 记录安装来源（"url"=链接 / "file"=本地文件 / "manifest"=官方渠道），
  * 管理页「安装预览」流程确认后直接调这里落盘。
  */
 export async function installFromText(text: string, smokeSongs: Song[], source: string, ref: string): Promise<SourceApplyResult> {
+  if (source == "file" && !isJsPackFileName(ref)) {
+    return applyResult(false, 0, "请选择 .js 格式的音源文件");
+  }
   const header = parsePackHeader(text);
   if (header == null) {
     return applyResult(
       false,
       0,
-      "不是有效的音源包：文件首行缺少 /*__QT_PACK__*/ 身份头（需要 2026-10 后构建的包）",
+      UNSUPPORTED_PACK_MESSAGE,
     );
   }
   return await installPackText(text, header, smokeSongs, false, source, ref);
@@ -491,7 +459,7 @@ async function installPackText(
   if (official) {
     const check = await verifyOfficialSignature(text);
     if (!check.ok) {
-      console.log(`[SourceUpdate] 官方包签名校验失败 ${id}：${check.message}`);
+      logErrV("SourceUpdate", `官方包签名校验失败 ${id}`, check.message);
       return applyResult(false, header.versionCode, "官方包签名校验失败：" + check.message);
     }
     signVerified = true;
@@ -501,7 +469,7 @@ async function installPackText(
   // 规则与 qt-pc src-tauri/src/pack_safety.rs 逐条一致。
   const scanFail = scanPackText(splitSignatureBlock(text).content, official);
   if (scanFail.length > 0) {
-    console.log(`[SourceUpdate] 安全扫描拒绝 ${id}：${scanFail}`);
+    logErrV("SourceUpdate", `安全扫描拒绝 ${id}`, scanFail);
     return applyResult(false, header.versionCode, scanFail);
   }
   const artifact = artifactOfKind(kind);
@@ -661,7 +629,7 @@ async function rollbackPack(
     await removePack(id);
     await removeFileAt(prevPath);
   } catch (e) {
-    console.log("[SourceUpdate] 回滚失败：" + `${e}`);
+    logErrV("SourceUpdate", "回滚失败", e);
   }
 }
 
@@ -910,7 +878,7 @@ function requestJson(
         }
       },
       fail: (error) => {
-        console.log("[SourceUpdate] 请求失败：" + `${error}`);
+        logErrV("SourceUpdate", "请求失败", error);
         resolve(null);
       },
     });
@@ -961,7 +929,7 @@ function downloadToTemp(url: string): Promise<string> {
   return new Promise<string>((resolve) => {
     // 唯一的下载出口：https 闸门放这里，任何新增调用方都不会漏掉明文拦截
     if (!isSecurePackLink(url)) {
-      console.log("[SourceUpdate] 拒绝明文直链下载：" + url);
+      logWarn("SourceUpdate", "拒绝明文直链下载：" + url);
       resolve("");
       return;
     }
@@ -976,7 +944,7 @@ function downloadToTemp(url: string): Promise<string> {
         }
       },
       fail: (error) => {
-        console.log("[SourceUpdate] 下载失败：" + `${error}`);
+        logErrV("SourceUpdate", "下载失败", error);
         resolve("");
       },
     });

@@ -159,7 +159,7 @@
 
 - [ ] `npm run check`（47 个 .uvue 静态检查，0 error）
 - [ ] HBuilderX 真机构建通过（静态检查不替代 Vapor CSS 编译）
-- [ ] 竖屏 + 宽屏（≥720px 或横屏）双视口验证
+- [ ] compact / medium / wide / desktop 四档视口验证（`isWide` 为 `width >= 900 || (landscape && width >= 600)`）
 - [ ] light + dark + 皮肤组合验证
 - [ ] 点击穿透回归（重点：mini-player FAB、分段控件、皮肤选项卡、表单按钮、MV 卡片、设置 cell、ActionSheet）
 - [ ] 更新 `docs/design.md` / `readme.md`（若改了 UI 模块结构或公共组件 API）

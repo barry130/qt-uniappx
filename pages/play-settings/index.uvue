@@ -1,0 +1,685 @@
+<template>
+  <qt-page-frame width-kind="flow">
+  <view class="page">
+    <scroll-view class="list" :class="layout.isWide ? 'list-wide' : ''" direction="vertical" :show-scrollbar="false">
+      <!-- 宽屏两列（≥1280）：左列「播放行为」4 行，右列「音质与缓存」2 行。
+           单列时这两组在 1920 下拉成 1312px 宽、每行右侧空出 600px，纵向还要滚两屏。 -->
+      <view v-if="twoColumn" class="cols" :style="colsStyle">
+        <view class="col" :style="colStyle">
+          <view class="group group-wide group-col" :style="groupStyle">
+            <view class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showRate">
+              <QtIcon class="cell-icon cell-icon-wide" name="trending" :size="36" color="#d99b3f" />
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">默认倍速</text>
+              <view class="cell-right">
+                <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ rateText() }}</text>
+                <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+              </view>
+            </view>
+            <view class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showSleep">
+              <QtIcon class="cell-icon cell-icon-wide" name="clock" :size="36" color="#9b82d9" />
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">定时关闭</text>
+              <view class="cell-right">
+                <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ sleepText() }}</text>
+                <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+              </view>
+            </view>
+            <view class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="goEq">
+              <QtIcon class="cell-icon cell-icon-wide" name="chart" :size="36" color="#5b8fd9" />
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">均衡器</text>
+              <view class="cell-right">
+                <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">五段音效调节</text>
+                <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+              </view>
+            </view>
+            <view class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showConcurrent">
+              <QtIcon class="cell-icon cell-icon-wide" name="sliders" :size="36" color="#4fb186" />
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">同时播放</text>
+              <view class="cell-right">
+                <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ concurrentText() }}</text>
+                <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+              </view>
+            </view>
+            <!-- 无缝播放：行内用自绘开关（全仓无 switch 组件，范本 pages/equalizer） -->
+            <view class="cell cell-no-border cell-wide gapless-cell gapless-cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleGapless">
+              <QtIcon class="cell-icon cell-icon-wide" name="gauge" :size="36" color="#d97f9b" />
+              <view class="cell-main">
+                <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">无缝播放</text>
+                <text class="cell-desc cell-desc-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">提前加载下一首，缩短连续播放时的间隔。默认关闭；在线歌曲的衔接效果取决于网络和音源响应。</text>
+              </view>
+              <view class="cell-right">
+                <view class="toggle" :class="layout.isWide ? 'toggle-wide' : ''" :style="'background-color:' + (gapless ? theme.skin.accent : theme.skin.surfaceInset) + ';'">
+                  <view class="toggle-knob" :class="knobClass" :style="'background-color:' + (gapless ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
+                </view>
+              </view>
+            </view>
+          </view>
+        </view>
+        <view class="col col-right" :style="colStyle">
+          <view class="group group-wide group-col" :style="groupStyle">
+            <view class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showPlayQuality">
+              <QtIcon class="cell-icon cell-icon-wide" name="music" :size="36" color="#4fb186" />
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">播放默认音质</text>
+              <view class="cell-right">
+                <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ playQualityText() }}</text>
+                <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+              </view>
+            </view>
+            <view class="cell cell-no-border cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showCacheLimit">
+              <QtIcon class="cell-icon cell-icon-wide" name="download" :size="36" color="#6d8fd6" />
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">音乐缓存上限</text>
+              <view class="cell-right">
+                <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ cacheLimitText() }}</text>
+                <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+              </view>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 竖屏 / 中等宽度：单列（原样） -->
+      <view v-else>
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showRate">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="trending" :size="36" color="#d99b3f" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">默认倍速</text>
+          <view class="cell-right">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ rateText() }}</text>
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </view>
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showSleep">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="clock" :size="36" color="#9b82d9" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">定时关闭</text>
+          <view class="cell-right">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ sleepText() }}</text>
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </view>
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="goEq">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="chart" :size="36" color="#5b8fd9" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">均衡器</text>
+          <view class="cell-right">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">五段音效调节</text>
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </view>
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showConcurrent">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="sliders" :size="36" color="#4fb186" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">同时播放</text>
+          <view class="cell-right">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ concurrentText() }}</text>
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </view>
+        <!-- 无缝播放：行内用自绘开关（全仓无 switch 组件，范本 pages/equalizer） -->
+        <view class="cell cell-no-border gapless-cell" :class="layout.isWide ? 'cell-wide gapless-cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleGapless">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="gauge" :size="36" color="#d97f9b" />
+          <view class="cell-main">
+            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">无缝播放</text>
+            <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">提前加载下一首，缩短连续播放时的间隔。</text>
+          </view>
+          <view class="cell-right">
+            <view class="toggle" :class="layout.isWide ? 'toggle-wide' : ''" :style="'background-color:' + (gapless ? theme.skin.accent : theme.skin.surfaceInset) + ';'">
+              <view class="toggle-knob" :class="knobClass" :style="'background-color:' + (gapless ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showPlayQuality">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="music" :size="36" color="#4fb186" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">播放默认音质</text>
+          <view class="cell-right">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ playQualityText() }}</text>
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </view>
+        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showCacheLimit">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="download" :size="36" color="#6d8fd6" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">音乐缓存上限</text>
+          <view class="cell-right">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ cacheLimitText() }}</text>
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+          </view>
+        </view>
+      </view>
+
+      </view>
+
+      <!-- 说明文字：单列在两列分支之外、仍在最下方通栏，两列时不拆断 -->
+      <view class="hint">
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">默认倍速保存后立即对当前播放生效，之后每次播放也按这个速度；定时关闭到达时间后会停止播放（也可以选「播放完当前歌曲后」）。</text>
+      </view>
+      <view class="hint">
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">音乐缓存上限是播放过的歌曲在本地保留的音频总量，超出后按最早播放的依次清理。改小上限会在下次播放时重建缓存。</text>
+      </view>
+    </scroll-view>
+
+    <!-- 自定义缓存上限：页内输入弹层（uni.showModal 的 editable 输入框在 App 端不渲染） -->
+    <view v-if="cacheSheetVisible" class="cache-mask" @click="closeCacheSheet">
+      <view class="cache-card" :class="layout.isWide ? 'cache-card-wide' : ''" :style="layout.isWide ? cacheCardStyleWide : cacheCardStyle" @click.stop>
+        <text class="cache-title" :class="layout.isWide ? 'cache-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(30, 17)">自定义缓存上限</text>
+        <text class="cache-desc" :class="layout.isWide ? 'cache-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">输入缓存大小（MB，≥ {{ cacheLimitMinMb }}，不设上限）</text>
+        <input
+          class="cache-input"
+          :class="layout.isWide ? 'cache-input-wide' : ''"
+          :style="layout.isWide ? cacheInputStyleWide : cacheInputStyle"
+          type="number"
+          :value="cacheSheetValue"
+          @input="onCacheSheetInput"
+          placeholder="1024"
+          :placeholder-class="layout.isWide ? 'cache-ph-wide' : 'cache-ph'"
+          :maxlength="6"
+          :focus="cacheSheetVisible"
+        />
+        <text v-if="cacheSheetError.length > 0" class="cache-error" :class="layout.isWide ? 'cache-error-wide' : ''" :style="('color:' + theme.skin.danger + ';') + qtFontDual(22, 12)">{{ cacheSheetError }}</text>
+        <view class="cache-btn-row" :class="layout.isWide ? 'cache-btn-row-wide' : ''">
+          <qt-button class="cache-btn" label="取消" variant="ghost" size="sm" @click="closeCacheSheet" />
+          <qt-button class="cache-btn" label="确定" variant="secondary" size="sm" @click="submitCacheSheet" />
+        </view>
+      </view>
+    </view>
+
+    <qt-action-sheet
+      v-model:visible="sheetVisible"
+      :title="sheetTitle"
+      :actions="sheetActions"
+      @select="onSheetSelect"
+    />
+  </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import { qtShowToast } from "@/services/toast";
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import { useQtTwoColumn } from "@/uni_modules/qt-ui/composables/use-qt-columns";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { computed, ref } from "vue";
+import { onShow } from "@dcloudio/uni-app";
+import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import { audioPlayer } from "@/services/audio-player";
+import { usePlayerStore } from "@/stores/player";
+import { useSourceStore } from "@/stores/source";
+import { useSourceRegistryStore } from "@/stores/source-registry";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtNavAnimation } from "@/uni_modules/qt-ui/composables/qt-nav";
+
+/**
+ * 播放设置页：原来这些项都散在设置主页里（两组共六行），设置页越来越长，
+ * 按用户要求整体拆成独立页；设置主页只留一行入口。
+ * 这里是唯一的数据源，设置主页不再保留任何副本。
+ */
+const player = usePlayerStore();
+const sourceStore = useSourceStore();
+const registry = useSourceRegistryStore();
+/** 宽屏两列（≥1280）：布局档位、列宽与两列容器留白全部来自公共口径 */
+const { layout, twoColumn, colStyle, colsStyle } = useQtTwoColumn();
+const theme = useThemeStore();
+const groupStyle = computed<string>(() => "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";");
+const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
+
+const sheetVisible = ref(false);
+const sheetTitle = ref("");
+const sheetActions = ref<SheetAction[]>([]);
+let sheetSelect: ((index: number) => void) | null = null;
+
+function openSheet(title: string, actions: SheetAction[], select: (index: number) => void): void {
+  sheetTitle.value = title;
+  sheetActions.value = actions;
+  sheetSelect = select;
+  sheetVisible.value = true;
+}
+function onSheetSelect(_action: SheetAction, index: number): void {
+  const cb = sheetSelect;
+  sheetSelect = null;
+  if (cb) cb(index);
+}
+
+// ==================== 默认倍速 ====================
+
+const rates: number[] = [0.75, 1.0, 1.25, 1.5, 2.0];
+const currentRate = ref(audioPlayer.rate);
+
+function rateText(): string {
+  return currentRate.value + "x";
+}
+function showRate(): void {
+  openSheet("默认倍速", rates.map((rate) => ({
+    name: rate + "x",
+    color: rate == currentRate.value ? theme.skin.accent : undefined,
+  })), (index) => {
+    pickRate(rates[index]);
+  });
+}
+function pickRate(rate: number): void {
+  currentRate.value = rate;
+  audioPlayer.changeRate(rate);
+  qtShowToast({ title: "默认倍速 " + rate + "x", icon: "none" });
+}
+
+// ==================== 定时关闭 ====================
+
+const sleepMinutes = ref(0);
+
+function sleepText(): string {
+  if (player.sleepStopAfterCurrent) return "播放完当前歌曲后";
+  if (sleepMinutes.value > 0) return sleepMinutes.value + " 分钟后";
+  return "关闭";
+}
+const sleepOptions: { minutes: number; name: string }[] = [
+  { minutes: 0, name: "关闭定时" },
+  { minutes: 10, name: "10 分钟后" },
+  { minutes: 30, name: "30 分钟后" },
+  { minutes: 60, name: "60 分钟后" },
+  { minutes: 90, name: "播放完当前歌曲后" },
+];
+function showSleep(): void {
+  openSheet("定时关闭", sleepOptions.map((opt) => ({
+    name: opt.name,
+    color: (opt.minutes == 90 ? player.sleepStopAfterCurrent : sleepMinutes.value == opt.minutes) && opt.minutes != 0 ? theme.skin.accent : undefined,
+  })), (index) => {
+    pickSleep(sleepOptions[index].minutes);
+  });
+}
+function pickSleep(minutes: number): void {
+  sleepMinutes.value = minutes;
+  player.setSleep(minutes);
+}
+
+// ==================== 均衡器 ====================
+
+/** 打开均衡器设置页（五段音效调节独立成页，这里只做入口） */
+function goEq(): void {
+  uni.navigateTo({ animationType: qtNavAnimation(), url: "/pages/equalizer/index" });
+}
+
+// ==================== 同时播放 ====================
+
+// 与其他应用的音频共存方式（0 不允许 / 1 部分场景 / 2 全部场景）
+const concurrentMode = ref(audioPlayer.getConcurrentMode());
+const concurrentOptions: { value: number; name: string; hint: string }[] = [
+  { value: 0, name: "不允许", hint: "独占音频，其他应用播放时暂停" },
+  { value: 1, name: "部分场景", hint: "对方可共存时压低音量继续播放" },
+  { value: 2, name: "全部场景", hint: "与其他应用完全同时播放" },
+];
+function concurrentText(): string {
+  for (let i = 0; i < concurrentOptions.length; i++) {
+    if (concurrentOptions[i].value == concurrentMode.value) return concurrentOptions[i].name;
+  }
+  return "不允许";
+}
+function showConcurrent(): void {
+  concurrentMode.value = audioPlayer.getConcurrentMode();
+  openSheet("同时播放（与其他应用的音频共存方式）", concurrentOptions.map((opt) => ({
+    name: opt.name + "（" + opt.hint + "）",
+    color: opt.value == concurrentMode.value ? theme.skin.accent : undefined,
+  })), (index) => {
+    const opt = concurrentOptions[index];
+    if (opt == null) return;
+    audioPlayer.setConcurrentMode(opt.value);
+    concurrentMode.value = opt.value;
+    qtShowToast({ title: "同时播放：" + opt.name, icon: "none" });
+  });
+}
+
+// ==================== 无缝播放 ====================
+
+// 提前把下一首的播放地址取好（默认关闭）。语义见 services/audio-player.uts 的
+// GAPLESS_KEY 注释：只预热地址缓存，不接流、不下发原生。
+const gapless = ref(audioPlayer.getGapless());
+/** 开关旋钮的 class 组合（:class 只能绑一个表达式，Vapor 后者覆盖前者，同 pages/equalizer） */
+const knobClass = computed((): string => {
+  const on = gapless.value;
+  const wide = layout.isWide;
+  if (on && wide) return "toggle-knob-on toggle-knob-on-wide toggle-knob-wide";
+  if (on) return "toggle-knob-on";
+  if (wide) return "toggle-knob-wide";
+  return "";
+});
+function toggleGapless(): void {
+  gapless.value = !gapless.value;
+  audioPlayer.setGapless(gapless.value);
+  qtShowToast({ title: "无缝播放已" + (gapless.value ? "开启" : "关闭"), icon: "none" });
+}
+
+// ==================== 播放默认音质 ====================
+
+// 音质档位来自数据包注册表，并按**当前选中的音源**收敛（v5 契约：包侧声明了
+// 该源可用档位，如 B 站无真无损就不展示 flac；未声明 = 全部档位）
+//（未装包为空 → 打开时提示安装）。computed 依赖 sourceStore.current，切源自动重算
+const qualityOptions = computed<{ value: string; name: string }[]>(() =>
+  registry.sourceQualities(sourceStore.current).map((q) => ({ value: q.id, name: q.name }))
+);
+function qualityLabel(q: string): string {
+  return registry.qualityLabel(q);
+}
+function playQualityText(): string {
+  return qualityLabel(player.quality);
+}
+function showPlayQuality(): void {
+  const opts = qualityOptions.value;
+  if (opts.length == 0) {
+    qtShowToast({ title: "请先在 设置→音源包管理 安装数据包", icon: "none" });
+    return;
+  }
+  openSheet("播放默认音质", opts.map((opt) => ({
+    name: opt.name,
+    color: opt.value == player.quality ? theme.skin.accent : undefined,
+  })), (index) => {
+    player.setQuality(opts[index].value);
+    qtShowToast({ title: "播放音质：" + opts[index].name, icon: "none" });
+  });
+}
+
+// ==================== 音乐缓存上限 ====================
+
+const cacheLimitOptions: number[] = [1024, 2048, 4096];
+// 手工输入档只校验下界（与原生层 CACHE_LIMIT_MIN_MB 一致，越界原生会静默夹回），
+// 上界已取消：用户要多大给多大，原生按新上限在下次播放时重建缓存
+const cacheLimitMinMb = 256;
+// 模板需要响应式：audioPlayer 是非响应式单例，直接在模板里读不会触发重渲染
+const cacheLimitMb = ref(audioPlayer.getCacheLimitMb());
+function cacheLimitLabel(mb: number): string {
+  if (mb % 1024 == 0) return (mb / 1024) + " GB";
+  return mb + " MB";
+}
+function cacheLimitText(): string {
+  return cacheLimitLabel(cacheLimitMb.value);
+}
+function showCacheLimit(): void {
+  cacheLimitMb.value = audioPlayer.getCacheLimitMb();
+  const inPresets = cacheLimitOptions.indexOf(cacheLimitMb.value) >= 0;
+  // 档位 + 「自定义…」：当前值不在档位里时高亮自定义项提示已手工设置
+  const actions: SheetAction[] = cacheLimitOptions.map((mb) => ({
+    name: cacheLimitLabel(mb),
+    color: mb == cacheLimitMb.value ? theme.skin.accent : undefined,
+  }));
+  actions.push({ name: "自定义…", color: inPresets ? undefined : theme.skin.accent });
+  openSheet("音乐缓存上限", actions, (index) => {
+    if (index >= cacheLimitOptions.length) {
+      openCacheSheet();
+      return;
+    }
+    const mb = cacheLimitOptions[index];
+    audioPlayer.setCacheLimitMb(mb);
+    cacheLimitMb.value = mb;
+    qtShowToast({ title: "音乐缓存上限：" + cacheLimitLabel(mb), icon: "none" });
+  });
+}
+
+// ==================== 自定义缓存上限弹层 ====================
+// uni.showModal 的 editable 在 App 端不出输入框，照 source-pack 的做法用页内弹层
+
+const cacheSheetVisible = ref(false);
+const cacheSheetValue = ref("");
+const cacheSheetError = ref("");
+/** 弹层卡片底色与圆角（主题切换随 skin 重算；宽窄屏圆角基准不同） */
+const cacheCardStyle = computed<string>(() => "background-color:" + theme.skin.surfaceStrong + ";border-radius:24rpx;");
+const cacheCardStyleWide = computed<string>(() => "background-color:" + theme.skin.surfaceStrong + ";border-radius:14px;");
+/** 输入框填充底色 + 文字色 */
+const cacheInputStyle = computed<string>(() => "background-color:" + theme.skin.surfaceInset + ";color:" + theme.skin.text + ";border-radius:14rpx;");
+const cacheInputStyleWide = computed<string>(() => "background-color:" + theme.skin.surfaceInset + ";color:" + theme.skin.text + ";border-radius:8px;");
+
+function openCacheSheet(): void {
+  cacheSheetValue.value = "";
+  cacheSheetError.value = "";
+  cacheSheetVisible.value = true;
+}
+function closeCacheSheet(): void {
+  cacheSheetVisible.value = false;
+}
+function onCacheSheetInput(e: InputEvent): void {
+  cacheSheetValue.value = e.detail.value;
+  if (cacheSheetError.value.length > 0) cacheSheetError.value = "";
+}
+/** 提交：非法值红字提示留在弹层里；过了就落库下发，以服务层回读值为准显示 */
+function submitCacheSheet(): void {
+  const mb = parseInt(cacheSheetValue.value);
+  if (!(mb >= cacheLimitMinMb)) {
+    cacheSheetError.value = "请输入不小于 " + cacheLimitMinMb + " 的数值（MB）";
+    return;
+  }
+  cacheSheetVisible.value = false;
+  audioPlayer.setCacheLimitMb(mb);
+  cacheLimitMb.value = audioPlayer.getCacheLimitMb();
+  qtShowToast({ title: "音乐缓存上限：" + cacheLimitLabel(cacheLimitMb.value), icon: "none" });
+}
+
+onShow(() => {
+  // 原生层可能被别处改过（清除全部数据会把缓存上限/倍速复位），进页面统一对账
+  currentRate.value = audioPlayer.rate;
+  concurrentMode.value = audioPlayer.getConcurrentMode();
+  cacheLimitMb.value = audioPlayer.getCacheLimitMb();
+  gapless.value = audioPlayer.getGapless();
+  sourceStore.restore();
+  registry.ensure();
+});
+</script>
+
+<style>
+.page {
+  flex: 1;
+}
+.list {
+  flex: 1;
+  padding: 16rpx 0 40rpx;
+}
+.list-wide {
+  padding: 12px 0 24px;
+}
+.group {
+  margin-top: 20rpx;
+  margin-left: 24rpx;
+  margin-right: 24rpx;
+  border-radius: 24rpx;
+  overflow: hidden;
+
+  border-width: 1px; border-style: solid;
+
+}
+.cell {
+  height: 96rpx;
+  padding: 0 32rpx;
+  flex-direction: row;
+  align-items: center;
+  border-bottom-width: 1px; border-bottom-style: solid;
+}
+/* 桌面指针反馈：只在宽屏启用（手机上 hover-class 会在点按瞬间闪一下） */
+.cell-hover {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+.cell-no-border {
+  border-bottom-width: 0;
+}
+.cell-icon {
+  margin-right: 20rpx;
+}
+/* 带副标题的行（无缝播放）：高度交给内容，标题/说明纵向排 */
+.cell-main {
+  flex: 1;
+}
+.cell-desc {
+  margin-top: 6rpx;
+
+  font-size: 22rpx;
+  line-height: 30rpx;
+}
+.cell-desc-wide {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 18px;
+}
+/* 自绘开关（全仓无 switch 组件，尺寸与 pages/equalizer 一致） */
+.toggle {
+  width: 92rpx;
+  height: 52rpx;
+  border-radius: 26rpx;
+  padding: 6rpx;
+  margin-left: 16rpx;
+}
+.toggle-wide {
+  width: 46px;
+  height: 26px;
+  border-radius: 13px;
+  padding: 3px;
+  margin-left: 12px;
+}
+.toggle-knob {
+  width: 40rpx;
+  height: 40rpx;
+  border-radius: 20rpx;
+}
+.toggle-knob-wide {
+  width: 20px;
+  height: 20px;
+  border-radius: 10px;
+}
+.toggle-knob-on {
+  margin-left: 40rpx;
+}
+.toggle-knob-on-wide {
+  margin-left: 20px;
+}
+.cell-title {
+  flex: 1;
+
+  font-size: 28rpx;
+  font-weight: 500;
+}
+.cell-right {
+  flex-direction: row;
+  align-items: center;
+}
+.cell-value {
+
+  font-size: 24rpx;
+  margin-right: 12rpx;
+}
+/* 宽屏下 rpx 会随窗口放大膨胀，固定 px 尺寸 */
+.group-wide { margin-top: 14px; margin-left: 24px; margin-right: 24px; border-radius: 14px; }
+.cell-wide { height: 64px; padding-left: 24px; padding-right: 24px; }
+.cell-title-wide { font-size: 17px; }
+.cell-value-wide { font-size: 14px; }
+.cell-icon-wide { margin-right: 10px; }
+/* 带副标题的行（无缝播放）必须放在 .cell / .cell-wide 之后：源码顺序决定覆盖，
+   height:auto 要压掉固定行高，否则两行文字会被裁掉 */
+.gapless-cell {
+  height: auto;
+  padding-top: 16rpx;
+  padding-bottom: 16rpx;
+}
+.gapless-cell-wide {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.hint {
+  margin-top: 18rpx;
+  padding: 0 40rpx;
+}
+.hint-text {
+  font-size: 22rpx;
+  line-height: 32rpx;
+}
+.hint-text-wide {
+  font-size: 12px;
+  line-height: 18px;
+}
+/* 两列：列内纵向堆叠、顶端对齐（默认 stretch 会把右列拉高露出分组底色） */
+.cols {
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: center;
+}
+.col {
+  flex-direction: column;
+}
+.col-right {
+  margin-left: 16px;
+}
+/* 两列里的分组不再带左右外边距：列宽已经把 24px 留白与 16px 间距算进去了 */
+.group-col {
+  margin-left: 0;
+  margin-right: 0;
+}
+
+/* 自定义缓存上限：页内输入弹层（遮罩 + 居中卡片），宽窄两套尺寸（同 source-pack 的 url 弹层） */
+.cache-mask {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background-color: rgba(0, 0, 0, 0.45);
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+}
+.cache-card {
+  width: 560rpx;
+  padding: 32rpx 28rpx 24rpx;
+}
+.cache-card-wide {
+  width: 480px;
+  padding: 22px 24px 18px;
+}
+.cache-title {
+  font-size: 30rpx;
+  font-weight: 600;
+}
+.cache-title-wide {
+  font-size: 17px;
+}
+.cache-desc {
+  margin-top: 8rpx;
+  font-size: 23rpx;
+}
+.cache-desc-wide {
+  margin-top: 4px;
+  font-size: 13px;
+}
+.cache-input {
+  margin-top: 22rpx;
+  height: 78rpx;
+  padding: 0 20rpx;
+  font-size: 26rpx;
+}
+.cache-input-wide {
+  margin-top: 12px;
+  height: 40px;
+  padding: 0 12px;
+  font-size: 14px;
+}
+.cache-ph {
+  font-size: 24rpx;
+  color: #9aa1b0;
+}
+.cache-ph-wide {
+  font-size: 13px;
+  color: #9aa1b0;
+}
+.cache-error {
+  margin-top: 10rpx;
+  font-size: 22rpx;
+  line-height: 1.5;
+}
+.cache-error-wide {
+  margin-top: 6px;
+  font-size: 12px;
+}
+.cache-btn-row {
+  flex-direction: row;
+  justify-content: flex-end;
+  margin-top: 26rpx;
+}
+.cache-btn-row-wide {
+  margin-top: 16px;
+}
+.cache-btn {
+  margin-left: 16rpx;
+}
+</style>

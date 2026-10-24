@@ -1,0 +1,61 @@
+/**
+ * 全站临时提示（toast）的唯一调用入口。
+ *
+ * 对应 qt-pc 的 `qt-pc/src/stores/toast.ts`（ToastHost 负责渲染），差别只有一处：
+ * 这里落在**屏幕底部的水平中央**，不再走右上角。
+ *
+ * 为什么不直接调 `uni.showToast`：平台原生 Toast 的位置、字号、颜色、直角黑底全由
+ * 各家 ROM 决定，Android 上是居中偏上的小方块、鸿蒙又是一套，全站看起来是七八种
+ * 东西。改由 `stores/toast.ts` 收文案、`qt-toast-host` 渲染，位置/配色/停留时长就
+ * 只有一处定义。
+ *
+ * 为什么是 `.uts` 而不是 `.ts`：`services/audio-player.uts` 这类原生服务里也有
+ * 提示要发，而 UTS 侧目前只能 import .uts 与 stores（`.ts` 不能互通）。加上 .uts
+ * 的文件名后，页面(.uvue/.ts)与原生模块(.uts)都能 import 同一份，不必为原生侧再抄
+ * 一份文案出口。
+ *
+ * 用法：
+ *   import { qtShowToast } from "@/services/toast";
+ *   qtShowToast({ title: "已加入下载队列", icon: "success" });
+ *   qtShowToast({ title: "网络较慢，请稍后重试", icon: "error" });
+ */
+
+import { qtShowToastByKind } from "@/uni_modules/qt-ui/stores/toast";
+
+/**
+ * 与平台 `uni.showToast` 对齐的入参，方便把老调用点整段替换。
+ * - `title` 必填，正文文案。
+ * - `icon` 决定图标与配色：success / error / none（及缺省）分别是成功、出错、普通；
+ *   loading 与原生一样不弹提示（转圈由调用方自己用 qt-loading 表达）。
+ * - `duration` 不再生效：停留时长由 kind 统一决定（成功/普通 3 秒、出错 6 秒）。
+ *   保留字段只为让老调用点不用删参数。
+ */
+export type QtShowToastOptions = {
+  title: string;
+  icon?: string | null;
+  duration?: number | null;
+};
+
+/**
+ * 发一条临时提示。
+ *
+ * 不做去重也不排队：连着两次操作就是上下叠两条，各自计时（同 qt-pc）。
+ */
+export function qtShowToast(options: QtShowToastOptions): void {
+  const text = options.title != null ? options.title : "";
+  if (text.length == 0) return;
+  const icon = options.icon != null ? options.icon : "";
+  if (icon == "loading") return;
+
+  let kind = "info";
+  if (icon == "success") {
+    kind = "success";
+  } else if (icon == "error" || icon == "fail" || icon == "exception") {
+    kind = "error";
+  } else if (icon == "none" || icon.length == 0) {
+    // 原生 `icon: "none"` 是最常用的一档：文案本身就是结论。原生没法表达「成功」，
+    // 老调用点全走这一档；为了不让一半回执是灰的、一半是绿的，这里统一按普通档。
+    kind = "info";
+  }
+  qtShowToastByKind(text, kind);
+}

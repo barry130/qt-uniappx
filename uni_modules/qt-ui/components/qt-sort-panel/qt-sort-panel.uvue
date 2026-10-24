@@ -1,0 +1,142 @@
+<template>
+  <!-- 歌曲排序两行选择面板（2026-10-24 起）：
+       第一行「排序方式」三枚单选 chip（按歌曲名 / 按专辑名 / 按歌手名），再点一次取消勾选，
+       全不勾 = 默认顺序；第二行「方向」正序 / 倒序（未选排序方式时置灰不可用）。
+       选中即生效（页面自行回顶再换血），蒙层 / 关闭钮收起。
+       用法（歌单详情 / 每日新歌 / 每日推荐共用）：
+         <qt-sort-panel v-model:visible="sortSheetVisible"
+           :sort-key="sortKey" :sort-desc="sortDesc"
+           @select="onSortKeySelect" @desc="onSortDescSelect" /> -->
+  <view v-if="mount" class="qt-sort-mask" :style="'background-color:' + theme.skin.scrim + ';'" @click="close">
+    <view class="qt-sort-panel" :class="shown ? 'qt-sort-panel-on' : ''" :style="'background-color:' + theme.skin.surfaceStrong + ';border-color:' + theme.skin.border + ';'" @click.stop>
+      <view class="qt-sort-head">
+        <text class="qt-sort-title" :style="'color:' + theme.skin.text + ';' + qtFontDual(30, 16)">更改歌曲排序方式</text>
+        <view class="qt-sort-close" @click="close">
+          <QtIcon name="close" :size="18" :color="theme.skin.textMuted" />
+        </view>
+      </view>
+      <view class="qt-sort-row">
+        <text class="qt-sort-label" :style="'color:' + theme.skin.textSubtle + ';' + qtFontDual(24, 13)">排序方式</text>
+        <view class="qt-sort-chips">
+          <view
+            v-for="key in SORT_KEYS"
+            :key="'qt-sort-key-' + key"
+            class="qt-sort-chip"
+            :style="keyChipStyle(key)"
+            @click="tapKey(key)"
+          ><text class="qt-sort-chip-text" :style="keyTextStyle(key)">{{ keyLabel(key) }}</text></view>
+        </view>
+      </view>
+      <view class="qt-sort-row">
+        <text class="qt-sort-label" :style="'color:' + theme.skin.textSubtle + ';' + qtFontDual(24, 13)">方向</text>
+        <view class="qt-sort-chips">
+          <view
+            v-for="dir in SORT_DIRS"
+            :key="'qt-sort-dir-' + dir"
+            class="qt-sort-chip"
+            :style="dirChipStyle(dir)"
+            @click="tapDir(dir)"
+          ><text class="qt-sort-chip-text" :style="dirTextStyle(dir)">{{ dir == "asc" ? "正序" : "倒序" }}</text></view>
+        </view>
+      </view>
+      <text class="qt-sort-hint" :style="'color:' + theme.skin.textSubtle + ';' + qtFontDual(22, 12)">不选排序方式即默认顺序；已选中的再点一次取消</text>
+    </view>
+  </view>
+</template>
+<script setup lang="ts">
+import { ref, watch, onUnmounted } from "vue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+
+const props = defineProps({
+  visible: { type: Boolean, default: false },
+  sortKey: { type: String, default: "none" },
+  sortDesc: { type: Boolean, default: false },
+});
+const emit = defineEmits(["update:visible", "select", "desc"]);
+
+const theme = useThemeStore();
+const SORT_KEYS: string[] = ["name", "album", "singer"];
+const SORT_DIRS: string[] = ["asc", "desc"];
+/** 标签用函数查表：Map 的方括号索引在模板里运行时取不到值（渲染成空），三元/if 查表最稳 */
+function keyLabel(key: string): string {
+  if (key == "album") return "按专辑名";
+  if (key == "singer") return "按歌手名";
+  return "按歌曲名";
+}
+
+// 面板动画：挂载后再 16ms 翻转 shown，收起先翻回再 220ms 卸载（同歌单广场分类面板）
+const mount = ref(false);
+const shown = ref(false);
+let openTimer = 0;
+let closeTimer = 0;
+watch(
+  () => props.visible,
+  (v: boolean) => {
+    if (v) {
+      mount.value = true;
+      openTimer = setTimeout(() => { shown.value = true; }, 16) as number;
+    } else if (mount.value) {
+      shown.value = false;
+      closeTimer = setTimeout(() => { mount.value = false; }, 220) as number;
+    }
+  },
+  { immediate: true }
+);
+onUnmounted((): void => {
+  if (openTimer != 0) clearTimeout(openTimer);
+  if (closeTimer != 0) clearTimeout(closeTimer);
+});
+function close(): void {
+  emit("update:visible", false);
+}
+
+function hasKey(): boolean {
+  return props.sortKey != "none";
+}
+function keyChipStyle(key: string): string {
+  if (props.sortKey == key) return "background-color:" + theme.skin.accent + ";border-width:0;";
+  return "background-color:" + theme.skin.surfaceMuted + ";border-color:" + theme.skin.border + ";";
+}
+function keyTextStyle(key: string): string {
+  const weight = props.sortKey == key ? "600" : "400";
+  const color = props.sortKey == key ? theme.skin.onAccent : theme.skin.text;
+  return "color:" + color + ";font-weight:" + weight + ";" + qtFontDual(26, 14);
+}
+function dirChipStyle(dir: string): string {
+  const on = hasKey() && (dir == "desc") == props.sortDesc;
+  if (on) return "background-color:" + theme.skin.accent + ";border-width:0;";
+  return "background-color:" + theme.skin.surfaceMuted + ";border-color:" + theme.skin.border + ";";
+}
+function dirTextStyle(dir: string): string {
+  const on = hasKey() && (dir == "desc") == props.sortDesc;
+  const color = !hasKey() ? theme.skin.textSubtle : on ? theme.skin.onAccent : theme.skin.text;
+  return "color:" + color + ";font-weight:" + (on ? "600" : "400") + ";" + qtFontDual(26, 14);
+}
+
+/** 排序方式单选，可反选：再点一次已选中的键回默认顺序 */
+function tapKey(key: string): void {
+  emit("select", props.sortKey == key ? "none" : key);
+}
+/** 方向只在已选排序方式时生效 */
+function tapDir(dir: string): void {
+  if (!hasKey()) return;
+  emit("desc", dir == "desc");
+}
+</script>
+<style>
+/* 蒙层即根节点（qt-action-sheet 配方）：全屏 fixed + flex-end 把面板推到底部；
+   蒙层色用带透明度的 scrim 而不是 opacity —— opacity 动画会把子树（面板）一起变半透明 */
+.qt-sort-mask { position: fixed; left: 0; right: 0; top: 0; bottom: 0; justify-content: flex-end; z-index: 999; }
+.qt-sort-panel { margin: 12rpx; border-width: 1px; border-style: solid; border-radius: 24rpx; padding: 28rpx 28rpx 36rpx; transform: translateY(102%); transition-property: transform; transition-duration: 220ms; transition-timing-function: ease-out; }
+.qt-sort-panel-on { transform: translateY(0); }
+.qt-sort-head { flex-direction: row; align-items: center; justify-content: space-between; }
+.qt-sort-title { font-weight: 600; }
+.qt-sort-close { width: 56rpx; height: 56rpx; border-radius: 28rpx; align-items: center; justify-content: center; background-color: rgba(127, 127, 127, 0.12); }
+.qt-sort-row { margin-top: 26rpx; flex-direction: row; align-items: center; }
+.qt-sort-label { width: 128rpx; flex-shrink: 0; }
+.qt-sort-chips { flex: 1; flex-direction: row; flex-wrap: wrap; }
+.qt-sort-chip { height: 64rpx; padding: 0 28rpx; margin-right: 16rpx; margin-bottom: 12rpx; border-width: 1px; border-style: solid; border-radius: 32rpx; align-items: center; justify-content: center; }
+.qt-sort-hint { margin-top: 20rpx; }
+</style>
