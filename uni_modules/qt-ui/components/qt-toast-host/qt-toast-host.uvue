@@ -15,9 +15,10 @@
   职责划分：**生命周期全在 `stores/toast.ts`**（push 即排定时器，到点置 leaving 再移除），
   本组件只渲染，避免每个宿主各维护一份定时器表。
 
-  挂载点：`qt-page-frame` 内（一处改动覆盖全站 36 个页面），与 `qt-mini-player` 同样
-  在 page-frame 内用 `position: fixed` —— 该写法已有真机先例，不会被外壳的
-  `overflow: hidden` 裁掉（浮层本来就落在外壳边界内部）。
+  挂载点：`qt-page-frame` 内（一处改动覆盖全站 36 个页面）。用 `position: absolute`
+  而不是 fixed：宽屏托管页里 fixed 会被提升到窗口层，被覆盖层压住、关闭后泄漏
+  （详见 qt-action-sheet 的 .as-mask 注释）；absolute 锚到 frame 根（原点=窗口
+  原点），落点不变，也不会被外壳的 `overflow: hidden` 裁掉（浮层落在边界内部）。
 -->
 <template>
   <view v-if="items.length > 0" class="qt-toast-host" :style="hostStyle">
@@ -142,7 +143,7 @@ const iconSize = computed((): number => {
 
 <style>
 .qt-toast-host {
-  position: fixed;
+  position: absolute;
   /* 951–997 之间：压过页面页头，但不遮挡 998 的迷你播放球与 999 的各弹层 */
   z-index: 970;
   flex-direction: column;

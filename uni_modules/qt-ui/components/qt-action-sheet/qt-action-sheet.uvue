@@ -122,8 +122,16 @@ function pick(index: number): void {
 </script>
 
 <style>
+/*
+ * 必须 absolute 而不是 fixed（2026-10-25 真机实锤：宽屏托管「每日新歌」里点歌曲
+ * 操作没反应，切到「我的」后弹层反而漏在那页上）。Vapor 把 fixed 节点提升到窗口层
+ * 参与 z 序：托管时蒙层(z999) 被覆盖层(z1000、不透明) 压住 → 看不见；而覆盖层
+ * visibility:hidden 又管不到提升到窗口层的 fixed 后代 → 切 tab 后漏在别的页上。
+ * absolute 锚到最近定位祖先（qt-page-frame 根，position:relative；普通页与托管 pane
+ * 的原点都是窗口原点），四边全屏视觉与 fixed 一致，且随所在页面子树一起显隐。
+ */
 .as-mask {
-  position: fixed;
+  position: absolute;
   left: 0;
   top: 0;
   right: 0;

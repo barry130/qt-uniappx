@@ -108,7 +108,9 @@ require(store, /export function qtShowToastByKind\(/, "缺少字符串形态的 
 
 // 3) 宿主：挂在 page-frame 内、底部居中、让开 TabBar
 const host = read(HOST);
-require(host, /position:\s*fixed/, "宿主必须 fixed 浮起来", HOST);
+// absolute 而非 fixed（2026-10-25）：fixed 在宽屏托管工具页里会被提升到窗口层，
+// 被覆盖层压住不可见、关闭后泄漏；absolute 锚 frame 根，落点不变（见组件头部注释）。
+require(host, /position:\s*absolute/, "宿主必须 absolute 浮起（fixed 在托管页会被覆盖层压住）", HOST);
 require(host, /align-items:\s*center/, "宿主必须水平居中", HOST);
 require(host, /bottom:/, "宿主必须贴底定位", HOST);
 require(host, /qtTabBarHeightPx\(\)/, "竖屏 bottom 要让开底部 TabBar", HOST);

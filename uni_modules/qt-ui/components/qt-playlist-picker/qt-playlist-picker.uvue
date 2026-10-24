@@ -62,7 +62,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, nextTick } from 'vue';
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import type { Playlist } from '@/types/music';
@@ -107,7 +107,32 @@ watch(() => props.selectedIds, (newVal) => {
 });
 
 /**
+ * 蒙层自身的窗口原点。蒙层 absolute 化后（见样式块注释）锚点不再是窗口，而是
+ * frame 内容区/页面容器（原点在状态栏/标题栏之下），而 anchorTop 与居中 left 都是
+ * **窗口坐标**（点击事件 detail.y、窗口宽居中），必须减掉蒙层原点才落回原位。
+ * 打开时用 createSelectorQuery 量一次蒙层矩形（qt-page-frame 同款写法）；
+ * 量不到（rect 为空）保持 0/0，面板略微偏移但仍可用。
+ */
+const maskOrigin = ref<{ top: number; left: number }>({ top: 0, left: 0 });
+
+function measureMask(): void {
+  uni.createSelectorQuery()
+    .select(".picker-mask")
+    .boundingClientRect((rect: UniNodeInfo | null) => {
+      if (rect != null) {
+        maskOrigin.value = { top: rect.top, left: rect.left };
+      }
+    })
+    .exec();
+}
+
+watch(() => props.visible, (v: boolean) => {
+  if (v) nextTick(() => measureMask());
+});
+
+/**
  * 面板定位：若给了 anchorTop（px）则该点下方展开；否则屏幕约 28% 处。
+ * 输入是窗口坐标，先减蒙层原点换算成蒙层（锚点容器）内坐标。
  *
  * 尺寸口径（2026-10-21 修）：把面板宽度的「浮动档」按 rpx 换算，与面板内的 rpx
  * 样式同源 —— 原来宽度写 `min(screenW - 40, 340)` 而内部字号写死 px，在 720dp
@@ -122,8 +147,8 @@ const panelStyle = computed(() => {
   const maxW = wide ? 340 : qtRpx(680);
   const panelW = Math.min(screenW - marginX, maxW);
   const defaultY = screenH * 0.28;
-  const top = props.anchorTop >= 0 ? props.anchorTop + (wide ? 10 : qtRpx(20)) : defaultY;
-  const left = (screenW - panelW) / 2;
+  const top = (props.anchorTop >= 0 ? props.anchorTop + (wide ? 10 : qtRpx(20)) : defaultY) - maskOrigin.value.top;
+  const left = (screenW - panelW) / 2 - maskOrigin.value.left;
   return 'top:' + Math.round(top) + 'px;left:' + Math.round(left) + 'px;width:' + Math.round(panelW) + 'px;';
 });
 
@@ -174,8 +199,13 @@ function close() {
  * 720dp 上 1rpx ≈ 0.96dp；宽屏继续固定 px（rpx 在宽屏会膨胀数倍，design.md §6.6）。
  * base 是 rpx（= 375dp 手机上原 px 值 ×2），-wide 是原 px，标准档渲染逐像素不变。
  */
+/*
+ * 蒙层与面板都 absolute 而不是 fixed：宽屏托管页里 fixed 会被提升到窗口层，
+ * 被覆盖层压住、关闭后泄漏（详见 qt-action-sheet 的 .as-mask 注释）。
+ * 内联 top/left 都是窗口坐标，而 frame 根（锚点）原点就是窗口原点，坐标不变。
+ */
 .picker-mask {
-  position: fixed;
+  position: absolute;
   top: 0;
   left: 0;
   right: 0;
@@ -184,7 +214,7 @@ function close() {
   z-index: 999;
 }
 .picker-panel {
-  position: fixed;
+  position: absolute;
   background: #ffffff;
   border-radius: 32rpx;
   padding: 32rpx;
