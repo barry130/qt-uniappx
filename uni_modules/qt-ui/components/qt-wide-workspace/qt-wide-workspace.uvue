@@ -14,15 +14,27 @@
     <view v-if="paneOn('/pages/playlists/index')" class="qtww-pane" :style="paneStyle('/pages/playlists/index')"><PlaylistsPage /></view>
     <view v-if="paneOn('/pages/chart/index')" class="qtww-pane" :style="paneStyle('/pages/chart/index')"><ChartPage /></view>
     <view v-if="paneOn('/pages/settings/index')" class="qtww-pane" :style="paneStyle('/pages/settings/index')"><SettingsPage /></view>
+    <!-- 停靠 rail：覆盖层自己画的那条左导航（docked 模式 = 子树内 absolute，随覆盖层
+         一起显隐）。工具页不再渲染自带的 fixed rail（真机实测：fixed 会被本覆盖层的
+         不透明背景压住、关闭后又漏在宿主页上，见 qt-side-nav 的 docked 注释与
+         qt-page-frame 的 showRail 注释），这条是托管期间唯一可见的 rail。
+         放在 pane 之后渲染 = 同级后绘者在上，压住 pane 里工具页让给 rail 的左条。 -->
+    <qt-side-nav
+      :docked="true"
+      :current="ws.route.length > 0 ? ws.route : props.hostRoute"
+      :dots="railDots"
+    />
   </view>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { qtWideWorkspace, qtCloseWideTool } from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
+import { qtWideWorkspace, qtCloseWideTool, qtWideWorkspaceRefreshTick } from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
 import { qtTopRoute } from "@/uni_modules/qt-ui/composables/qt-page-chrome";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useSourceUpdateStore } from "@/stores/source-update";
+import QtSideNav from "@/uni_modules/qt-ui/components/qt-side-nav/qt-side-nav.uvue";
 import SearchPage from "@/pages/search/index.uvue";
 import DailyPage from "@/pages/daily/index.uvue";
 import PlaylistsPage from "@/pages/playlists/index.uvue";
@@ -37,7 +49,8 @@ import SettingsPage from "@/pages/settings/index.uvue";
  * 只会在「这个宿主上被打开过」时才创建，不会因为另一个 tab 顶上来就凭空多一份。
  *
  * 它必须**不透明**：宿主 tab 页自己的 rail 与底部播放栏就在下面，覆盖层负责把它们
- * 盖住，否则会看到两份 rail 叠在一起。工具页自带的那份 rail 才是可见的那一份。
+ * 盖住（否则会看到两份 rail 叠在一起），导航由本覆盖层自画的停靠 rail 接管
+ * （工具页自带的 fixed rail 已在框架层禁用，见 qt-page-frame 的 showRail 注释）。
  */
 const props = defineProps<{
   /** 本覆盖层所在的宿主页路由（两个 tab 根页各传各的） */
@@ -47,6 +60,10 @@ const props = defineProps<{
 const ws = qtWideWorkspace();
 const theme = useThemeStore();
 const layout = useQtLayout();
+const sourceUpdateStore = useSourceUpdateStore();
+
+/** 与 qt-page-frame 的 railDots 同源：音源包有新包待生效时给「我的」亮红点 */
+const railDots = computed((): string[] => sourceUpdateStore.updatePending ? ["/pages/profile/index"] : []);
 
 /** 在本宿主上创建过（保活中）的工具页清单；只增不减 */
 const alive = ref<string[]>([]);
@@ -88,12 +105,17 @@ function paneStyle(route: string): string {
  * 覆盖层整体可见性：
  *   - 没有正在托管的工具（点了 tab / 按返回键，qtCloseWideTool 只清路由）就隐藏，
  *     已创建的工具页全部保留，下次打开瞬时恢复；
- *   - 栈顶不是本宿主（另一个 tab 顶上来了）就隐藏本宿主这份，另一份接手；
+ *   - 栈顶不是本宿主（另一个 tab 顶上来 / 从托管页跳进了深页）就隐藏本宿主这份；
  *   - 宽屏失效就隐藏（窄屏回到整页导航语义，rail 本来也不渲染）。
  * 关闭一律是「藏」而不是「拆」—— 拆掉重建正是每次点击频闪的来源。
+ *
+ * qtTopRoute() 非响应式：从托管页 navigateTo 深页再返回宿主时栈变了但没有响应式
+ * 依赖变化，这里不会自己重算 —— 读一下刷新号（宿主页 onShow 时递增）强制订阅，
+ * 返回宿主的瞬间重估一次（2026-10-24 记忆账①的落地）。
  */
 const rootStyle = computed((): string => {
   const base = "background-color:" + theme.skin.background + ";";
+  qtWideWorkspaceRefreshTick();
   if (ws.route.length == 0 || !layout.isWide || qtTopRoute() != props.hostRoute) {
     return base + "visibility:hidden;";
   }

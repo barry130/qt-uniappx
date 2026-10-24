@@ -356,8 +356,16 @@ const kind = computed((): string => props.widthKind != null && props.widthKind.l
  */
 const hostedRoute = (qtWideToolActive() && qtIsWideToolHost(qtTopRoute())) ? qtWideToolRoute() : "";
 
-/** 宽屏才挂 rail；沉浸页与显式禁用的页面不挂 */
-const showRail = computed((): boolean => layout.isWide && !fullWidth.value);
+/**
+ * 宽屏才挂 rail；沉浸页与显式禁用的页面不挂；**被托管的工具页也不挂**。
+ *
+ * 托管形态下工具页由 qt-wide-workspace 覆盖层托管，覆盖层自己画一条停靠 rail
+ * （见 qt-wide-workspace.uvue）—— 工具页再画自带的 fixed rail 会被覆盖层的不透明
+ * 背景压住（Vapor 把 fixed 节点提升到窗口层参与 z 序，rail z900 < 覆盖层 z1000），
+ * 覆盖层关闭后它又不随 visibility 收起、漏在宿主页上（四个工具入口同时亮红的
+ * 根因）。两层都不要，rail 只画覆盖层那一条。
+ */
+const showRail = computed((): boolean => layout.isWide && !fullWidth.value && hostedRoute.length == 0);
 
 /**
  * 宽屏常驻底栏。
@@ -367,7 +375,9 @@ const showRail = computed((): boolean => layout.isWide && !fullWidth.value);
  * 没有当前歌曲时不挂、也不留底部空带 —— 否则每页底部都多出一条 64px 死区。
  */
 const player = usePlayerStore();
-const showPlayerBar = computed((): boolean => layout.isWide && !fullWidth.value && player.current != null);
+// 被托管的工具页同样不画自带播放栏：宿主的底栏此刻被覆盖层盖住（z940 < z1000），
+// 工具页再画一条 fixed 底栏同样有「被盖住 + 关闭后漏显」的问题（同 showRail 注释）。
+const showPlayerBar = computed((): boolean => layout.isWide && !fullWidth.value && player.current != null && hostedRoute.length == 0);
 
 /**
  * 当前路由：优先用调用方传的，否则从页面栈推断。

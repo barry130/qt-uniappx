@@ -44,7 +44,7 @@
  *   - back 键先关托管（宿主页的 onBackPress 里调 qtCloseWideTool）。关闭/切 tab
  *     只是「藏」：已创建的工具页组件树保活在原地，下次打开瞬时恢复。
  */
-import { reactive } from "vue";
+import { reactive, ref } from "vue";
 import { qtTopRoute } from "./qt-page-chrome";
 import { qtLayout } from "./use-qt-layout";
 
@@ -138,4 +138,20 @@ export function qtCloseWideTool(): boolean {
   if (state.route.length == 0) return false;
   state.route = "";
   return true;
+}
+
+/**
+ * 宿主页 onShow 递增的刷新号。
+ *
+ * 覆盖层的可见性判定里有 `qtTopRoute()`（getCurrentPages，**非响应式**）：从托管
+ * 的工具页里 navigateTo 到歌曲/歌单等深页再返回宿主时，页面栈变了但没有任何
+ * 响应式依赖变化，覆盖层的可见性 computed 不会重算。宿主页的 onShow 里调一下
+ * qtWideWorkspaceRefresh() 强制重估（见 qt-wide-workspace.uvue 的 rootStyle）。
+ */
+const refreshTick = ref(0);
+export function qtWideWorkspaceRefresh(): void {
+  refreshTick.value = refreshTick.value + 1;
+}
+export function qtWideWorkspaceRefreshTick(): number {
+  return refreshTick.value;
 }

@@ -80,6 +80,18 @@ const props = defineProps<{
    * 的时间/信号图标压住。所以下面固定按状态栏高度加 padding-top。
    */
   insetTop?: boolean;
+  /**
+   * 停靠模式（qt-wide-workspace 覆盖层专用）：作为覆盖层子树里的普通 absolute
+   * 元素渲染，随覆盖层一起显隐。
+   *
+   * 默认的 position:fixed rail 有两个真机实测的问题（都出在被托管工具页自带
+   * rail 上）：fixed 节点在 Vapor 下会被提升到窗口层参与 z 序 —— 覆盖层（z 1000
+   * 不透明背景）压过 rail（z 900），工具页自带的 rail 整条不可见；覆盖层关闭
+   * （visibility:hidden）时 fixed 子节点又不随祖先收起，已创建的各工具页 rail
+   * 全部漏在宿主页上，表现为「rail 上四个工具入口同时亮红」。停靠模式四边锚定
+   * （top/bottom 显式，全仓蒙层同款可靠写法）留在子树内，两个问题都消失。
+   */
+  docked?: boolean;
 }>();
 
 const layout = useQtLayout();
@@ -89,14 +101,20 @@ const theme = useThemeStore();
 // 预热页面树；旧的 qt-page-preload.ts 已删除 —— uni.preloadPage 在 uni-app x 不支持，
 // 就地托管后宽屏连预热的目标都不存在了）。
 const compact = computed((): boolean => layout.sizeClass == "medium");
-/** 固定在窗口左缘（不随 qt-page-frame 限宽居中），高度显式撑满窗口 */
+/** 固定在窗口左缘（不随 qt-page-frame 限宽居中）；停靠模式随覆盖层撑满 */
 const railStyle = computed((): string => {
   // 恒加状态栏高度：全站 navigationStyle=custom 后页面区从窗口顶缘起，
   // rail 不主动让位就会被状态栏文字压住（历史实现只在发现的 3 个页面让位）。
   const sb = qtStatusBarPx();
+  const base = "padding-top:" + sb + "px;background-color:" + theme.skin.surfaceInset + ";border-right-color:" + theme.skin.divider + ";";
+  if (props.docked == true) {
+    // 停靠：四边锚定的 absolute（内联压过类里的 fixed），高度随覆盖层撑满。
+    // 不能沿用 fixed + 显式 height：见 docked prop 注释（窗口层 z 序 + 漏显隐）。
+    return "position:absolute;left:0;top:0;bottom:0;" + base;
+  }
   // 高度必须显式给 px：position:fixed 下 top+bottom 双锚拉伸在 Vapor 不可靠
   // （2026-10-24 宽屏 rail 整条消失的根因，同 stats hero 底图），塌成高 0 就不可见
-  return "padding-top:" + sb + "px;height:" + layout.windowHeight + "px;background-color:" + theme.skin.surfaceInset + ";border-right-color:" + theme.skin.divider + ";";
+  return "height:" + layout.windowHeight + "px;" + base;
 });
 
 type NavItem = { page: string; label: string; icon: string };
