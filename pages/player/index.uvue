@@ -61,8 +61,8 @@
                 </view>
               </view>
               <text v-else class="lrc lrc-wide" :style="lrcStyle(index)" :class="index == activeLyric ? 'lrc-active' : ''" >{{ line.text }}</text>
-              <text v-if="line.romanization != null && line.romanization.length > 0" class="lrc-roma lrc-roma-wide" :style="lrcRomaStyle(index)">{{ line.romanization }}</text>
-              <text v-if="line.translation != null && line.translation.length > 0" class="lrc-tr lrc-tr-wide" :style="lrcTrStyle(index)" :class="index == activeLyric ? 'lrc-tr-active' : ''" >{{ line.translation }}</text>
+              <text v-if="hasRoma(line)" class="lrc-roma lrc-roma-wide" :style="lrcRomaStyle(index)">{{ line.romanization }}</text>
+              <text v-if="hasTr(line)" class="lrc-tr lrc-tr-wide" :style="lrcTrStyle(index)" :class="index == activeLyric ? 'lrc-tr-active' : ''" >{{ line.translation }}</text>
               <view v-if="lyricTimesVisible && index == lyricTargetIndex" class="lrc-scroll-hint lrc-scroll-hint-wide" :style="'background-color:' + theme.skin.mediaControl + ';'">
                 <text class="lrc-hint-time lrc-hint-time-wide" :style="('color:' + theme.skin.mediaText + ';') + qtFontDual(24, 12)">{{ format(line.time) }}</text>
                 <QtIcon name="play" :size="14" :color="theme.skin.mediaText" />
@@ -153,8 +153,8 @@
               </view>
             </view>
             <text v-else class="lrc" :style="lrcStyle(index)" :class="index == activeLyric ? 'lrc-active' : ''" >{{ line.text }}</text>
-            <text v-if="line.romanization != null && line.romanization.length > 0" class="lrc-roma" :style="lrcRomaStyle(index)">{{ line.romanization }}</text>
-            <text v-if="line.translation != null && line.translation.length > 0" class="lrc-tr" :style="lrcTrStyle(index)" :class="index == activeLyric ? 'lrc-tr-active' : ''" >{{ line.translation }}</text>
+            <text v-if="hasRoma(line)" class="lrc-roma" :style="lrcRomaStyle(index)">{{ line.romanization }}</text>
+            <text v-if="hasTr(line)" class="lrc-tr" :style="lrcTrStyle(index)" :class="index == activeLyric ? 'lrc-tr-active' : ''" >{{ line.translation }}</text>
             <view v-if="lyricTimesVisible && index == lyricTargetIndex" class="lrc-scroll-hint" :style="'background-color:' + theme.skin.mediaControl + ';'">
               <text class="lrc-hint-time" :style="('color:' + theme.skin.mediaText + ';') + qtFontDual(24, 14)">{{ format(line.time) }}</text>
               <QtIcon name="play" :size="18" :color="theme.skin.mediaText" />
@@ -168,7 +168,7 @@
           <view v-if="lyricContext.length > 0">
             <view v-for="(line, index) in lyricContext" :key="index" class="lyric-preview-line" :style="previewGapStyle">
               <text class="lyric-preview-text" :style="'color:' + (line.isActive ? theme.skin.mediaText : theme.skin.mediaMuted) + ';' + previewFontStyle(line.isActive)" :class="line.isActive ? 'lyric-preview-active' : ''">{{ line.text }}</text>
-              <text v-if="(line.romanization != null && line.romanization.length > 0) || (line.translation != null && line.translation.length > 0)" class="lyric-preview-tr" :style="'color:' + theme.skin.mediaMuted + ';' + previewTrFontStyle" :class="line.isActive ? 'lyric-preview-tr-active' : ''">{{ (line.romanization != null && line.romanization.length > 0) ? line.romanization : line.translation }}</text>
+              <text v-if="previewSubHas(line)" class="lyric-preview-tr" :style="'color:' + theme.skin.mediaMuted + ';' + previewTrFontStyle" :class="line.isActive ? 'lyric-preview-tr-active' : ''">{{ previewSubText(line) }}</text>
             </view>
           </view>
           <view v-else class="lyric-empty"><text class="lrc-empty" :style="('color:' + theme.skin.mediaMuted + ';') + qtFontDual(26, 14)">纯音乐，请欣赏</text></view>
@@ -965,18 +965,43 @@ const lyricScrollAnimated = ref(true);
  * 逐字在这三行预览里不做染色：原生悬浮窗与封面态都没有逐帧刷新通道，
  * 只取行文本/时间轴（与 desktop-lyric.uts 同口径）。
  */
-const lyricContext = computed((): { text: string; isActive: boolean; time: number; translation: string | null; romanization: string | null }[] => {
+interface LyricContextLine {
+  text: string;
+  isActive: boolean;
+  time: number;
+  translation: string | null;
+  romanization: string | null;
+}
+
+const lyricContext = computed((): LyricContextLine[] => {
   const lines = lyricLines.value;
   if (lines.length == 0) return [];
   const active = activeLyric.value;
   const start = Math.max(0, active - 1);
   const end = Math.min(lines.length, active + 2);
-  const context: { text: string; isActive: boolean; time: number; translation: string | null; romanization: string | null }[] = [];
+  const context: LyricContextLine[] = [];
   for (let i = start; i < end; i++) {
     context.push({ text: lines[i].text, isActive: i == active, time: lines[i].time, translation: lines[i].translation ?? null, romanization: lines[i].romanization ?? null });
   }
   return context;
 });
+
+// 歌词行副文本的空值守卫全部收进脚本：romanization/translation 是可选字段，
+// 模板里 && 不保证短路（两边都求值），内联 `x != null && x.length` 会炸（09-30 账目）
+function hasRoma(line: LyricLine): boolean {
+  return line.romanization != null && line.romanization.length > 0;
+}
+function hasTr(line: LyricLine): boolean {
+  return line.translation != null && line.translation.length > 0;
+}
+// 折叠预览副文本：罗马音优先，其次翻译，都没有返回空串
+function previewSubHas(line: LyricContextLine): boolean {
+  return (line.romanization != null && line.romanization.length > 0) || (line.translation != null && line.translation.length > 0);
+}
+function previewSubText(line: LyricContextLine): string {
+  if (line.romanization != null && line.romanization.length > 0) return line.romanization;
+  return line.translation != null ? line.translation : "";
+}
 const dragging = ref(false);
 const dragValue = ref(0);
 /** 自定义进度条：轨道位置与宽度（px），用于把手指坐标换算成进度秒数 */

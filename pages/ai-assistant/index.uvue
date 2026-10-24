@@ -200,9 +200,9 @@
         </view>
       </view>
     </view>
-    <!-- 候选歌行「…」的操作表：useSongSheet 只管状态，渲染必须在这里补一份，
-         否则 onSongMore 只改内部 ref，用户看不到任何东西（审查发现的死按钮） -->
-    <QtActionSheet v-model:visible="songSheet.sheetVisible" :title="songSheet.sheetTitle()" :actions="songSheet.sheetActions" @select="songSheet.onSheetSelect" />
+    <!-- 候选歌行「…」的操作表：useSongSheet 返回普通对象包 refs，模板不解包嵌套 ref，
+         必须解构成顶层再绑（与 daily/daily-recommend 同款），否则组件收到 Ref 本身直接崩 -->
+    <QtActionSheet v-model:visible="sheetVisible" :title="sheetTitle()" :actions="sheetActions" @select="onSheetSelect" />
   </qt-page-frame>
 </template>
 
@@ -236,7 +236,8 @@ const historyPanelMaxHeight = computed((): string => "max-height:" + Math.floor(
 const bubbleUserMaxWidth = computed((): string => "max-width:" + Math.floor(layout.windowWidth * (layout.isWide ? 0.62 : 0.78)) + "px;");
 const bubbleAiMaxWidth = computed((): string => "max-width:" + Math.floor(layout.windowWidth * (layout.isWide ? 0.72 : 0.88)) + "px;");
 const player = usePlayerStore();
-const songSheet = useSongSheet();
+// 必须解构：嵌在普通对象里的 ref 模板不会自动解包，绑 songSheet.sheetVisible 会把 Ref 传给组件
+const { sheetVisible, sheetActions, openSheet, onSheetSelect, sheetTitle } = useSongSheet();
 
 const chat = useAiChat();
 const {
@@ -369,7 +370,7 @@ function onPlaySong(song: Song): void {
 }
 
 function onSongMore(song: Song): void {
-  songSheet.openSheet(song);
+  openSheet(song);
 }
 
 function onAction(action: AiAction, index: number): void {
