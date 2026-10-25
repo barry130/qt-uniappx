@@ -67,6 +67,11 @@ const ICON_BODIES: Record<string, string> = {
   "repeat-1": '<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/><path d="M11 10.6l1.5-1v5.9"/>',
   shuffle: '<polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/>',
   list: '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3.5" y1="6" x2="3.51" y2="6"/><line x1="3.5" y1="12" x2="3.51" y2="12"/><line x1="3.5" y1="18" x2="3.51" y2="18"/>',
+  // 音量：喇叭 + 两道声波（宽屏底栏音量入口）。喇叭用多边形填充，
+  // 与 play/skip 同法用 COLOR_TOKEN 占位，小尺寸下比纯描边更清晰。
+  volume: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="' + COLOR_TOKEN + '" stroke="none"/><path d="M15.5 8.6a5 5 0 0 1 0 6.8"/><path d="M18.6 5.6a9.4 9.4 0 0 1 0 12.8"/>',
+  // 静音：同款喇叭 + 右侧叉（底栏静音态）。叉与喇叭分离，避免小尺寸糊成一团
+  "volume-mute": '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="' + COLOR_TOKEN + '" stroke="none"/><line x1="15.5" y1="9.5" x2="21" y2="15"/><line x1="21" y1="9.5" x2="15.5" y2="15"/>',
 
   // 音乐业务
   music: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',

@@ -45,6 +45,7 @@ import WebResourceResponse from 'android.webkit.WebResourceResponse'
 import ValueCallback from 'android.webkit.ValueCallback'
 import RenderProcessGoneDetail from 'android.webkit.RenderProcessGoneDetail'
 import PackageInfo from 'android.content.pm.PackageInfo'
+import ContextThemeWrapper from 'android.view.ContextThemeWrapper'
 import View from 'android.view.View'
 import ViewGroup from 'android.view.ViewGroup'
 import Handler from 'android.os.Handler'
@@ -646,7 +647,13 @@ export function v8Start(): string {
 				if (l != null) l.countDown()
 				return
 			}
-			const wv = new WebView(activity)
+			// 用「应用级 Context + 当前主题」建 WebView，而不是直接用 activity：
+			// 引擎是全 App 单例，WebView 若持有某个页面的 Activity（本插件是一页一
+			// Activity 架构），页面销毁后 555KB 的 Activity/View 树会一直被静态
+			// gWebView/gHostView 扣住（2026-10-25 LeakCanary 实锤）。应用级 Context
+			// 生命周期与进程一致，且 WebView 仍通过 addContentView 挂进窗口执行 JS。
+			const themed = new ContextThemeWrapper(activity.getApplicationContext(), activity.getTheme())
+			const wv = new WebView(themed)
 			const s = wv.getSettings()
 			s.setJavaScriptEnabled(true)
 			// 不放开本地文件/内容访问：bundle 走 shouldInterceptRequest，不需要 file:// 权限

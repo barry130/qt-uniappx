@@ -221,6 +221,15 @@ let gInited = false;
 let gDebug = false;
 /** 串行写队列（见文件头「并发」） */
 let gQueue: Promise<boolean> = Promise.resolve(true);
+/**
+ * 当前日志文件的字节数快照（-1 = 未知）。
+ *
+ * 为什么要有它：轮转判定原先每写一行都要 fsList 一次整个日志目录（一次原生
+ * 目录扫描 + 数组解析），也就是**一行日志两次原生调用**。下载/内嵌那种一行接一行
+ * 的场景里，这笔开销比写日志本身还贵。现在初始时扫一次、之后按写入量累加，
+ * 只有跨过上限才真的去轮转，常规路径恢复成「一行一次 append」。
+ */
+let gSize = -1;
 
 /** 设置 debug 级别（持久化，重启后保留） */
 export function setLogDebug(on: boolean): void {
@@ -307,25 +316,47 @@ export function describeValue(v: any): string {
 
 // ==================== 轮转 ====================
 
+/** UTF-8 字节数（估算用：日志上限只按量级拦，不需要精确到字节） */
+function utf8Bytes(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) {
+      n = n + 1;
+    } else if (c < 0x800) {
+      n = n + 2;
+    } else {
+      n = n + 3;
+    }
+  }
+  return n;
+}
+
 /**
  * 按需轮转。返回是否发生了轮转。
  * 顺序：删最旧的 → 从大到小依次改名 → 腾出当前文件名。
+ *
+ * 大小取自 gSize 缓存：只有「缓存未知」（首次写入 / 上次写失败 / 外部清空过）
+ * 才真的列一次目录。列目录是相对最贵的原生调用，不能每行都做。
  */
 async function rotateIfNeeded(): Promise<boolean> {
   const dir = logDir();
   const path = logPath();
   if (dir.length == 0 || path.length == 0) return false;
 
-  const entries = await fsList(dir);
-  let size = 0;
-  for (let i = 0; i < entries.length; i++) {
-    const e = entries[i];
-    if (!e.dir && e.name == LOG_FILE_NAME) {
-      size = e.size;
-      break;
+  if (gSize < 0) {
+    const entries = await fsList(dir);
+    let size = 0;
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      if (!e.dir && e.name == LOG_FILE_NAME) {
+        size = e.size;
+        break;
+      }
     }
+    gSize = size;
   }
-  if (size < MAX_FILE_BYTES) return false;
+  if (gSize < MAX_FILE_BYTES) return false;
 
   // 最旧的一份直接删掉，给后面的改名腾位置
   await fsRemove(backupPath(MAX_BACKUPS));
@@ -335,12 +366,16 @@ async function rotateIfNeeded(): Promise<boolean> {
       await fsRename(backupPath(i), backupPath(i + 1));
     } catch (_) {}
   }
+  let moved = false;
   try {
     await fsRename(path, backupPath(1));
+    moved = true;
   } catch (_) {
     // 当前文件挪不走（极少见）：不阻断写入，继续往原文件追加，
     // 结果是这个文件会略超上限，但日志不丢——比丢日志好。
   }
+  // 挪走了就是全新的空文件；没挪走说明还在往原文件追加，保留累计值继续往上顶
+  if (moved) gSize = 0;
   return true;
 }
 
@@ -395,10 +430,15 @@ async function writeLine(line: string): Promise<boolean> {
   const path = logPath();
   if (path.length == 0) return false;
   await rotateIfNeeded();
+  const bytes = utf8Bytes(line) + 1;
   try {
     await fsAppend(path, line + "\n");
+    // 追加成功后本地记账，下次轮转判定不必再列目录
+    gSize = gSize < 0 ? -1 : gSize + bytes;
     return true;
   } catch (e) {
+    // 记账失真了就作废缓存，下一行重新列一次目录拿真值
+    gSize = -1;
     // 日志写不进去（磁盘满、权限异常…）不能让主流程受影响，只在控制台留一句
     console.log("[Logger] 写日志失败：" + describeValue(e));
     return false;
@@ -437,6 +477,19 @@ export function logWith(tag: string, message: string, extra: any): void {
 
 // 下面几个是给调用点用的短名包装：迁移 console.* 时不必每次写全 level 常量，
 // 也统一了「值怎么描述」的规则（永远走 describeValue，不会出现 [object Object]）。
+
+/**
+ * debug 级：默认不写文件也不打控制台（logLine 里第一句就 return），
+ * 设置页打开「调试日志」后才落盘。
+ *
+ * 用途是那些**排查时才需要、平时只費性能**的细节：分块落盘的每块字节、
+ * 续传探测的 dir/total、取址长度、批量清扫的逐条结果……这类一行接一行的高频
+ * 日志如果都按 info 落盘，每条都要过一次脱敏 + 一次原生追加，最贵时比下载本身
+ * 还占 CPU。默认关掉就只剩一个函数调用。
+ */
+export function logDebug(tag: string, message: string): void {
+  logLine(LOG_DEBUG, tag, message);
+}
 
 export function logInfo(tag: string, message: string): void {
   logLine(LOG_INFO, tag, message);
@@ -484,6 +537,14 @@ export function logMsg(message: string, extra: any = null): void {
   const parts = splitTag(message);
   const body = extra != null ? parts[1] + " " + describeValue(extra) : parts[1];
   logLine(LOG_INFO, parts[0], body);
+}
+
+/** 迁移入口：debug 级（默认不落盘，见 logDebug） */
+export function logMsgDebug(message: string, extra: any = null): void {
+  if (!gDebug) return;
+  const parts = splitTag(message);
+  const body = extra != null ? parts[1] + " " + describeValue(extra) : parts[1];
+  logLine(LOG_DEBUG, parts[0], body);
 }
 
 /** 迁移入口：warn 级 */
@@ -569,6 +630,8 @@ export function clearLogs(): Promise<boolean> {
     for (let i = 1; i <= MAX_BACKUPS; i++) {
       await fsRemove(backupPath(i));
     }
+    // 文件已被删掉，缓存的字节数作废（置 0 即可，不必再列一次目录）
+    gSize = 0;
     return true;
   };
   gQueue = gQueue.then(task).catch(() => false);

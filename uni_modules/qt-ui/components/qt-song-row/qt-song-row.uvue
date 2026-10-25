@@ -46,17 +46,10 @@
       />
     </view>
   </view>
-
-  <qt-action-sheet
-    v-model:visible="sheetVisible"
-    :title="song.name + ' - ' + song.singer"
-    :actions="sheetActions"
-    @select="onSheetSelect"
-  />
 </template>
 <script setup lang="ts">
 import { qtShowToast } from "@/services/toast";
-import { ref, computed } from "vue";
+import { computed } from "vue";
 import type { Song } from "@/types/music";
 import { usePlayerStore } from "@/stores/player";
 import { useDownloadsStore } from "@/stores/downloads";
@@ -64,8 +57,7 @@ import { useDislikesStore } from "@/stores/dislikes";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { platformShort, platformColor } from "@/services/platform";
-import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
-import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import { qtShowActionSheet } from "@/services/action-sheet";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
@@ -88,44 +80,49 @@ const liked = computed(() => player.isLiked(props.song));
 const downloaded = computed(() => downloads.has(props.song));
 // 不喜欢列表：命中任何规则（歌或歌手）→ 行置灰提示
 const disliked = computed(() => dislikes.isDisliked(props.song));
-const sheetVisible = ref(false);
 
 const badgeStyle = computed(() => {
   const color = platformColor(props.song.platform);
   return "background-color:" + color + ";";
 });
 
-const sheetActions = computed<SheetAction[]>(() => {
+/**
+ * 歌曲菜单走全局 host（services/action-sheet.ts）：原生渲染里 absolute 锚定
+ * 父节点，本组件若内联 <qt-action-sheet>，蒙层只有一行行那么高，弹层从蒙层
+ * 底部向上溢出被屏幕裁掉（2026-10-25 首页音源切换同款事故）。宿主实例挂在
+ * qt-page-frame 根，absolute 即满屏。逐项颜色经 options.colors 保留高亮红。
+ */
+const sheetActions = computed((): { names: string[]; colors: (string | null)[]; title: string } => {
   // 歌曲按钮看 hasSongRule（不含歌手规则——歌手规则命中的歌，取歌按钮
   // 必须独立可单独解除）；歌手按钮恒占一位（串空时置灰），保持 index 稳定
   const songBanned = dislikes.hasSongRule(props.song);
   const hasSinger = props.song.singer != null && props.song.singer.length > 0;
   const singerBanned = hasSinger && dislikes.hasSingerRule(props.song.singer != null ? props.song.singer : "");
-  const actions: SheetAction[] = [
-    { name: "下一首播放" },
-    {
-      name: liked.value ? "取消收藏" : "收藏到我喜欢",
-      color: liked.value ? themeStore.skin.accent : undefined,
-    },
-    { name: "加入播放队列" },
-    {
-      name: downloaded.value ? "已在下载列表" : "下载到本地",
-      disabled: downloaded.value,
-    },
-    { name: "分享" },
-    { name: "查看歌手" },
-    {
-      name: songBanned ? "取消屏蔽这首歌" : "屏蔽这首歌",
-      color: songBanned ? themeStore.skin.accent : undefined,
-    },
-    {
-      name: singerBanned ? "取消屏蔽该歌手" : "屏蔽该歌手",
-      color: singerBanned ? themeStore.skin.accent : undefined,
-      disabled: !hasSinger,
-    },
+  const names: string[] = [
+    "下一首播放",
+    liked.value ? "取消收藏" : "收藏到我喜欢",
+    "加入播放队列",
+    downloaded.value ? "已在下载列表" : "下载到本地",
+    "分享",
+    "查看歌手",
+    songBanned ? "取消屏蔽这首歌" : "屏蔽这首歌",
+    singerBanned ? "取消屏蔽该歌手" : "屏蔽该歌手",
   ];
-  if (props.inHistory) actions.push({ name: "从最近播放移除" });
-  return actions;
+  const colors: (string | null)[] = [
+    null,
+    liked.value ? themeStore.skin.accent : null,
+    null,
+    null,
+    null,
+    null,
+    songBanned ? themeStore.skin.accent : null,
+    singerBanned ? themeStore.skin.accent : null,
+  ];
+  if (props.inHistory) {
+    names.push("从最近播放移除");
+    colors.push(null);
+  }
+  return { names: names, colors: colors, title: props.song.name + " - " + (props.song.singer != null ? props.song.singer : "") };
 });
 
 function shortName(platform: string): string {
@@ -141,14 +138,21 @@ function toggleLike(): void {
   player.showPlaylistPickerFor(props.song);
 }
 function openSheet(): void {
-  sheetVisible.value = true;
+  const sheet = sheetActions.value;
+  qtShowActionSheet({
+    title: sheet.title,
+    itemList: sheet.names,
+    colors: sheet.colors,
+  }).then((index: number) => {
+    if (index >= 0) onSheetSelect(index);
+  });
 }
 /** 多选态下长按不弹菜单：宿主点行是勾选，弹菜单会打断批量操作 */
 function onLongPress(): void {
   if (props.selecting) return;
   openSheet();
 }
-function onSheetSelect(_action: SheetAction, index: number): void {
+function onSheetSelect(index: number): void {
   if (index == 0) {
     player.playNext(props.song);
   } else if (index == 1) {

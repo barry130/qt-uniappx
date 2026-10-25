@@ -25,7 +25,7 @@ import { ref } from "vue";
 export type AiEngineMode = "rule" | "local" | "server";
 
 export const AI_MODE_LABEL_RULE = "纯规则";
-export const AI_MODE_LABEL_LOCAL = "本地模型精选";
+export const AI_MODE_LABEL_LOCAL = "本地模型";
 export const AI_MODE_LABEL_SERVER = "服务端 AI";
 
 export const AI_MODE_HINT_RULE = "不联网、不调模型：每日推荐按口味规则排，音乐助手按关键词规则选歌。永远可用。";

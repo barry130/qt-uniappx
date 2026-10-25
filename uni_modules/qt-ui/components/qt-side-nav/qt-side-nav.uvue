@@ -2,22 +2,15 @@
   宽屏侧边导航 rail（平板 / 横屏 / 车机）
   由 qt-page-frame 在 layout.isWide 时挂载，覆盖 tab 页与所有普通页面；宽屏取代底部
   原生 tabbar，手机竖屏不渲染，仍用原生 tabbar。
-  medium（600–899dp）退化为 64px 图标栏；wide/desktop（>=900dp）使用完整 rail
-  （品牌与文字），避免中等宽度窗口被导航栏挤占。
+  medium（600–899dp）是 64px 图标栏；wide/desktop（>=900dp）2026-10-25 起对齐
+  网易云 Pad：96px「图标上、小字下」紧凑栏（原 208px 文字横排栏太占内容宽）。
   本组件只在宽屏渲染，因此内部尺寸直接用 px。
 -->
 <template>
   <view class="qsn" :class="compact ? 'qsn-compact' : ''" :style="railStyle">
-    <view v-if="!compact" class="qsn-brand">
-      <image class="qsn-logo" src="/static/icon/xxxhdpi.png" mode="aspectFill" />
-      <view class="qsn-brand-copy">
-        <text class="qsn-brand-name" :style="('color:' + theme.skin.text + ';') + qtFontPx(17)">轻听</text>
-        <text class="qsn-brand-sub" :style="('color:' + theme.skin.textSubtle + ';') + qtFontPx(11)">你的私人音乐台</text>
-      </view>
-    </view>
-    <image v-else class="qsn-logo qsn-logo-compact" src="/static/icon/xxxhdpi.png" mode="aspectFill" />
-
-    <!-- 矮窗口（横屏手机 / 车机）下菜单项放不下，品牌固定在顶部，菜单区可滚动 -->
+    <!-- 2026-10-25 用户要求去掉左上角品牌 logo：rail 直接从「发现」开始
+         （状态栏 padding 仍保留，防止菜单被状态栏文字压住）。 -->
+    <!-- 矮窗口（横屏手机 / 车机）下菜单项放不下，logo 固定在顶部，菜单区可滚动 -->
     <scroll-view class="qsn-scroll" direction="vertical" :show-scrollbar="false">
       <view class="qsn-group">
         <view
@@ -28,11 +21,11 @@
           :style="itemActive(tab.page) ? 'background-color:' + theme.skin.accentSoft + ';' : ''"
           @click="goTab(tab.page)"
         >
-          <QtIcon :name="tab.icon" :size="compact ? 24 : 20" :color="itemActive(tab.page) ? theme.skin.accent : theme.skin.iconMuted" />
+          <QtIcon :name="tab.icon" :size="compact ? 24 : 21" :color="itemActive(tab.page) ? theme.skin.accent : theme.skin.iconMuted" />
           <text
             v-if="!compact"
             class="qsn-label"
-            :style="('color:' + (itemActive(tab.page) ? theme.skin.accent : theme.skin.textSubtle) + ';') + qtFontPx(14)"
+            :style="('color:' + (itemActive(tab.page) ? theme.skin.accent : theme.skin.textSubtle) + ';') + qtFontPx(11)"
           >{{ tab.label }}</text>
           <view v-if="hasDot(tab.page)" class="qsn-dot" />
         </view>
@@ -49,8 +42,8 @@
           :style="itemActive(tool.page) ? 'background-color:' + theme.skin.accentSoft + ';' : ''"
           @click="goPage(tool.page)"
         >
-          <QtIcon :name="tool.icon" :size="compact ? 24 : 20" :color="itemActive(tool.page) ? theme.skin.accent : theme.skin.iconMuted" />
-          <text v-if="!compact" class="qsn-label" :style="('color:' + (itemActive(tool.page) ? theme.skin.accent : theme.skin.textSubtle) + ';') + qtFontPx(14)">{{ tool.label }}</text>
+          <QtIcon :name="tool.icon" :size="compact ? 24 : 21" :color="itemActive(tool.page) ? theme.skin.accent : theme.skin.iconMuted" />
+          <text v-if="!compact" class="qsn-label" :style="('color:' + (itemActive(tool.page) ? theme.skin.accent : theme.skin.textSubtle) + ';') + qtFontPx(11)">{{ tool.label }}</text>
         </view>
       </view>
     </scroll-view>
@@ -66,6 +59,7 @@ import { useSourceStore } from "@/stores/source";
 import { useSourceRegistryStore } from "@/stores/source-registry";
 import { qtFontPx } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtRailNavigate, qtRailSwitchTab } from "@/uni_modules/qt-ui/composables/qt-nav";
+import { qtWideToolActive } from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
 import { qtIsSettingsRoute, qtIsProfileRoute } from "@/uni_modules/qt-ui/composables/qt-page-chrome";
 
 const props = defineProps<{
@@ -106,7 +100,11 @@ const railStyle = computed((): string => {
   // 恒加状态栏高度：全站 navigationStyle=custom 后页面区从窗口顶缘起，
   // rail 不主动让位就会被状态栏文字压住（历史实现只在发现的 3 个页面让位）。
   const sb = qtStatusBarPx();
-  const base = "padding-top:" + sb + "px;background-color:" + theme.skin.surfaceInset + ";border-right-color:" + theme.skin.divider + ";";
+  // 2026-10-25 用户反馈「左边导航栏应该和右边一个背景颜色」：rail 此前铺
+  // surfaceInset + divider，在浅色皮肤里呈现为一条竖灰板，跟内容区割裂。
+  // 改成全透明：rail 固定在 qt-page-frame 根上，底下就是整窗壁纸/页面底色，
+  // 透出去后左右天然同底（壁纸皮肤也成立，不会盖掉左缘壁纸）。
+  const base = "padding-top:" + sb + "px;background-color:transparent;border-right-color:transparent;";
   if (props.docked == true) {
     // 停靠：四边锚定的 absolute（内联压过类里的 fixed），高度随覆盖层撑满。
     // 不能沿用 fixed + 显式 height：见 docked prop 注释（窗口层 z 序 + 漏显隐）。
@@ -128,6 +126,9 @@ const tabs: NavItem[] = [
 // 每日推荐/歌单广场按当前源判断（页面数据取自当前源）。
 const ALL_TOOLS: NavItem[] = [
   { page: "/pages/search/index", label: "搜索", icon: "search" },
+  // 每日推荐不按功能面过滤：它的候选来自播放历史/收藏 + 全部已装音源，
+  // 规则模式在没有任何音源功能声明时也能出结果，做成常驻入口。
+  { page: "/pages/daily-recommend/index", label: "每日推荐", icon: "sparkles" },
   { page: "/pages/daily/index", label: "每日新歌", icon: "calendar" },
   { page: "/pages/playlists/index", label: "歌单广场", icon: "disc" },
   { page: "/pages/chart/index", label: "排行榜", icon: "trending" },
@@ -168,7 +169,10 @@ function hasDot(page: string): boolean {
   return false;
 }
 function goTab(page: string): void {
-  if (props.current == page) return;
+  // 「目标=当前」直接吞掉的前提是没有托管页 —— 托管覆盖层开着时（dock 模式下
+  // props.current 是宿主页），点宿主 tab 的语义是「关掉托管回到这个 tab」，
+  // 必须放行给 qtRailSwitchTab 走关闭分支（2026-10-25 真机：吞掉=没反应）。
+  if (props.current == page && !qtWideToolActive()) return;
   qtRailSwitchTab(page);
 }
 function goPage(page: string): void {
@@ -183,9 +187,9 @@ function goPage(page: string): void {
   left: 0;
   top: 0;
   z-index: 900;
-  width: 208px;
+  width: 96px;
   flex-shrink: 0;
-  padding: 14px 10px;
+  padding: 14px 8px;
   flex-direction: column;
   align-items: stretch;
   border-right-width: 1px; border-right-style: solid;
@@ -195,44 +199,22 @@ function goPage(page: string): void {
   padding: 14px 8px;
   align-items: center;
 }
-.qsn-brand {
-  flex-direction: row;
-  align-items: center;
-  padding: 4px 8px 14px;
-}
-.qsn-logo {
-  width: 38px;
-  height: 38px;
-  border-radius: 12px;
-}
-.qsn-logo-compact {
-  margin-bottom: 14px;
-}
 .qsn-scroll {
   flex: 1;
   min-height: 0;
 }
-.qsn-brand-copy {
-  margin-left: 10px;
-  flex-direction: column;
-}
-.qsn-brand-name {
-  font-size: 17px;
-  font-weight: 700;
-}
-.qsn-brand-sub {
-  margin-top: 2px;
-  font-size: 11px;
-}
 .qsn-group {
   flex-direction: column;
 }
+/* 网易云 Pad 同款：图标居上、11px 小字标签居下，整项纵排居中。
+   compact（medium 档）没有 label，纵排天然把单个图标居中。 */
 .qsn-item {
-  height: 44px;
+  height: 58px;
   margin-bottom: 2px;
-  padding: 0 12px;
-  flex-direction: row;
+  padding: 0 4px;
+  flex-direction: column;
   align-items: center;
+  justify-content: center;
   border-radius: 10px;
 }
 /* 桌面指针反馈：收起成图标轨（compact）时不启用，只图标没有文字时整块变色反而显脏 */
@@ -241,20 +223,20 @@ function goPage(page: string): void {
 }
 .qsn-dot {
   position: absolute;
-  top: 12px;
-  right: 10px;
+  top: 10px;
+  right: 12px;
   width: 8px;
   height: 8px;
   border-radius: 4px;
   background-color: #ff4b4b;
 }
 .qsn-label {
-  margin-left: 10px;
-  font-size: 14px;
+  margin-top: 4px;
+  font-size: 11px;
   font-weight: 500;
 }
 .qsn-divider {
   height: 1px;
-  margin: 10px 8px;
+  margin: 10px 4px;
 }
 </style>

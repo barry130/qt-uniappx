@@ -53,12 +53,6 @@
       </view>
     </view>
 
-    <qt-action-sheet
-      v-model:visible="sheetVisible"
-      :title="sheetTitle"
-      :actions="sheetActions"
-      @select="onSheetSelect"
-    />
     </scroll-view>
   </view>
 </template>
@@ -70,7 +64,8 @@ import { qtContentWidth, qtSplitByHeight, QT_GUTTER_PX } from "@/uni_modules/qt-
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { computed, onMounted, ref, watch } from "vue";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
-import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import { qtShowActionSheet } from "@/services/action-sheet";
+import { showSourceSheet, SOURCE_SHEET_TITLE_DEFAULT } from "@/services/source-sheet";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { audioPlayer } from "@/services/audio-player";
 import { desktopLyric } from "@/services/desktop-lyric";
@@ -167,13 +162,13 @@ const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.div
  */
 const CURRENT_CELL_ROUTES: string[] = [
   "source", "pack", "play-settings", "player-bar", "download-settings",
-  "theme", "dislikes", "desktop-lyric", "permissions", "logs", "cache",
+  "theme", "dislikes", "desktop-lyric", "permissions", "logs", "cache", "ai-providers",
 ];
 const CURRENT_CELL_PAGES: string[] = [
   "", "/pages/source-pack/index", "/pages/play-settings/index", "/pages/player-bar/index",
   "/pages/download-settings/index", "/pages/theme/index", "/pages/dislikes/index",
   "/pages/desktop-lyric/index", "/pages/permissions/index", "/pages/logs/index",
-  "/pages/cache/index",
+  "/pages/cache/index", "/pages/ai-providers/index",
 ];
 
 const routeNow = computed<string>((): string => {
@@ -196,7 +191,8 @@ function cellStyleFor(key: string): string {
   return cellStyle.value + "background-color:" + theme.skin.accentSoft + ";";
 }
 
-const sources = computed<string[]>(() => registry.sourceIds());
+// 音源清单不在这里维护：设置页「默认音源」的清单/高亮/滚动定位统一由
+// services/source-sheet.ts 的 showSourceSheet 提供（四个入口同一口径）。
 // 「有新音源包」红点：检查下载后亮，立即应用 / 下次启动自动装载后灭
 const sourceUpdateStore = useSourceUpdateStore();
 // 桌面歌词（响应式镜像：服务是非响应式单例，模板要靠 ref 刷新）
@@ -207,10 +203,8 @@ const lyricOn = ref(desktopLyric.isEnabled());
  */
 const logSizeText = ref<string>("");
 
-const sheetVisible = ref(false);
-const sheetTitle = ref("");
-const sheetActions = ref<SheetAction[]>([]);
-let sheetSelect: ((index: number) => void) | null = null;
+/** 弹层走全局 host（qt-page-frame 根挂载）：蒙层 absolute 锚定父节点，
+ * 内联在 scroll-view 里时蒙层只有视口高、还会被悬浮迷你播放器压住。 */
 
 /**
  * 设置页的 8 个分组 / 11 个入口描述（原本是 124 行手写模板，每组结构完全相同：
@@ -310,7 +304,10 @@ const visibleGroups = computed((): SettingsGroup[] => groups.value.filter((g: Se
 const twoColumn = computed((): boolean => {
   if (props.inPane == true) return false;
   const inner = qtContentWidth("flow") - QT_GUTTER_PX * 2 - 16;
-  return inner >= 420 * 2;
+  // 700（两列各 342）而不是 840：pad 档（1097dp 窗口，内容列 841，inner 777）
+  // 按原门限永远单列，托管设置页就成了一根窄柱（2026-10-25 用户反馈）。
+  // 342 列宽下「标题 + 行尾值 + 箭头」约 345px，仍放得下；更窄自动退回单列。
+  return inner >= 700;
 });
 
 /**
@@ -334,15 +331,16 @@ const colStyle = computed<string>(() => {
 });
 
 function openSheet(title: string, actions: SheetAction[], select: (index: number) => void): void {
-  sheetTitle.value = title;
-  sheetActions.value = actions;
-  sheetSelect = select;
-  sheetVisible.value = true;
-}
-function onSheetSelect(_action: SheetAction, index: number): void {
-  const cb = sheetSelect;
-  sheetSelect = null;
-  if (cb) cb(index);
+  const names: string[] = [];
+  const colors: (string | null)[] = [];
+  for (let i = 0; i < actions.length; i++) {
+    names.push(actions[i].name);
+    const c = actions[i].color;
+    colors.push(c != null && c.length > 0 ? c : null);
+  }
+  qtShowActionSheet({ title: title, itemList: names, colors: colors }).then((index: number) => {
+    if (index >= 0) select(index);
+  });
 }
 
 function aiModeLabelOf(mode: AiEngineMode): string {
@@ -386,7 +384,8 @@ function aiProvidersSummary(): string {
 }
 
 function goAiProviders(): void {
-  uni.navigateTo({ url: "/pages/ai-providers/index" });
+  // 走 goSubpage：宽屏三栏下从右栏就地替换（redirectTo），不层层堆页
+  goSubpage("/pages/ai-providers/index");
 }
 
 /**
@@ -521,16 +520,12 @@ function sourceText(): string {
   return platformLabel(sourceStore.current);
 }
 function showSource(): void {
-  const list = sources.value;
-  if (list.length == 0) {
-    qtShowToast({ title: "请先在 设置→音源包管理 安装数据包", icon: "none" });
-    return;
-  }
-  openSheet("默认音源", list.map((s) => ({
-    name: platformLabel(s),
-    color: s == sourceStore.current ? theme.skin.accent : undefined,
-  })), (index) => {
-    pickSource(list[index]);
+  // 走 services/source-sheet 的统一口径（与首页切换器、搜索页、歌单导入页同一套）：
+  // 未装包提示、当前项 accent 高亮、以及这里原先缺的 selectedIndex——
+  // 不传它列表打开时永远停在顶部，当前源在折叠区外就看不见自己选的是哪个。
+  showSourceSheet(SOURCE_SHEET_TITLE_DEFAULT).then((source: string) => {
+    if (source.length == 0) return;
+    pickSource(source);
   });
 }
 function pickSource(s: string): void {
@@ -656,7 +651,7 @@ function goLogs(): void {
 .group-wide { margin-top: 14px; margin-left: 24px; margin-right: 24px; border-radius: 14px; }
 .cell-wide { height: 64px; padding-left: 24px; padding-right: 24px; }
 .cell-title-wide { font-size: 17px; }
-.cell-value-wide { font-size: 14px; }
+.cell-value-wide { font-size: 14px; margin-right: 12px; }
 .cell-icon-wide { margin-right: 10px; }
 
 /* ===== 三栏中间栏（inPane）=====

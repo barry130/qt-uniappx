@@ -67,7 +67,23 @@
       <view class="type-row" :class="layout.isWide ? 'type-row-wide' : ''" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';'">
         <qt-segmented :list="typeLabels" v-model="typeIndex" @change="switchType" />
       </view>
-      <!-- 全部：四类型分节预览（主流搜索默认页形态），各节「查看更多」跳对应 tag -->
+      <!-- 播放全部悬浮条（窄屏歌曲 tab）：放在滚动容器之外，滚动时始终钉在
+            类型条下方，不会随结果滚走。宽屏走框架药丸行（widePlayAllText），
+            不渲染这一条。 -->
+       <view
+         v-if="type == 'song' && songs.length > 0 && !searching && !layout.isWide"
+         class="play-all-float"
+         @click="playAllSongs"
+       >
+         <view class="play-all-row" :style="'background-color:' + theme.skin.surfaceMuted + ';border-bottom-color:' + theme.skin.divider + ';'">
+           <view class="play-all-chip" :style="'background-color:' + theme.skin.accentSoft + ';'">
+             <QtIcon name="play" :size="22" :color="theme.skin.accent" />
+           </view>
+           <text class="play-all-text" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 16)">播放全部</text>
+           <text class="play-all-count" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13)">({{ songs.length }})</text>
+         </view>
+       </view>
+       <!-- 全部：四类型分节预览（主流搜索默认页形态），各节「查看更多」跳对应 tag -->
       <scroll-view v-show="type == 'all'" class="results" direction="vertical" :show-scrollbar="false">
         <!-- 宽屏两列：左列「单曲」（最多 20 行，最长），右列「歌单+歌手+专辑」三节累加。
              不用 flex-wrap 自动折行：单曲那一节比歌单高得多，折行后右列会在歌单下方
@@ -151,21 +167,8 @@
         <list-item v-if="searching && songs.length == 0" class="sk-item" :class="layout.isWide ? 'sk-item-wide' : ''">
           <QtSkeletonList kind="song" :rows="SKELETON_ROWS" />
         </list-item>
-        <!-- 播放全部：必须放在 v-for 之前（状态/操作条目一律先于数据条目，
-             否则长列表回收时行错乱），内容包在内层 view 里保证 list-item 只有一个 view 子节点 -->
-        <list-item
-          v-if="songs.length > 0 && !searching && !layout.isWide"
-          class="play-all-item" :class="layout.isWide ? 'play-all-item-wide' : ''"
-          @click="playAllSongs"
-        >
-          <view class="play-all-row" :class="layout.isWide ? 'play-all-row-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';border-bottom-color:' + theme.skin.divider + ';'">
-            <view class="play-all-chip" :class="layout.isWide ? 'play-all-chip-wide' : ''" :style="'background-color:' + theme.skin.accentSoft + ';'">
-              <QtIcon name="play" :size="layout.isWide ? 12 : 22" :color="theme.skin.accent" />
-            </view>
-            <text class="play-all-text" :class="layout.isWide ? 'play-all-text-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 16)">播放全部</text>
-            <text class="play-all-count" :class="layout.isWide ? 'play-all-count-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13)">({{ songs.length }})</text>
-          </view>
-        </list-item>
+        <!-- 播放全部已上移为类型条下方的悬浮条（play-all-float），不再占用
+             list-item 槽位；这里只留骨架与数据行，虚拟滚动依旧稳定 -->
         <list-item
           v-for="item in songRows"
           :key="item.key"
@@ -348,12 +351,6 @@
       :actions="sheetActions"
       @select="onSheetSelect"
     />
-    <QtActionSheet
-      v-model:visible="sourceSheetVisible"
-      title="切换音源"
-      :actions="sourceSheetActions"
-      @select="onSourceSelect"
-    />
   </view>
   </qt-page-frame>
 </template><script setup lang="ts">
@@ -371,7 +368,6 @@ import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import qtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
-import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import { useSongSheet } from "@/composables/use-song-sheet";
 import { musicApi } from "@/services/music-api";
@@ -382,6 +378,7 @@ import { usePlayerStore } from "@/stores/player";
 import { useSourceStore } from "@/stores/source";
 import { useSourceRegistryStore } from "@/stores/source-registry";
 import { platformShort, platformLabel } from "@/services/platform";
+import { showSourceSheet, SOURCE_SHEET_TITLE_SWITCH } from "@/services/source-sheet";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
 import type { Song, Playlist, Artist, Album } from "@/types/music";
 import type { Source } from "@/services/music-api";
@@ -422,30 +419,16 @@ function onHeaderChipTap(index: number): void {
   if (index == 0) openSourceSheet();
   else toggleAggregateMode();
 }
-// 音源切换：与 qt-source-switcher 同一套（注册表清单 + accent 标当前），只是入口搬进了标题栏
-const sourceSheetVisible = ref(false);
-const sourceSheetActions = computed<SheetAction[]>(() => {
-  const ids = sourceRegistry.sourceIds();
-  const out: SheetAction[] = [];
-  for (let i = 0; i < ids.length; i++) {
-    out.push({ name: platformLabel(ids[i]), color: ids[i] == sourceStore.current ? theme.skin.accent : undefined });
-  }
-  return out;
-});
+// 音源切换：走 services/source-sheet 的统一口径（与首页切换器、设置页同一套）。
+// 此前这里是内联 <QtActionSheet> + 自己拼 actions，既没有 selectedIndex（打开不滚到
+// 当前源），又是内联组件（absolute 锚父节点，2026-10-25 真机被裁过）。
 function openSourceSheet(): void {
-  if (sourceRegistry.sourceIds().length == 0) {
-    qtShowToast({ title: "请先在 设置→音源包管理 安装数据包", icon: "none" });
-    return;
-  }
-  sourceSheetVisible.value = true;
-}
-function onSourceSelect(_action: SheetAction, index: number): void {
-  const ids = sourceRegistry.sourceIds();
-  if (index < 0 || index >= ids.length) return;
-  const s = ids[index];
-  if (s == sourceStore.current) return;
-  sourceStore.setSource(s);
-  ensureSource();
+  showSourceSheet(SOURCE_SHEET_TITLE_SWITCH).then((source: string) => {
+    if (source.length == 0) return;
+    if (source == sourceStore.current) return;
+    sourceStore.setSource(source);
+    ensureSource();
+  });
 }
 
 const playlists = ref<Playlist[]>([]);
@@ -1304,9 +1287,9 @@ function openAlbum(al: Album): void {
   justify-content: center;
 }
 /* 「播放全部」操作条：固定高度与歌曲行同档，虚拟滚动才不抖 */
-.play-all-item {
-  height: 96rpx;
-  justify-content: center;
+.play-all-float {
+  background-color: #ffffff00;
+  flex-shrink: 0;
 }
 .play-all-row {
   height: 96rpx;
@@ -1394,11 +1377,6 @@ function openAlbum(al: Album): void {
 .tag-wide { margin-right: 12px; margin-bottom: 12px; padding: 8px 16px; border-radius: 20px; font-size: 15px; }
 .row-wide { height: 82px; padding-left: 24px; padding-right: 24px; }
 .row-item-wide { height: 82px; }
-.play-all-item-wide { height: 60px; }
-.play-all-row-wide { height: 60px; padding-left: 24px; padding-right: 24px; }
-.play-all-chip-wide { width: 32px; height: 32px; border-radius: 16px; }
-.play-all-text-wide { margin-left: 10px; font-size: 16px; }
-.play-all-count-wide { margin-left: 5px; font-size: 13px; }
 .row-cover-wide { width: 58px; height: 58px; border-radius: 10px; }
 .row-name-wide { font-size: 17px; }
 .row-meta-wide { margin-top: 6px; font-size: 14px; }

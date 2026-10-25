@@ -21,9 +21,9 @@
              在设置页自行安装。没有生效中的播放包时给一条引导条；没有生效中的数据包时弹
              QtMetaPackGuide（下方）。两者都只指路「音源包管理」页（pages/source-pack/index），
              不带下载动作；本地音乐照常播放 -->
-        <view v-if="sourceUpdateStore.sourceMissing" class="source-tip" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="goSourcePack">
+        <view v-if="sourceUpdateStore.sourceMissing" class="source-tip" :class="layout.isWide ? 'source-tip-wide' : ''" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="goSourcePack">
           <QtIcon name="music" :size="26" :color="themeStore.skin.accent" />
-          <view class="source-tip-copy">
+          <view class="source-tip-copy" :class="layout.isWide ? 'source-tip-copy-wide' : ''">
             <text class="source-tip-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(27, 15)" :max-lines="1">未安装播放音源包</text>
             <text class="source-tip-desc" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)" :max-lines="2">在线播放需要先安装播放音源包，点此去音源包管理安装；本地音乐播放不受影响</text>
           </view>
@@ -209,7 +209,7 @@
                 <view class="wide-chart-info"><text class="wide-chart-name" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(13)" :max-lines="1">{{ chart.name }}</text><text class="wide-chart-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(11)" :max-lines="1">{{ chart.description || "热门榜单" }}</text></view>
                 <QtIcon name="chevron-right" :size="13" :color="themeStore.skin.iconMuted" />
               </view>
-              <view v-if="!loading && charts.length == 0" class="home-empty"><text class="home-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(23, 13)">暂无榜单</text></view>
+              <view v-if="!loading && charts.length == 0" class="home-empty" :class="layout.isWide ? 'home-empty-wide' : ''"><text class="home-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(23, 13)">暂无榜单</text></view>
             </view>
           </view>
         </view>
@@ -223,7 +223,9 @@
       </view>
     </view>
     <!-- 宽屏 rail 工具入口的就地托管层：同窗口换内容，不新建 Activity（没有系统起始窗白帧）。
-         详见 qt-wide-workspace.ts。窄屏不渲染（托管状态恒为空）。 -->
+         详见 qt-wide-workspace.ts。窄屏不渲染（托管状态恒为空）。
+         2026-10-25 教训：不能挪到页面根做多根节点 —— 字节码模板渲染器直接
+         std::runtime_error 崩溃（unsupported component sharedData source）。 -->
     <qt-wide-workspace host-route="/pages/home/index" />
   </qt-page-frame>
 </template>
@@ -742,7 +744,8 @@ function playFeatured(): void {
  */
 const wideHomeWidth = computed<number>(() => qtContentWidth("grid"));
 const wideCompact = computed<boolean>(() => wideHomeWidth.value < 720);
-const wideSideWidth = computed<number>(() => wideCompact.value ? 0 : 300);
+// 2026-10-25 对齐网易云 Pad：右栏 300→264，rail 收窄（208→96）腾出的宽度留给歌单网格加列
+const wideSideWidth = computed<number>(() => wideCompact.value ? 0 : 264);
 // wide-shell 自身有 16px（紧凑 12px）左右内边距，主列宽必须一并扣除，否则右栏溢出被裁。
 // 右栏（热门榜单）被功能面门控隐藏时不再为它让位，主列撑满剩余宽度
 const wideMainWidth = computed<number>(() => wideHomeWidth.value - (wideCompact.value ? 24 : 32) - (showCharts.value ? wideSideWidth.value : 0) - (wideCompact.value ? 0 : 16));
@@ -755,20 +758,30 @@ const widePanelInner = computed<number>(() => Math.max(1, wideMainWidth.value - 
  * 但方向反了：窗口越宽列数越多、每张卡反而越小 —— 1280dp 窗口下主列 678dp
  * 算成 5 列、卡宽只有 116dp，比竖屏手机横滑架上的卡（约 135dp）还小，
  * 于是「宽屏」只增加了张数、没有放大内容。宽屏正确的做法是先让卡长到
- * 看得清封面与两行文案（≥150dp），再多出来的宽度才用于加列；
+ * 看得清封面与两行文案（≥128dp），再多出来的宽度才用于加列；
  * 同时给一个 200dp 上限，免得超宽窗口下只剩两三张巨卡。
+ * 2026-10-25 用户实测 1097dp 窗口 2 列 218dp 仍嫌「图片太大」：下限 150→128
+ * （网易云 Pad 同区域约 3 列 140dp），461dp 主列从 2 列 218dp 变 3 列 141dp。
  */
 const widePlaylistColumns = computed<number>(() => {
   const inner = wideMainWidth.value - 32;
-  let cols = qtColumnCount(inner, 150, 12, 6);
-  while (cols < 6 && Math.floor((inner - 12 * cols) / cols) > 200) cols = cols + 1;
+  let cols = qtColumnCount(inner, 128, 12, 6);
+  // 上限 200dp 是「别只剩两三张巨卡」，但加列前必须确认加完还在自己定的
+  // 128dp 下限之上：旧写法只看「当前列宽 > 200」就加列，431dp 内容宽下
+  // 2 列 203dp → 加一列变 3 列 131dp，直接掉到下限以下。
+  while (cols < 6 && Math.floor((inner - 12 * (cols + 1)) / (cols + 1)) >= 128) {
+    const cur = Math.floor((inner - 12 * cols) / cols);
+    const next = Math.floor((inner - 12 * (cols + 1)) / (cols + 1));
+    if (cur <= 200 || next < 128) break;
+    cols = cols + 1;
+  }
   return cols;
 });
 const widePlaylistCardWidth = computed<number>(() => {
   const inner = wideMainWidth.value - 32;
   const gap = 12;
   // 末卡也带 margin-right，行宽按 cols 个 gap 计，避免最后一列被挤到换行
-  return Math.max(84, Math.floor((inner - gap * widePlaylistColumns.value) / widePlaylistColumns.value));
+  return Math.max(128, Math.floor((inner - gap * widePlaylistColumns.value) / widePlaylistColumns.value));
 });
 /**
  * 歌单网格按行切开（数据层），不用 flex-wrap。
@@ -925,16 +938,21 @@ const formatCount = formatBigCount;
 .source-tip-copy { flex: 1; min-width: 0; margin-left: 18rpx; }
 .source-tip-title { font-size: 27rpx; font-weight: 600; }
 .source-tip-desc { margin-top: 6rpx; font-size: 22rpx; }
-.home-bell-dot-wide { min-width: 18px; height: 18px; border-radius: 9px; top: 3px; right: 3px; }
+/* 宽屏：.source-tip 只被 sourceMissing 门控，宽屏同样渲染，rpx 会放大 2.7 倍。
+   间距按宽屏 px 重给（外壳 .wide-shell 自身已有 16px 内边距，这里不再叠 34px）。 */
+.source-tip-wide { margin: 12px 16px 0 16px; padding: 12px 14px; border-radius: 10px; }
+.source-tip-copy-wide { margin-left: 10px; }
+.home-empty-wide { height: 88px; }
+.home-bell-dot-wide { min-width: 18px; height: 18px; border-radius: 9px; top: 3px; right: 3px; padding-left: 4px; padding-right: 4px; }
 .home-bell-dot-text-wide { font-size: 11px; }
 .wide-kicker { color: #8a919f; font-size: 11px; font-weight: 700; }
 .wide-more-text { color: #8a919f; font-size: 13px; }
 .wide-empty { height: 48px; align-items: center; justify-content: center; }
 .wide-empty-text { color: #929aa8; font-size: 12px; }
 .home-header-wide { padding-left: 16px; padding-right: 16px; padding-bottom: 8px; }
-.home-search-wide { height: 36px; border-radius: 10px; }
+.home-search-wide { height: 36px; border-radius: 10px; margin-left: 14px; padding-left: 14px; padding-right: 14px; }
 .home-search-text-wide { margin-left: 8px; font-size: 13px; }
-.home-bell-wide { width: 36px; height: 36px; border-radius: 10px; }
+.home-bell-wide { width: 36px; height: 36px; border-radius: 10px; margin-left: 10px; }
 .wide-home { align-self: center; padding-bottom: 28px; }
 .wide-shell { flex-direction: row; align-items: flex-start; padding: 0 16px; }
 .wide-shell-compact { flex-direction: column; padding: 0 12px; }
@@ -943,10 +961,10 @@ const formatCount = formatBigCount;
 /* 宽屏 hero：底图/蒙层绝对铺满，内容行用 z-index 压在上面。
    绝对层的 <image> 必须显式写 width/height:100%（uni-app x 对四边拉伸不稳，
    player 的 .bg 与 qt-page-frame 壁纸都踩过同一个坑）。 */
-.wide-feature { position: relative; padding: 24px; min-height: 180px; flex-direction: row; align-items: center; border-radius: 16px; overflow: hidden; }
+.wide-feature { position: relative; padding: 18px; min-height: 140px; flex-direction: row; align-items: center; border-radius: 16px; overflow: hidden; }
 .wide-feature-bg { position: absolute; left: 0; top: 0; width: 100%; height: 100%; z-index: 0; }
 .wide-feature-scrim { position: absolute; left: 0; top: 0; width: 100%; height: 100%; z-index: 1; }
-.wide-feature-cover { position: relative; z-index: 2; width: 132px; height: 132px; border-radius: 10px; background-color: #2d333f; }
+.wide-feature-cover { position: relative; z-index: 2; width: 100px; height: 100px; border-radius: 10px; background-color: #2d333f; }
 .wide-feature-copy { position: relative; z-index: 2; flex: 1; min-width: 0; margin-left: 20px; }
 .wide-feature-kicker { color: rgba(255,255,255,0.62); font-size: 11px; font-weight: 700; }
 .wide-feature-title { margin-top: 6px; color: #ffffff; font-size: 23px; line-height: 29px; font-weight: 700; }

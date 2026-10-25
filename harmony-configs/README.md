@@ -32,10 +32,14 @@ HBuilderX 会用纯模板工程编译。
 模板里的 `vendor` 是占位值 `"example"`，而 `assembleCompiledManifest()` **只写
 `bundleName` / `versionName` / `versionCode`**，从不写 `vendor`（在打包后的
 `main.js` 里搜 `vendor` 只有无关的 `vendorId` 事件名，零处写 app.json5 的 vendor）。
-不覆盖的话上架审核会看到 `vendor: example`，所以这里放一份覆盖版，把 vendor 改成
-真实开发者名——取自发行证书 `.harmony-csr/轻听.cer` 的 subject（`O=张云翔`，
-与华为开发者账号主体一致），并顺带把 `bundleName`/版本写成与 manifest 一致
-（这两个随后会被注入覆盖成同样的值，不冲突）。
+不覆盖的话上架审核会看到 `vendor: example`，所以这里放一份覆盖版，并顺带把
+`bundleName`/版本写成与 manifest 一致（这两个随后会被注入覆盖成同样的值，不冲突）。
+
+**vendor 已去隐私化（2026-10-25）**：仓库里只留品牌名 `轻听`；真实开发者主体名只存在
+本地 gitignored 的发行证书里（`.harmony-csr/轻听.cer` 的 subject `O=` 字段，与华为
+开发者账号主体一致）。**正式上架构建前**把 vendor 临时改回证书主体名（本地查看：
+`keytool -printcert -file .harmony-csr/轻听.cer | grep O=`），构建完成后再改回 `轻听`，
+不要把主体名提交入库。
 
 ## 图标与启动图（manifest 注入，不放在覆盖层）
 

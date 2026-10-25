@@ -11,10 +11,10 @@
       <view class="nav" :class="layout.isWide ? 'nav-wide' : ''" :style="navStyle">
         <view class="nav-btn" :class="layout.isWide ? 'nav-btn-wide' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="back"><QtIcon name="chevron-left" :size="layout.isWide ? 20 : 30" :color="theme.skin.mediaText" /></view>
         <view class="nav-title-area" :class="layout.isWide ? 'nav-title-area-wide' : ''">
+          <!-- 两行口径（2026-10-25 用户定的）：第一行 歌名 - 歌手，第二行 平台 + 码率 -->
           <view v-if="!layout.isWide" class="nav-title-row">
-            <text class="nav-title" :style="('color:' + theme.skin.mediaText + ';') + qtFont(31)" :max-lines="1">{{ name() }}</text>
+            <text class="nav-title" :style="('color:' + theme.skin.mediaText + ';') + qtFont(31)" :max-lines="1">{{ name() }} - {{ artistText() }}</text>
           </view>
-          <text v-if="!layout.isWide" class="nav-artist" :style="('color:' + theme.skin.mediaMuted + ';') + qtFont(21)" :max-lines="1">{{ artistText() }}</text>
           <!-- 2026-10 用户要求：平台与码率单独占一行，放在歌名/歌手下面。
                原来平台角标挤在歌名右边，歌名一长就被压到省略号后面看不见。 -->
           <view v-if="!layout.isWide && hasMeta()" class="nav-meta-row">
@@ -34,13 +34,12 @@
               <view v-else class="cover-img cover-empty" :style="wideCoverImageStyle + 'background-color:' + theme.skin.mediaControl + ';'"><QtIcon name="music" :size="Math.floor(wideCoverSize / 4)" :color="theme.skin.mediaMuted" /></view>
             </view>
           </view>
-        </view>
-
-        <view class="wide-right mid" :style="'background-color:' + theme.skin.mediaSurface + ';border-color:' + theme.skin.mediaBorder + ';'" @touchstart="onTouchStart" @touchend="onTouchEnd">
-          <view class="track-head">
+          <!-- 曲名块挪到封面下方（2026-10-25 用户定稿：参考网易云 Pad，左列 = 唱片 + 曲名，
+               右列整列给歌词）。宽度与封面卡同宽，标题/歌手/平台签随卡片左对齐 -->
+          <view class="track-head track-head-under" :style="'width:' + (wideCoverSize + 20) + 'px;'">
             <view class="track-copy">
-              <text class="track-title" :style="('color:' + theme.skin.mediaText + ';') + qtFontPx(20)" :max-lines="2">{{ name() }}</text>
-              <text class="track-artist" :style="('color:' + theme.skin.mediaMuted + ';') + qtFontPx(12)" :max-lines="1">{{ artistText() }}</text>
+              <!-- 两行口径（2026-10-25 用户定的）：第一行 歌名 - 歌手，第二行 平台 + 码率 -->
+              <text class="track-title" :style="('color:' + theme.skin.mediaText + ';') + qtFontPx(18)" :max-lines="1">{{ name() }} - {{ artistText() }}</text>
               <!-- 宽屏同款「平台 + 码率」行（与竖屏 .nav-meta-row 同构，只是 px 口径） -->
               <view v-if="hasMeta()" class="track-meta-row">
                 <text v-if="platformKey() != ''" class="track-meta-badge" :style="('background-color:' + platformColor(platformKey()) + ';color:#ffffff;') + qtFontPx(10)">{{ platformShortName() }}</text>
@@ -48,6 +47,9 @@
               </view>
             </view>
           </view>
+        </view>
+
+        <view class="wide-right mid" :style="'background-color:' + theme.skin.mediaSurface + ';border-color:' + theme.skin.mediaBorder + ';'" @touchstart="onTouchStart" @touchend="onTouchEnd">
           <scroll-view class="lyric lyric-viewport" direction="vertical" :scroll-top="lyricScrollTop" :scroll-with-animation="lyricScrollAnimated" :show-scrollbar="false" @scroll="onLyricUserScroll" @touchstart="onLyricScrollTouchStart">
             <view :style="'height:' + lyricPadStyle"></view>
             <view v-for="(line, index) in lyricLines" :key="index" class="lyric-line lyric-line-wide" :style="lineOpacityStyle(index)" @click.stop="onLyricLineTap(line, index)" @longpress.stop="copyLyric(line, index)">
@@ -75,7 +77,7 @@
         </view>
 
         <!-- 宽屏没有竖屏那条工具图标行，所以这一行只能落在进度条上方（右侧歌词面板与播放栏之间） -->
-        <view v-if="lyricVisible" class="lyric-tools-row lyric-tools-row-wide">
+        <view v-if="lyricVisible" class="lyric-tools-row lyric-tools-row-wide" :class="wideShort ? 'lyric-tools-row-short' : ''">
           <view class="lyric-tool lyric-tool-wide" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openOffset">
             <QtIcon name="sliders" :size="13" :color="currentOffsetMs != 0 ? theme.skin.accent : theme.skin.mediaMuted" />
             <text class="lyric-tool-text lyric-tool-text-wide" :style="('color:' + (currentOffsetMs != 0 ? theme.skin.accent : theme.skin.mediaMuted) + ';') + qtFontDual(22, 11)">{{ offsetButtonText() }}</text>
@@ -91,9 +93,15 @@
             <QtIcon name="search" :size="13" :color="noLyricYet ? theme.skin.accent : theme.skin.mediaMuted" />
             <text class="lyric-tool-text lyric-tool-text-wide" :style="('color:' + (noLyricYet ? theme.skin.accent : theme.skin.mediaMuted) + ';') + qtFontDual(22, 11)">搜索歌词</text>
           </view>
+          <!-- 桌面歌词：参考网易云/QQ 音乐 Pad 播放页把「桌面歌词」放在歌词工具组里。
+               之前只有「设置 - 桌面歌词」一个入口，平板上翻两层才找得到，属于 Parity 缺口。 -->
+          <view class="lyric-tool lyric-tool-wide" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="toggleDesktopLyric">
+            <QtIcon name="type" :size="13" :color="lyricOn ? theme.skin.accent : theme.skin.mediaMuted" />
+            <text class="lyric-tool-text lyric-tool-text-wide" :style="('color:' + (lyricOn ? theme.skin.accent : theme.skin.mediaMuted) + ';') + qtFontDual(22, 11)">桌面歌词</text>
+          </view>
         </view>
 
-        <view class="progress-row progress-row-wide">
+        <view class="progress-row progress-row-wide" :class="wideShort ? 'progress-row-short' : ''">
           <text class="prog-time prog-time-wide" :style="qtFontDual(18, 11)">{{ format(displayProgress) }}</text>
           <view class="prog-range" :class="layout.isWide ? 'prog-range-wide' : ''" @touchstart="onProgTouchStart" @touchmove="onProgTouchMove" @touchend="onProgTouchEnd" @touchcancel="onProgTouchCancel">
             <view class="prog-track prog-track-wide" :style="'background-color:' + theme.skin.mediaControl + ';'"></view>
@@ -105,28 +113,28 @@
 
           <!-- 横屏：左翼模式 / 中间播放键 / 右翼工具组，两翼等宽（flex:1）
                才能让播放键落在正中；工具组按设置增减时也不会把播放键带偏 -->
-          <view class="controls controls-wide">
+          <view class="controls controls-wide" :class="wideShort ? 'controls-short' : ''">
             <view class="control-wing control-wing-left">
-              <view class="control-side" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="cycleMode"><QtIcon :name="modeIconName()" :size="22" :color="theme.skin.mediaMuted" /></view>
+              <view class="control-side" :class="wideShort ? 'control-side-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="cycleMode"><QtIcon :name="modeIconName()" :size="22" :color="theme.skin.mediaMuted" /></view>
             </view>
             <view class="control-center-wide">
-              <view class="control-side" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="player.previous()"><QtIcon name="skip-back" :size="24" :color="theme.skin.mediaMuted" /></view>
-              <view class="icon-main icon-main-wide center-play" :style="'background-color:' + theme.skin.mediaText + ';'" @click="player.toggle()"><QtIcon :name="player.playing ? 'pause' : 'play'" :size="24" :color="theme.skin.mediaSurface" /></view>
-              <view class="control-side" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="player.next()"><QtIcon name="skip-forward" :size="24" :color="theme.skin.mediaMuted" /></view>
+              <view class="control-side" :class="wideShort ? 'control-side-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="player.previous()"><QtIcon name="skip-back" :size="24" :color="theme.skin.mediaMuted" /></view>
+              <view class="icon-main icon-main-wide center-play" :class="wideShort ? 'icon-main-short' : ''" :style="'background-color:' + theme.skin.mediaText + ';'" @click="player.toggle()"><QtIcon :name="player.playing ? 'pause' : 'play'" :size="24" :color="theme.skin.mediaSurface" /></view>
+              <view class="control-side" :class="wideShort ? 'control-side-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="player.next()"><QtIcon name="skip-forward" :size="24" :color="theme.skin.mediaMuted" /></view>
             </view>
             <view class="control-wing control-wing-right">
               <view class="control-tools-wide">
-                <view v-if="toolVisible('like')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openPicker($event)"><QtIcon :name="liked ? 'heart-fill' : 'heart'" :size="17" :color="liked ? theme.skin.danger : theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('download')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="doDownload"><QtIcon name="download" :size="17" :color="theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('artist')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openArtistPage"><QtIcon name="user" :size="17" :color="theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('quality')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="switchQuality"><QtIcon name="music" :size="17" :color="theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('dislike')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openDislikeSheet"><QtIcon name="ban" :size="17" :color="dislikedCurrent ? theme.skin.danger : theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('speed')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="cycleRate"><QtIcon name="gauge" :size="17" :color="theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('sleep')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openSleep"><QtIcon name="clock" :size="17" :color="sleepActive ? theme.skin.accent : theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('share')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="shareCurrent"><QtIcon name="share" :size="17" :color="theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('equalizer')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openEqualizer"><QtIcon name="sliders" :size="17" :color="theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('source')" class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openSourceSwitch()"><QtIcon name="refresh" :size="17" :color="theme.skin.mediaMuted" /></view>
-                <view class="tool-btn" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openQueue"><QtIcon name="list" :size="17" :color="theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('like')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openPicker($event)"><QtIcon :name="liked ? 'heart-fill' : 'heart'" :size="17" :color="liked ? theme.skin.danger : theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('download')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="doDownload"><QtIcon name="download" :size="17" :color="theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('artist')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openArtistPage"><QtIcon name="user" :size="17" :color="theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('quality')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="switchQuality"><QtIcon name="music" :size="17" :color="theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('dislike')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openDislikeSheet"><QtIcon name="ban" :size="17" :color="dislikedCurrent ? theme.skin.danger : theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('speed')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="cycleRate"><QtIcon name="gauge" :size="17" :color="theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('sleep')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openSleep"><QtIcon name="clock" :size="17" :color="sleepActive ? theme.skin.accent : theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('share')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="shareCurrent"><QtIcon name="share" :size="17" :color="theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('equalizer')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openEqualizer"><QtIcon name="sliders" :size="17" :color="theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('source')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openSourceSwitch()"><QtIcon name="refresh" :size="17" :color="theme.skin.mediaMuted" /></view>
+                <view class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openQueue"><QtIcon name="list" :size="17" :color="theme.skin.mediaMuted" /></view>
               </view>
             </view>
           </view>
@@ -348,7 +356,7 @@ import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-fr
 import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { ref, computed, watch, nextTick, getCurrentInstance, onMounted, onUnmounted } from "vue";
-import { onShow } from "@dcloudio/uni-app";
+import { onLoad, onShow, onUnload } from "@dcloudio/uni-app";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
@@ -362,10 +370,11 @@ import { useShareCardStore } from "@/stores/share-card";
 import { findSourceCandidates, peekSourceCandidates } from "@/services/source-switch";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { audioPlayer } from "@/services/audio-player";
-import { musicApi, isQtAdmin } from "@/services/music-api";
+import { musicApi, isQtAdmin, MusicApi } from "@/services/music-api";
 import { useLyricOffsetStore, LYRIC_OFFSET_MAX_MS, LYRIC_OFFSET_STEP_MS } from "@/stores/lyric-offset";
 import { desktopLyric } from "@/services/desktop-lyric";
 import { platformShort, platformColor } from "@/services/platform";
+import { isHarmonyOs } from "@/services/app-native";
 import { collectDupMessage, type CollectDupConflict } from "@/services/collect-dup";
 import { qtDiag } from "@/services/diag";
 import { beginLoading, finishLoading } from "@/services/ui-loading";
@@ -761,8 +770,41 @@ const statusBarRpx = ref(0);
 // 宽屏判定：qt-ui 布局状态（横屏/窗口 >= 720dp 视为宽屏）
 const layout = useQtLayout();
 const wideStageWidth = computed<number>(() => Math.min(layout.windowWidth - 36, 1120));
-const wideCoverSize = computed<number>(() => Math.max(112, Math.min(240, layout.windowHeight - 108)));
-const wideStageStyle = computed<string>(() => "width:" + wideStageWidth.value + "px;");
+/**
+ * 横屏矮窗（手机横屏、车机矮窗等 windowHeight < 520，即 use-qt-layout 的 isShort）。
+ *
+ * 为什么必须单独处理：isWide 的判据是「宽 >= 900 或 横屏且宽 >= 600」，所以手机横屏
+ * （如 780×360）也会落进宽屏分支，但宽屏舞台的留白是按 pad 设计的。原来封面尺寸写的是
+ * `windowHeight - 108` 且下限 112 —— 780×360 时算出 240，而「顶部留白 + 底部三行控件」
+ * 之后实际只剩一百多 px，封面卡（240+20）直接盖住进度行和控制行。
+ * 现在的口径是「先扣掉顶部留白、底部三行、底部留白，剩下的才是封面卡能占的高度」，
+ * 封面尺寸永远由这个剩余空间反算，窗再矮也不会溢出；矮窗额外收紧三行的外边距。
+ */
+const wideShort = computed((): boolean => layout.isShort);
+/** 底部三行占位：歌词工具行 34+6 / 进度行 32+12 / 控制行 46+8 = 138 */
+const WIDE_BOTTOM_ROWS_PX = 138;
+/** 矮窗收紧后：歌词工具行 34+2 / 进度行 28+6 / 控制行 42+4 = 116（见 -short 规则） */
+const WIDE_SHORT_BOTTOM_ROWS_PX = 116;
+const WIDE_PAD_BOTTOM_PX = 14;
+const WIDE_SHORT_PAD_BOTTOM_PX = 8;
+const widePadBottom = computed<number>((): number => wideShort.value ? WIDE_SHORT_PAD_BOTTOM_PX : WIDE_PAD_BOTTOM_PX);
+/** 顶部留白：与 navStyle 的导航高度同源（矮窗导航也收窄，见 navStyle），否则封面会钻到按钮下面 */
+const widePadTop = computed<number>((): number => wideShort.value ? statusBarPx() + 44 : 60);
+/** 封面卡最大边长（含内边距 20）：pad 上维持原来的 240px 封面观感 */
+const WIDE_COVER_CARD_MAX_PX = 260;
+/** 封面卡最小边长：再小就没法看封面了，宁可让 wide-body 溢出（极矮窗的最后兜底） */
+const WIDE_COVER_CARD_MIN_PX = 108;
+/** 封面下方曲名块占位（两行口径：标题 24 + 平台行 16 + 间距 8 ≈ 48；矮窗字号不变取同值） */
+const WIDE_TRACK_HEAD_PX = 48;
+const wideBodyHeight = computed<number>((): number => {
+  const rows = wideShort.value ? WIDE_SHORT_BOTTOM_ROWS_PX : WIDE_BOTTOM_ROWS_PX;
+  return layout.windowHeight - widePadTop.value - widePadBottom.value - rows - WIDE_TRACK_HEAD_PX;
+});
+const wideCoverSize = computed<number>((): number => {
+  const card = Math.max(WIDE_COVER_CARD_MIN_PX, Math.min(WIDE_COVER_CARD_MAX_PX, wideBodyHeight.value));
+  return card - 20; // 20 = .cover-card 的 padding 10 × 2
+});
+const wideStageStyle = computed<string>((): string => "width:" + wideStageWidth.value + "px;padding-top:" + widePadTop.value + "px;padding-bottom:" + widePadBottom.value + "px;");
 const wideCoverBoxStyle = computed<string>(() => "width:" + (wideCoverSize.value + 20) + "px;height:" + (wideCoverSize.value + 20) + "px;");
 const wideCoverImageStyle = computed<string>(() => "width:" + wideCoverSize.value + "px;height:" + wideCoverSize.value + "px;");
 /**
@@ -782,12 +824,56 @@ const queueDrawerWideStyle = computed<string>(() => layout.isWide ? "width:" + q
 /** 歌词视口当前是否展示：宽屏右侧歌词面板常驻，竖屏看 showLyric。
     歌词的测量与自动跟随滚动一律以此为准 —— 之前错用竖屏的 showLyric 门控，宽屏歌词不跟随、定位错乱。 */
 const lyricVisible = computed((): boolean => layout.isWide || showLyric.value);
+
+/** 桌面歌词开关状态：与 services/desktop-lyric 的真相同步（onShow 里重读一次） */
+const lyricOn = ref(desktopLyric.isEnabled());
+
+/**
+ * 桌面歌词开关（播放页入口）。
+ *
+ * 逻辑与 pages/desktop-lyric/index.uvue 的 toggleEnabled 一致，但这里只做「开/关」，
+ * 授权引导仍交给设置页（那里有各机型的详细路径文案），避免同一段长文案维护两份。
+ * 鸿蒙走系统渲染、不需要悬浮窗权限（hasPermission 恒 true），所以 hasPermission
+ * 分支天然只在安卓生效。
+ */
+function toggleDesktopLyric(): void {
+  if (lyricOn.value) {
+    desktopLyric.disable();
+    lyricOn.value = false;
+    qtShowToast({ title: "已关闭桌面歌词", icon: "none" });
+    return;
+  }
+  if (!desktopLyric.hasPermission()) {
+    qtConfirm({
+      title: "需要悬浮窗权限",
+      content: "桌面歌词需要「悬浮窗 / 显示在其他应用上层」权限。\n点「去开启」跳到系统权限页，开启后返回即可再次点击。\n详细机型路径见「设置 → 桌面歌词」。",
+      confirmText: "去开启",
+    }).then((ok: boolean) => {
+      if (!ok) return;
+      const opened = desktopLyric.requestPermission();
+      if (!opened) {
+        qtShowToast({ title: "没能打开系统设置页，请到「权限管理 → 悬浮窗」手动开启", icon: "none" });
+      }
+    });
+    return;
+  }
+  const ok = desktopLyric.enable();
+  lyricOn.value = desktopLyric.isEnabled();
+  if (!ok) {
+    qtShowToast({
+      title: isHarmonyOs() ? "当前系统不支持桌面歌词" : "开启失败，请重试",
+      icon: "none",
+    });
+  }
+}
 // 内联尺寸统一收敛：宽屏下用绝对 px（rpx 在宽屏会被放大 2.7 倍），手机端保持 rpx
 const navStyle = computed((): string => {
   // 导航高度必须 = 状态栏(padding-top) + 内容高，否则按钮上下溢出会被 Android 裁掉
   if (!layout.isWide) return "height:" + (statusBarRpx.value + 96) + "rpx;padding-top:" + statusBarRpx.value + "rpx;";
   const sb = statusBarPx();
-  return "height:" + (sb + 52) + "px;padding-top:" + sb + "px;";
+  // 矮窗（手机横屏/车机）收窄到 44：宽屏舞台的顶部留白按同一个值算（见 widePadTop），
+  // 两处必须同步，否则封面要么钻到按钮下面、要么白留一条缝
+  return "height:" + (sb + (wideShort.value ? 44 : 52)) + "px;padding-top:" + sb + "px;";
 });
 // 竖屏封面下移量：导航实际占位 = 状态栏(padding-top) + 96rpx(内容高)，
 // 舞台的 96rpx padding 只抵了内容高，需再补状态栏高度，否则封面压住标题/歌手
@@ -1969,9 +2055,22 @@ watch((): string => player.quality, (): void => {
 });
 // 真正拿到 size 的时刻：取链成功 → 原生起播 → playing 翻真。playing 只在状态切换时
 // 变，比盯 progress（秒级心跳）省，又能覆盖「首帧 0、起播后才知道」这条时序。
-watch((): boolean => player.playing, (playing: boolean): void => {
-  if (playing) refreshBitrate();
-});
+// immediate：歌已在播时才进播放页（最常见的打开方式），playing 不会再翻转，
+// 普通 watch 一次都不触发，「xxx kbps」就永远不显示 —— 进页立刻补算一次。
+watch(
+  (): boolean => player.playing,
+  (playing: boolean): void => {
+    if (playing) refreshBitrate();
+  },
+  { immediate: true }
+);
+// 老音源包不回报 size 时，宿主会 HEAD 探测兜底（music-api.probeUrlSize），
+// 探到就广播这条事件 —— 听到后重算一次，kpbs 行才能在起播一两秒内补出来。
+// 具名函数：onUnload 里要按同一引用 $off，页面反复进出不能叠监听器。
+function onUrlSizeProbed(): void {
+  refreshBitrate();
+}
+uni.$on(MusicApi.URL_SIZE_EVENT, onUrlSizeProbed);
 function format(seconds: number): string {
   const min = Math.floor(seconds / 60);
   const sec = Math.floor(seconds % 60);
@@ -2678,6 +2777,30 @@ function ensureLyric(): void {
   loadLyric();
 }
 
+/**
+ * 宽屏底栏「队列」入口带 ?queue=1 进来时直接展开队列抽屉。
+ *
+ * 为什么用 query 而不是事件：底栏挂在 qt-page-frame 上，而播放页是 full-width
+ * （showPlayerBar 恒为 false），所以点队列时播放页还没挂载，事件必丢。
+ * query 由 onLoad 接住，是唯一可靠的时机。
+ *
+ * 注意 onLoad 的入参是普通对象、不是 UTSJSONObject —— 必须下标取值，
+ * 调 option.get(...) 在真机上会抛 `option.get is not a function`（本仓多页已踩过）。
+ */
+onLoad((option: Record<string, string> | null) => {
+  if (option == null) return;
+  const flag = option["queue"] as string | undefined;
+  if (flag == null || flag != "1") return;
+  // 队列抽屉的行高/窗口按实测几何算，等首帧布局完成再开，否则会落在 0 行高
+  nextTick(() => {
+    openQueue();
+  });
+});
+
+onUnload(() => {
+  uni.$off(MusicApi.URL_SIZE_EVENT, onUrlSizeProbed);
+});
+
 onShow(() => {
   qtTrackPage("pages/player/index");
   // 注册表是氛围底色/音质档位/跨源候选的来源，冷启动直接进播放页时也要拉一次
@@ -2690,6 +2813,8 @@ onShow(() => {
   playerBar.restore((id: string): boolean => playerBarCountedShared(id, showPlayUrlEntry.value));
   // 设置页也能改倍速，返回时对齐本页显示
   syncRateIndex();
+  // 设置页也能开关桌面歌词，返回时对齐本页图标高亮
+  lyricOn.value = desktopLyric.isEnabled();
   // 返回播放页时立即从底层播放器同步一次进度，避免进度条停在起点后再跳变
   player.syncProgressNow();
   // 页面隐藏期间（后台播放）拿不到布局，重新进入时再测一次轨道宽度，
@@ -2808,8 +2933,7 @@ onUnmounted(() => {
 /* text-align: center 而不是把 align-items 改回 center：element 仍占满整行宽度
    （这样 text-overflow: ellipsis 才生效），只是文字在行内居中。
    若改用 align-items: center，子节点会退回内容宽度，长文本又会溢出被裁。 */
-.nav-artist { margin-top: 4rpx; font-size: 21rpx; text-align: center; text-overflow: ellipsis; }
-/* 平台 + 码率行：单独一行居中排在歌手下面，与歌名解耦（歌名再长也压不掉它） */
+/* 平台 + 码率行：第二行居中，与「歌名 - 歌手」解耦（歌名再长也压不掉它） */
 .nav-meta-row { margin-top: 8rpx; flex-direction: row; align-items: center; justify-content: center; }
 .nav-meta-badge { flex-shrink: 0; padding: 3rpx 10rpx; border-radius: 8rpx; font-size: 18rpx; }
 .nav-meta-bitrate { margin-left: 10rpx; flex-shrink: 0; font-size: 20rpx; }
@@ -2836,7 +2960,8 @@ onUnmounted(() => {
 .lyric-empty { height: 300rpx; align-items: center; justify-content: center; }
 .lrc-empty { font-size: 26rpx; }
 
-.wide-stage { flex: 1; min-height: 0; flex-direction: column; padding: 60px 18px 14px; }
+/* 上下留白由 wideStageStyle 内联给出（矮窗要收紧），这里只管左右 */
+.wide-stage { flex: 1; min-height: 0; flex-direction: column; padding-left: 18px; padding-right: 18px; }
 .wide-body { flex: 1; min-height: 0; flex-direction: row; align-items: stretch; justify-content: center; }
 .wide-left { align-items: center; justify-content: center; flex-shrink: 0; }
 .cover-card { padding: 10px; align-items: center; justify-content: center; border-width: 1px; border-style: solid; border-radius: 18px; }
@@ -2845,8 +2970,10 @@ onUnmounted(() => {
 .disc-spin { width: 100%; height: 100%; align-items: center; justify-content: center; }
 .wide-right { flex: 1; min-width: 0; height: 100%; margin-left: 18px; padding: 14px; flex-direction: column; border-width: 1px; border-style: solid; border-radius: 16px; overflow: hidden; }
 .track-head { flex-direction: row; align-items: flex-start; }
+/* 曲名块在封面下方：左对齐卡宽（宽度由模板内联给出），与封面卡之间留 12px */
+.track-head-under { margin-top: 12px; }
 .track-copy { flex: 1; min-width: 0; }
-.track-title { font-size: 20px; line-height: 26px; font-weight: 700; }
+.track-title { font-size: 18px; line-height: 24px; font-weight: 700; }
 .track-artist { margin-top: 5px; font-size: 12px; }
 /* 宽屏「平台 + 码率」行：与竖屏 .nav-meta-row 同构，px 口径 */
 .track-meta-row { margin-top: 7px; flex-direction: row; align-items: center; }
@@ -2873,9 +3000,9 @@ onUnmounted(() => {
 
 /* 歌词工具行：竖屏时落在工具图标行上方（播放栏的上面的上面），只在歌词视图出现 */
 .lyric-tools-row { height: 60rpx; margin-top: 8rpx; padding: 0 24rpx; flex-direction: row; align-items: center; justify-content: flex-end; }
-.lyric-tools-row-wide { height: 26px; margin-top: 6px; padding: 0 8px; }
+.lyric-tools-row-wide { height: 34px; margin-top: 6px; padding: 0 8px; }
 .lyric-tool { height: 52rpx; padding: 0 22rpx; margin-left: 16rpx; flex-direction: row; align-items: center; border-radius: 26rpx; }
-.lyric-tool-wide { height: 24px; padding: 0 10px; margin-left: 8px; border-radius: 12px; }
+.lyric-tool-wide { height: 32px; padding: 0 12px; margin-left: 8px; border-radius: 16px; }
 .lyric-tool-text { margin-left: 8rpx; font-size: 22rpx; }
 .lyric-tool-text-wide { margin-left: 4px; font-size: 11px; }
 
@@ -2942,7 +3069,7 @@ onUnmounted(() => {
 .queue-meta { margin-top: 5rpx; font-size: 21rpx; text-overflow: ellipsis; }
 .queue-move { margin-left: 12rpx; }
 
-.nav-title-area-wide { align-items: flex-start; }
+.nav-title-area-wide { align-items: flex-start; margin-left: 14px; }
 .lyric-line-wide { padding: 9px 0; }
 .lrc-scroll-hint {
   position: absolute; left: 16rpx; right: 16rpx; top: 0; bottom: 0;
@@ -2961,9 +3088,6 @@ onUnmounted(() => {
 .lrc-tr-wide { margin-top: 1px; font-size: 12px; }
 .lyric-empty-wide { height: 160px; }
 .lrc-empty-wide { font-size: 15px; }
-.wide-stage-compact { }
-.wide-right-compact { }
-.track-title-compact { }
 .progress-row-wide { height: 32px; margin: 12px 8px 0; padding: 0 8px; }
 .prog-time-wide { width: 46px; font-size: 11px; }
 .prog-track-wide { top: 6px; height: 5px; border-radius: 3px; }
@@ -2978,6 +3102,15 @@ onUnmounted(() => {
 .control-center-wide { flex-direction: row; align-items: center; }
 .center-play { margin: 0 14px; }
 .icon-main-wide { width: 42px; height: 42px; border-radius: 21px; }
+/* 横屏矮窗（windowHeight < 520，见 wideShort）：三行控件收紧，给封面腾出高度。
+   与 -wide 同级（单类选择器），靠书写顺序覆盖，所以必须排在上面那批 -wide 之后。
+   数值与 WIDE_SHORT_BOTTOM_ROWS_PX = 116 严格对应：34+2 / 28+6 / 42+4。 */
+.lyric-tools-row-short { height: 34px; margin-top: 2px; }
+.progress-row-short { height: 28px; margin-top: 6px; }
+.controls-short { height: 42px; margin-top: 4px; }
+.control-side-short { width: 36px; height: 36px; border-radius: 10px; }
+.icon-main-short { width: 38px; height: 38px; border-radius: 19px; }
+.tool-btn-short { width: 32px; height: 32px; margin-left: 6px; border-radius: 9px; }
 .mask-wide { justify-content: center; align-items: center; }
 /* 播放列表在宽屏改成右侧抽屉：贴内容区右缘、整高、左侧直角。
    原来和偏移/搜索弹层一样居中 560px，播放页本身已经是左右双栏，

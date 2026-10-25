@@ -51,6 +51,7 @@ import { qtLayout } from "./use-qt-layout";
 /** 可被就地托管的工具页，与 qt-side-nav 的 5 个工具入口一一对应 */
 export const QT_WIDE_TOOL_ROUTES: string[] = [
   "/pages/search/index",
+  "/pages/daily-recommend/index",
   "/pages/daily/index",
   "/pages/playlists/index",
   "/pages/chart/index",

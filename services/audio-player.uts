@@ -43,6 +43,7 @@ import {
   audioPlayTimelineIndex,
   audioSetRepeatMode,
   audioCurrentMediaId,
+  audioPreloadTrack,
   audioSyncTimeline,
   audioOnResolveRequest,
   audioOnTrackChanged,
@@ -70,20 +71,23 @@ const CACHE_LIMIT_DEFAULT_MB = 1024;
 const CONCURRENT_KEY = "qt-concurrent-play-mode";
 const CONCURRENT_DEFAULT = 0;
 /**
- * 无缝播放（默认关闭，"1"/"0" 字符串存储）。
+ * 无缝播放（默认开启，"1"/"0" 字符串存储）。
  *
- * 语义只有一件事：**在播当前曲时提前把下一首的播放地址取好**（填 musicApi 的
- * urlCache），真正切歌时取链命中缓存，省掉整条音源回退链的耗时。
+ * 语义两件事：
+ * 1. **提前取链**：在播当前曲时把下一首的播放地址取好（填 musicApi 的
+ *    urlCache），切歌时取链命中缓存，省掉整条音源回退链的耗时；
+ * 2. **整首预取**（Android）：换歌成功后调 audioPreloadTrack(占位URI)，
+ *    原生用与播放相同的数据源栈把下一首整首读进 SimpleCache（缓存 key =
+ *    qt-resolve 占位地址，与播放侧同一 key），切歌时 CacheDataSource 全量
+ *    命中磁盘，首字节网络等待也省掉。
  *
- * 为什么只做到「提前取链」而不像 qt-pc 那样接同一条输出流：
- * - Android（media3）的时间线本来就预缓冲下一条目，缺口只在 JS 取链时机，
- *   取链一命中，ExoPlayer 的无缝拼接天然生效；
+ * 为什么不像 qt-pc 那样接同一条输出流：
+ * - Android（media3）的时间线本来就预缓冲下一条目，取链命中 + 整首落盘后，
+ *   ExoPlayer 的无缝拼接天然生效；
  * - 鸿蒙原生侧是「一次只解析一首」的串行模型（gPendingMid 单值），没有时间线
- *   预缓冲，只能缩短取链时间，做不到真正接流；
+ *   预缓冲，只能缩短取链时间，做不到真正接流（audioPreloadTrack 空实现）；
  * - 提前调原生 resolveDone 无效：Android audioResolveDone 在没有挂起 req 时
  *   直接丢弃（见 qt-audio-player app-android/index.uts），所以只能预热 urlCache。
- *
- * 不涉及任何原生下发，因此没有对应的 audioSetXxx。
  */
 const GAPLESS_KEY = "qt-playback-gapless";
 /** EQ 设置持久化 key：开关 + 5 段增益（dB，逗号分隔串） */
@@ -679,6 +683,16 @@ export class AudioPlayer {
     // #endif
   }
 
+  /**
+   * 无缝播放：预取下一首整首歌到磁盘缓存（Android；uri 为 qt-resolve:// 占位地址，
+   * 与播放共用同一缓存 key，切歌时全量命中；鸿蒙为空实现，本地歌/直连地址原生侧自动忽略）。
+   */
+  preloadTrack(uri: string): void {
+    // #ifdef APP-ANDROID || APP-HARMONY
+    audioPreloadTrack(uri);
+    // #endif
+  }
+
   /** 注册解析处理器：原生加载 qt-resolve 条目时向 JS 要真实地址（主线程回调） */
   onResolveRequest(callback: AudioResolveRequestCallback): void {
     // #ifdef APP-ANDROID || APP-HARMONY
@@ -744,13 +758,15 @@ export class AudioPlayer {
     // #endif
   }
 
-  /** 无缝播放是否开启（默认关闭；只影响 store 是否提前预热下一首地址） */
+  /** 无缝播放是否开启（默认开启；控制 store 是否预热下一首地址 + 原生整首预取） */
   getGapless(): boolean {
     try {
       const raw = uni.getStorageSync(GAPLESS_KEY) as string;
+      // 没写过（新用户/旧版本未开启过）视为开启；写过才尊重用户选择
+      if (raw == null || raw.length == 0) return true;
       return raw == "1";
     } catch (_) {
-      return false;
+      return true;
     }
   }
 

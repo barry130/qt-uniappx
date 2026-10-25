@@ -1,7 +1,18 @@
 import { reactive } from "vue";
-import { musicApi, RegistryQuality, RegistrySort, RegistrySource } from "@/services/music-api";
+import { musicApi, RegistryOfficialQuality, RegistryQuality, RegistrySort, RegistrySource } from "@/services/music-api";
 import { SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
 import { useSourceStore } from "@/stores/source";
+import { sourcePlayLoginActive, sourceVipTierOf } from "@/services/source-auth";
+
+/**
+ * 会员档高低序（v11 官方档位过滤用）：none < vip < svip。
+ * 未知档位串按 0（none）处理，宁可多展示不隐藏。
+ */
+function vipTierRank(tier: string): number {
+  if (tier == "vip") return 1;
+  if (tier == "svip") return 2;
+  return 0;
+}
 
 /**
  * 数据包可声明的「功能面」（v4 契约，包侧 registry.ts 的 SourceFeatures）：
@@ -170,8 +181,32 @@ class SourceRegistryStore {
    * 全部档位，与旧包行为一致；声明了子集 → 只保留子集里的档位（如 B 站无真
    * 无损，flac 不再出现在音质选项里）。声明的 id 与全局档位对不上时退回全部，
    * 宁可多展示也不把选项清空。
+   *
+   * v11 官方档位切换：该源播放面登录态生效（有账号 + 播放面开关开）且注册表
+   * 声明了 auth.officialQualities 时，**整体换成官方档位清单**——id=官方
+   * level 同名直通、展示名随包下发（标准/极高/无损/高解析度无损/高清臻音/
+   * 超清母带），并按登录账号的会员档过滤展示（见下）。官方清单为空再回普通
+   * 子集。登录态是
+   * uni storage 同步读（services/source-auth），账号/开关变化经
+   * SOURCE_AUTH_CHANGED_EVENT 广播，页面据此重算。
    */
   sourceQualities(id: string): RegistryQuality[] {
+    if (id != "local" && sourcePlayLoginActive(id)) {
+      const official = this.officialQualities(id);
+      if (official.length > 0) {
+        // v11：官方展示名随包下发 + 按账号会员档过滤（VIP 到 VIP 级、SVIP 到
+        // SVIP 级；账号档未知 = 不过滤，多展示不隐藏）
+        const tier = sourceVipTierOf(id);
+        const minRank = tier == null ? -1 : vipTierRank(tier);
+        const out: RegistryQuality[] = [];
+        for (let j = 0; j < official.length; j++) {
+          const oq = official[j];
+          if (minRank >= 0 && vipTierRank(oq.min) > minRank) continue;
+          out.push({ id: oq.id, name: oq.name });
+        }
+        return out;
+      }
+    }
     let declared: string[] | null = null;
     for (let i = 0; i < this.sources.length; i++) {
       const s = this.sources[i];
@@ -196,6 +231,24 @@ class SourceRegistryStore {
     for (let i = 0; i < this.sources.length; i++) {
       const s = this.sources[i];
       if (s.id == id) return s.playlistSorts != null ? s.playlistSorts : [];
+    }
+    return [];
+  }
+
+  /**
+   * 某源官方前置线路支持的音质档位（v11 契约，低到高，{id,name,min}）。
+   * 未声明 → []。登录态生效时由 sourceQualities() 整体切到这份清单（音质
+   * 选项/降档阶梯的切换口径都从它派生）。
+   */
+  officialQualities(id: string): RegistryOfficialQuality[] {
+    for (let i = 0; i < this.sources.length; i++) {
+      const s = this.sources[i];
+      if (s.id == id) {
+        const auth = s.auth;
+        if (auth == null) return [];
+        const declared = auth.officialQualities;
+        return declared != null ? declared : [];
+      }
     }
     return [];
   }

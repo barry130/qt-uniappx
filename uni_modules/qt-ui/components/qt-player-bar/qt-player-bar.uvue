@@ -1,13 +1,32 @@
 <!--
-  宽屏常驻底部播放栏（期 5）
+  宽屏常驻底部播放栏（期 5 / 期 8 补齐桌面音乐软件动作集）
   ------------------------------------------------------------------
   改造前宽屏只有一个 72px 的浮动圆球（qt-mini-player），和主流桌面音乐软件
   （Spotify / Apple Music / 网易云 PC / QQ 音乐 PC）差得最远的一点就是它：
   桌面上播放状态必须常驻、必须能直接看到进度、必须一次点击就能拖到任意位置，
   而不是先点球展开一条 360px 的小条再点进去。
 
-  结构：左（封面 + 曲名/歌手）→ 中（上一首 / 播放暂停 / 下一首）→ 右（进度 + 时间）。
+  结构（从左到右）：歌曲块 → 上一首/播放/下一首 → 动作组（收藏·播放模式·队列）
+  → 进度（时间 + 轨道） → 音量（静音键 + 轨道）。
   整条固定贴底，左侧让开 rail 宽度（rail 是 position:fixed，会盖住底栏左端）。
+
+  为什么补收藏 / 播放模式 / 队列 / 音量（2026-10-25）：
+  网易云 PC、QQ 音乐 PC、Spotify 的底栏都把「当前这首歌」的全部即时动作摊在
+  同一行 —— 收藏是红心、模式是单曲/列表/随机、队列是列表、音量是喇叭 + 短轨。
+  本仓此前这四件事只能进播放页再找，等于宽屏下每次都要多两次跳转。
+  四个入口都直接复用既有能力，不引入新原生代码：
+    · 收藏 → player.canPickPlaylist() + player.showPlaylistPickerFor()（同播放页）
+    · 模式 → player.cycleMode() / player.modeLabel() / player.mode
+    · 队列 → /pages/player/index?queue=1（播放页 onLoad 收到后自动展开队列抽屉）
+    · 音量 → audioPlayer.getVolume/setVolume/getMuted/setMuted（服务层早已持久化）
+
+  宽度分档（全部按「窗口宽 - rail 宽」的可用宽度算，不看 windowWidth）：
+  底栏每一项都是固定 px，减完 rail 后剩余宽度决定能摆几个动作，写死一档必然
+  在某一档把进度条压成 0 宽（真机表现是右侧总时长被裁、滑块无处显示）：
+    · 可用 < 740  → 只保留 歌曲块 + 三个主控 + 进度（横屏手机 / 车机矮窗）
+    · 可用 ≥ 740  → 追加 动作组（收藏 / 模式 / 队列）
+    · 可用 ≥ 840  → 追加 音量
+  歌曲块本身也随可用宽度收窄（300 / 240 / 168），封面同步缩小。
 
   挂载点：qt-page-frame 统一挂（与 rail、toast-host 同一策略），不再逐页 import。
   宽屏下 qt-mini-player 的浮动球不再渲染，避免两套播放控制并存。
@@ -45,6 +64,22 @@
       </view>
     </view>
 
+    <view v-if="showActions" class="pbar-actions">
+      <view class="pbar-btn" hover-class="pbar-btn-hover" @click.stop="toggleLike">
+        <QtIcon
+          :name="liked ? 'heart-fill' : 'heart'"
+          :size="17"
+          :color="liked ? theme.skin.danger : theme.skin.icon"
+        />
+      </view>
+      <view class="pbar-btn" hover-class="pbar-btn-hover" @click.stop="cycleMode">
+        <QtIcon :name="modeIcon" :size="17" :color="theme.skin.icon" />
+      </view>
+      <view class="pbar-btn" hover-class="pbar-btn-hover" @click.stop="openQueue">
+        <QtIcon name="list" :size="17" :color="theme.skin.icon" />
+      </view>
+    </view>
+
     <view
       class="pbar-progress"
       @click.stop="() => {}"
@@ -60,6 +95,34 @@
       </view>
       <text class="pbar-time" :style="'color:' + theme.skin.textSubtle + ';' + qtFontPx(11)">{{ durText }}</text>
     </view>
+
+    <view v-if="showVolume" class="pbar-volume" @click.stop="() => {}">
+      <view class="pbar-btn" hover-class="pbar-btn-hover" @click.stop="toggleMute">
+        <QtIcon :name="volumeIconName()" :size="17" :color="theme.skin.icon" />
+      </view>
+      <!--
+        音量用原生 <slider>，不自绘轨道。原因（真机实测）：
+        宽屏托管页的底部栏是 qt-wide-workspace 覆盖层（z-index 1000）里的停靠 bar，
+        自绘轨道的 @touchstart/@touchmove 收不到事件——同一行的 @click（静音键、
+        播放键）都正常，进度条在首页能拖、到托管页也失灵，属覆盖层事件路由问题。
+        换原生控件交给系统处理命中，取值方式与 pages/equalizer、pages/theme 一致。
+        注意：Android Vapor 下 slider 的 active-color / background-color / block-size
+        全部不支持，只能走 track-class / track-active-class / thumb-class，
+        而类名里只能用静态色 —— 所以音量条颜色不跟皮肤 accent 走，是中性灰。
+      -->
+      <slider
+        class="pbar-vol-slider"
+        :min="0"
+        :max="100"
+        :step="1"
+        :value="volPercent"
+        track-class="pbar-vol-track"
+        track-active-class="pbar-vol-track-active"
+        thumb-class="pbar-vol-thumb"
+        @changing="onVolChanging"
+        @change="onVolChange"
+      />
+    </view>
   </view>
 </template>
 
@@ -71,6 +134,21 @@ import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { qtFontPx } from "@/uni_modules/qt-ui/stores/font-scale";
 import { QT_PLAYER_BAR_HEIGHT_PX } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { qtShowToast } from "@/services/toast";
+import { audioPlayer } from "@/services/audio-player";
+
+const props = defineProps<{
+  /**
+   * 停靠模式：给 qt-wide-workspace 覆盖层用（内联 absolute，随覆盖层显隐）。
+   *
+   * 为什么需要第二份：宽屏工具页（搜索/榜单/歌单广场/每日新歌/设置）是被覆盖层
+   * z-index:1000 整个盖住宿主页的，宿主页那条 fixed 底栏（z-index:940）根本看不见；
+   * 工具页自己又被框架层禁掉了底栏（showPlayerBar 要求 hostedRoute 为空）。
+   * 结果就是「打开工具页 → 播放控制整条消失」，只能靠返回键回到宿主页才能再暂停。
+   * 网易云 / QQ 音乐 pad 版换页时底栏是常驻的，这里补上同一条。
+   */
+  docked?: boolean;
+}>();
 
 const player = usePlayerStore();
 const layout = useQtLayout();
@@ -82,22 +160,46 @@ const theme = useThemeStore();
  */
 const visible = computed((): boolean => layout.isWide && player.current != null);
 
-/** 底栏顶端要让开 rail：rail 是 fixed 的，压在最上层，不让开会盖住封面 */
-const barStyle = computed((): string => {
-  return "left:" + qtRailWidth() + "px;height:" + QT_PLAYER_BAR_HEIGHT_PX + "px;background-color:" + theme.skin.surfaceInset + ";border-top-color:" + theme.skin.divider + ";";
+/**
+ * 可用宽度 = 窗口宽 - rail 宽。
+ * 所有分档都必须用它算：rail 在 medium 档是 64px、wide 档是 96px，
+ * 直接拿 windowWidth 判断会在「900px 窗口 + rail」时高估一截 rail 宽，
+ * 结果就是进度条被挤没（真机表现：总时长被裁掉）。
+ */
+const innerWidth = computed((): number => Math.max(0, layout.windowWidth - qtRailWidth()));
+
+/** 动作组（收藏 / 播放模式 / 队列）只在放得下时出现 */
+const showActions = computed((): boolean => innerWidth.value >= 740);
+/** 音量只在放得下时出现（动作组 + 音量 ≈ 250px，再少就压到进度条了） */
+const showVolume = computed((): boolean => innerWidth.value >= 840);
+
+/** 歌曲块宽度分档：宽 → 300，够用 → 240，紧凑 → 168 */
+const leftWidth = computed((): number => {
+  const inner = innerWidth.value;
+  if (inner >= 1000) return 300;
+  if (inner >= 740) return 240;
+  return 168;
+});
+const narrow = computed((): boolean => leftWidth.value < 240);
+const leftStyle = computed((): string => "width:" + leftWidth.value + "px;");
+const copyStyle = computed((): string => {
+  const cover = narrow.value ? 36 : 44;
+  return "width:" + Math.max(60, leftWidth.value - cover - 12) + "px;";
 });
 
 /**
- * 窄宽屏（medium 档，600–899dp：横屏手机 / 车机矮窗）必须收窄左侧歌曲块。
- *
- * 桌面口径里左侧固定 300px（封面 44 + 文案 232），progress 区吃剩余宽度；
- * 但 medium 档窗口只有 600–900dp，减掉 64px 图标 rail 后可用不足 840dp，
- * 300px 的左侧块 + 132px 的控制键 + 两侧时间（42×2）会把进度条压成 0 宽，
- * 真机表现是右侧总时长被裁掉、滑块无处可显示。窄档改用 168px 并缩封面。
+ * 底栏顶端要让开 rail：rail 是 fixed 的，压在最上层，不让开会盖住封面。
+ * 停靠模式换成 absolute —— 覆盖层自己就是 fixed 容器，子节点必须 absolute
+ * 才会跟着它显隐（Harmony 上 fixed 套 fixed 的触摸还会错位，见 design.md）。
  */
-const narrow = computed((): boolean => layout.windowWidth < 900);
-const leftStyle = computed((): string => "width:" + (narrow.value ? 168 : 300) + "px;");
-const copyStyle = computed((): string => "width:" + (narrow.value ? 108 : 232) + "px;");
+const barStyle = computed((): string => {
+  // 2026-10-25 用户反馈「播放栏不要有特别的背景色」：此前铺 surfaceInset + divider
+  // 分隔线，浅色皮肤里呈一条灰色横带。改成全透明（与 rail 同策略），底色透出
+  // qt-page-frame 的页面背景/壁纸，视觉上与内容区一体。
+  const base = "left:" + qtRailWidth() + "px;height:" + QT_PLAYER_BAR_HEIGHT_PX + "px;background-color:transparent;border-top-color:transparent;";
+  if (props.docked == true) return "position:absolute;right:0;bottom:0;" + base;
+  return base;
+});
 
 const title = computed((): string => {
   const cur = player.current;
@@ -125,7 +227,7 @@ const ratio = computed((): number => {
   return Math.max(0, Math.min(1, displayProgress.value / d));
 });
 
-const fillStyle = computed((): string => "width:" + Math.round(ratio.value * 100) + "%;background-color:" + theme.skin.accent + ";");
+const fillStyle = computed((): string => "width:" + Math.round(ratio.value * 100) + "%" + ";background-color:" + theme.skin.accent + ";");
 /**
  * 滑块位置必须算成 px，不能写 `calc(50% - 5px)`：
  * 本仓 qt-back-to-top.uvue 头部注释已记录，calc()/env() 在该 Vapor 版本不生效
@@ -137,6 +239,91 @@ const thumbStyle = computed((): string => {
   const left = Math.round(ratio.value * w) - 5;
   return "left:" + left + "px;border-color:" + theme.skin.accent + ";";
 });
+
+// ── 收藏 / 播放模式 / 队列 ───────────────────────────────────────────────
+/**
+ * 红心口径与播放页一致：player.isLiked = 「这首歌在任意一个自建歌单里」。
+ * 因此点击不能简单取反（取反要先决定从哪个歌单摘掉），走与播放页同一个
+ * 歌单选择器；没有任何歌单时先提示去新建。
+ */
+const liked = computed((): boolean => {
+  const cur = player.current;
+  return cur != null && player.isLiked(cur);
+});
+
+function toggleLike(): void {
+  const cur = player.current;
+  if (cur == null) return;
+  if (!player.canPickPlaylist()) {
+    qtShowToast({ title: "还没有歌单，请先新建", icon: "none" });
+    return;
+  }
+  player.showPlaylistPickerFor(cur);
+}
+
+/** 播放模式图标与播放页 modeIconName() 同口径（random→shuffle，single→repeat-1） */
+const modeIcon = computed((): string => {
+  if (player.mode == "random") return "shuffle";
+  if (player.mode == "single") return "repeat-1";
+  return "repeat";
+});
+
+function cycleMode(): void {
+  player.cycleMode();
+  qtShowToast({ title: "播放模式：" + player.modeLabel(), icon: "none" });
+}
+
+/**
+ * 队列入口：直接进播放页并让它展开队列抽屉。
+ * 这里不能只 emit 事件 —— 播放页此刻还没挂载（本栏在 full-width 页面上不渲染，
+ * 所以「已经在播放页」这种情况不会发生），事件会丢；用 query 由 onLoad 接住。
+ */
+function openQueue(): void {
+  uni.navigateTo({ url: "/pages/player/index?queue=1" });
+}
+
+// ── 音量 ─────────────────────────────────────────────────────────────────
+// 音量用原生 <slider>（宽度由 .pbar-vol-slider 的 CSS 控制），不再自绘轨道，
+// 所以没有「左边界/宽度常量要与 CSS 同步」的负担。
+
+const volPercent = ref(Math.round(audioPlayer.getVolume() * 100));
+const muted = ref(audioPlayer.getMuted());
+
+/**
+ * 图标名用「函数 + return 字面量」而不是三元表达式：
+ * tools/check-uvue.mjs 的 indirectIcons() 只认 `return "xxx"` 形式的间接引用，
+ * 写成三元会被判成 UNUSED 图标而让 npm run check 失败（与 modeIconName() 同法）。
+ */
+function volumeIconName(): string {
+  if (muted.value || volPercent.value <= 0) return "volume-mute";
+  return "volume";
+}
+
+/**
+ * 音量（原生 slider）：拖动中只改内存里的 volPercent（原生控件自己重绘），
+ * 松手才 writeVolume——每帧都写一次持久化键会掉帧（同 player 页拖进度的手感要求）。
+ * muted 与 volPercent 联动：拖到 >0 自动解除静音，拖到 0 自动变静音图标。
+ */
+function onVolChanging(event: UniSliderChangeEvent): void {
+  const next = Math.round(event.detail.value);
+  if (next < 0 || next > 100) return;
+  volPercent.value = next;
+}
+function onVolChange(event: UniSliderChangeEvent): void {
+  const next = Math.round(event.detail.value);
+  volPercent.value = next < 0 ? 0 : next > 100 ? 100 : next;
+  audioPlayer.setVolume(volPercent.value / 100);
+  if (volPercent.value > 0 && muted.value) {
+    muted.value = false;
+    audioPlayer.setMuted(false);
+  }
+}
+function toggleMute(): void {
+  const next = !muted.value;
+  muted.value = next;
+  audioPlayer.setMuted(next);
+  qtShowToast({ title: next ? "已静音" : "取消静音", icon: "none" });
+}
 
 function formatTime(sec: number): string {
   if (sec < 0 || !isFinite(sec)) return "0:00";
@@ -296,7 +483,7 @@ function onTouchEnd(): void {
   height: 44px;
   border-radius: 8px;
 }
-/* 窄档（medium：横屏手机 / 车机矮窗）封面同步缩小，与 leftStyle 的 168px 配套 */
+/* 紧凑档（leftWidth < 240）封面同步缩小，与 leftStyle 的 168px 配套 */
 .pbar-cover-narrow {
   width: 36px;
   height: 36px;
@@ -342,6 +529,15 @@ function onTouchEnd(): void {
   margin-left: 12px;
   margin-right: 4px;
 }
+/* 动作组：收藏 / 播放模式 / 队列。与主控之间靠 margin-right 分隔，
+   右边界贴着进度条，视觉上成为「这首歌的操作」而不是「播放控制」。 */
+.pbar-actions {
+  flex-direction: row;
+  align-items: center;
+  margin-left: 4px;
+  margin-right: 8px;
+  flex-shrink: 0;
+}
 .pbar-progress {
   flex: 1;
   flex-direction: row;
@@ -372,5 +568,36 @@ function onTouchEnd(): void {
   border-width: 2px;
   border-style: solid;
   background-color: #ffffff;
+}
+/* 音量：静音键 + 原生 slider（96px ≈ 76px 轨道 + 两端滑块余量）。 */
+.pbar-volume {
+  flex-direction: row;
+  align-items: center;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+.pbar-vol-slider {
+  width: 96px;
+  height: 32px;
+  margin-left: 4px;
+  margin-right: 4px;
+}
+/* 音量条三段样式：Vapor(Android) 只认这三个类名，且类名里只能用静态色。
+   默认 thumb 是 28dp 的大白球，宽屏底栏里太抢眼，这里压到 14dp。 */
+.pbar-vol-track {
+  height: 4px;
+  background-color: rgba(128, 128, 128, 0.28);
+}
+.pbar-vol-track-active {
+  height: 4px;
+  background-color: rgba(128, 128, 128, 0.62);
+}
+.pbar-vol-thumb {
+  width: 14px;
+  height: 14px;
+  background-color: #ffffff;
+  border-width: 1px;
+  border-style: solid;
+  border-color: rgba(25, 29, 38, 0.30);
 }
 </style>

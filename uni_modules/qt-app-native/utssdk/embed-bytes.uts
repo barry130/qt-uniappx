@@ -1,0 +1,585 @@
+/**
+ * qt-app-native —— 音频标签内嵌「字节层」（平台无关，Android / Harmony 双端复用）
+ *
+ * 职责（对应设计文档 §3.6 / §3.9）：
+ *   - planMp3()   : 为 mp3 生成完整的 ID3v2.3 标签（标题/歌手/专辑 + USLT 歌词 + APIC 封面），
+ *                   并给出旧标签长度，由平台层拼接「新标签 + 原音频区」
+ *   - planFlac()  : 为 flac 生成元数据区重组计划：STREAMINFO + 原有保留块 + 新 VORBIS_COMMENT
+ *                   +（可选）新 PICTURE，剔除旧 VORBIS_COMMENT / PICTURE；音频帧区由平台层原样搬运
+ *
+ * 本文件只做纯内存计算，不碰任何文件/平台 API —— 保证同一份逻辑在 node（strip-types 自测）
+ * 与真机（Kotlin / ArkTS）行为一致。
+ *
+ * UTS 编码约束（两端编译器都吃得下）：
+ *   - 全部函数显式 export；显式类型标注；可空一律 `| null`；
+ *   - 不用解构/扩展/模板串/ts 特有语法；字符串拼接用 +；
+ *   - Uint8Array 按索引读写，写入前先 & 0xff 防符号问题；不用 ++ 于下标表达式；
+ *   - Array<T> 显式声明；循环用 for(;;)。
+ *   - node 自测：本文件不含 UTS 专属类型，tsc 直接编译；详见 embed-bytes.node-test.ts。
+ */
+
+/** 需要写入音频标签的内容（字节层入参） */
+export type EmbedTagsData = {
+	/** 标题；空串 = 不写 */
+	title: string;
+	/** 歌手；空串 = 不写 */
+	artist: string;
+	/** 专辑；空串 = 不写 */
+	album: string;
+	/** LRC 歌词原文（已含时间轴）；空串 = 不写 */
+	lrcText: string;
+	/** 已按魔数校验过的封面原始字节（jpg/png）；null = 不写封面 */
+	coverBytes: Uint8Array | null;
+	/** 封面 MIME：image/jpeg 或 image/png（coverBytes 为 null 时忽略） */
+	coverMime: string;
+};
+
+/** mp3 内嵌计划 */
+export type Mp3Plan = {
+	/** 原文件需跳过的旧 ID3v2 区总长（含标签头 10B + footer 10B[如有]；0 = 无旧标签） */
+	oldTagSize: number;
+	/** 新的完整 ID3v2.3 标签（含 10 字节标签头），直接拼在音频区前 */
+	newTag: Uint8Array;
+};
+
+/** flac 保留块的搬运区间（头与数据都在原文件里，头可能落在前缀之外？——不会，见 planFlac 注释） */
+export type FlacSpan = {
+	/** 该块 4 字节块头在【原文件】中的偏移 */
+	headerOffset: number;
+	/** 数据区长度（不含 4 字节头） */
+	dataLen: number;
+};
+
+/** flac 内嵌计划 */
+export type FlacPlan = {
+	/** 原文件音频帧区起点（= 最后一个元数据块之后；从这里开始按字节搬运） */
+	audioOffset: number;
+	/** 38 字节：STREAMINFO 块头（type 0，last 位清零）+ 34B 数据 */
+	streamInfo: Uint8Array;
+	/** 依原顺序保留的块（含 PADDING；已剔除旧 VORBIS_COMMENT / PICTURE） */
+	keptSpans: Array<FlacSpan>;
+	/** 新 VORBIS_COMMENT 块（含 4B 头，last=0） */
+	vorbisComment: Uint8Array;
+	/** 新 PICTURE 块（含 4B 头，last=0x80）；不嵌封面时为 null */
+	picture: Uint8Array | null;
+};
+
+/** UTF-16LE 编码，带 BOM（ID3v2.3 文本帧/USLT 用） */
+export function utf16leEncode(text: string): Uint8Array {
+	const chars = text.length;
+	const out = new Uint8Array(chars * 2 + 2);
+	out[0] = 0xff;
+	out[1] = 0xfe;
+	for (let i = 0; i < chars; i++) {
+		const c = text.charCodeAt(i) ?? 0;
+		out[2 + i * 2] = c & 0xff;
+		out[3 + i * 2] = (c >> 8) & 0xff;
+	}
+	return out;
+}
+
+/** UTF-8 编码（代理对感知；VorbisComment 用） */
+export function utf8Encode(text: string): Uint8Array {
+	const chars = text.length;
+	let byteLen = 0;
+	for (let i = 0; i < chars; i++) {
+		const c = text.charCodeAt(i) ?? 0;
+		if (c < 0x80) {
+			byteLen += 1;
+		} else if (c < 0x800) {
+			byteLen += 2;
+		} else if (c >= 0xd800 && c <= 0xdbff && i + 1 < chars) {
+			const d = text.charCodeAt(i + 1) ?? 0;
+			if (d >= 0xdc00 && d <= 0xdfff) {
+				byteLen += 4;
+				i += 1;
+			} else {
+				byteLen += 3;
+			}
+		} else {
+			byteLen += 3;
+		}
+	}
+	const out = new Uint8Array(byteLen);
+	let p = 0;
+	for (let i = 0; i < chars; i++) {
+		let cp = text.charCodeAt(i) ?? 0;
+		if (cp >= 0xd800 && cp <= 0xdbff && i + 1 < chars) {
+			const d = text.charCodeAt(i + 1) ?? 0;
+			if (d >= 0xdc00 && d <= 0xdfff) {
+				cp = 0x10000 + ((cp - 0xd800) << 10) + (d - 0xdc00);
+				i += 1;
+			}
+		}
+		if (cp < 0x80) {
+			out[p] = cp & 0xff;
+			p += 1;
+		} else if (cp < 0x800) {
+			out[p] = (0xc0 | (cp >> 6)) & 0xff;
+			out[p + 1] = (0x80 | (cp & 0x3f)) & 0xff;
+			p += 2;
+		} else if (cp < 0x10000) {
+			out[p] = (0xe0 | (cp >> 12)) & 0xff;
+			out[p + 1] = (0x80 | ((cp >> 6) & 0x3f)) & 0xff;
+			out[p + 2] = (0x80 | (cp & 0x3f)) & 0xff;
+			p += 3;
+		} else {
+			out[p] = (0xf0 | (cp >> 18)) & 0xff;
+			out[p + 1] = (0x80 | ((cp >> 12) & 0x3f)) & 0xff;
+			out[p + 2] = (0x80 | ((cp >> 6) & 0x3f)) & 0xff;
+			out[p + 3] = (0x80 | (cp & 0x3f)) & 0xff;
+			p += 4;
+		}
+	}
+	return out;
+}
+
+const B64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+/**
+ * base64 编码（Android 平台层专用桥）。
+ * 为什么需要：UTS 在 app-android 上对 kotlin ByteArray 的**元素级写入**没有可靠先例
+ * （本插件既有代码只把 ByteArray 当流拷贝的整块缓冲用），而 android.util.Base64 的
+ * encode/decode 是已被验证可静态调用的安全通道。本函数 + base64Decode 构成
+ * Uint8Array ↔ Base64 字符串 的纯逻辑桥，可进 node 自测。
+ * 实现为分片 Array + join（避免 UTS string += 在 Kotlin 上的 O(n²) 拼接）。
+ */
+export function base64Encode(bytes: Uint8Array): string {
+	const len = bytes.length;
+	const pieces: Array<string> = [];
+	for (let i = 0; i < len; i += 3) {
+		const b0 = bytes[i] & 0xff;
+		const hasB1 = i + 1 < len;
+		const hasB2 = i + 2 < len;
+		const b1 = hasB1 ? bytes[i + 1] & 0xff : 0;
+		const b2 = hasB2 ? bytes[i + 2] & 0xff : 0;
+		pieces.push(
+			B64_ALPHABET.charAt(b0 >> 2) +
+				B64_ALPHABET.charAt(((b0 & 0x03) << 4) | (b1 >> 4)) +
+				(hasB1 ? B64_ALPHABET.charAt(((b1 & 0x0f) << 2) | (b2 >> 6)) : '=') +
+				(hasB2 ? B64_ALPHABET.charAt(b2 & 0x3f) : '=')
+		);
+	}
+	return pieces.join('');
+}
+
+/** 反查表按需构建（base64Decode 用）；值为 6bit，非法字符 = -1 */
+function b64Rev(c: number): number {
+	if (c >= 65 && c <= 90) return c - 65; // A-Z
+	if (c >= 97 && c <= 122) return c - 97 + 26; // a-z
+	if (c >= 48 && c <= 57) return c - 48 + 52; // 0-9
+	if (c == 43) return 62; // +
+	if (c == 47) return 63; // /
+	return -1;
+}
+
+/** base64 解码（Android 平台层专用桥；容忍 \n \r 空白, 严格处理 == 填充） */
+export function base64Decode(text: string): Uint8Array {
+	const chars = text.length;
+	const pieces: Array<number> = []; // 解码过程中按 6bit 流推进, 最后统一落字节
+	// 先统计有效字符与填充
+	let valid = 0;
+	let pad = 0;
+	for (let i = 0; i < chars; i++) {
+		const c = text.charCodeAt(i) ?? 0;
+		if (c == 13 || c == 10 || c == 32 || c == 9) continue; // 空白
+		if (c == 61) {
+			pad += 1;
+			continue; // '='
+		}
+		if (b64Rev(c) < 0) return new Uint8Array(0); // 非法输入 → 空结果
+		valid += 1;
+	}
+	if (valid == 0) return new Uint8Array(0);
+	if (pad > 2) return new Uint8Array(0);
+	const outLen = ((valid + pad) / 4) * 3 - pad;
+	if (outLen <= 0) return new Uint8Array(0);
+	const out = new Uint8Array(outLen);
+	let acc = 0;
+	let nBits = 0;
+	let p = 0;
+	for (let i = 0; i < chars; i++) {
+		const c = text.charCodeAt(i) ?? 0;
+		if (c == 61 || c == 13 || c == 10 || c == 32 || c == 9) continue;
+		const v = b64Rev(c);
+		if (v < 0) return new Uint8Array(0);
+		acc = (acc << 6) | v;
+		nBits += 6;
+		if (nBits >= 8) {
+			nBits -= 8;
+			out[p] = (acc >> nBits) & 0xff;
+			p += 1;
+		}
+	}
+	return out;
+}
+
+/** 4 字节 SyncSafe 整数（ID3v2 尺寸域专用：每字节 7bit，高位恒 0） */
+function toSyncSafe(len: number): Uint8Array {
+	const out = new Uint8Array(4);
+	out[0] = (len >> 21) & 0x7f;
+	out[1] = (len >> 14) & 0x7f;
+	out[2] = (len >> 7) & 0x7f;
+	out[3] = len & 0x7f;
+	return out;
+}
+
+/** ID3v2.3 帧：4B 帧标识 + 4B 大端尺寸（不含帧头） + 2B 标志(0) + 数据 */
+function id3Frame(frameId: string, body: Uint8Array): Uint8Array {
+	const out = new Uint8Array(10 + body.length);
+	for (let i = 0; i < 4; i++) {
+		out[i] = (frameId.charCodeAt(i) ?? 0) & 0xff;
+	}
+	const n = body.length;
+	out[4] = (n >> 24) & 0xff;
+	out[5] = (n >> 16) & 0xff;
+	out[6] = (n >> 8) & 0xff;
+	out[7] = n & 0xff;
+	for (let i = 0; i < n; i++) {
+		out[10 + i] = body[i];
+	}
+	return out;
+}
+
+/** ID3v2.3 文本帧体：1B 编码(01=UTF-16 w/ BOM) + UTF-16LE(BOM) + 00 00 终止 */
+function id3TextFrameBody(text: string): Uint8Array {
+	const enc = utf16leEncode(text);
+	const out = new Uint8Array(1 + enc.length + 2);
+	out[0] = 0x01;
+	for (let i = 0; i < enc.length; i++) {
+		out[1 + i] = enc[i];
+	}
+	const base = 1 + enc.length;
+	out[base] = 0;
+	out[base + 1] = 0;
+	return out;
+}
+
+/** ID3v2.3 USLT（非同步歌词）帧体：01(UTF-16) + "XXX"(语言) + 内容描述空串(UTF-16: BOM+0000) + 歌词正文 */
+function id3UsltBody(lrc: string): Uint8Array {
+	const enc = utf16leEncode(lrc);
+	const out = new Uint8Array(1 + 3 + 2 + 2 + enc.length);
+	let p = 0;
+	out[p] = 0x01;
+	p += 1;
+	out[p] = 0x58; /* X */ out[p + 1] = 0x58; /* X */ out[p + 2] = 0x58; /* X */
+	p += 3;
+	out[p] = 0xff; out[p + 1] = 0xfe; /* 空描述的 BOM */
+	p += 2;
+	out[p] = 0; out[p + 1] = 0; /* 描述终止 */
+	p += 2;
+	for (let i = 0; i < enc.length; i++) {
+		out[p + i] = enc[i];
+	}
+	return out;
+}
+
+/** ID3v2.3 APIC（ attached picture）帧体：00(latin1 mime) + mime + 00 + 03(类型=封面) + 00(描述终止) + 图片字节 */
+function id3ApicBody(mime: string, cover: Uint8Array): Uint8Array {
+	const mimeBytes = asciiBytes(mime);
+	const out = new Uint8Array(1 + mimeBytes.length + 1 + 1 + 1 + cover.length);
+	let p = 0;
+	out[p] = 0x00;
+	p += 1;
+	for (let i = 0; i < mimeBytes.length; i++) {
+		out[p + i] = mimeBytes[i];
+	}
+	p += mimeBytes.length;
+	out[p] = 0x00;
+	p += 1;
+	out[p] = 0x03;
+	p += 1;
+	out[p] = 0x00;
+	p += 1;
+	for (let i = 0; i < cover.length; i++) {
+		out[p + i] = cover[i];
+	}
+	return out;
+}
+
+/** ASCII → 字节（mime "image/jpeg" 等纯 ASCII 用） */
+function asciiBytes(text: string): Uint8Array {
+	const out = new Uint8Array(text.length);
+	for (let i = 0; i < text.length; i++) {
+		out[i] = (text.charCodeAt(i) ?? 0) & 0xff;
+	}
+	return out;
+}
+
+/**
+ * mp3 计划：读入「文件头前缀」（至少 oldTagSize + 2 字节；建议 ≥ 64B），
+ * 校验音频同步头后生成新 ID3v2.3 标签。
+ * 返回 null = 不是可识别的 mp3（无同步头 / 前缀太短）——调用方回退侧车。
+ */
+export function planMp3(prefix: Uint8Array, data: EmbedTagsData): Mp3Plan | null {
+	// 1. 旧 ID3v2 区长度：连续多重旧标签一并跳过（真实文件存在 双ID3/残留标签 场景）
+	let oldTagSize = 0;
+	let scanning = true;
+	while (scanning) {
+		scanning = false;
+		if (prefix.length >= oldTagSize + 10) {
+			const base = oldTagSize;
+			const b0 = prefix[base] & 0xff;
+			const b1 = prefix[base + 1] & 0xff;
+			const b2 = prefix[base + 2] & 0xff;
+			if (b0 == 0x49 && b1 == 0x44 && b2 == 0x33) {
+				// "ID3"
+				const size =
+					(prefix[base + 6] & 0x7f) * 2097152 +
+					(prefix[base + 7] & 0x7f) * 16384 +
+					(prefix[base + 8] & 0x7f) * 128 +
+					(prefix[base + 9] & 0x7f);
+				let seg = 10 + size;
+				if ((prefix[base + 5] & 0x10) != 0) {
+					seg += 10; // footer
+				}
+				oldTagSize += seg;
+				scanning = true; // 继续看后面是否还叠了一个标签
+			}
+		}
+	}
+	// 2. 音频起点必须是 MPEG 帧同步（防扩展名说谎：mp3 名下装了 flac 等）
+	if (prefix.length < oldTagSize + 2) {
+		return null;
+	}
+	const s0 = prefix[oldTagSize] & 0xff;
+	const s1 = prefix[oldTagSize + 1] & 0xff;
+	if (s0 != 0xff || (s1 & 0xe0) != 0xe0) {
+		return null;
+	}
+	// 3. 组帧
+	const frames: Array<Uint8Array> = [];
+	if (data.title.length > 0) {
+		frames.push(id3Frame('TIT2', id3TextFrameBody(data.title)));
+	}
+	if (data.artist.length > 0) {
+		frames.push(id3Frame('TPE1', id3TextFrameBody(data.artist)));
+	}
+	if (data.album.length > 0) {
+		frames.push(id3Frame('TALB', id3TextFrameBody(data.album)));
+	}
+	if (data.lrcText.length > 0) {
+		frames.push(id3Frame('USLT', id3UsltBody(data.lrcText)));
+	}
+	if (data.coverBytes != null && (data.coverMime == 'image/jpeg' || data.coverMime == 'image/png')) {
+		frames.push(id3Frame('APIC', id3ApicBody(data.coverMime, data.coverBytes)));
+	}
+	let bodyLen = 0;
+	for (let i = 0; i < frames.length; i++) {
+		bodyLen += frames[i].length;
+	}
+	// 4. 标签头：ID3 v2.3 flags=0 + SyncSafe 尺寸
+	const tag = new Uint8Array(10 + bodyLen);
+	tag[0] = 0x49;
+	tag[1] = 0x44;
+	tag[2] = 0x33;
+	tag[3] = 0x03;
+	tag[4] = 0x00;
+	tag[5] = 0x00;
+	const ss = toSyncSafe(bodyLen);
+	tag[6] = ss[0];
+	tag[7] = ss[1];
+	tag[8] = ss[2];
+	tag[9] = ss[3];
+	let p = 10;
+	for (let i = 0; i < frames.length; i++) {
+		const f = frames[i];
+		for (let j = 0; j < f.length; j++) {
+			tag[p + j] = f[j];
+		}
+		p += f.length;
+	}
+	const plan: Mp3Plan = { oldTagSize: oldTagSize, newTag: tag };
+	return plan;
+}
+
+/** 构造一条 VorbisComment 键值条目：u32LE(长度) + utf8(key+value) */
+function vorbisEntry(key: string, value: string): Uint8Array {
+	const payload = utf8Encode(key + value);
+	const out = new Uint8Array(4 + payload.length);
+	const n = payload.length;
+	out[0] = n & 0xff;
+	out[1] = (n >> 8) & 0xff;
+	out[2] = (n >> 16) & 0xff;
+	out[3] = (n >> 24) & 0xff;
+	for (let i = 0; i < payload.length; i++) {
+		out[4 + i] = payload[i];
+	}
+	return out;
+}
+
+/** VORBIS_COMMENT 块体：u32LE(vendorLen)+vendor+u32LE(条数)+条目 */
+function buildVorbisCommentBody(data: EmbedTagsData): Uint8Array {
+	const entries: Array<Uint8Array> = [];
+	if (data.title.length > 0) {
+		entries.push(vorbisEntry('TITLE=', data.title));
+	}
+	if (data.artist.length > 0) {
+		entries.push(vorbisEntry('ARTIST=', data.artist));
+	}
+	if (data.album.length > 0) {
+		entries.push(vorbisEntry('ALBUM=', data.album));
+	}
+	// 歌词走 VORBIS_COMMENT 的 LYRICS 字段（foobar2000/Poweramp/MusicBrainz 惯例，
+	// 与 LRC 同为纯文本，逐行 [mm:ss.xx] 时间轴原样写入）
+	if (data.lrcText.length > 0) {
+		entries.push(vorbisEntry('LYRICS=', data.lrcText));
+	}
+	const vendor = utf8Encode('qt-music');
+	let bodyLen = 4 + vendor.length + 4;
+	for (let i = 0; i < entries.length; i++) {
+		bodyLen += entries[i].length;
+	}
+	const out = new Uint8Array(bodyLen);
+	let p = 0;
+	const v = vendor.length;
+	out[p] = v & 0xff;
+	out[p + 1] = (v >> 8) & 0xff;
+	out[p + 2] = (v >> 16) & 0xff;
+	out[p + 3] = (v >> 24) & 0xff;
+	p += 4;
+	for (let i = 0; i < vendor.length; i++) {
+		out[p + i] = vendor[i];
+	}
+	p += vendor.length;
+	const c = entries.length;
+	out[p] = c & 0xff;
+	out[p + 1] = (c >> 8) & 0xff;
+	out[p + 2] = (c >> 16) & 0xff;
+	out[p + 3] = (c >> 24) & 0xff;
+	p += 4;
+	for (let i = 0; i < entries.length; i++) {
+		const e = entries[i];
+		for (let j = 0; j < e.length; j++) {
+			out[p + j] = e[j];
+		}
+		p += e.length;
+	}
+	return out;
+}
+
+/** 给块体套上 flac 元数据块头（type + 24bit 大端长度 + last 位） */
+function flacBlock(type: number, last: boolean, body: Uint8Array): Uint8Array {
+	const out = new Uint8Array(4 + body.length);
+	out[0] = (type & 0x7f) | (last ? 0x80 : 0x00);
+	const n = body.length;
+	out[1] = (n >> 16) & 0xff;
+	out[2] = (n >> 8) & 0xff;
+	out[3] = n & 0xff;
+	for (let i = 0; i < body.length; i++) {
+		out[4 + i] = body[i];
+	}
+	return out;
+}
+
+/**
+ * flac 计划：读入「覆盖全部元数据块区的文件前缀」（首个 METADATA_BLOCK_HEADER 必须完整；
+ * 1MB 前缀不够时调用方应换 16MB 重试——大 PADDING 场景）。
+ * 返回 null = 魔数/首块不合法、或前缀没盖住完整块区——调用方扩前缀重试或回退侧车。
+ */
+export function planFlac(prefix: Uint8Array, data: EmbedTagsData): FlacPlan | null {
+	// fLaC + 4B 头 + 34B STREAMINFO = 42
+	if (prefix.length < 42) {
+		return null;
+	}
+	if (
+		(prefix[0] & 0xff) != 0x66 ||
+		(prefix[1] & 0xff) != 0x4c ||
+		(prefix[2] & 0xff) != 0x61 ||
+		(prefix[3] & 0xff) != 0x43
+	) {
+		return null; // "fLaC"
+	}
+	const head0 = prefix[4] & 0xff;
+	const type0 = head0 & 0x7f;
+	const len0 = (prefix[5] & 0xff) * 65536 + (prefix[6] & 0xff) * 256 + (prefix[7] & 0xff);
+	if (type0 != 0 || len0 != 34) {
+		return null; // 首块必须 STREAMINFO
+	}
+	// STREAMINFO 块（last 清零）原样搬运
+	const streamInfo = new Uint8Array(38);
+	streamInfo[0] = 0x00;
+	streamInfo[1] = (34 >> 16) & 0xff;
+	streamInfo[2] = (34 >> 8) & 0xff;
+	streamInfo[3] = 34 & 0xff;
+	for (let i = 0; i < 34; i++) {
+		streamInfo[4 + i] = prefix[8 + i];
+	}
+	// 遍历后续块：剔除旧 VORBIS_COMMENT(4)/PICTURE(6)，其余（含 PADDING）依序保留
+	const keptSpans: Array<FlacSpan> = [];
+	let pos = 42;
+	let sawLast = false;
+	while (pos + 4 <= prefix.length) {
+		const head = prefix[pos] & 0xff;
+		const isLast = (head & 0x80) != 0;
+		const type = head & 0x7f;
+		const bLen = (prefix[pos + 1] & 0xff) * 65536 + (prefix[pos + 2] & 0xff) * 256 + (prefix[pos + 3] & 0xff);
+		if (type != 4 && type != 6) {
+			const span: FlacSpan = { headerOffset: pos, dataLen: bLen };
+			keptSpans.push(span);
+		}
+		pos += 4 + bLen;
+		if (isLast) {
+			sawLast = true;
+			break;
+		}
+	}
+	if (!sawLast) {
+		return null; // 前缀没盖住完整元数据区 → 调用方扩前缀重试
+	}
+	// 新 VORBIS_COMMENT（last=0，因为后面还有块/音频）
+	const vorbisComment = flacBlock(4, false, buildVorbisCommentBody(data));
+	// 新 PICTURE（嵌封面时 = 整个元数据区最后一块，last=1）
+	let picture: Uint8Array | null = null;
+	const cb = data.coverBytes;
+	if (cb != null && (data.coverMime == 'image/jpeg' || data.coverMime == 'image/png')) {
+		const mimeBytes = asciiBytes(data.coverMime);
+		const body = new Uint8Array(32 + mimeBytes.length + cb.length);
+		let p = 0;
+		// u32BE picture type = 3 (Cover(front))
+		body[p] = 0;
+		body[p + 1] = 0;
+		body[p + 2] = 0;
+		body[p + 3] = 3;
+		p += 4;
+		const ml = mimeBytes.length;
+		body[p] = (ml >> 24) & 0xff;
+		body[p + 1] = (ml >> 16) & 0xff;
+		body[p + 2] = (ml >> 8) & 0xff;
+		body[p + 3] = ml & 0xff;
+		p += 4;
+		for (let i = 0; i < mimeBytes.length; i++) {
+			body[p + i] = mimeBytes[i];
+		}
+		p += mimeBytes.length;
+		// 描述空串 u32BE(0)
+		body[p] = 0;
+		body[p + 1] = 0;
+		body[p + 2] = 0;
+		body[p + 3] = 0;
+		p += 4;
+		// 宽高深色全 0（u32BE × 4）
+		for (let i = 0; i < 16; i++) {
+			body[p + i] = 0;
+		}
+		p += 16;
+		const cl = cb.length;
+		body[p] = (cl >> 24) & 0xff;
+		body[p + 1] = (cl >> 16) & 0xff;
+		body[p + 2] = (cl >> 8) & 0xff;
+		body[p + 3] = cl & 0xff;
+		p += 4;
+		for (let i = 0; i < cb.length; i++) {
+			body[p + i] = cb[i];
+		}
+		picture = flacBlock(6, true, body);
+	}
+	const plan: FlacPlan = {
+		audioOffset: pos,
+		streamInfo: streamInfo,
+		keptSpans: keptSpans,
+		vorbisComment: vorbisComment,
+		picture: picture,
+	};
+	return plan;
+}

@@ -63,13 +63,21 @@
                 </view>
               </view>
             </view>
-            <view class="cell cell-no-border cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleLyric">
+            <view class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleLyric">
               <QtIcon class="cell-icon cell-icon-wide" name="list" :size="36" color="#5f9ea0" />
               <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">同时下载歌词</text>
               <view class="cell-right">
                 <view class="switch" :class="downloads.downloadLyric ? 'switch-on' : ''" :style="downloads.downloadLyric ? ('background-color:' + theme.skin.accent + ';') : ('background-color:' + theme.skin.surfaceMuted + ';')">
                   <view class="switch-dot" />
                 </view>
+              </view>
+            </view>
+            <view class="cell cell-no-border cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showStorageMode">
+              <QtIcon class="cell-icon cell-icon-wide" name="music" :size="36" color="#a07fd6" />
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">下载存储方式</text>
+              <view class="cell-right">
+                <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ downloads.storageModeText() }}</text>
+                <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
               </view>
             </view>
           </view>
@@ -146,13 +154,21 @@
             </view>
           </view>
         </view>
-        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleLyric">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleLyric">
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="list" :size="36" color="#5f9ea0" />
           <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">同时下载歌词</text>
           <view class="cell-right">
             <view class="switch" :class="downloads.downloadLyric ? 'switch-on' : ''" :style="downloads.downloadLyric ? ('background-color:' + theme.skin.accent + ';') : ('background-color:' + theme.skin.surfaceMuted + ';')">
               <view class="switch-dot" />
             </view>
+          </view>
+        </view>
+        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showStorageMode">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="music" :size="36" color="#a07fd6" />
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">下载存储方式</text>
+          <view class="cell-right">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ downloads.storageModeText() }}</text>
+            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
           </view>
         </view>
       </view>
@@ -178,7 +194,7 @@
       </view>
 
       <view class="hint">
-        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">打开后，下载歌曲时会顺带把封面图（.jpg/.png）和歌词（.lrc）存到同一目录，文件名与歌曲一致，本地播放器可自动识别。取不到封面或歌词时只跳过，不影响歌曲本身。</text>
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">打开后，下载歌曲时会顺带获取封面和歌词，按「下载存储方式」存放：音乐内嵌＝写进音频文件标签，其他播放器直接显示封面和歌词；同目录文件＝存为同名 .jpg/.png 和 .lrc。取不到或格式不支持内嵌时自动跳过，不影响歌曲本身。</text>
       </view>
       <view class="hint">
         <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">同时下载数越高越容易被音源限流。超过 {{ warnAbove }} 个时会有一次确认提醒。</text>
@@ -200,8 +216,9 @@ import { qtConfirm } from "@/services/confirm";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { useQtTwoColumn } from "@/uni_modules/qt-ui/composables/use-qt-columns";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { computed, ref } from "vue";
+import { computed, ref, onMounted, onUnmounted } from "vue";
 import { onShow } from "@dcloudio/uni-app";
+import { SOURCE_AUTH_CHANGED_EVENT } from "@/services/source-auth";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
@@ -247,9 +264,16 @@ function onSheetSelect(_action: SheetAction, index: number): void {
 
 // 音质档位来自数据包注册表，并按**当前选中的音源**收敛（v5 契约：包侧声明了
 // 该源可用档位，如 B 站无真无损就不展示 flac；未声明 = 全部档位）
-const qualityOptions = computed<{ value: string; name: string }[]>(() =>
-  registry.sourceQualities(sourceStore.current).map((q) => ({ value: q.id, name: q.name }))
-);
+// v10：播放面登录态生效时整体切官方档位清单——登录态不进响应式系统（uni storage
+// 同步读），用 loginTick 进依赖 + SOURCE_AUTH_CHANGED_EVENT 触发重算。
+const loginTick = ref(0);
+const qualityOptions = computed<{ value: string; name: string }[]>(() => {
+  loginTick.value;
+  return registry.sourceQualities(sourceStore.current).map((q) => ({ value: q.id, name: q.name }));
+});
+function onLoginChanged(): void {
+  loginTick.value++;
+}
 function qualityLabel(q: string): string {
   return registry.qualityLabel(q);
 }
@@ -289,6 +313,24 @@ function showDownloadNameFormat(): void {
   })), (index) => {
     downloads.setDownloadNameFormat(nameFormatOptions[index].value);
     qtShowToast({ title: "下载文件名格式：" + nameFormatOptions[index].name, icon: "none" });
+  });
+}
+
+// ==================== 下载存储方式 ====================
+// 「音乐内嵌」= 封面/歌词写进音频文件标签（ID3v2.4 APIC/USLT、FLAC PICTURE/LYRICS），
+// 其他播放器直接显示；「同目录文件」= .jpg/.lrc 落在音频旁边（传统做法）。
+// 默认内嵌；不支持的格式（如 m4a/wav/ogg）在下载时自动退回同目录文件并 toast 提示。
+const storageModeOptions: { value: string; name: string }[] = [
+  { value: "embed", name: "音乐内嵌" },
+  { value: "sidecar", name: "同目录文件" },
+];
+function showStorageMode(): void {
+  openSheet("下载存储方式", storageModeOptions.map((opt) => ({
+    name: opt.name,
+    color: opt.value == downloads.storageMode ? theme.skin.accent : undefined,
+  })), (index) => {
+    downloads.setStorageMode(storageModeOptions[index].value);
+    qtShowToast({ title: "下载存储方式：" + storageModeOptions[index].name, icon: "none" });
   });
 }
 
@@ -422,6 +464,13 @@ onShow(() => {
   sourceStore.restore();
   registry.ensure();
 });
+
+onMounted(() => {
+  uni.$on(SOURCE_AUTH_CHANGED_EVENT, onLoginChanged);
+});
+onUnmounted(() => {
+  uni.$off(SOURCE_AUTH_CHANGED_EVENT, onLoginChanged);
+});
 </script>
 
 <style>
@@ -480,7 +529,7 @@ onShow(() => {
   height: 64rpx;
   margin-right: 12rpx;
 }
-.directory-scroll-wide { height: 44px; }
+.directory-scroll-wide { height: 44px; margin-right: 12px; }
 .directory-track {
   height: 64rpx;
   flex-direction: row;
@@ -503,7 +552,7 @@ onShow(() => {
 .group-wide { margin-top: 14px; margin-left: 24px; margin-right: 24px; border-radius: 14px; }
 .cell-wide { height: 64px; padding-left: 24px; padding-right: 24px; }
 .cell-title-wide { font-size: 17px; }
-.cell-value-wide { font-size: 14px; }
+.cell-value-wide { font-size: 14px; margin-right: 12px; }
 .cell-icon-wide { margin-right: 10px; }
 
 /* 开关：与 pages/desktop-lyric 同一套（Vapor 下圆角 + flex 对齐即可，无需伪元素） */

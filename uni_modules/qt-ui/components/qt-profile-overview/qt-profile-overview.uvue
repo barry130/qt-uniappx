@@ -277,12 +277,17 @@ function cellTitleColor(page: string): string {
 //
 const twoColumn = computed((): boolean => {
   if (props.inPane == true) return false;
-  return qtContentWidth("grid") - QT_GUTTER_PX * 2 - 16 >= 420 * 2;
+  // 700（两列各 342）而不是 840（两列各 420）：1097dp 的 pad 窗口内容列只有约 841，
+  // 扣掉两侧留白与间距后是 777，按 840 判会在 pad 档永远单列 —— 我的 hub 变成
+  // 一根窄柱 + 大片空底（2026-10-25 用户反馈「宽屏好丑」的实测现场）。
+  // 342 列宽下：五宫格每格约 68px（图标 52 + 标签 60px 文本）与分组行都放得下。
+  return qtContentWidth("grid") - QT_GUTTER_PX * 2 - 16 >= 700;
 });
 const colWidthPx = computed((): number => {
   const inner = qtContentWidth("grid") - QT_GUTTER_PX * 2 - 16;
   const w = Math.floor(inner / 2);
-  return w > 320 ? w : 320;
+  // 下限 340 与 twoColumn 的 700 门限对齐（(700-16)/2=342）：再窄五宫格会挤换行。
+  return w > 340 ? w : 340;
 });
 const colStyle = computed((): string => twoColumn.value ? "width:" + colWidthPx.value + "px;flex-shrink:0;" : "");
 const rightColStyle = computed((): string => twoColumn.value ? "width:" + colWidthPx.value + "px;flex-shrink:0;margin-left:16px;" : "");

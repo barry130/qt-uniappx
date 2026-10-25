@@ -40,6 +40,8 @@ export const QT_REVEAL_STEP_MS = 60;
 const QT_REVEAL_LEAD_MS = 32;
 /** 「全部可见」的哨兵值。不用 Number.MAX_SAFE_INTEGER：UTS 的数值语义与 JS 不完全一致 */
 const QT_REVEAL_ALL = 999999;
+/** 兜底闸门的额外等待：错峰全部排完 + 一段淡出时长之后再多等这么多毫秒 */
+const QT_REVEAL_GUARD_MS = 800;
 
 export type QtRevealHandle = {
   /** 已经浮现的块数；等于 QT_REVEAL_ALL 表示全部可见 */
@@ -120,6 +122,18 @@ export function useQtReveal(): QtRevealHandle {
           }, at) as number
         );
       }
+      // 兜底闸门：真机上出现过「错峰定时器停摆」——真实首屏行永远停在
+      // opacity:0、骨架层永远盖在上面，只有 list-item 复用池的尾行可见
+      // （2026-10-25 歌单广场实测）。到点后无条件把状态推到终态：
+      // revealing=false 让调用方的骨架层 v-if 卸载（节点移除在新渲染器上
+      // 是可靠路径，风格翻转不可靠），revealedCount=哨兵让真实行全部可见。
+      // 正常路径先到这里时此定时器是幂等的空操作。
+      timers.push(
+        setTimeout(() => {
+          revealedCount.value = QT_REVEAL_ALL;
+          revealing.value = false;
+        }, QT_REVEAL_LEAD_MS + count * QT_REVEAL_STEP_MS + QT_REVEAL_DURATION_MS + QT_REVEAL_GUARD_MS) as number
+      );
     });
   }
 

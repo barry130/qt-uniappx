@@ -90,7 +90,7 @@
               direction="horizontal"
               :show-scrollbar="false"
               :scroll-left="chipScrollLeft"
-              :scroll-with-animation="true"
+              :scroll-with-animation="false"
               @scroll="onChipRowScroll"
             >
               <!-- 关键结构（对齐首页歌单架 shelf-scroll/shelf-row 的可用先例）：
@@ -170,7 +170,7 @@
                 direction="horizontal"
                 :show-scrollbar="false"
                 :scroll-left="chipScrollLeft"
-                :scroll-with-animation="true"
+                :scroll-with-animation="false"
                 @scroll="onChipRowScroll"
               >
                 <view class="qt-page-frame-chip-inner" :style="'width:' + chipContentWidth + 'px;' + chipRowInline">
@@ -194,7 +194,12 @@
                 <text v-if="paneHeadCount >= 0" class="qt-page-frame-pane-btn-count" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 12)">({{ paneHeadCount }})</text>
               </view>
             </view>
-            <slot v-if="!showSettingsSplit || !isSettingsOverview" />
+            <!-- 托管工具页两段式挂载：切换 = 卸载旧面板 + 整页新建，一次同步 flush
+                 里做完要占满引擎线程 ~1s+，期间连侧栏高亮都不重绘（真机实测 0.4s
+                 截图与切换前逐字节相同），用户感知就是「点了没反应」。拆成先挂
+                 框架（底色/侧栏高亮立即可见），下一拍再挂页面内容。 -->
+            <view v-if="hostedRoute.length > 0 && !hostedContentReady" class="qt-page-frame-empty-pane" />
+            <slot v-if="(hostedRoute.length == 0 || hostedContentReady) && (!showSettingsSplit || !isSettingsOverview)" />
             <view v-if="showSettingsSplit && isSettingsOverview" class="qt-page-frame-empty-pane" />
           </view>
         </view>
@@ -382,6 +387,11 @@ const kind = computed((): string => props.widthKind != null && props.widthKind.l
  *     切换工具不再重建组件（见 qt-wide-workspace.uvue），认领结果持续有效。
  */
 const hostedRoute = (qtWideToolActive() && qtIsWideToolHost(qtTopRoute())) ? qtWideToolRoute() : "";
+// 托管内容两段式挂载的第二拍（见模板处注释）。只在托管态起步为 false。
+const hostedContentReady = ref(hostedRoute.length == 0);
+if (hostedRoute.length > 0) {
+  setTimeout(() => { hostedContentReady.value = true; }, 30);
+}
 
 /**
  * 宽屏才挂 rail；沉浸页与显式禁用的页面不挂；**被托管的工具页也不挂**。
@@ -404,7 +414,17 @@ const showRail = computed((): boolean => layout.isWide && !fullWidth.value && ho
 const player = usePlayerStore();
 // 被托管的工具页同样不画自带播放栏：宿主的底栏此刻被覆盖层盖住（z940 < z1000），
 // 工具页再画一条 fixed 底栏同样有「被盖住 + 关闭后漏显」的问题（同 showRail 注释）。
+// 托管期间的底栏由覆盖层自己以 docked 形态挂一份（qt-wide-workspace.uvue）。
 const showPlayerBar = computed((): boolean => layout.isWide && !fullWidth.value && player.current != null && hostedRoute.length == 0);
+
+/**
+ * 内容区要不要为底栏让出 64px —— 与「本框架层是否自己挂底栏」分开判定。
+ *
+ * 托管形态下本框架层不挂（会被 z1000 覆盖层压住），但**覆盖层自己挂了一条**
+ * （见 qt-wide-workspace.uvue 的 docked 底栏）。所以让位条件只看「宽屏 + 有歌 +
+ * 非沉浸页」，不看 hostedRoute；否则托管工具页的最后一行会被那条底栏盖住。
+ */
+const reservePlayerBar = computed((): boolean => layout.isWide && !fullWidth.value && player.current != null);
 
 /**
  * 当前路由：优先用调用方传的，否则从页面栈推断。
@@ -836,6 +856,9 @@ function centerChipIndex(index: number, rowWidthPx: number): void {
   const maxLeft = Math.max(0, chipContentWidth.value - rowWidthPx);
   if (target < 0) target = 0;
   if (target > maxLeft) target = maxLeft;
+  // 内容本来就不超一行（maxLeft == 0）时不要碰 scroll-left：往回写 0.1 这种
+  // 「几乎没动的滚动」也会让 scroll-view 走一次滚动流程，真机上有整行丢渲染的前科
+  if (maxLeft <= 0 && chipScrollLeft.value <= 0) return;
   // 这里曾经有一句「用户手滑过头不往回拽」（target < chipLeftNow 时改回 chipLeftNow）：
   // 它会让「点左边的 tab 滚不回去」——只要用户手动滑过，点第一个 tab 后 target 归 0
   // 却被改回当前位置，左侧 tab 永远半截被裁。居中就是居中，用户的滑动不该否决它。
@@ -916,7 +939,7 @@ const contentStyle = computed((): string => {
   // scroll-view / list-view 变矮，滚动内容自然停在底栏上方，不会出现「最后一行被底栏盖住」。
   // 不给滚动内容加 padding 的另一个原因：页面里已有 .foot-space 一类尾部占位，
   // 两处都加会叠出一条空白带。
-  const bottom = showPlayerBar.value ? "padding-bottom:" + QT_PLAYER_BAR_HEIGHT_PX + "px;" : "";
+  const bottom = reservePlayerBar.value ? "padding-bottom:" + QT_PLAYER_BAR_HEIGHT_PX + "px;" : "";
   if (!framed.value) return bottom;
   const width = contentWidthPx.value;
   // 内容列居中在「rail 右侧的可用区」，不是居中在整个窗口（否则窄内容列会压到 rail 上）。
@@ -1012,7 +1035,13 @@ watch([showSplit, paneWidthPx], (): void => {
  */
 const snavStyle = computed((): string => {
   const top = selfHeader.value ? "padding-top:" + (qtStatusBarPx() + 12) + "px;" : "";
-  return "width:" + QT_SPLIT_NAV_WIDTH + "px;margin-right:" + QT_SPLIT_NAV_GAP + "px;" + top + "border-right-color:" + theme.skin.divider + ";";
+  // 托管层开着时把中栏 visibility 藏掉（不 unmount）：三栏的中栏（qt-profile-overview）
+  // 在原生渲染里压不住 qt-wide-workspace 覆盖层，会漏在托管页左边（2026-10-25 真机）。
+  // 早期做法是 showProfileSplit 直接 return false（整栏拆掉），但「我的」页开着托管再
+  // 关掉时，三栏 v-if 重挂载在 Vapor 真机上整块画不出来（右半白屏、点击全无反应，
+  // 2026-10-25 13:47 复现），所以改成只切 visibility，结构全程保持挂载。
+  const hide = showProfileSplit.value && qtWideToolActive() ? "visibility:hidden;" : "";
+  return "width:" + QT_SPLIT_NAV_WIDTH + "px;margin-right:" + QT_SPLIT_NAV_GAP + "px;" + hide + top + "border-right-color:" + theme.skin.divider + ";";
 });
 </script>
 

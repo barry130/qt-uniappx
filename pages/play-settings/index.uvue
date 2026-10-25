@@ -195,7 +195,7 @@ import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { useQtTwoColumn } from "@/uni_modules/qt-ui/composables/use-qt-columns";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { computed, ref } from "vue";
+import { computed, ref, onMounted, onUnmounted } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
@@ -205,6 +205,7 @@ import { audioPlayer } from "@/services/audio-player";
 import { usePlayerStore } from "@/stores/player";
 import { useSourceStore } from "@/stores/source";
 import { useSourceRegistryStore } from "@/stores/source-registry";
+import { SOURCE_AUTH_CHANGED_EVENT } from "@/services/source-auth";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 /**
@@ -327,8 +328,8 @@ function showConcurrent(): void {
 
 // ==================== 无缝播放 ====================
 
-// 提前把下一首的播放地址取好（默认关闭）。语义见 services/audio-player.uts 的
-// GAPLESS_KEY 注释：只预热地址缓存，不接流、不下发原生。
+// 提前把下一首准备好：取链预热 + 整首预取（默认开启）。语义见 services/audio-player.uts
+// 的 GAPLESS_KEY 注释：Android 端 audioPreloadTrack 会把下一首整首读进磁盘缓存。
 const gapless = ref(audioPlayer.getGapless());
 /** 开关旋钮的 class 组合（:class 只能绑一个表达式，Vapor 后者覆盖前者，同 pages/equalizer） */
 const knobClass = computed((): string => {
@@ -349,10 +350,17 @@ function toggleGapless(): void {
 
 // 音质档位来自数据包注册表，并按**当前选中的音源**收敛（v5 契约：包侧声明了
 // 该源可用档位，如 B 站无真无损就不展示 flac；未声明 = 全部档位）
-//（未装包为空 → 打开时提示安装）。computed 依赖 sourceStore.current，切源自动重算
-const qualityOptions = computed<{ value: string; name: string }[]>(() =>
-  registry.sourceQualities(sourceStore.current).map((q) => ({ value: q.id, name: q.name }))
-);
+//（未装包为空 → 打开时提示安装）。computed 依赖 sourceStore.current，切源自动重算；
+// v10：播放面登录态生效时整体切官方档位清单——登录态不进响应式系统（uni storage
+// 同步读），用 loginTick 进依赖 + SOURCE_AUTH_CHANGED_EVENT 触发重算。
+const loginTick = ref(0);
+const qualityOptions = computed<{ value: string; name: string }[]>(() => {
+  loginTick.value;
+  return registry.sourceQualities(sourceStore.current).map((q) => ({ value: q.id, name: q.name }));
+});
+function onLoginChanged(): void {
+  loginTick.value++;
+}
 function qualityLabel(q: string): string {
   return registry.qualityLabel(q);
 }
@@ -456,6 +464,13 @@ onShow(() => {
   gapless.value = audioPlayer.getGapless();
   sourceStore.restore();
   registry.ensure();
+});
+
+onMounted(() => {
+  uni.$on(SOURCE_AUTH_CHANGED_EVENT, onLoginChanged);
+});
+onUnmounted(() => {
+  uni.$off(SOURCE_AUTH_CHANGED_EVENT, onLoginChanged);
 });
 </script>
 
@@ -562,7 +577,7 @@ onShow(() => {
 .group-wide { margin-top: 14px; margin-left: 24px; margin-right: 24px; border-radius: 14px; }
 .cell-wide { height: 64px; padding-left: 24px; padding-right: 24px; }
 .cell-title-wide { font-size: 17px; }
-.cell-value-wide { font-size: 14px; }
+.cell-value-wide { font-size: 14px; margin-right: 12px; }
 .cell-icon-wide { margin-right: 10px; }
 /* 带副标题的行（无缝播放）必须放在 .cell / .cell-wide 之后：源码顺序决定覆盖，
    height:auto 要压掉固定行高，否则两行文字会被裁掉 */

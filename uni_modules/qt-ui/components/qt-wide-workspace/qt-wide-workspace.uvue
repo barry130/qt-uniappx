@@ -8,12 +8,19 @@
          - 切换工具 = 改一个 CSS 属性，同帧完成，没有「旧页拆掉、露出空白、新页建好」
            的频闪（v-if 分支互换版每次点击都要整页销毁重建，用户实测每点必闪）；
          - 滚动位置、输入内容、已加载的数据全部保留，第二次进入是瞬时恢复。 -->
-  <view v-if="paneCount > 0" class="qt-wide-workspace" :style="rootStyle">
-    <view v-if="paneOn('/pages/search/index')" class="qtww-pane" :style="paneStyle('/pages/search/index')"><SearchPage /></view>
-    <view v-if="paneOn('/pages/daily/index')" class="qtww-pane" :style="paneStyle('/pages/daily/index')"><DailyPage /></view>
-    <view v-if="paneOn('/pages/playlists/index')" class="qtww-pane" :style="paneStyle('/pages/playlists/index')"><PlaylistsPage /></view>
-    <view v-if="paneOn('/pages/chart/index')" class="qtww-pane" :style="paneStyle('/pages/chart/index')"><ChartPage /></view>
-    <view v-if="paneOn('/pages/settings/index')" class="qtww-pane" :style="paneStyle('/pages/settings/index')"><SettingsPage /></view>
+  <view v-if="ws.route.length > 0" class="qt-wide-workspace">
+    <!-- 显隐全部落在这个非 fixed 的内层 stage 上：真机实测 fixed 根节点的动态
+         visibility 关不下去（12:52 logcat：route 已清、rail current 已回落，
+         搜索页仍盖屏），而非 fixed 节点（pane 互切）一直可靠。根节点只负责
+         铺满窗口的几何，不挂任何动态样式；背景也移到 stage，避免根节点
+         「内容藏了、底色还盖着宿主页」。 -->
+    <view class="qtww-stage" :style="stageStyle">
+    <view v-if="paneOn('/pages/search/index')" class="qtww-pane"><SearchPage /></view>
+    <view v-if="paneOn('/pages/daily-recommend/index')" class="qtww-pane"><DailyRecommendPage /></view>
+    <view v-if="paneOn('/pages/daily/index')" class="qtww-pane"><DailyPage /></view>
+    <view v-if="paneOn('/pages/playlists/index')" class="qtww-pane"><PlaylistsPage /></view>
+    <view v-if="paneOn('/pages/chart/index')" class="qtww-pane"><ChartPage /></view>
+    <view v-if="paneOn('/pages/settings/index')" class="qtww-pane"><SettingsPage /></view>
     <!-- 停靠 rail：覆盖层自己画的那条左导航（docked 模式 = 子树内 absolute，随覆盖层
          一起显隐）。工具页不再渲染自带的 fixed rail（真机实测：fixed 会被本覆盖层的
          不透明背景压住、关闭后又漏在宿主页上，见 qt-side-nav 的 docked 注释与
@@ -24,19 +31,31 @@
       :current="ws.route.length > 0 ? ws.route : props.hostRoute"
       :dots="railDots"
     />
+    <!-- 停靠底栏：覆盖层不透明且 z-index:1000，宿主页那条 fixed 底栏（z-index:940）
+         被整个盖住；被托管的工具页又被框架层禁掉了自己的底栏（qt-page-frame 的
+         showPlayerBar 要求 hostedRoute 为空，否则会跟宿主页那条重复）。两边都不画，
+         宽屏下打开搜索/榜单/歌单广场/每日新歌/设置就没有任何播放控制了。
+         这里补一条停靠版（docked = absolute），与宿主页底栏同一组件、同一动作集。
+         放在 rail 之后渲染：同级后绘者在上，底栏与 rail 在横向上不重叠
+         （底栏 left 让开 rail 宽度），顺序只影响万一的层叠边界。
+         工具页的 qt-page-frame 仍会为它留出 64px 内边距（见 reservePlayerBar）。 -->
+    <qt-player-bar :docked="true" />
+    </view>
   </view>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, watch } from "vue";
 import { qtWideWorkspace, qtCloseWideTool, qtWideWorkspaceRefreshTick } from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
 import { qtTopRoute } from "@/uni_modules/qt-ui/composables/qt-page-chrome";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useSourceUpdateStore } from "@/stores/source-update";
 import QtSideNav from "@/uni_modules/qt-ui/components/qt-side-nav/qt-side-nav.uvue";
+import QtPlayerBar from "@/uni_modules/qt-ui/components/qt-player-bar/qt-player-bar.uvue";
 import SearchPage from "@/pages/search/index.uvue";
 import DailyPage from "@/pages/daily/index.uvue";
+import DailyRecommendPage from "@/pages/daily-recommend/index.uvue";
 import PlaylistsPage from "@/pages/playlists/index.uvue";
 import ChartPage from "@/pages/chart/index.uvue";
 import SettingsPage from "@/pages/settings/index.uvue";
@@ -65,22 +84,7 @@ const sourceUpdateStore = useSourceUpdateStore();
 /** 与 qt-page-frame 的 railDots 同源：音源包有新包待生效时给「我的」亮红点 */
 const railDots = computed((): string[] => sourceUpdateStore.updatePending ? ["/pages/profile/index"] : []);
 
-/** 在本宿主上创建过（保活中）的工具页清单；只增不减 */
-const alive = ref<string[]>([]);
-const paneCount = computed((): number => alive.value.length);
-
-/**
- * 每次「打开工具」序号都会 +1（即使路由值没变），这里跟着把当前工具页收进保活清单。
- * 盯序号而不是路由值：换过 tab 后同一个工具在新宿主上点开时路由值不变，但这个宿主
- * 的覆盖层还从没创建过那份工具页 —— 只有序号才能保证每次点击都有机会补建。
- * 栈顶不是本宿主就不收录：被压在下面的 tab 不该跟着创建一份看不见的实例。
- */
-watch((): number => ws.openSeq, (): void => {
-  const route = ws.route;
-  if (route.length == 0) return;
-  if (qtTopRoute() != props.hostRoute) return;
-  if (alive.value.indexOf(route) < 0) alive.value.push(route);
-}, { immediate: true });
+/** 单活动 pane 后 alive/保活已无渲染作用（见 paneOn 注释），随预挂载一并移除。 */
 
 /**
  * 宽屏失效（窗口收窄 / 转竖屏）时清掉托管状态。
@@ -91,15 +95,21 @@ watch((): boolean => layout.isWide, (wide: boolean): void => {
   if (!wide && ws.route.length > 0) qtCloseWideTool();
 });
 
-/** 该工具页是否已在本宿主上创建过（创建后保活，切换只动 visibility） */
+/** 该工具页是否正在托管（单活动 pane：route 匹配才挂载） */
 function paneOn(route: string): boolean {
-  return alive.value.indexOf(route) >= 0;
+  // 2026-10-25 改为「单活动 pane」：只挂当前工具页，切换即换挂。
+  // 旧的「多 pane 常挂 + visibility 互切」保活方案在真机 Vapor 上接连翻车：
+  // 隐藏 pane 漏画（设置栏叠在排行榜左边）、切出的 pane 整块不渲染（榜单只有
+  // tab 行下面全空）、关闭后宿主重挂失败（我的页白屏点击全无响应），以及
+  // RecycleList 在多份存活列表间滚动时的 SIGSEGV。全部指向同一件事：这个
+  // 渲染器对「已存在节点改 visibility」不可靠，对「新挂节点」一直可靠。
+  // 代价：每次切换重新建页（16~300ms，榜单最重），换来以上四类问题根除。
+  return ws.route == route;
 }
 
-/** 只有当前托管的就是自己才显示；其余保活页隐藏（不销毁，保留布局与全部状态） */
-function paneStyle(route: string): string {
-  return ws.route == route ? "" : "visibility:hidden;";
-}
+// （2026-10-25 移除空闲预挂载与保活清单：单活动 pane 下预挂载无处可挂，
+//  且隐藏保活页正是 RecycleList SIGSEGV 的触发面。等 DCloud 修 recycler、
+//  若需恢复首开提速，应在「切工具瞬间」做骨架屏，而不是常驻隐藏页。）
 
 /**
  * 覆盖层整体可见性：
@@ -113,7 +123,7 @@ function paneStyle(route: string): string {
  * 依赖变化，这里不会自己重算 —— 读一下刷新号（宿主页 onShow 时递增）强制订阅，
  * 返回宿主的瞬间重估一次（2026-10-24 记忆账①的落地）。
  */
-const rootStyle = computed((): string => {
+const stageStyle = computed((): string => {
   const base = "background-color:" + theme.skin.background + ";";
   qtWideWorkspaceRefreshTick();
   if (ws.route.length == 0 || !layout.isWide || qtTopRoute() != props.hostRoute) {
@@ -124,20 +134,31 @@ const rootStyle = computed((): string => {
 </script>
 
 <style>
-/* 固定铺满窗口（含状态栏区域，与 rail 同坐标系）。
-   覆盖层是保活子页的「画框」：每个 pane 都四边钉死在覆盖层上（绝对定位），
-   而不是挤在 flex 流里平分高度 —— 工具页是整页组件（自带 flex:1 的
-   .qt-page-frame），多页常驻必须各自独立铺满，谁可见由 visibility 决定。
-   （不能用 v-show 切换：Android(Vapor) 不支持，见组件头部注释。） */
+/* 铺满窗口（含状态栏区域，与 rail 同坐标系）。必须是 fixed：absolute 会被
+   锚到宿主页内部的分栏容器上 —— 我的页宽屏是 snav(400px)+内容 的分栏布局，
+   实测覆盖层就变成从 x≈496dp 开始的右半块，与宿主页并排（2026-10-25 12:58
+   截图）。根节点不挂任何动态样式（fixed 节点的动态 visibility 真机不生效，
+   见模板里 stage 的注释），显隐与背景全在内层 .qtww-stage。 */
 .qt-wide-workspace {
   position: fixed;
   left: 0;
   top: 0;
   right: 0;
   bottom: 0;
-  flex-direction: column;
   /* 高于 rail(900)、底部播放栏与页内浮层，确保完整遮住宿主页 */
   z-index: 1000;
+}
+/* 内层舞台：背景 + 显隐都在这里（非 fixed 节点，样式更新可靠）。
+   每个 pane 都四边钉死在 stage 上（绝对定位），而不是挤在 flex 流里平分高度
+   —— 工具页是整页组件（自带 flex:1 的 .qt-page-frame），多页常驻必须各自
+   独立铺满，谁可见由 visibility 决定。（不能用 v-show 切换：Android(Vapor)
+   不支持，见组件头部注释。） */
+.qtww-stage {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
 }
 .qtww-pane {
   position: absolute;

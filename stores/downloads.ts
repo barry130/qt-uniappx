@@ -3,11 +3,12 @@ import { musicApi, isPlayUrlStale } from "@/services/music-api";
 import { isEncryptedMediaUrl } from "@/services/music-api";
 import type { Source } from "@/services/music-api";
 import { parseJsonToUtso } from "@/services/http";
-import { saveToPublicMedia, ensurePublicDirPermission, deleteMediaByPath } from "@/uni_modules/qt-app-native";
+import { saveToPublicMedia, ensurePublicDirPermission, deleteMediaByPath, embedAudioTags } from "@/uni_modules/qt-app-native";
+import type { EmbedTagsOptions } from "@/uni_modules/qt-app-native";
 import { restoreCustomDir } from "@/services/app-native";
 import type { Song } from "@/types/music";
 import { logErrV } from "@/services/logger";
-import { qtDiag } from "@/services/diag";
+import { qtDiag, qtDiagDebug } from "@/services/diag";
 import { qtShowToast } from "@/services/toast";
 
 const DOWNLOAD_KEY = "qt-downloads";
@@ -279,6 +280,11 @@ export const DOWNLOAD_CONCURRENCY_WARN_ABOVE = 3;
  */
 const DOWNLOAD_COVER_KEY = "qt-download-cover";
 const DOWNLOAD_LYRIC_KEY = "qt-download-lyric";
+/**
+ * 封面/歌词的存储方式："embed"=内嵌进音频文件标签（默认），"sidecar"=同目录文件。
+ * 与 PC 侧 download.rs 的 SETTING_DOWNLOAD_STORAGE 是同一份契约，两边要一起改。
+ */
+const DOWNLOAD_STORAGE_MODE_KEY = "qt-download-storage";
 
 /**
  * 删除下载记录时是否连磁盘文件一起删（uni 存储键）。默认开：用户在下载管理里
@@ -351,6 +357,12 @@ class DownloadsStore {
   downloadCover = false;
   /** 下载时一并保存歌词文件（默认关） */
   downloadLyric = false;
+  /**
+   * 封面/歌词的存储方式："embed"=内嵌进音频文件标签（默认，其他播放器可直接显示，
+   * 不支持的格式自动降级存为同目录文件）；"sidecar"=同目录同名 .jpg/.lrc 文件
+   * （不改动音频本身）。开关关着时此项无作用。
+   */
+  storageMode = "embed";
   /** 删除下载记录时连同磁盘文件一起删（默认开） */
   deleteFileOnRemove = true;
   /**
@@ -459,6 +471,11 @@ class DownloadsStore {
     } catch (_) {}
     try {
       this.downloadLyric = uni.getStorageSync(DOWNLOAD_LYRIC_KEY) == "1";
+    } catch (_) {}
+    try {
+      // 只有显式存过 "sidecar" 才是文件模式，其余（含老用户无此键）一律内嵌
+      const sm = uni.getStorageSync(DOWNLOAD_STORAGE_MODE_KEY) as string;
+      this.storageMode = sm == "sidecar" ? "sidecar" : "embed";
     } catch (_) {}
     try {
       // 只有显式存过 "0" 才算关，没这个键（老用户）保持默认开
@@ -843,8 +860,9 @@ class DownloadsStore {
         throw new Error("下载地址无效（音源未返回可用链接）");
       }
       // 排查「invalid URL」用：底层只回错误码，不说是哪个地址不合法，
-      // 这里把实际交给底层的地址留一行日志（截断，避免日志被长签名撑爆）
-      qtDiag("[Download] 取址 " + task.song.platform + ":" + task.song.id + " len=" + url.length +
+      // 这里把实际交给底层的地址留一行日志（截断，避免日志被长签名撑爆）。
+      // 走 debug 级：每次下载都会命中，平时没人看，开调试日志才落盘。
+      qtDiagDebug("[Download] 取址 " + task.song.platform + ":" + task.song.id + " len=" + url.length +
         " → " + (url.length > 160 ? url.substring(0, 160) + "…" : url));
       // 加密档兜底：老包会给加密地址（mflac/mgg/qmc），宿主无解密契约，不落盘
       if (isEncryptedMediaUrl(url)) {
@@ -866,7 +884,7 @@ class DownloadsStore {
       }
       // 排查续传是否真的生效：dir 为 null 说明 USER_DATA_PATH 拿不到（整下兜底），
       // total 为 0 说明探不到长度（音源不认 Range 且无断点，也是整下兜底）
-      qtDiag("[Download] 续传探测 " + task.song.platform + ":" + task.song.id +
+      qtDiagDebug("[Download] 续传探测 " + task.song.platform + ":" + task.song.id +
         " dir=" + (dir == null ? "null" : "ok") + " total=" + total +
         " cached=" + cached);
       if (total > 0 && dir != null) {
@@ -895,7 +913,7 @@ class DownloadsStore {
       if (plainPath(savedPath) != plainPath(tempPath)) {
         this.clearPart(task.song);
       } else {
-        qtDiag("[Download] 成品与断点同路径，跳过清残留 " + task.song.platform + ":" + task.song.id);
+        qtDiagDebug("[Download] 成品与断点同路径，跳过清残留 " + task.song.platform + ":" + task.song.id);
         try {
           uni.getFileSystemManager().unlinkSync(plainPath(tempPath) + ".meta");
         } catch (_) {}
@@ -1149,19 +1167,30 @@ class DownloadsStore {
     return ".mp3";
   }
 
-  private saveToDisk(
+  private async saveToDisk(
     tempPath: string,
     song?: Song,
     url?: string,
     quality?: string
   ): Promise<string> {
+    // 扩展名提前算好：内嵌写入器按扩展名挑（mp3/flac），不能等公共目录权限
+    // 弹窗（异步用户交互）之后才决定；fileName 也复用这一次计算
+    const ext = this.resolveExt(url != null ? url : "", tempPath, song, quality);
+    // 存储方式=内嵌 且 封面/歌词任一开 → 内嵌窗口期：在副本上做，失败回原件
+    let publishTemp = tempPath;
+    let embedded = false;
+    if (song != null && this.storageMode == "embed" && (this.downloadCover || this.downloadLyric)) {
+      publishTemp = await this.embedBeforePublish(tempPath, song, ext);
+      embedded = plainPath(publishTemp) != plainPath(tempPath);
+    }
     return new Promise((resolve, reject) => {
       // 公共目录：通过 MediaStore 写入（Android 10+ 官方方式，Scoped Storage 兼容）
       // 目录固定为 Download/QtDownload/Music，不可修改
       const toPrivateDir = (): void => {
-        // 私有目录：saveFile（兜底）
+        // 私有目录：saveFile（兜底）。注意 saveFile 会把文件**移动**走：
+        // 内嵌成功时被移动的是副本，原件 .part 仍由 clearPart 清理
         uni.getFileSystemManager().saveFile({
-          tempFilePath: tempPath,
+          tempFilePath: publishTemp,
           success: (res) => {
             resolve(res.savedFilePath);
           },
@@ -1182,18 +1211,29 @@ class DownloadsStore {
           name = base.length > 0 ? base : song.id;
         }
         // 文件名必须带真实扩展名，不能写死 .mp3（无损为 .flac 等）
-        const fileName = name + this.resolveExt(url != null ? url : "", tempPath, song, quality);
+        const fileName = name + ext;
         if (!granted) {
           qtShowToast({ title: "未选择保存目录，已存私有目录", icon: "none" });
           toPrivateDir();
           return;
         }
-        saveToPublicMedia(tempPath, "download", fileName, DOWNLOAD_DIR_SUB, this.dirArgs()).then((saved) => {
+        saveToPublicMedia(publishTemp, "download", fileName, DOWNLOAD_DIR_SUB, this.dirArgs()).then((saved) => {
           if (saved != null && saved.length > 0) {
             qtShowToast({ title: "已保存到公共目录", icon: "none" });
-            // 封面 / 歌词落在同一目录、同一基名下（不 await：附带资源失败不能影响
-            // 歌曲本身已完成的落盘与「已下载」记录）
-            this.saveSidecars(name, song);
+            if (embedded) {
+              // 内嵌成功：MediaStore 里已经是带标签的副本，私有目录里的副本
+              // 使命完成；同名 .jpg/.lrc 不再写——内容都在音频标签里了
+              this.cleanupEmbedCopy(publishTemp);
+              // embedded=true 蕴含 song 非空（内嵌只在 song != null 时尝试），
+              // 但编译器推不出来，这里防一手空引用
+              const tag = song != null ? song.platform + ":" + song.id + " " : "";
+              qtDiag("[Download] 内嵌完成 " + tag + publishTemp);
+            } else {
+              // 封面 / 歌词落在同一目录、同一基名下（不 await：附带资源失败不能影响
+              // 歌曲本身已完成的落盘与「已下载」记录）。内嵌模式下走到这里 =
+              // 格式白名单外 / 内嵌失败——「不支持的格式自动存为同目录文件」的降级
+              this.saveSidecars(name, song);
+            }
             resolve(saved);
             return;
           }
@@ -1600,7 +1640,7 @@ class DownloadsStore {
       fs.unlink({
         filePath: partPath,
         success: () => {
-          qtDiag("[Download] 续传残留异步删除成功 " + song.platform + ":" + song.id);
+          qtDiagDebug("[Download] 续传残留异步删除成功 " + song.platform + ":" + song.id);
         },
         fail: (e) => {
           const why = e != null ? e.toString() : "unknown";
@@ -1658,7 +1698,7 @@ class DownloadsStore {
           uni.getFileSystemManager().unlink({
             filePath: target,
             success: () => {
-              qtDiag("[Download] 清扫残留异步成功 " + name);
+              qtDiagDebug("[Download] 清扫残留异步成功 " + name);
             },
             fail: (e) => {
               const why = e != null ? e.toString() : "unknown";
@@ -1717,11 +1757,12 @@ class DownloadsStore {
           header,
           success: (res) => {
             // 没经过进度回调就结束了：拿不到长度，按探不到处理
-            qtDiag("[Download] 探测(下载) 无进度即结束 status=" + res.statusCode);
+            // （探不到长度是常规降级：退回一次性整下，不算失败，故走 debug 级）
+            qtDiagDebug("[Download] 探测(下载) 无进度即结束 status=" + res.statusCode);
             done(0);
           },
           fail: (e) => {
-            qtDiag("[Download] 探测(下载) 失败 " + describeNetError(e));
+            qtDiagDebug("[Download] 探测(下载) 失败 " + describeNetError(e));
             done(0);
           },
         });
@@ -1743,7 +1784,7 @@ class DownloadsStore {
           });
         }
       } catch (e) {
-        qtDiag("[Download] 探测(下载) 异常 " + describeNetError(e));
+        qtDiagDebug("[Download] 探测(下载) 异常 " + describeNetError(e));
         done(0);
       }
     });
@@ -1870,7 +1911,7 @@ class DownloadsStore {
     // 继续时先把断点百分比刷回界面
     this.noteBytes(task, partSize, total);
     this.setProgress(task, (partSize * 100) / total);
-    qtDiag("[Download] 续传开始 " + song.platform + ":" + song.id +
+    qtDiagDebug("[Download] 续传开始 " + song.platform + ":" + song.id +
       " 已有=" + partSize + " 总长=" + total + " 块=" + DOWNLOAD_CHUNK_BYTES);
     while (partSize < total) {
       // 暂停/移除：带着已有 .part 静默退出（pause 的语义就是保留断点）
@@ -1922,12 +1963,12 @@ class DownloadsStore {
       } catch (_) {}
       if (wrote <= 0) throw new Error("分块写入失败");
       partSize = partSize + wrote;
+      // 逐块日志原来按 info 落盘：一个 33MB 的 flac 就是 16 行，每行都要过脱敏 +
+      // 一次原生追加。进度条本身已经反映了同样的信息，这里降到 debug 级。
       this.noteBytes(task, partSize, total);
-      qtDiag("[Download] 分块落盘 " + song.platform + ":" + song.id +
-        " 块字节=" + wrote + " 累计=" + partSize + "/" + total);
       this.setProgress(task, (partSize * 100) / total);
     }
-    qtDiag("[Download] 续传完成 " + song.platform + ":" + song.id + " 总字节=" + partSize);
+    qtDiagDebug("[Download] 续传完成 " + song.platform + ":" + song.id + " 总字节=" + partSize);
     return partPath;
   }
 
@@ -1966,6 +2007,11 @@ class DownloadsStore {
     return this.downloadLyric ? "已开启" : "已关闭";
   }
 
+  /** 存储方式文案（设置页右侧） */
+  storageModeText(): string {
+    return this.storageMode == "sidecar" ? "同目录文件" : "音乐内嵌";
+  }
+
   setDownloadCover(on: boolean): void {
     this.downloadCover = on;
     try {
@@ -1977,6 +2023,13 @@ class DownloadsStore {
     this.downloadLyric = on;
     try {
       uni.setStorageSync(DOWNLOAD_LYRIC_KEY, on ? "1" : "0");
+    } catch (_) {}
+  }
+
+  setStorageMode(mode: string): void {
+    this.storageMode = mode == "sidecar" ? "sidecar" : "embed";
+    try {
+      uni.setStorageSync(DOWNLOAD_STORAGE_MODE_KEY, this.storageMode);
     } catch (_) {}
   }
 
@@ -2000,7 +2053,22 @@ class DownloadsStore {
 
   /** 封面：先下到临时文件再交给原生写公共目录（不改动 song.picUrl） */
   private async saveCoverSidecar(baseName: string, song: Song): Promise<void> {
-    if (song.picUrl.length == 0) return;
+    const temp = await this.fetchCoverTemp(song);
+    if (temp == null) return;
+    try {
+      await saveToPublicMedia(temp, "download", baseName + coverExtOf(song.picUrl), DOWNLOAD_DIR_SUB, this.dirArgs());
+    } catch (e) {
+      logErrV("Download", "封面写公共目录失败", e);
+    }
+  }
+
+  /**
+   * 把封面下到临时文件（sidecar 与内嵌共用同一个入口：embed 模式下 sidecar
+   * 分支不会先跑，同一完成流程里最多一处真正发这次下载）。失败 / 无 picUrl →
+   * null，不抛错——封面从来都是「尽力而为」的附带资源。
+   */
+  private async fetchCoverTemp(song: Song): Promise<string | null> {
+    if (song.picUrl.length == 0) return null;
     const temp = await new Promise<string>((resolve) => {
       uni.downloadFile({
         url: song.picUrl,
@@ -2014,12 +2082,7 @@ class DownloadsStore {
         },
       });
     });
-    if (temp.length == 0) return;
-    try {
-      await saveToPublicMedia(temp, "download", baseName + coverExtOf(song.picUrl), DOWNLOAD_DIR_SUB, this.dirArgs());
-    } catch (e) {
-      logErrV("Download", "封面写公共目录失败", e);
-    }
+    return temp.length > 0 ? temp : null;
   }
 
   /**
@@ -2060,6 +2123,73 @@ class DownloadsStore {
     try {
       fs.unlinkSync(temp);
     } catch (_) {}
+  }
+
+  /**
+   * 内嵌窗口期（设计 §3.4）：把标题/歌手/专辑/LRC（主词+译文）/封面交给原生插件
+   * 写进音频**副本**的标签区。成功返回副本路径；任何失败返回 tempPath 原样。
+   * **永不抛**——内嵌是附带增强，不能连累正片落盘；降级由 saveToDisk 里
+   * saveSidecars 分支兜住（「不支持的格式自动存为同目录文件」）。
+   */
+  private async embedBeforePublish(tempPath: string, song: Song, ext: string): Promise<string> {
+    try {
+      // 封面：下到临时文件（失败/无 picUrl → 空串，只嵌其余项）
+      let coverTempPath = "";
+      let coverMime = "";
+      if (this.downloadCover) {
+        const coverTemp = await this.fetchCoverTemp(song);
+        if (coverTemp != null) {
+          coverTempPath = coverTemp;
+          // 白名单只认 JPEG/PNG；webp 封面按扩展名给 jpg mime 会被原生魔数校验拦下，
+          // 等价于「不嵌封面」，不影响其余项
+          coverMime = coverExtOf(song.picUrl) == ".png" ? "image/png" : "image/jpeg";
+        }
+      }
+      // 歌词：主词 + 可选 "\n\n" + 译文（与播放页共用 ensureLyric 缓存层，
+      // 不会为下载单独再打一次源站）。取词失败 / 纯音乐 → 空串 = 只嵌其余项
+      let lrcText = "";
+      if (this.downloadLyric) {
+        try {
+          const main = await musicApi.lyrics(song);
+          if (main.length > 0) {
+            lrcText = main;
+            const translation = await musicApi.lyricTranslation(song);
+            if (translation.length > 0) lrcText = main + "\n\n" + translation;
+          }
+        } catch (e) {
+          qtDiag("[Download] 内嵌取词失败 " + song.platform + ":" + song.id + " " + describeNetError(e));
+        }
+      }
+      const opts: EmbedTagsOptions = {
+        ext: ext.substring(1),
+        title: song.name,
+        artist: song.singer,
+        album: song.album,
+        lrcText: lrcText,
+        coverTempPath: coverTempPath,
+        coverMime: coverMime,
+      };
+      const out = await embedAudioTags(tempPath, opts);
+      // 契约（interface.uts EmbedAudioTags）：失败/白名单外 resolve 原路径
+      //（可能已去 file:// 前缀）；拿到不同路径 = 内嵌出了新副本
+      if (out == null || out.length == 0 || out == tempPath || out == plainPath(tempPath)) {
+        qtDiag("[Download] 内嵌未生效（格式不支持或失败），走原件 " + song.platform + ":" + song.id);
+        return tempPath;
+      }
+      return out;
+    } catch (e) {
+      logErrV("Download", "内嵌失败，走原件", e);
+      return tempPath;
+    }
+  }
+
+  /** 发布成功后清掉内嵌副本（MediaStore 已有自己的拷贝；清不掉只记日志，孤儿由 sweepStaleParts 兜底） */
+  private cleanupEmbedCopy(copyPath: string): void {
+    try {
+      uni.getFileSystemManager().unlinkSync(plainPath(copyPath));
+    } catch (_) {
+      qtDiag("[Download] 内嵌副本清理失败（孤儿清扫会兜底） " + copyPath);
+    }
   }
 
 }

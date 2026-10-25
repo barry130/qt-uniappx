@@ -815,6 +815,73 @@ export function audioResolveFail(mediaId: string): void {
   req.latch.countDown()
 }
 
+// ==================== 无缝播放：下一首整首预取 ====================
+// JS 在换歌成功后调 audioPreloadTrack(占位URI)，用与播放完全相同的数据源栈
+// （buildAudioDataSourceFactory）把整首歌读一遍：字节落进 SimpleCache（key=
+// 占位地址串，与播放侧同一 key），真正切歌时 CacheDataSource 全量命中磁盘，
+// 取链等待与首字节网络等待都省掉。已缓存的歌这条链路只会从缓存读，开销≈0
+//（且不会再触发 JS 解析桥——懒解析只挂在缓存未命中的上游）。
+// 单并发：上一个预取没跑完就跳过本次（JS 侧另有 5 分钟去重记账，这里只防
+// 快速切歌时的线程堆积）。失败静默：正常切歌链路（懒解析 + 取链回退）兜底。
+
+let gPreloadRunning = false
+
+class QtPreloadRunnable implements Runnable {
+  private uri: string
+  constructor(uri: string) {
+    this.uri = uri
+  }
+  override run(): void {
+    try {
+      const ctx = UTSAndroid.getAppContext()
+      if (ctx == null) return
+      const cache = getAudioCache(ctx)
+      if (cache == null) return
+      // 缓存余量守卫：用量超过上限 85% 时跳过整首预取（只留 JS 侧 URL 预热）。
+      // 原因（2026-10-25 真机实测）：1G 上限下每次预取都触发 LRU 驱逐风暴，
+      // 内存压力让引擎挂着的已销毁页面来不及回收，被泄漏检测器连续标记。
+      // 余量不足时不写盘 = 不会驱逐，正常切歌链路（懒解析 + 取链）不受影响。
+      const usedBytes = cache.getCacheSpace().toDouble()
+      const limitBytes = gCacheLimitMb * 1024 * 1024
+      if (usedBytes > limitBytes * 0.85) {
+        console.log('[QT Audio] 预取跳过: 缓存余量不足 ' + Math.round(usedBytes / 1048576).toInt() + 'M/' + gCacheLimitMb + 'M')
+        return
+      }
+      const factory = buildAudioDataSourceFactory(ctx)
+      const ds = factory.createDataSource()
+      let total = 0
+      try {
+        ds.open(new DataSpec(Uri.parse(this.uri)))
+        // UTS 的 Number 落到 Kotlin 是 Double，ByteArray/read 这类 Int 参数必须显式 toInt()
+        const chunk = 65536
+        const buf = new ByteArray(chunk.toInt())
+        while (true) {
+          const n = ds.read(buf, 0, chunk.toInt())
+          if (n == -1) break
+          total += n
+        }
+      } finally {
+        ds.close()
+      }
+      console.log('[QT Audio] 预取完成: ' + this.uri + ' bytes=' + total.toString())
+    } catch (e) {
+      // 静默：预取失败不影响正常切歌（懒解析在播放时还会再试一次）
+      console.log('[QT Audio] 预取失败(静默): ' + this.uri)
+    } finally {
+      gPreloadRunning = false
+    }
+  }
+}
+
+/** JS 触发下一首预取：uri 必须是 qt-resolve:// 占位地址（本地歌无需预取） */
+export function audioPreloadTrack(uri: string): void {
+  if (!uri.startsWith('qt-resolve://')) return
+  if (gPreloadRunning) return
+  gPreloadRunning = true
+  const t = new Thread(new QtPreloadRunnable(uri))
+  t.start()
+}
+
 /** JS 注册切歌事件：原生自动切歌 / seekTo 定位都会触发，参数 = 新条目 mediaId + 是否自然播到头引发 */
 export function audioOnTrackChanged(callback: AudioTrackChangedCallback | null): void {
   cbTrackChanged = callback
@@ -1724,9 +1791,15 @@ function buildHeaders(): HashMap<string, string> {
   return headers
 }
 
-function buildPlayerOnce(): void {
-  const appContext = UTSAndroid.getAppContext()
-  if (appContext == null) return
+/**
+ * 播放用的完整数据源栈：DefaultDataSource（scheme 路由）→ CacheDataSource
+ * （LRU 磁盘缓存，key=占位地址串）→ ResolvingDataSource（qt-resolve:// 懒解析
+ * 取链）→ DefaultHttpDataSource。buildPlayerOnce 与 audioPreloadTrack 共用，
+ * **两边必须同一份工厂代码**：预取与播放各自 new factory 没问题（SimpleCache
+ * 是进程级单例 gAudioCache，span 写入天然合并），但栈结构一旦分叉，缓存 key
+ * 或懒解析行为就会对不上，预取白干。
+ */
+function buildAudioDataSourceFactory(context: Context): DefaultDataSource.Factory {
   // 超时与封面加载器对齐（media3 默认 8 秒，移动网络下偏短）；允许跨协议重定向（302 到 http 的音源）
   const httpFactory = new DefaultHttpDataSource.Factory()
     .setUserAgent(UA_HEADER)
@@ -1742,17 +1815,21 @@ function buildPlayerOnce(): void {
   // file:// → FileDataSource，其余回落到 HTTP 工厂。只传 HTTP 工厂时 content:// 会直接 Source error。
   // HTTP 链路外层再包 CacheDataSource（LRU 磁盘缓存，播过的歌二次播放直接读缓存）；
   // content:// 本地文件不经过缓存。缓存创建失败时回落纯 HTTP 流式（仍带懒解析）。
-  const cache = getAudioCache(appContext)
-  let dataSourceFactory: DefaultDataSource.Factory
+  const cache = getAudioCache(context)
   if (cache != null) {
     const cacheFactory = new CacheDataSource.Factory()
       .setCache(cache)
       .setUpstreamDataSourceFactory(resolvingFactory)
       .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
-    dataSourceFactory = new DefaultDataSource.Factory(appContext, cacheFactory)
-  } else {
-    dataSourceFactory = new DefaultDataSource.Factory(appContext, resolvingFactory)
+    return new DefaultDataSource.Factory(context, cacheFactory)
   }
+  return new DefaultDataSource.Factory(context, resolvingFactory)
+}
+
+function buildPlayerOnce(): void {
+  const appContext = UTSAndroid.getAppContext()
+  if (appContext == null) return
+  const dataSourceFactory = buildAudioDataSourceFactory(appContext)
   const mediaSourceFactory = new DefaultMediaSourceFactory(dataSourceFactory)
   const attr = new AudioAttributes.Builder()
     .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)

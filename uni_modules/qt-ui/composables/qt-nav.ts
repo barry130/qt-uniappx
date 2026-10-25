@@ -24,6 +24,7 @@ import {
   qtOpenWideTool,
   qtCloseWideTool,
   qtIsWideToolHost,
+  qtWideWorkspaceRefresh,
 } from "./qt-wide-workspace";
 
 /**
@@ -143,8 +144,53 @@ export function qtRailNavigate(url: string): void {
  */
 export function qtRailSwitchTab(url: string): void {
   // 就地托管的工具页不在页面栈里，也没法被 switchTab 关掉 —— 先关覆盖层
-  qtCloseWideTool();
-  if (qtTopRoute() == url) return;
+  const wasHosted = qtCloseWideTool();
+  if (qtTopRoute() == url) {
+    qtWideWorkspaceRefresh();
+    return;
+  }
+  // 2026-10-25 真机（MuMu）实测两件事：
+  //  1) 关闭覆盖层（visibility 翻转）与 uni.switchTab 同一 tick 发起时，switchTab
+  //     会被偶发吞掉（「经常没有反应」，竞态）——所以不能先关再立刻切；
+  //  2) 先关覆盖层再延迟切 tab（上一版 60ms 方案）会先露出宿主页一瞬
+  //     （「从搜索页点我的，先闪一下发现页」）。
+  // 正确顺序：覆盖层保持盖着（不露宿主页），先 switchTab，成功后再关；
+  // 另加 300ms 兜底强制关，switchTab 被吞时弹层也不会卡死。
+  if (wasHosted) {
+    // 关覆盖层时必须同时 qtWideWorkspaceRefresh()：覆盖层可见性 computed 里读的
+    // qtTopRoute()（getCurrentPages）不是响应式，切 tab 后栈变了但两个宿主的
+    // 覆盖层都不会自动重估 —— 旧宿主那条会整块漏在新 tab 上（真机实测
+    // 「我的页面和搜索页面叠在一起」）。refresh 强制两边立即重算。
+    const close = () => {
+      qtCloseWideTool();
+      qtWideWorkspaceRefresh();
+    };
+    // #ifdef APP-HARMONY
+    close();
+    uni.reLaunch({ url: url });
+    // #endif
+    // #ifndef APP-HARMONY
+    uni.switchTab({
+      url: url,
+      success: () => { close(); },
+      fail: (e) => {
+        close();
+        uni.reLaunch({ url: url });
+      },
+    });
+    // 兜底（300ms）：switchTab 被吞时 success 不来 —— 关掉覆盖层并再试一次，
+    // 退化成「短暂露出宿主页后切换」，好过卡在工具页没反应。
+    setTimeout(() => {
+      if (qtTopRoute() != url) {
+        close();
+        qtSwitchTab(url);
+      } else {
+        close();
+      }
+    }, 300);
+    // #endif
+    return;
+  }
   const pages = qtPageStackDepthSafe();
   if (!qtLayout().isWide || pages <= 1) {
     qtSwitchTab(url);

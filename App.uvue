@@ -29,11 +29,12 @@ import type { PackUpdateOffer } from '@/services/source-update'
 import { exitApp, ensureNotificationPermission, openNotificationSettings, applyLegacyInsets, isIgnoringBatteryOptimizations, openBatteryOptimizationSettings } from '@/services/app-native'
 import { beginLoading, finishLoading } from '@/services/ui-loading'
 import { refreshQtLayout, pauseQtLayoutWatcher, resumeQtLayoutWatcher } from '@/uni_modules/qt-ui/composables/use-qt-layout'
-import { qtNavAnimation } from '@/uni_modules/qt-ui/composables/qt-nav'
 import { installBootGuard, notifyAppForeground, notifyAppBackground } from '@/services/boot-guard'
 import { refreshMe } from '@/services/user-cache'
 import { initLogger, flushLogs, logLine, logMsgErr, LOG_ERROR } from '@/services/logger'
 import { qtConfirm } from '@/services/confirm'
+// 音源账号登录态注入：import 即注册「meta 装载成功」钩子（服务模块级副作用）
+import { ensureSourceAuthInjected } from '@/services/source-auth'
 
 onLaunch(() => {
   // 三星 One UI 手势导航下 edge-to-edge 窗口会让运行时首屏挂载竞态（S24 Ultra
@@ -89,6 +90,8 @@ onLaunch(() => {
   runStartup()
   // 音源引擎预热：恢复本地状态 → 起 WebView(V8) 引擎 → 装已安装的音源包（未安装则直接返回，全程失败静默）
   prewarmSourceEngine()
+  // 音源账号登录态对账重灌（引擎未就绪则静默；装载成功钩子会兜底重放）
+  ensureSourceAuthInjected().catch(() => {})
   // 启动时发现音源包更新（各包自管 updateUrl + astral manifest，4 小时节流）：
   // 只发现不安装——发现到新版后弹「仅提示」的确认框，用户点了「更新」才下载生效
   setTimeout(() => {
@@ -177,7 +180,7 @@ function showPlayPackMissingGuide(): void {
     cancelText: '暂不',
   }).then((ok) => {
     if (!ok) return
-    uni.navigateTo({ url: '/pages/source-pack/index', animationType: qtNavAnimation() })
+    uni.navigateTo({ url: '/pages/source-pack/index' })
   })
 }
 

@@ -21,12 +21,19 @@ export interface QtActionSheetOptions {
   title?: string;
   /** 当前选中项下标（-1 = 无）。打开时若在折叠区外列表自动滚到它 */
   selectedIndex?: number;
+  /**
+   * 逐项自定义颜色（与 itemList 按下标对齐，缺省/null = 主题默认色）。
+   * 内联 qt-action-sheet 的 actions 支持 color，宿主路径经这里补齐同一能力
+   * （如歌曲菜单里「取消收藏」的高亮红）。
+   */
+  colors?: (string | null)[];
 }
 
 const visible = ref(false);
 const items = ref<string[]>([]);
 const title = ref("");
 const selectedIndex = ref(-1);
+const colors = ref<(string | null)[]>([]);
 
 let resolver: ((index: number) => void) | null = null;
 
@@ -42,6 +49,7 @@ export function qtShowActionSheet(options: QtActionSheetOptions): Promise<number
   items.value = list;
   title.value = options.title != null ? options.title : "";
   selectedIndex.value = options.selectedIndex != null ? options.selectedIndex : -1;
+  colors.value = options.colors != null ? options.colors : [];
   visible.value = true;
   return new Promise<number>((resolve) => {
     resolver = resolve;
@@ -68,5 +76,5 @@ export function qtActionSheetCancel(): void {
 
 /** 宿主组件读取状态用 */
 export function qtActionSheetState() {
-  return { visible, items, title, selectedIndex };
+  return { visible, items, title, selectedIndex, colors };
 }

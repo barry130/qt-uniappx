@@ -44,8 +44,12 @@ const ID_PATTERN = "^[a-z0-9-]{2,32}$";
  * 返回 null = 没有头或头不完整/不合法（旧版包、随便改名的文件都会落在这里，
  * 调用方按「不是可安装的音源包」口径提示）。
  */
-export function parsePackHeader(text: string): PackHeaderInfo | null {
-  if (text == null || text.length == 0) return null;
+export function parsePackHeader(rawText: string): PackHeaderInfo | null {
+  if (rawText == null || rawText.length == 0) return null;
+  // 容忍 UTF-8 BOM：手写/某些编辑器保存的包首字节可能是 \uFEFF，
+  // 不剥掉 startsWith 直接判 false（安卓 java.io 读文本不剥，鸿蒙 readTextSync 也不剥）
+  let text = rawText;
+  if (text.startsWith("\uFEFF")) text = text.substring(1);
   if (!text.startsWith(HEADER_MARK)) return null;
   const end = text.indexOf("*/", HEADER_MARK.length);
   if (end < 0) return null;

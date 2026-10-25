@@ -23,21 +23,21 @@
          ②没有歌单封面，详情图片取第一首歌曲的图片（displayPicUrl）。
           宽屏操作（播放全部 / 加入队列 / 批量，含选择态批量条）全住左栏封面块，
           列表顶不再有操作条 —— 对齐 qt-pc 的页头管理，悬浮条要么全收要么全留。 -->
-    <scroll-view v-if="layout.isWide" class="wide-left" direction="vertical" :show-scrollbar="false">
+    <scroll-view v-if="layout.isWide" class="wide-left" :style="wideAsideStyle" direction="vertical" :show-scrollbar="false">
       <view class="whero" :style="'background-color:' + themeStore.skin.surfaceStrong + ';border-color:' + themeStore.skin.border + ';'">
         <!-- 加载中：左栏整块换骨架（封面 + 标题 + 两行简介 + 数量行），与歌单详情页同构 -->
-        <QtSkeleton v-if="loading" tone="cover" width="238px" height="238px" radius="12px" />
-        <image v-else class="whero-cover" :src="displayPicUrl" mode="aspectFill" />
+        <QtSkeleton v-if="loading" tone="cover" :width="wideCoverPx" :height="wideCoverPx" radius="12px" />
+        <image v-else class="whero-cover" :style="wideCoverStyle" :src="displayPicUrl" mode="aspectFill" />
         <template v-if="loading">
           <view class="wsk-l1"><QtSkeleton tone="line" width="160px" height="18px" radius="4px" /></view>
           <view class="wsk-l2"><QtSkeleton tone="line" width="220px" height="13px" radius="4px" /></view>
           <view class="wsk-l3"><QtSkeleton tone="line" width="190px" height="13px" radius="4px" /></view>
           <view class="wsk-l4"><QtSkeleton tone="line" width="90px" height="12px" radius="4px" /></view>
           <!-- 操作区骨架：播放全部（44px、圆角 22px）+ 加入队列/批量两等分（40px、圆角 20px） -->
-          <view class="wsk-l5"><QtSkeleton tone="block" width="238px" height="44px" radius="22px" /></view>
+          <view class="wsk-l5"><QtSkeleton tone="block" :width="wideCoverPx" height="44px" radius="22px" /></view>
           <view class="wsk-l6">
-            <QtSkeleton tone="block" width="114px" height="40px" radius="20px" />
-            <view class="wsk-l6-gap"><QtSkeleton tone="block" width="114px" height="40px" radius="20px" /></view>
+            <QtSkeleton tone="block" :width="wideActHalfPx" height="40px" radius="20px" />
+            <view class="wsk-l6-gap"><QtSkeleton tone="block" :width="wideActHalfPx" height="40px" radius="20px" /></view>
           </view>
         </template>
         <template v-else>
@@ -271,6 +271,7 @@ import { usePlayerStore } from "@/stores/player";
 import { useSourceStore } from "@/stores/source";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtContentWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import type { Playlist, Song } from "@/types/music";
 import type { Source } from "@/services/music-api";
 import { qtFontPx, qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
@@ -282,6 +283,29 @@ const player = usePlayerStore();
 const sourceStore = useSourceStore();
 const themeStore = useThemeStore();
 const layout = useQtLayout();
+/**
+ * 宽屏左栏宽度按「详情页内宽 - 列表最小可用宽」反算，夹在 220~272px。
+ * 封面与骨架都跟着这个宽度走（原来 238px 写死在 CSS 与模板里，收窄左栏就会溢出）。
+ * 列表最小可用宽取 360px：再窄歌曲行里「封面 + 歌名 + 时长 + 更多」就挤成一团
+ * （900dp 平板内容列 644、页内边距 40，左栏原来是写死 272，列表只剩 316）。
+ */
+const WIDE_ASIDE_GAP_PX = 16;
+const WIDE_ASIDE_MAX_PX = 272;
+const WIDE_ASIDE_MIN_PX = 220;
+const WIDE_LIST_MIN_PX = 360;
+const wideAsideWidth = computed((): number => {
+  const inner = qtContentWidth("detail") - 40;
+  const room = inner - WIDE_ASIDE_GAP_PX - WIDE_LIST_MIN_PX;
+  return Math.max(WIDE_ASIDE_MIN_PX, Math.min(WIDE_ASIDE_MAX_PX, room));
+});
+const wideAsideStyle = computed((): string => "width:" + wideAsideWidth.value + "px;");
+/** 封面边长 = 左栏宽 - 卡片内边距与边框（34px），骨架用同一个值，加载完不会跳 */
+const wideCoverSize = computed((): number => wideAsideWidth.value - 34);
+const wideCoverStyle = computed((): string => "width:" + wideCoverSize.value + "px;height:" + wideCoverSize.value + "px;");
+const wideCoverPx = computed((): string => wideCoverSize.value + "px");
+/** 左栏两个等分按钮的宽度骨架（封面宽 - 组内间距 10 再对半） */
+const wideActHalfPx = computed((): string => Math.floor((wideCoverSize.value - 10) / 2) + "px");
+
 
 // 回到顶部
 const scrollTop = ref(0);
@@ -749,7 +773,7 @@ onUnmounted(() => {
 
 <style>
 .page { flex: 1; min-height: 0; }
-.scroll { flex: 1; min-height: 0; }
+.scroll { flex: 1; min-height: 0; min-width: 0; }
 /* list-item 不支持 margin，用 padding */
 .hero-item { padding: 0; }
 .hero { padding: 40rpx 32rpx; flex-direction: row; border-width: 1px; border-style: solid; border-radius: 24rpx; }
@@ -791,7 +815,7 @@ onUnmounted(() => {
 .search-field-wide { padding-top: 6px; padding-bottom: 6px; padding-left: 12px; padding-right: 12px; border-radius: 16px; }
 .search-input-wide { margin-left: 8px; font-size: 14px; height: 22px; }
 .search-ph-wide { color: #9aa1b1; font-size: 14px; }
-.search-clear-wide { width: 24px; height: 24px; }
+.search-clear-wide { width: 32px; height: 32px; }
 .empty-item-wide { padding-top: 72px; padding-bottom: 72px; }
 .empty-text-wide { font-size: 15px; }
 /* 宽屏左栏操作区：封面下方统一管理播放与批量（对齐 qt-pc 页头），列表顶无操作条 */
@@ -810,8 +834,10 @@ onUnmounted(() => {
 /* 宽屏左右布局：左栏推荐信息 + 右栏歌曲列表（竖屏保持上下），与歌单详情页同构 */
 .page-wide { flex-direction: row; align-items: stretch; padding: 16px 20px 0; }
 .wide-left { width: 272px; flex-shrink: 0; margin-right: 16px; padding-bottom: 16px; }
+/* 宽屏左栏宽度已改由 wideAsideStyle 内联给出（窄平板横屏会收窄到 220~272 之间），这里只留兜底 */
 .whero { padding: 16px; flex-direction: column; border-width: 1px; border-style: solid; border-radius: 16px; }
 .whero-cover { width: 238px; height: 238px; border-radius: 12px; background-color: rgba(255, 255, 255, 0.2); }
+/* 宽屏封面边长由 wideCoverStyle 内联给出，与左栏宽度同步 */
 .whero-title { margin-top: 14px; font-size: 18px; font-weight: 600; }
 .whero-desc { margin-top: 8px; font-size: 13px; line-height: 20px; }
 .whero-count { margin-top: 6px; font-size: 12px; }

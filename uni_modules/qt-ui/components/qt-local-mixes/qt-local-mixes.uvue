@@ -105,8 +105,13 @@ const lastRowHeight = computed<number>(() => Math.max(30, cardWidth.value - cell
     宽屏 7+2x17+3+16=60px 留到 64px。矮了会裁掉最后一行副标题 */
 const railHeight = computed<number>(() => cardWidth.value + (layout.isWide ? 64 : qtRpx(140)));
 /** 抽屉高度照 qt-listen-detail：竖屏吃满 0.88 窗口高（原来 0.82 只露四行半，用户反馈「下滑范围小了」），
-    宽屏仍是 0.92。列表不再算死像素高，改由 flex:1 吃满头部/全部播放条之外的剩余空间。 */
-const sheetHeight = computed<number>(() => Math.max(layout.isWide ? 520 : 420, Math.floor(layout.windowHeight * (layout.isWide ? 0.92 : 0.88))));
+    宽屏仍是 0.92。列表不再算死像素高，改由 flex:1 吃满头部/全部播放条之外的剩余空间。
+    下限 520/420 只保证「正常窗口里别缩成一条」，必须再夹到窗口高以内 —— 否则横屏矮窗
+    （如 780×360，会落进 isWide 分支）抽屉比窗口还高，顶到屏幕外、标题被裁掉。 */
+const sheetHeight = computed<number>(() => {
+  const prefer = Math.max(layout.isWide ? 520 : 420, Math.floor(layout.windowHeight * (layout.isWide ? 0.92 : 0.88)));
+  return Math.max(240, Math.min(prefer, layout.windowHeight));
+});
 /** 抽屉尺寸一次算全：宽屏宽度走 QT_SHEET_WIDTH.drawer 契约并夹到窗口内 */
 const sheetStyle = computed((): string => {
   let style = "height:" + sheetHeight.value + "px;background-color:" + theme.skin.sheetSurface + ";";

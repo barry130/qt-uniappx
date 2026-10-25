@@ -7,46 +7,50 @@
          <qt-sort-panel v-model:visible="sortSheetVisible"
            :sort-key="sortKey" :sort-desc="sortDesc"
            @select="onSortKeySelect" @desc="onSortDescSelect" /> -->
-  <view v-if="mount" class="qt-sort-mask" :style="'background-color:' + theme.skin.scrim + ';'" @click="close">
-    <view class="qt-sort-panel" :class="shown ? 'qt-sort-panel-on' : ''" :style="'background-color:' + theme.skin.surfaceStrong + ';border-color:' + theme.skin.border + ';'" @click.stop>
+  <view v-if="mount" class="qt-sort-mask" :class="layout.isWide ? 'qt-sort-mask-wide' : ''" :style="'background-color:' + theme.skin.scrim + ';'" @click="close">
+    <view class="qt-sort-panel" :class="panelClass" :style="panelStyle" @click.stop>
       <view class="qt-sort-head">
         <text class="qt-sort-title" :style="'color:' + theme.skin.text + ';' + qtFontDual(30, 16)">更改歌曲排序方式</text>
-        <view class="qt-sort-close" @click="close">
-          <QtIcon name="close" :size="18" :color="theme.skin.textMuted" />
+        <view class="qt-sort-close" :class="layout.isWide ? 'qt-sort-close-wide' : ''" @click="close">
+          <QtIcon name="close" :size="layout.isWide ? 16 : 18" :color="theme.skin.textMuted" />
         </view>
       </view>
-      <view class="qt-sort-row">
-        <text class="qt-sort-label" :style="'color:' + theme.skin.textSubtle + ';' + qtFontDual(24, 13)">排序方式</text>
+      <view class="qt-sort-row" :class="layout.isWide ? 'qt-sort-row-wide' : ''">
+        <text class="qt-sort-label" :class="layout.isWide ? 'qt-sort-label-wide' : ''" :style="'color:' + theme.skin.textSubtle + ';' + qtFontDual(24, 13)">排序方式</text>
         <view class="qt-sort-chips">
           <view
             v-for="key in SORT_KEYS"
             :key="'qt-sort-key-' + key"
             class="qt-sort-chip"
+            :class="layout.isWide ? 'qt-sort-chip-wide' : ''"
             :style="keyChipStyle(key)"
             @click="tapKey(key)"
           ><text class="qt-sort-chip-text" :style="keyTextStyle(key)">{{ keyLabel(key) }}</text></view>
         </view>
       </view>
-      <view class="qt-sort-row">
-        <text class="qt-sort-label" :style="'color:' + theme.skin.textSubtle + ';' + qtFontDual(24, 13)">方向</text>
+      <view class="qt-sort-row" :class="layout.isWide ? 'qt-sort-row-wide' : ''">
+        <text class="qt-sort-label" :class="layout.isWide ? 'qt-sort-label-wide' : ''" :style="'color:' + theme.skin.textSubtle + ';' + qtFontDual(24, 13)">方向</text>
         <view class="qt-sort-chips">
           <view
             v-for="dir in SORT_DIRS"
             :key="'qt-sort-dir-' + dir"
             class="qt-sort-chip"
+            :class="layout.isWide ? 'qt-sort-chip-wide' : ''"
             :style="dirChipStyle(dir)"
             @click="tapDir(dir)"
           ><text class="qt-sort-chip-text" :style="dirTextStyle(dir)">{{ dir == "asc" ? "正序" : "倒序" }}</text></view>
         </view>
       </view>
-      <text class="qt-sort-hint" :style="'color:' + theme.skin.textSubtle + ';' + qtFontDual(22, 12)">不选排序方式即默认顺序；已选中的再点一次取消</text>
+      <text class="qt-sort-hint" :class="layout.isWide ? 'qt-sort-hint-wide' : ''" :style="'color:' + theme.skin.textSubtle + ';' + qtFontDual(22, 12)">不选排序方式即默认顺序；已选中的再点一次取消</text>
     </view>
   </view>
 </template>
 <script setup lang="ts">
-import { ref, watch, onUnmounted } from "vue";
+import { ref, watch, onUnmounted, computed } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const props = defineProps({
@@ -57,6 +61,7 @@ const props = defineProps({
 const emit = defineEmits(["update:visible", "select", "desc"]);
 
 const theme = useThemeStore();
+const layout = useQtLayout();
 const SORT_KEYS: string[] = ["name", "album", "singer"];
 const SORT_DIRS: string[] = ["asc", "desc"];
 /** 标签用函数查表：Map 的方括号索引在模板里运行时取不到值（渲染成空），三元/if 查表最稳 */
@@ -71,6 +76,25 @@ const mount = ref(false);
 const shown = ref(false);
 let openTimer = 0;
 let closeTimer = 0;
+
+/**
+ * 面板 class：宽屏换成居中对话框（`.qt-sort-panel-wide`），
+ * 展开态用 `.qt-sort-panel-on` 驱动窄屏的上滑动画。
+ * 宽屏的淡入淡出走内联 opacity —— 组合选择器 `.a.b` 在本版 Vapor 下匹配不稳，
+ * 而 -wide 与 -on 必然同时存在，靠类叠加拿不到样式。
+ */
+const panelClass = computed((): string => {
+  let c = shown.value ? "qt-sort-panel-on" : "";
+  if (layout.isWide) c += " qt-sort-panel-wide";
+  return c;
+});
+/** 面板底色/描边/尺寸：走内联，避免被主题类覆盖 */
+const panelStyle = computed((): string => {
+  let s = "background-color:" + theme.skin.surfaceStrong + ";border-color:" + theme.skin.border + ";";
+  if (layout.isWide) s += "width:" + qtSheetWidth("dialog") + "px;opacity:" + (shown.value ? "1" : "0") + ";";
+  return s;
+});
+
 watch(
   () => props.visible,
   (v: boolean) => {
@@ -141,4 +165,21 @@ function tapDir(dir: string): void {
 .qt-sort-chips { flex: 1; flex-direction: row; flex-wrap: wrap; }
 .qt-sort-chip { height: 64rpx; padding: 0 28rpx; margin-right: 16rpx; margin-bottom: 12rpx; border-width: 1px; border-style: solid; border-radius: 32rpx; align-items: center; justify-content: center; }
 .qt-sort-hint { margin-top: 20rpx; }
+
+/* 宽屏 px 覆盖（rpx 在 1138dp 窗口里放大 1.4 倍、2560 宽时 3.4 倍，见 design.md §6.6）。
+   宽屏改成居中的对话框：底部贴边面板在 pad 上会拉成一条 1000px+ 的长横幅，
+   与 qt-action-sheet / qt-confirm-host 的宽屏观感也不一致。 */
+.qt-sort-mask-wide { justify-content: center; align-items: center; }
+.qt-sort-panel-wide {
+  margin: 0;
+  padding: 20px 20px 24px;
+  border-radius: 16px;
+  transform: translateY(0);
+  transition-property: opacity;
+}
+.qt-sort-close-wide { width: 32px; height: 32px; border-radius: 16px; }
+.qt-sort-row-wide { margin-top: 18px; }
+.qt-sort-label-wide { width: 72px; }
+.qt-sort-chip-wide { height: 36px; padding: 0 16px; margin-right: 10px; margin-bottom: 8px; border-radius: 18px; }
+.qt-sort-hint-wide { margin-top: 12px; }
 </style>

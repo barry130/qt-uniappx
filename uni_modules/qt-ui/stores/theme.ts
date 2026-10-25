@@ -131,20 +131,20 @@ function makeSkin(
   };
 }
 
-const LINEN_LIGHT = makeSkin("linen", "Linen", "暖白纸张与珊瑚红", false, "#e5484d", "#f6f7f8", "rgba(255,255,255,0.78)", "rgba(255,255,255,0.94)", "#191d26", "#737b8e", "rgba(25,29,38,0.08)", "rgba(245,246,248,0.76)", "#ffffff");
-const LINEN_DARK = makeSkin("linen", "Linen", "暖白纸张与珊瑚红", true, "#ff656a", "#15171d", "rgba(34,37,46,0.82)", "rgba(43,47,58,0.96)", "#f6f3ee", "#aaa8a5", "rgba(255,255,255,0.10)", "rgba(21,23,29,0.72)", "#1a1d25");
-const GRAPHITE_LIGHT = makeSkin("graphite", "Graphite", "中性石墨与清晰层次", false, "#d9474e", "#eef0f3", "rgba(255,255,255,0.82)", "rgba(255,255,255,0.96)", "#20232b", "#6b7280", "rgba(32,35,43,0.10)", "rgba(238,240,243,0.76)", "#ffffff");
-const GRAPHITE_DARK = makeSkin("graphite", "Graphite", "中性石墨与清晰层次", true, "#ff5b61", "#11141c", "rgba(31,36,48,0.82)", "rgba(38,44,58,0.96)", "#f4f5f7", "#a6adbc", "rgba(255,255,255,0.10)", "rgba(17,20,28,0.64)", "#161a23");
-const AURORA_LIGHT = makeSkin("aurora", "Aurora", "蓝紫层次与通透玻璃", false, "#6b5ce7", "#eef0fb", "rgba(255,255,255,0.72)", "rgba(255,255,255,0.92)", "#1e2030", "#71748c", "rgba(76,69,145,0.12)", "rgba(238,240,251,0.70)", "#ffffff");
-const AURORA_DARK = makeSkin("aurora", "Aurora", "蓝紫层次与通透玻璃", true, "#9789ff", "#141424", "rgba(35,34,59,0.82)", "rgba(46,44,76,0.96)", "#f5f3ff", "#aaa6c2", "rgba(180,172,255,0.15)", "rgba(20,20,36,0.64)", "#1a1a2e");
-const OCEAN_LIGHT = makeSkin("ocean", "Ocean", "深海蓝与清爽水面", false, "#0b7ad1", "#f1f5f9", "rgba(255,255,255,0.80)", "rgba(255,255,255,0.95)", "#16212b", "#6e7b88", "rgba(22,33,43,0.08)", "rgba(241,245,249,0.76)", "#ffffff");
-const OCEAN_DARK = makeSkin("ocean", "Ocean", "深海蓝与清爽水面", true, "#58aef5", "#0f151d", "rgba(32,42,56,0.82)", "rgba(42,54,70,0.96)", "#eef3f8", "#a2aebb", "rgba(255,255,255,0.10)", "rgba(15,21,29,0.72)", "#171f29");
-const FOREST_LIGHT = makeSkin("forest", "Forest", "松林绿与自然晨雾", false, "#1f9d61", "#f1f8f3", "rgba(255,255,255,0.80)", "rgba(255,255,255,0.95)", "#14211a", "#6d7d72", "rgba(20,33,26,0.08)", "rgba(241,248,243,0.76)", "#ffffff");
-const FOREST_DARK = makeSkin("forest", "Forest", "松林绿与自然晨雾", true, "#4cd08d", "#0e1712", "rgba(30,44,36,0.82)", "rgba(40,56,47,0.96)", "#ecf5ef", "#9fb2a6", "rgba(255,255,255,0.10)", "rgba(14,23,18,0.72)", "#16211b");
-const SUNSET_LIGHT = makeSkin("sunset", "Sunset", "落日橙与暖沙余晖", false, "#d96a1f", "#faf5f0", "rgba(255,255,255,0.80)", "rgba(255,255,255,0.94)", "#241a12", "#7d7266", "rgba(36,26,18,0.08)", "rgba(250,245,240,0.76)", "#ffffff");
-const SUNSET_DARK = makeSkin("sunset", "Sunset", "落日橙与暖沙余晖", true, "#ff9e54", "#191210", "rgba(46,36,30,0.82)", "rgba(58,45,37,0.96)", "#f8f1ea", "#b3a69a", "rgba(255,255,255,0.10)", "rgba(25,18,16,0.72)", "#211a15");
-const BLOSSOM_LIGHT = makeSkin("blossom", "Blossom", "樱花粉与柔和春日", false, "#d6487e", "#fbf3f7", "rgba(255,255,255,0.80)", "rgba(255,255,255,0.94)", "#241520", "#7f6d79", "rgba(36,21,32,0.08)", "rgba(251,243,247,0.76)", "#ffffff");
-const BLOSSOM_DARK = makeSkin("blossom", "Blossom", "樱花粉与柔和春日", true, "#ff7fae", "#1a1117", "rgba(47,33,42,0.82)", "rgba(60,42,54,0.96)", "#f9edf3", "#b5a1ad", "rgba(255,255,255,0.10)", "rgba(26,17,23,0.72)", "#231820");
+const LINEN_LIGHT = makeSkin("linen", "Linen", "暖白纸张与珊瑚红", false, "#e5484d", "#f6f7f8", "#ffffff", "rgba(255,255,255,0.97)", "#191d26", "#737b8e", "rgba(25,29,38,0.12)", "rgba(245,246,248,0.76)", "#ffffff");
+const LINEN_DARK = makeSkin("linen", "Linen", "暖白纸张与珊瑚红", true, "#ff656a", "#15171d", "rgba(34,37,46,0.94)", "rgba(45,49,61,0.97)", "#f6f3ee", "#aaa8a5", "rgba(255,255,255,0.14)", "rgba(21,23,29,0.72)", "#1a1d25");
+const GRAPHITE_LIGHT = makeSkin("graphite", "Graphite", "中性石墨与清晰层次", false, "#d9474e", "#eef0f3", "#ffffff", "rgba(255,255,255,0.97)", "#20232b", "#6b7280", "rgba(32,35,43,0.13)", "rgba(238,240,243,0.76)", "#ffffff");
+const GRAPHITE_DARK = makeSkin("graphite", "Graphite", "中性石墨与清晰层次", true, "#ff5b61", "#11141c", "rgba(31,36,48,0.94)", "rgba(40,46,60,0.97)", "#f4f5f7", "#a6adbc", "rgba(255,255,255,0.14)", "rgba(17,20,28,0.64)", "#161a23");
+const AURORA_LIGHT = makeSkin("aurora", "Aurora", "蓝紫层次与通透玻璃", false, "#6b5ce7", "#eef0fb", "#ffffff", "rgba(255,255,255,0.96)", "#1e2030", "#71748c", "rgba(76,69,145,0.16)", "rgba(238,240,251,0.70)", "#ffffff");
+const AURORA_DARK = makeSkin("aurora", "Aurora", "蓝紫层次与通透玻璃", true, "#9789ff", "#141424", "rgba(35,34,59,0.94)", "rgba(48,46,79,0.97)", "#f5f3ff", "#aaa6c2", "rgba(180,172,255,0.15)", "rgba(20,20,36,0.64)", "#1a1a2e");
+const OCEAN_LIGHT = makeSkin("ocean", "Ocean", "深海蓝与清爽水面", false, "#0b7ad1", "#f1f5f9", "#ffffff", "rgba(255,255,255,0.97)", "#16212b", "#6e7b88", "rgba(22,33,43,0.12)", "rgba(241,245,249,0.76)", "#ffffff");
+const OCEAN_DARK = makeSkin("ocean", "Ocean", "深海蓝与清爽水面", true, "#58aef5", "#0f151d", "rgba(32,42,56,0.94)", "rgba(44,56,73,0.97)", "#eef3f8", "#a2aebb", "rgba(255,255,255,0.14)", "rgba(15,21,29,0.72)", "#171f29");
+const FOREST_LIGHT = makeSkin("forest", "Forest", "松林绿与自然晨雾", false, "#1f9d61", "#f1f8f3", "#ffffff", "rgba(255,255,255,0.97)", "#14211a", "#6d7d72", "rgba(20,33,26,0.12)", "rgba(241,248,243,0.76)", "#ffffff");
+const FOREST_DARK = makeSkin("forest", "Forest", "松林绿与自然晨雾", true, "#4cd08d", "#0e1712", "rgba(30,44,36,0.94)", "rgba(42,58,49,0.97)", "#ecf5ef", "#9fb2a6", "rgba(255,255,255,0.14)", "rgba(14,23,18,0.72)", "#16211b");
+const SUNSET_LIGHT = makeSkin("sunset", "Sunset", "落日橙与暖沙余晖", false, "#d96a1f", "#faf5f0", "rgba(255,255,255,0.80)", "rgba(255,255,255,0.94)", "#241a12", "#7d7266", "rgba(36,26,18,0.12)", "rgba(250,245,240,0.76)", "#ffffff");
+const SUNSET_DARK = makeSkin("sunset", "Sunset", "落日橙与暖沙余晖", true, "#ff9e54", "#191210", "rgba(46,36,30,0.94)", "rgba(60,47,39,0.97)", "#f8f1ea", "#b3a69a", "rgba(255,255,255,0.14)", "rgba(25,18,16,0.72)", "#211a15");
+const BLOSSOM_LIGHT = makeSkin("blossom", "Blossom", "樱花粉与柔和春日", false, "#d6487e", "#fbf3f7", "rgba(255,255,255,0.80)", "rgba(255,255,255,0.94)", "#241520", "#7f6d79", "rgba(36,21,32,0.12)", "rgba(251,243,247,0.76)", "#ffffff");
+const BLOSSOM_DARK = makeSkin("blossom", "Blossom", "樱花粉与柔和春日", true, "#ff7fae", "#1a1117", "rgba(47,33,42,0.94)", "rgba(62,44,56,0.97)", "#f9edf3", "#b5a1ad", "rgba(255,255,255,0.14)", "rgba(26,17,23,0.72)", "#231820");
 
 export const QT_SKINS: QtSkinPreset[] = [
   { id: "linen", name: "Linen", description: "暖白纸张与珊瑚红", light: LINEN_LIGHT, dark: LINEN_DARK },

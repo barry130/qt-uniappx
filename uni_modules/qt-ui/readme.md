@@ -43,7 +43,9 @@
 
 - 读取主题皮肤背景色、渲染自定义背景图片与遮罩；
 - 按 `width-kind`（`form` / `prose` / `flow` / `list` / `detail` / `grid` / `full`）计算宽屏内容列；`max-width` 只可额外收紧；
-- 宽屏挂全局 rail 与有歌曲时的常驻播放器底栏；页面切换**一律不传 `animationType`**（默认动画；曾试过宽屏 `none` 保持 rail 静止，但新 Activity 起始窗在 none 下整窗裸闪，深色系统真机反馈「每次点击黑屏闪一下」，已全量回退——见 `composables/qt-nav.ts` 头注释）；rail 的五个工具入口在宽屏下由 `qt-wide-workspace` **就地托管**进当前 tab 页（不新建 Activity、没有起始窗白帧，也不再往页面栈里堆页面），每个工具页首次打开后保活、切换/关闭只动 `visibility`，没有重建闪动，重开瞬时恢复（详见 [`docs/design.md`](docs/design.md) §6.18）；
+- 宽屏挂全局 rail 与有歌曲时的常驻播放器底栏；底栏按 rail 右侧可用宽度分档追加控件（`>=740px` 出收藏/播放模式/队列，`>=840px` 出静音+音量条，窄平板横屏只保留封面信息/三键/进度条），左块随之 168/240/300px 收缩，全部固定 px（详见 [`docs/design.md`](docs/design.md) §6.4）；页面切换**一律不传 `animationType`**（默认动画；曾试过宽屏 `none` 保持 rail 静止，但新 Activity 起始窗在 none 下整窗裸闪，深色系统真机反馈「每次点击黑屏闪一下」，已全量回退——见 `composables/qt-nav.ts` 头注释）；rail 的五个工具入口在宽屏下由 `qt-wide-workspace` **就地托管**进当前 tab 页（不新建 Activity、没有起始窗白帧，也不再往页面栈里堆页面），每个工具页首次打开后保活、切换/关闭只动 `visibility`，没有重建闪动，重开瞬时恢复（详见 [`docs/design.md`](docs/design.md) §6.18）；
+- 横屏矮窗（`layout.isShort`，`windowHeight < 520`）也会落进宽屏分支（手机横屏 / 车机），按 `windowHeight` 反算的宽屏尺寸必须**先扣掉本页固定的顶部与底部行占位**，不要写 `windowHeight - 常数`；播放页宽屏舞台已按此改造并追加 `-short` 收紧规则（详见 [`docs/design.md`](docs/design.md) §10.3）；
+- 宽屏 Parity（对齐网易云 / QQ 音乐 Pad）落在五处：底栏分档控件（收藏 / 播放模式 / 队列 / 音量，见上一条）、播放页**宽屏**歌词工具行的「桌面歌词」按钮（原来只有设置页一条路径；竖屏那行本就三颗药丸，加第四颗会在 375dp 上溢出，故只加宽屏）、rail 补上「每日推荐」（原来只有首页竖屏快捷药丸能进）、artist/playlist/daily/daily-recommend 左栏宽度改由 `qtContentWidth("detail")` 反算（不再写死 272/296px）、宽屏触达尺寸下限 32–36px 与浮层 `rpx` 尺寸的 `-wide` px 夹紧；改这些位置前先读 [`docs/design.md`](docs/design.md) §10.4；
 - 全站 `navigationStyle: "custom"`：宽屏不画顶部标题，窄屏画功能性「返回 + 标题」栏；
 - 设置子页与我的页族（收藏/本地/下载/最近播放/听歌报告/音乐助手/反馈/关于/个人信息）在桌面可用宽度足够时自动变成 `rail | 总览 | 子页内容` 三栏，中栏分别复用真实的设置总览（`qt-settings-overview`）与「我的」总览（`qt-profile-overview`）并高亮当前项；总览里的音乐助手入口按权限码 `user:ai:music:use` 显隐（无权限/未登录不显示，与 qt-pc 同一判定）；
 - 竖屏底部导航是 `qt-tab-bar` 悬浮胶囊：左右各缩 40rpx、离地 24rpx、高 120rpx、圆角 60rpx（375dp 基准下正好等于 20px / 12px / 60px / 30px），发现 / 我的 两个入口，当前项 accentSoft 圆角 chip 高亮；**尺寸一律用 rpx**，随窗口宽度与整页内容同步放大（写死 px 会在平板 / 折叠屏 / 大窗口模拟器上显得极小）；总占位是 `QT_TAB_BAR_HEIGHT_RPX`（144rpx），由 `qtTabBarHeightPx()` 折算成 px，toast 让位与悬浮球初始边距都按它取值；

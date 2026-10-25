@@ -9,7 +9,7 @@
         class="nts-content"
         direction="vertical"
         :show-scrollbar="false"
-        :style="layout.isWide ? 'height:360px;margin-top:14px;margin-bottom:2px;' : 'margin-top:24rpx;margin-bottom:4rpx;max-height:760rpx;'"
+        :style="contentStyle"
       >
         <QtRichText
           :html="notice!.content ?? ''"
@@ -53,10 +53,26 @@ const themeStore = useThemeStore();
 /**
  * 宽屏宽度走统一浮层契约（QT_SHEET_WIDTH.modal = 560），并夹到窗口内。
  * 改造前写死 560px，在 640×360 之类窄横屏上会横出窗口。
+ *
+ * 高度同理：`.nts-card-wide` 的 `max-height: 560px` 只防「内容太长撑满大屏」，
+ * 但 780×360 这类横屏手机（会落进 isWide 分支）整窗才 360px 高，遮罩又是居中对齐，
+ * 560px 的卡片会把标题和按钮同时挤到屏幕外 —— 所以上限必须跟窗口高走。
  */
 const cardStyle = computed((): string => {
   if (!layout.isWide) return "width:620rpx;";
-  return "width:" + qtSheetWidth("modal") + "px;";
+  const maxH = Math.max(260, layout.windowHeight - 32); // 32 = 上下各 16 的呼吸位
+  return "width:" + qtSheetWidth("modal") + "px;max-height:" + maxH + "px;";
+});
+
+/**
+ * 正文区尺寸：宽屏给**确定高度**（scroll-view 在 Vapor 宽屏下 max-height 不保证形成可滚动区块，
+ * 内容一长就会把按钮顶出屏幕），但固定 360px 在横屏矮窗里已经超过整窗高度，
+ * 所以按窗口高反算并夹到 [120, 360]。
+ */
+const contentStyle = computed((): string => {
+  if (!layout.isWide) return "margin-top:24rpx;margin-bottom:4rpx;max-height:760rpx;";
+  const h = Math.max(120, Math.min(360, layout.windowHeight - 220));
+  return "height:" + h + "px;margin-top:14px;margin-bottom:2px;";
 });
 
 const props = defineProps<{

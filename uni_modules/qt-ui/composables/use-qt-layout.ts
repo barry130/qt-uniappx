@@ -265,7 +265,10 @@ export function qtIsDesktop(): boolean {
  */
 export function qtRailWidth(): number {
   if (!layout.isWide) return 0;
-  return layout.sizeClass == "medium" ? 64 : 208;
+  // 2026-10-25 对齐网易云 Pad：wide/desktop 档 rail 收成 96px 的「图标上、
+  // 小字下」紧凑栏（原 208px 文字横排栏在 1097dp 窗口吃掉近 1/5 内容宽）。
+  // medium 档仍是 64px 纯图标栏。
+  return layout.sizeClass == "medium" ? 64 : 96;
 }
 
 /**

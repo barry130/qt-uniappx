@@ -23,6 +23,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 
 const props = defineProps<{
   /** 形状：cover 封面方块 / line 文本行 / block 普通块 / circle 圆形 */
@@ -36,6 +37,7 @@ const props = defineProps<{
 }>();
 
 const theme = useThemeStore();
+const layout = useQtLayout();
 
 const rootClass = computed((): string => {
   // Vapor 不支持复合选择器，明暗两套底色各用一个扁平 class
@@ -43,11 +45,26 @@ const rootClass = computed((): string => {
   return "qt-skeleton-" + t + (theme.dark ? " qt-skeleton-" + t + "-dark" : "");
 });
 
+/**
+ * 默认圆角（调用方没传 radius 时生效）。
+ *
+ * 为什么不在 CSS 里靠 `.qt-skeleton-cover` 的 rpx 兜底：宽屏下 rpx 会放大
+ * 1.4~3.4 倍（见 design.md §6.6），骨架屏的圆角跟着变大，与真实内容的 px 圆角
+ * 对不上，加载完成时会「跳一下」。这里按 tone 给一份宽屏 px 值，覆盖掉 class 里的 rpx。
+ */
+function defaultRadiusPx(tone: string): string {
+  if (tone == "circle") return "50%";
+  if (tone == "cover") return "12px";
+  if (tone == "line") return "6px";
+  return "9px";
+}
+
 const boxStyle = computed((): string => {
   let style = "";
   if (props.width != null && props.width!.length > 0) style += "width:" + props.width! + ";";
   if (props.height != null && props.height!.length > 0) style += "height:" + props.height! + ";";
   if (props.radius != null && props.radius!.length > 0) style += "border-radius:" + props.radius! + ";";
+  else if (layout.isWide) style += "border-radius:" + defaultRadiusPx(props.tone != null ? props.tone! : "block") + ";";
   return style;
 });
 </script>

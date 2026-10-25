@@ -252,12 +252,25 @@ function resourcePathTry(relPath: string): TextProbe {
 // ============================================================================
 
 /**
+ * 路径归一：uni.downloadFile 在鸿蒙上返回的 tempFilePath 是 `file://` URI，
+ * @ohos.file.fs 的这些入口只认沙箱绝对路径（`/data/storage/...`），带前缀直接
+ * No such file（2026-10-25 真机：链接安装音源包在鸿蒙全挂、安卓正常，根因即此）。
+ * 只剥前缀不做别的加工：`file:///data/...` → `/data/...`；普通路径原样返回。
+ */
+function normalizeFsPath(path: string): string {
+	if (path.startsWith('file://')) {
+		return path.substring('file://'.length)
+	}
+	return path
+}
+
+/**
  * 读文本（UTF-8）。
  * [A4 已核对] `readTextSync(filePath: string, options?: ReadTextOptions): string`，
  * `ReadTextOptions.encoding?: string`。不传 options 时默认按 utf-8 解。
  */
 function fsReadText(path: string): string {
-	return fs.readTextSync(path)
+	return fs.readTextSync(normalizeFsPath(path))
 }
 
 /**
@@ -303,7 +316,7 @@ function fsAppendText(path: string, text: string): void {
  */
 function fsExists(path: string): boolean {
 	try {
-		return fs.accessSync(path)
+		return fs.accessSync(normalizeFsPath(path))
 	} catch (e) {
 		return false
 	}
@@ -350,7 +363,8 @@ function fsEntrySize(path: string): number {
  * [A4 已核对] `unlinkSync(path: string): void` 删文件、
  * `rmdirSync(path: string): void` 删空目录（所以递归必须自己走）。
  */
-function fsRemovePath(path: string): void {
+function fsRemovePath(rawPath: string): void {
+	const path = normalizeFsPath(rawPath)
 	if (fsIsDir(path)) {
 		const names = fsListNames(path)
 		for (let i = 0; i < names.length; i++) {

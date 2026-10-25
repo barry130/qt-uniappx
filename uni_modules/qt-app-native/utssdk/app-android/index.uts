@@ -30,7 +30,10 @@ import InputStreamReader from "java.io.InputStreamReader";
 import OpenableColumns from "android.provider.OpenableColumns";
 import PackageManager from "android.content.pm.PackageManager";
 import DocumentsContract from "android.provider.DocumentsContract";
-import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, IsIgnoringBatteryOptimizations, OpenBatteryOptimizationSettings, OpenAutoStartSettings, OpenAppDetailsSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteMediaByPath, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, PickFileResult, PickJsFile, PickDirectoryResult, PickDirectory, SetCustomDirUri, PermissionState, QueryPermissionStates, OpenPermissionSettings } from "../interface.uts";
+import Base64 from "android.util.Base64";
+import Arrays from "java.util.Arrays";
+import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, IsIgnoringBatteryOptimizations, OpenBatteryOptimizationSettings, OpenAutoStartSettings, OpenAppDetailsSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteMediaByPath, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, PickFileResult, PickJsFile, PickDirectoryResult, PickDirectory, SetCustomDirUri, PermissionState, QueryPermissionStates, OpenPermissionSettings, EmbedTagsOptions, EmbedAudioTags } from "../interface.uts";
+import { EmbedTagsData, Mp3Plan, FlacPlan, planMp3, planFlac, base64Encode, base64Decode } from "../embed-bytes.uts";
 
 /**
  * 强制窗口回归传统布局模式（decorFitsSystemWindows = true）。
@@ -1377,3 +1380,296 @@ export const pickDirectory: PickDirectory = function (onResult: (result: PickDir
 // 不需要「启动时把 URI 喂回原生」这一步，空实现。
 export const setCustomDirUri: SetCustomDirUri = function (uri: string): void {
 };
+
+// ==================== 音频标签内嵌（下载内嵌封面/歌词） ====================
+
+/** 读文件的最多 maxLen 字节（不足则全量）。经 Base64 桥转 Uint8Array：UTS 对
+ *  kotlin ByteArray 的元素级访问没有可靠先例（既有代码只把 ByteArray 当整块流缓冲），
+ *  而 android.util.Base64.encodeToString 是稳定静态通道；分片避免中途产生巨型中间串。
+ *
+ *  ⚠️ 分片**必须逐片解码再按字节拼装**：多片各自带 `=` 填充后连成一个大 base64 串是
+ *  非法输入（填充只允许出现在末尾），一次性解码会整体失败。2026-10-25 真机实测：118KB
+ *  封面 = 2 片，`pad` 累计 4 > 2 → base64Decode 返回**空数组** → looksLikeImage 判否 →
+ *  APIC 静默丢失（这首歌标题/歌词都在、就是没封面），而 FLAC 的 1MB/16MB 前缀阶梯
+ *  更是必然多片，等于 FLAC 内嵌从来不可能成功。 */
+function readFileBytes(path: string, maxLen: number): Uint8Array | null {
+	try {
+		const file = new File(path);
+		if (!file.exists()) return null;
+		const input = new FileInputStream(path);
+		try {
+			const CHUNK = 65536;
+			const bufSize = maxLen < CHUNK ? maxLen : CHUNK;
+			const buffer = new ByteArray(bufSize.toInt());
+			const parts: Array<Uint8Array> = [];
+			let total = 0;
+			for (;;) {
+				const n = input.read(buffer);
+				if (n <= 0) break;
+				// 尾块截成精确长度再编码，避免把旧缓冲内容混进去
+				const encoded = n == bufSize
+					? Base64.encodeToString(buffer, Base64.NO_WRAP)
+					: Base64.encodeToString(Arrays.copyOfRange(buffer, 0, n), Base64.NO_WRAP);
+				const piece = base64Decode(encoded);
+				if (piece.length == 0) {
+					console.log("[AppNative] readFileBytes 分片解码失败 path=" + path + " offset=" + total + " n=" + n);
+					return null;
+				}
+				parts.push(piece);
+				total += piece.length;
+				if (total >= maxLen) break;
+			}
+			if (total == 0) return null;
+			const out = new Uint8Array(total);
+			let p = 0;
+			for (let i = 0; i < parts.length; i++) {
+				const part = parts[i];
+				for (let j = 0; j < part.length; j++) {
+					out[p] = part[j];
+					p++;
+				}
+			}
+			return out;
+		} finally {
+			input.close();
+		}
+	} catch (e) {
+		console.log("[AppNative] readFileBytes 失败: " + (e != null ? e.toString() : "unknown"));
+		return null;
+	}
+}
+
+/** Uint8Array → FileOutputStream（同样走 Base64 桥） */
+function writeBytes(output: FileOutputStream, bytes: Uint8Array): void {
+	output.write(Base64.decode(base64Encode(bytes), Base64.NO_WRAP));
+}
+
+/** 从源文件 [from, to) 区间按流拷贝到 output（java→java，不经 UTS 元素层） */
+function copyRange(output: FileOutputStream, srcPath: string, from: number, to: number): boolean {
+	const input = new FileInputStream(srcPath);
+	try {
+		let skipped = 0;
+		while (skipped < from) {
+			const n = input.skip((from - skipped).toLong()).toInt();
+			if (n <= 0) return false;
+			skipped += n;
+		}
+		const buffer = new ByteArray(262144);
+		let left = to - from;
+		while (left > 0) {
+			const want = left < 262144 ? left : 262144;
+			const n = input.read(buffer, 0, want.toInt());
+			if (n <= 0) return false;
+			output.write(buffer, 0, n);
+			left -= n;
+		}
+		return true;
+	} finally {
+		input.close();
+	}
+}
+
+/** 魔数校验：只认 JPEG/PNG（防把 HTML 错误页/占位图嵌进音频） */
+function looksLikeImage(bytes: Uint8Array): boolean {
+	if (bytes.length < 4) return false;
+	const b0 = bytes[0] & 0xff;
+	const b1 = bytes[1] & 0xff;
+	if (b0 == 0xff && b1 == 0xd8) return true; // JPEG
+	if (b0 == 0x89 && b1 == 0x50) return true; // PNG
+	return false;
+}
+
+/** mp3 旧标签可能叠了多重 ID3 / 大 APIC：64B → 1MB → 16MB 前缀阶梯重试 */
+function planMp3WithPrefixLadder(src: string, data: EmbedTagsData): Mp3Plan | null {
+	const prefix64 = readFileBytes(src, 64);
+	if (prefix64 != null) {
+		const plan = planMp3(prefix64, data);
+		if (plan != null) return plan;
+	}
+	const prefix1m = readFileBytes(src, 1024 * 1024);
+	if (prefix1m != null) {
+		const plan = planMp3(prefix1m, data);
+		if (plan != null) return plan;
+	}
+	const prefix16m = readFileBytes(src, 16 * 1024 * 1024);
+	if (prefix16m != null) {
+		const plan = planMp3(prefix16m, data);
+		if (plan != null) return plan;
+	}
+	return null;
+}
+
+/** flac 元数据区可能含大 PADDING/旧封面：1MB → 16MB 前缀阶梯；保留成功前缀供块头复用 */
+type FlacPlanWithPrefix = {
+	plan: FlacPlan;
+	prefix: Uint8Array;
+};
+
+function planFlacWithPrefixLadder(src: string, data: EmbedTagsData): FlacPlanWithPrefix | null {
+	const prefix1m = readFileBytes(src, 1024 * 1024);
+	if (prefix1m != null) {
+		const plan = planFlac(prefix1m, data);
+		if (plan != null) {
+			const r: FlacPlanWithPrefix = { plan: plan, prefix: prefix1m };
+			return r;
+		}
+	}
+	const prefix16m = readFileBytes(src, 16 * 1024 * 1024);
+	if (prefix16m != null) {
+		const plan = planFlac(prefix16m, data);
+		if (plan != null) {
+			const r: FlacPlanWithPrefix = { plan: plan, prefix: prefix16m };
+			return r;
+		}
+	}
+	return null;
+}
+
+/**
+ * 内嵌标签（见 interface.uts 的 EmbedAudioTags 契约）。
+ * 失败/不支持 resolve 原绝对路径；成功 resolve .embed.<ext> 副本路径。
+ */
+export const embedAudioTags: EmbedAudioTags = function (audioTempPath: string, opts: EmbedTagsOptions): Promise<string> {
+	return new Promise<string>((resolve: (value: string) => void) => {
+		resolve(embedAudioTagsSync(audioTempPath, opts));
+	});
+};
+
+/**
+ * uni 文件 URI → 真实绝对路径。
+ *
+ * 为什么必须有这一步：`uni.env.USER_DATA_PATH` 在 Android 上是 `unifile://usr`，
+ * 下载停靠点（.part）与内嵌时的封面临时文件都挂在那里；而 `java.io.File` 不认这个
+ * scheme，`new File("unifile://usr//qt-download-parts/x.part").exists()` 恒为 false，
+ * 内嵌于是**静默**退回同目录文件（2026-10-25 MuMu 实测：日志里只有一句
+ * 「内嵌未生效（格式不支持或失败），走原件」，原生侧一个字都没打）。
+ *
+ * 规则与 saveToPublicMedia 对齐：先剥 file://，能直接 stat 到就用；否则交
+ * UTSAndroid.convert2AbsFullPath；再兜底按 uni 私有目录约定把 `unifile://usr`
+ * 映射到应用 filesDir（= qt-app-native dataDir() 返回的同一目录）。
+ */
+function resolveRealPath(path: string): string {
+	let p = path;
+	if (p.indexOf("file://") == 0) p = p.substring(7);
+	if (p.length > 0 && new File(p).exists()) return p;
+	const converted = UTSAndroid.convert2AbsFullPath(path);
+	if (converted.length > 0 && new File(converted).exists()) return converted;
+	if (p.indexOf("unifile://usr") == 0) {
+		const ctx = UTSAndroid.getAppContext();
+		if (ctx != null) {
+			const dir = ctx.filesDir;
+			if (dir != null) {
+				let rest = p.substring(13);
+				while (rest.indexOf("/") == 0) rest = rest.substring(1);
+				return dir.getAbsolutePath() + "/" + rest;
+			}
+		}
+	}
+	if (converted.length > 0) return converted;
+	return p;
+}
+
+function embedAudioTagsSync(audioTempPath: string, opts: EmbedTagsOptions): string {
+	const ext = opts.ext;
+	if (audioTempPath.length == 0 || (ext != "mp3" && ext != "flac")) return audioTempPath;
+	let copyPath = "";
+	let copyReal = "";
+	try {
+		const realSrc = resolveRealPath(audioTempPath);
+		const file = new File(realSrc);
+		if (!file.exists()) {
+			console.log("[AppNative] embed 源文件不存在 src=" + audioTempPath + " real=" + realSrc);
+			return audioTempPath;
+		}
+		const totalLen = file.length().toInt();
+		if (totalLen < 128) return audioTempPath;
+		// 封面字节（带魔数校验，失败按无封面处理）
+		let coverBytes: Uint8Array | null = null;
+		if (opts.coverTempPath.length > 0) {
+			const raw = readFileBytes(resolveRealPath(opts.coverTempPath), 4 * 1024 * 1024);
+			if (raw != null && looksLikeImage(raw)) coverBytes = raw;
+		}
+		const data: EmbedTagsData = {
+			title: opts.title,
+			artist: opts.artist,
+			album: opts.album,
+			lrcText: opts.lrcText,
+			coverBytes: coverBytes,
+			coverMime: opts.coverMime,
+		};
+		if (ext == "mp3") {
+			const plan = planMp3WithPrefixLadder(realSrc, data);
+			if (plan == null) {
+				console.log("[AppNative] embed mp3 计划失败 src=" + realSrc + " len=" + totalLen);
+				return audioTempPath;
+			}
+			copyPath = audioTempPath + ".embed." + ext;
+			copyReal = realSrc + ".embed." + ext;
+			const output = new FileOutputStream(copyReal);
+			try {
+				writeBytes(output, plan.newTag);
+				if (!copyRange(output, realSrc, plan.oldTagSize, totalLen)) {
+					output.close();
+					new File(copyReal).delete();
+					return audioTempPath;
+				}
+			} finally {
+				output.close();
+			}
+			return copyPath;
+		}
+		const flac = planFlacWithPrefixLadder(realSrc, data);
+		if (flac == null) {
+			console.log("[AppNative] embed flac 计划失败 src=" + realSrc + " len=" + totalLen);
+			return audioTempPath;
+		}
+		copyPath = audioTempPath + ".embed." + ext;
+		copyReal = realSrc + ".embed." + ext;
+		const output = new FileOutputStream(copyReal);
+		try {
+			// fLaC 魔数
+			const magic = new Uint8Array(4);
+			magic[0] = 0x66;
+			magic[1] = 0x4c;
+			magic[2] = 0x61;
+			magic[3] = 0x43;
+			writeBytes(output, magic);
+			writeBytes(output, flac.plan.streamInfo);
+			// 保留块：块头 4B 从前缀取（last 位清零——它不再是最后一块），数据区从源文件搬运
+			const spans = flac.plan.keptSpans;
+			for (let i = 0; i < spans.length; i++) {
+				const head = new Uint8Array(4);
+				const off = spans[i].headerOffset;
+				head[0] = flac.prefix[off] & 0x7f;
+				head[1] = flac.prefix[off + 1];
+				head[2] = flac.prefix[off + 2];
+				head[3] = flac.prefix[off + 3];
+				writeBytes(output, head);
+				if (!copyRange(output, realSrc, off + 4, off + 4 + spans[i].dataLen)) {
+					output.close();
+					new File(copyReal).delete();
+					return audioTempPath;
+				}
+			}
+			writeBytes(output, flac.plan.vorbisComment);
+			const pic = flac.plan.picture;
+			if (pic != null) writeBytes(output, pic);
+			if (!copyRange(output, realSrc, flac.plan.audioOffset, totalLen)) {
+				output.close();
+				new File(copyReal).delete();
+				return audioTempPath;
+			}
+		} finally {
+			output.close();
+		}
+		return copyPath;
+	} catch (e) {
+		console.log("[AppNative] embedAudioTags 失败: " + (e != null ? e.toString() : "unknown"));
+		if (copyReal.length > 0) {
+			try {
+				new File(copyReal).delete();
+			} catch (e2) {}
+		}
+		return audioTempPath;
+	}
+}

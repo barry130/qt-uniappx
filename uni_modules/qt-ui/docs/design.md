@@ -252,7 +252,7 @@ qt-button-label-sm
 - 全站 `navigationStyle: "custom"` 后的 chrome：**宽屏只留状态栏留白、不画顶部标题**；窄屏自绘「返回 + 标题」功能栏；
 - 设置子页的三栏：rail | 原设置总览 | 子页内容。中栏复用 `qt-settings-overview`，不是另一份精简菜单。
 - 我的页族的三栏（2026-10-19 起，与设置族同一套机制）：rail | 「我的」总览 | 子页内容。中栏复用 `qt-profile-overview`（从「我的」页抽出的真实总览，含用户卡/五宫格/功能分组与实时数据），当前项高亮；「设置」cell 属设置族，仍走 `navigateTo` 进另一套三栏，不做 redirectTo 就地替换。总览里的音乐助手 cell 按权限显隐（`canUseMusicAssistant`，`services/music-api.ts`）：账号权限里没有 `user:ai:music:use`（超管 `*:*:*` / 前缀通配 `user:ai:*` 等价）或未登录时整个入口不显示，而不是点进去才看到「无权限」——判定与 qt-pc 侧边栏同一个权限码（后端 `/api/v1/app/ai/agents` 已按它过滤，无码账号拉到的就是空列表）；AI 页自身的空态/错误展示保留为第二道守卫。竖屏/中等宽度的 `pages/user` 账户组也有同一个入口（2026-10-24 起，「听歌统计」下方，`sparkles` 图标 + 同一 `canUseMusicAssistant` 门禁，隐藏时统计行补回 `cell-no-border`），AI 页本体是 `pages/ai-assistant/index.uvue` + `composables/use-ai-chat.ts` + `services/ai.ts` + `types/ai.ts`（与 qt-pc 的 useAiChat/lib/ai 同一套后端口径：短轮询事件、提交前自搜候选，无本地算法）。
-- **设置总览新增 AI 分组（2026-10-24，qt-pc 设置页 AiSection 的移动端形态）**：`qt-settings-overview` 在「桌面歌词」组后新增 `ai` 组两行——「AI 模式」（值 = `AI_MODE_LABEL_*`，弹 action-sheet 三选一：纯规则/本地模型精选/服务端 AI，**服务端仅 `isQtAdmin()` 可见**，非管理员任何路径都存不进 server；选中后 toast 该档说明）与「接口配置」（值 = 生效供应商名 + 生效模型，或 未配置/未选生效档）。模式直接读写同步真源 `ai-mode.ts` 的 `readAiMode/saveAiMode`（存储键 `dailyRecommend.mode`，音乐助手与每日推荐全局共用）。**推荐口味行已按用户要求删除**（口味只在每日推荐页内切换）。「接口配置」进入新页 `pages/ai-providers/index.uvue`（qt-pc AiProvidersDialog 的移动端形态：供应商卡片列表 + 底部弹层编辑器——名称/接口地址/协议 action-sheet（openai/openai-responses/anthropic/gemini）/模型手填或「拉取列表」/密钥（明文只存本机，列表与占位只显 `maskKey` 掩码，编辑留空 = 保留旧值）/证书校验开关/测试连接（一条「你好」走全链路，回显 HTTP 状态 + 耗时 + 回复片段）），数据面在 `services/ai-providers.ts`（键 `qt-ai-providers`；`aiLocalChat` 按协议构造请求并解析回复，`listModels` 网关不支持时可手填模型）。`daily-recommend.ts` 的 `askModelForPicks` 已接真实 `aiLocalChat`（两轮温度 0.4/0.2 + JSON 纠正重试，失败仍自动退回规则推荐）。分组两列切分由 `qtSplitByHeight` 自动重算。
+- **设置总览新增 AI 分组（2026-10-24，qt-pc 设置页 AiSection 的移动端形态）**：`qt-settings-overview` 在「桌面歌词」组后新增 `ai` 组两行——「AI 模式」（值 = `AI_MODE_LABEL_*`，弹 action-sheet 三选一：纯规则/本地模型/服务端 AI，**服务端仅 `isQtAdmin()` 可见**，非管理员任何路径都存不进 server；选中后 toast 该档说明）与「接口配置」（值 = 生效供应商名 + 生效模型，或 未配置/未选生效档）。模式直接读写同步真源 `ai-mode.ts` 的 `readAiMode/saveAiMode`（存储键 `dailyRecommend.mode`，音乐助手与每日推荐全局共用）。**推荐口味行已按用户要求删除**（口味只在每日推荐页内切换）。「接口配置」进入新页 `pages/ai-providers/index.uvue`（qt-pc AiProvidersDialog 的移动端形态：供应商卡片列表 + 底部弹层编辑器——名称/接口地址/协议 action-sheet（openai/openai-responses/anthropic/gemini）/模型手填或「拉取列表」/密钥（明文只存本机，列表与占位只显 `maskKey` 掩码，编辑留空 = 保留旧值）/证书校验开关/测试连接（一条「你好」走全链路，回显 HTTP 状态 + 耗时 + 回复片段）），数据面在 `services/ai-providers.ts`（键 `qt-ai-providers`；`aiLocalChat` 按协议构造请求并解析回复，`listModels` 网关不支持时可手填模型）。`daily-recommend.ts` 的 `askModelForPicks` 已接真实 `aiLocalChat`（两轮温度 0.4/0.2 + JSON 纠正重试，失败仍自动退回规则推荐）。分组两列切分由 `qtSplitByHeight` 自动重算。
 - **每日推荐页（2026-10-24，qt-pc DailyRecommendPage 全量对齐）**：`pages/daily-recommend/index.uvue`（与「每日新歌」`pages/daily` 是两个页面——后者是新歌流，前者是个性化推荐）。服务层 `services/daily-recommend.ts`（约 2840 行，qt-pc `src/lib/daily-recommend.ts` 的移植）+ `services/recommend-rank.ts` / `recommend-dimensions.ts` / `music-style.ts` / `recommend-types.ts` / `recommend-text.ts` / `ai-mode.ts` / `ai-server-picks.ts` 六件套；偏好数据源全走本地：收听统计 `stores/listen-stats`（effectiveCount 降序取 topTracks、聚合歌手）、收藏 `player.likedSongs`、本地歌单成员经 `pids` 反查、在线收藏歌单走 `musicApi.playlist` 详情、播放历史 `player.history`。模式三档**全局**（rule/local/server，真源 `ai-mode.ts`，每日推荐与音乐助手共用），页面上的「AI 模式设置」弹窗即写它；`server` 选项仅 `isQtAdmin()` 可见（qt-pc 同款门禁）。缓存按 `日期+模式+口味` 命中（`dailyRecommend.cache`，版本号 DAILY_RULE_VERSION），换一批同日合并 keys 供 7 天跨天去重。口味三档（心动/常听/探索）与冷启动风格种子（`dailyRecommend.seeds`，冷启动时展示平台分类 chips 让用户勾选）同 qt-pc。页面 UI 复用详情页骨架（qt-page-frame width-kind=detail + 宽屏左栏 whero + 窄屏 hero + list-view），行是自定义 `rc-row`（序号/封面/名称/`歌手 · 推荐理由`副行/更多），批量操作与排序走既有 useBatchSelect/useBatchActions。注意服务层导出多为 **async**（loadTodayResult/clearTodayResult/readMode/generateDailyRecommend），页面侧等待后再用；模式高亮等同步场景直接用 `ai-mode.ts` 的 readAiMode/saveAiMode。
 
 API：
@@ -349,8 +349,12 @@ class `.qt-button-label-sm` 只有 23rpx。若模板再追加一个内联 `qtFon
 
 - 页面壳：按 `widthKind` 取内容形态上限，并在 rail 右侧居中；页面不能再自行计算 rail padding；
 - `qt-action-sheet`：移动端从底部出现，宽屏改为右侧抽屉（`420px`）；
-- `qt-side-nav`：只有 `qt-page-frame` 挂载。`medium`（600–899）是 64px 图标 rail；`wide` / `desktop` 是 208px 完整 rail；
+- `qt-side-nav`：只有 `qt-page-frame` 挂载。`medium`（600–899）是 64px 图标 rail；`wide` / `desktop` 2026-10-25 起对齐网易云 Pad，收成 96px「图标上、11px 小字下」紧凑 rail（原 208px 文字横排栏太占内容宽）；
 - `qt-player-bar`：存在当前歌曲时由 frame 在宽屏统一挂 64px 常驻底栏，`qt-mini-player` 只在非宽屏出现；
+  - 内容按可用宽度（`layout.windowWidth - qtRailWidth()`，即 rail 右侧的真实空间）分档，全部用 px：`<740px` 只留「封面信息 + 上一首/播放/下一首 + 进度条」（窄平板横屏）；`>=740px` 追加 `.pbar-actions`（收藏 / 播放模式 / 队列）；`>=840px` 再追加 `.pbar-volume`（静音按钮 + 76px 音量条）。左块宽度随之 168 / 240 / 300px 三档收缩，不挤占进度条；
+  - 收藏走 `player.canPickPlaylist()` + `player.showPlaylistPickerFor(current)`（与播放页爱心同一条路径，含「还没有歌单」提示）；播放模式走 `player.cycleMode()` + `player.modeLabel()` toast，图标 `shuffle / repeat-1 / repeat` 随 `player.mode` 变；队列按钮 `uni.navigateTo("/pages/player/index?queue=1")`——底栏在 `fullWidth` 的播放页自身不渲染，emit 无处可发，故用查询参数让播放页 `onLoad` 里 `nextTick(openQueue)`；
+  - 音量直连 `services/audio-player.uts` 的 `getVolume/setVolume/getMuted/setMuted`（本来就有持久化，无需新原生代码），拖动只在 `touchend` 落盘，`pct > 0` 自动解除静音；音量条宽度固定 76px 并用 `windowWidth - 20 - 4 - 76` 反算触点映射，因为该 Vapor 版本不支持 `calc()/env()`；
+  - 触达宽度都按「宽屏只可能是 pad/desktop」写死 px（`rpx` 在宽屏会被放大到 1rpx≈1.4dp，见 §10.1）；
 - 列表、卡片、输入框等基础组件使用同一份 props 和 token，只在布局 class 上产生差异。
 
 `qt-action-sheet` 已接入该逻辑，且**必须放在页面所有 `list-view` 节点之后**（原生组件层级问题，
@@ -362,8 +366,8 @@ class `.qt-button-label-sm` 只有 23rpx。若模板再追加一个内联 `qtFon
 
 ```text
 ┌────────────────────────────────────────────────────────┐
-│ rail（medium: 64px；wide/desktop: 208px）│ 内容列（frame） │
-│ 品牌 + 菜单，可滚动                         │ 宽度按 kind 计算 │
+│ rail（medium: 64px；wide/desktop: 96px 图标+小字）│ 内容列（frame） │
+│ 菜单（无品牌 logo，2026-10-25 用户要求去掉） │ 宽度按 kind 计算 │
 ├────────────────────────────────────────────────────────┤
 │                 宽屏常驻 player bar（有歌曲时）           │
 └────────────────────────────────────────────────────────┘
@@ -379,7 +383,7 @@ rail │ 设置总览 / 我的总览（400px，当前项高亮） │ 子页内�
 
 ### 6.6 多形态适配约定（竖屏手机 / 横屏 / 平板 / 车机，2026-09 定稿）
 
-目标形态：`compact <600dp`（手机竖屏，底部 tab）、`medium 600–899dp`（仅横屏时 `isWide=true`，64px 图标 rail、单列）、`wide 900–1279dp`（208px rail，按可用宽决定单/双列）、`desktop ≥1280dp`（208px rail、允许多列与常驻底栏）。竖屏 720dp 设备必须保持 compact/medium 手机布局，不能因为历史 720 门限误进 rail。
+目标形态：`compact <600dp`（手机竖屏，底部 tab）、`medium 600–899dp`（仅横屏时 `isWide=true`，64px 图标 rail、单列）、`wide 900–1279dp`（96px 紧凑 rail，按可用宽决定单/双列）、`desktop ≥1280dp`（96px 紧凑 rail、允许多列与常驻底栏）。竖屏 720dp 设备必须保持 compact/medium 手机布局，不能因为历史 720 门限误进 rail。
 
 **rpx 的残酷事实（2026-09 实测，HBuilderX alpha 5.25 / Android）**：
 
@@ -389,7 +393,7 @@ rail │ 设置总览 / 我的总览（400px，当前项高亮） │ 子页内�
 **宽屏导航 rail（`qt-side-nav`）**：
 
 - `qt-side-nav` 只由 `qt-page-frame` 挂载；业务页面不得自行 import。rail 恒为状态栏让位，菜单区在 `qsn-scroll`（`scroll-view`，`flex:1`）内滚动，避免矮横屏里末尾「设置」不可达。
-- 仅 `medium` 使用 64px 图标 rail；`wide` 与 `desktop` 使用 208px 完整 rail。工具入口（搜索/每日推荐/歌单广场/排行榜/设置）在宽屏下由 `qtRailNavigate()` **就地托管**进当前 tab 页（§6.18：不新建 Activity、不往页面栈里堆页面），栈顶不是宿主页时先 `navigateBack` 回宿主再托管，深链兜底才 `navigateTo`（不传 `animationType`，走默认动画）；窄屏保留系统整页导航。发现/我的切 tab 统一走 `qtSwitchTab()`（鸿蒙 `reLaunch`，见下条），该 API 不接受 `animationType`，不要给它加动画参数；切 tab 前先 `qtCloseWideTool()` 把托管工具页藏起来（已创建的工具页保活，重开瞬时恢复）。
+- 仅 `medium` 使用 64px 图标 rail；`wide` 与 `desktop` 使用 96px「图标+小字」紧凑 rail（2026-10-25 起，对齐网易云 Pad）。工具入口（搜索/每日推荐/歌单广场/排行榜/设置）在宽屏下由 `qtRailNavigate()` **就地托管**进当前 tab 页（§6.18：不新建 Activity、不往页面栈里堆页面），栈顶不是宿主页时先 `navigateBack` 回宿主再托管，深链兜底才 `navigateTo`（不传 `animationType`，走默认动画）；窄屏保留系统整页导航。发现/我的切 tab 统一走 `qtSwitchTab()`（鸿蒙 `reLaunch`，见下条），该 API 不接受 `animationType`，不要给它加动画参数；切 tab 前先 `qtCloseWideTool()` 把托管工具页藏起来（已创建的工具页保活，重开瞬时恢复）。
 - 全部 39 页使用 `navigationStyle: "custom"`。宽屏由 frame 省去顶部标题并留出状态栏空间；窄屏 frame 画功能性返回与标题，避免二级页失去返回路径。业务页面不再计算 rail padding。
 - `qt-mini-player` 仅在非宽屏显示；宽屏统一由 `qt-player-bar` 占据 rail 右侧的常驻 64px 底栏。**全站共用一份实例状态（2026-10-24 改造，用户要求「全部页面共用一个悬浮播放器，页面返回或者进入页面不应该出现闪烁」）**：悬浮球的位置/展开/吸附侧/渲染尺寸/唱片旋转角全部收敛到 `uni_modules/qt-ui/services/mini-player-singleton.ts` 这一个模块级 store（`miniFabX/miniFabY/miniExpanded/miniEdgeSide/miniEdgeAnimating/miniRenderWidth/miniRenderHeight/miniRotateDeg` + `ensureMiniPositioned/miniSnapToNearestEdge/miniExpandFromFab/miniCollapse/onMiniWindowResize` 等 action），组件改为无状态消费者；挂载点收敛到 `qt-page-frame`（`<qt-mini-player v-if="!fullWidth" />`，全站 39 页一处生效），**业务页面一律不得再自行挂 `qt-mini-player`**（2026-10-24 起已从 10 个页面摘除）。废弃了旧的「显示权交接」协议（registerMiniPlayer/refreshMiniPlayerRoute/栈顶路由轮询）——每次 navigateTo/back 都要做一次球的消失→出现交接，交接空洞正是闪烁根源；现在被盖住的页面窗口本来就在下层、它的球不可见，转场期间新旧两页的球像素级一致地跟着页面动画运动，视觉上是同一个球；第 2 个页面起也没有「窗口尺寸不稳→重试定位」的初始化窗口期（定位状态全站共享，只有首个实例做 `ensureMiniPositioned()` 的 50ms×40 重试）。唱片旋转是全站共享的单 rAF（组件 mount 引用计数 + playing 标志驱动），换页后旋转角度连续。**注意 `position: fixed` 元素在鸿蒙上不会随页面栈被裁剪**——排查时别把下层页面残留的 fixed 层误判成当前页组件（2026-10-19 就误把榜单里「当前播放行」的大圆封面当成悬浮球查了半天）。
 - **鸿蒙上 fixed 宿主里的 fixed 子节点收不到触摸，子级必须改 `absolute`**（2026-10-19 真机实测定稿，用户报「点击悬浮球无反应」）。现象：悬浮球看得见、`uitest dumpLayout` 里节点 `clickable=true`、z-index 998 也在最上层，但点它完全没反应，同一坐标下方的榜单行反而被点开（事件穿透）。根因：`.mini-player-host` 是 `position: fixed`，子级 `.fab-right` 也写 `position: fixed`——鸿蒙（uni-app x）在这种「fixed 套 fixed」下命中测试失效。**解法**：宿主保持 `fixed` 并按 `left/top` 定位，子级改 `position: absolute; left: 0; top: 0`，铺满宿主即可。**关键坑**：改 absolute 后子级的 `left/top` 必须固定为 `0`——若仍沿用宿主那套屏幕坐标（本组件原先把 `fabX/fabY` 内联到 `containerStyle`），就会在宿主偏移之上再偏移一次，球被推到屏幕外，`dumpLayout` 里该节点 `clickable` 会从 true 变 false。所以 `containerStyle` 现在只输出尺寸与圆角，位置完全由 `hostStyle` 负责，两者不要都写坐标。同一红线适用于任何「fixed 容器 + fixed 子级」的组合（`qt-playlist-picker` 的 mask/panel、`qt-action-sheet`、`qt-upgrade-popup`、`qt-notice-splash` 等），改样式时先按这条自检。
@@ -416,7 +420,7 @@ rail │ 设置总览 / 我的总览（400px，当前项高亮） │ 子页内�
 **页面骨架模式**：
 
 - 首页 / 我的等 tab 页：只使用 `qt-page-frame width-kind="grid"`；frame 统一挂 rail，页面不再自行挂 `QtSideNav` 或写 rail padding。首页宽屏仍是 rail | 主列（feature + 推荐歌单网格 + 新歌） | 300px Trending 侧栏；主列可用宽不足时右栏内容下移。歌单网格列数由 `qtColumnCount()` 和真实内宽计算，禁止靠 flex-wrap 或历史固定列数。
-- **首页头部不再有品牌块**（2026-10 用户定稿：「把首页最上面的轻听那一块内容全部删了吧，顺序换成音源-搜索-通知，否则显得太拥挤了」）：`.home-brand`（logo + 「轻听」+「你的私人音乐台」）连同它的 4 条 `*-wide` 覆盖一并删除，头部一行只剩三个控件，顺序 `SourceSwitcher`、搜索、通知（竖屏与宽屏同一顺序）。`.home-source` 的 `margin-left` 随之一并删掉——它成了行首，再留 12rpx 就比页面左右内边距多缩进一截。首页的品牌仍由宽屏的 `qt-side-nav` 承担，页内不再重复。
+- **首页头部不再有品牌块**（2026-10 用户定稿：「把首页最上面的轻听那一块内容全部删了吧，顺序换成音源-搜索-通知，否则显得太拥挤了」）：`.home-brand`（logo + 「轻听」+「你的私人音乐台」）连同它的 4 条 `*-wide` 覆盖一并删除，头部一行只剩三个控件，顺序 `SourceSwitcher`、搜索、通知（竖屏与宽屏同一顺序）。`.home-source` 的 `margin-left` 随之一并删掉——它成了行首，再留 12rpx 就比页面左右内边距多缩进一截。首页与 rail 均不再显示品牌（2026-10-25 用户要求去掉 rail 左上角 logo）。
 - **今日精选 hero 用歌单封面当底图**（2026-10 用户要求「把首页这个背景改为整个歌单的图片，可以适当裁剪然后背景颜色」）：竖屏 `.portrait-hero` 内最前面加两层绝对定位满铺兄弟节点——`<image class="hero-bg" mode="aspectFill">`（`playlists[0].picUrl`）+ `.hero-scrim`（`background-color: theme.skin.mediaScrim`，即 `rgba(0,0,0,0.52)`，与播放页底图遮罩同一个 token；换皮肤时一起变）。`heroStyle` 的 accent 底色 + 135° 渐变保留，作为封面未到货/加载失败时的兜底，也是图片透明区的垫底。两层各自写 `border-radius: 28rpx`（与卡片同值）：原生端绝对定位子节点不一定被父级 `overflow:hidden` 的圆角裁掉。**卡内不再放 `.hero-art` 缩略图**（2026-10 用户「右边这个图片不需要」）：底图就是同一张封面，再摆一个方块只是重复；hero 内的封面骨架块（`.hero-art-skel`）与 `QtSkeleton` 导入一并删掉，首屏未到货时靠 `heroStyle` 的 accent 底 + 文案占位撑住卡片。宽屏 `.wide-feature` 的 `.wide-feature-cover` 是另一套布局（不是满铺底图），保留，但图片同样走 `featuredPicUrl`。**底图铺满要「外层 view 四边 0 + image 100%×100%」两层**（2026-10 两次踩坑后的定稿；用户原话「这样太怪了，还是之前的一个容器，不要分成两个」与「每日推荐上面那个立即播放的背景图片没有占满整个屏幕」）：`<image>` 自己写绝对定位四边 0 不生效——`right: 0` 让底图只拿到行内剩余宽度（770 宽窗口实测约 518px），卡片右侧露一条 accent 底色（`#793032`，正是 accent `#ff6268` 被 `mediaScrim` 压掉 48% 的结果；顺带可用它反推皮肤 accent），整卡看着像被劈成两张；退一步改成「只写 left/top/bottom + 内联 px 宽度（`heroBgWidth = Math.round(win - win * 48 / 750)`）」只修好了横向，**纵向 `bottom: 0` 对 image 同样不生效**，高度退化成按宽高比推出来的方图（约 330px），「立即播放」那一带约 100px 露出被遮罩压暗的 accent 底色——这就是用户报的「背景图片没有占满整个屏幕」。定稿写法：外面套一层 `<view class="hero-bg-wrap">` 用四边 0 拉伸（view 的拉伸是可靠的，`.hero-scrim` 一直就是这么铺满的），`<image class="hero-bg">` 在外层里写 `width: 100%; height: 100%`，与 `pages/theme` 的 `.wallpaper-image`、`qt-page-frame` 的 `.qt-page-frame-wallpaper` 同源。结论一句话：**image 的绝对定位只认「左上 + 显式宽高」，不认 right/bottom 拉伸；要拉伸就套一层 view**。宽屏 `.wide-feature-bg` 一直是 `width/height:100%` 的写法所以没踩到。注意换算不能用 `qtRpx`：它在宽窗口按 375 基准折算，48rpx 会算成 24px、比真实卡宽差 25px。
 - **今日精选每次加载随机挑一个歌单**（2026-10 用户「首页这个容器展示从下面推荐歌单里面随机选择一个，不要只选择第一个」）：`featuredIndex` 是 `ref<number>`，`featuredName` / `featuredPicUrl` / `playFeatured` 三处都读它（取不到时回落到 0）；随机只在推荐数据到货那一刻抽一次（`load()` 的 `recsTask` 里 `playlists.value = recs` 之后调 `pickFeatured(recs)`），抽取范围取 `Math.min(10, list.length)`——与下方歌单架 `playlists.slice(0, 10)` 同一区间，避免 hero 抽到架子上看不到的歌单。**不能写成 computed 里现抽**——否则每次重算（滚动、主题切换、任意响应式依赖变动）都会换一个歌单，封面、标题、点击目标会各跳各的。换源/重拉时 `pickFeatured` 重新抽并自然收敛到新数组范围，`ensureLoad` 清空 `playlists` 后 `featuredIndex` 无需手动复位。**「一次加载只抽一次」要靠两层保证**（2026-10 用户报「首页这条会加载两次不一样的」）：① `ensureLoad()` 必须先 `ensureLocalStateRestored()` 再比对 `packsFingerprint()`——冷启动时本地包态是异步从磁盘恢复的，恢复前指纹恒为空态，紧随 `onMounted` 的 `onShow` 会误判「包变了」而再拉一整轮（推荐数据到货两次 → hero 当场换一张）；② `pickFeatured` 记住「音源 + 抽中的歌单 id」（`featuredSource` / `featuredId`），同一音源下那个歌单还在前 10 里就直接沿用、不重抽（推荐走 `music-api` 的 60s 短缓存，重拉常拿到同一份列表，内容没变就不该换 hero），换源或它掉出前 10 才重抽。不要用「关掉 onShow 的 ensureLoad」代替——那会失去包变更/回前台的兜底。
 - **「我的」页三块卡必须同宽**（2026-10 用户反馈「上面用户信息框和下面的宽度不一致」）：竖屏统一 `24rpx` 侧边距 + `24rpx` 圆角（`.profile` / `.tiles` / `.group` 三块都走这套），宽屏统一 `16px`。`.profile` 早期是「上直角下圆角」的通栏卡（没有侧边距、圆角 `0 0 28rpx 28rpx`），整卡比下面两张宽 48rpx；改宽度时圆角要一起改成四角 `24rpx`，否则方角卡片浮在页面里会显得残缺。内容左边距靠「卡片侧边距 + 卡片内边距」对齐（24 + 32 = 56rpx，与分组卡的 `padding: 0 32rpx` 一致）。三块卡与全部业务（头像/昵称/签到/计数/跳转）2026-10-19 起移入 `components/qt-profile-overview`：宽屏三栏下同一份总览还渲染在我的族子页中栏，两处实时数据必须同源，抄两份必然漂移。中栏变体（`inPane`）恒单列、隐藏行尾摘要与箭头、行高 52px（与设置中栏同规格），当前项高亮 accentSoft 底色 + 标题 accent 色。
@@ -551,6 +555,20 @@ export function qtFontDualRpx(baseRpx: number, wideRpx: number): string;
 <text :style="('color:' + theme.skin.text + ';') + qtFont(25)">标题</text>
 <text :style="qtFontDual(26, 15)">紧凑 26rpx / 宽屏 15px</text>
 ```
+
+**选哪个 helper（2026-10-25 明确，此前只是约定俗成，宽屏改造里反复要判断）**：
+看这个 `<text>` **所在子树会不会在宽屏渲染**，而不是看文件或数值大小 ——
+
+| 情况 | 用 | 理由 |
+| --- | --- | --- |
+| 只在竖屏分支（`v-if="!layout.isWide"` 或 `.portrait-*` 子树内） | `qtFont(baseRpx)` | 宽屏永不渲染，写成 dual 的白算一半；rpx 在竖屏是 750 基准，正好是设计稿口径 |
+| 宽屏与竖屏共用同一个节点，且有 `-wide` 字号覆盖 | `qtFontDual(baseRpx, widePx)` | 唯一正解，见下一段 |
+| 只在宽屏分支（`v-if="layout.isWide"` / `.wide-*` / `-wide` 类常驻） | `qtFontPx(widePx)` | 宽屏 `1rpx ≈ 1.42dp`，只能写 px；用 dual 会让人误以为还有 rpx 分支 |
+| 字号在 JS 里算（歌词、富文本、图表轴） | 不内联，函数内乘 `fontScale.scale` | 见「有意不参与缩放的节点」 |
+
+`qtFontRpx` 是 `qtFont` 的别名（历史命名），新代码用 `qtFont`；`qtFontDualPx/Rpx` 只在
+「两端都已是 px / 都是 rpx」时出现，宽屏改造里基本用不到。判断口径统一后，
+`tools/audit-px-units.mjs` 的 C 段（class 写 px 但被内联覆盖）可以当「写错档位」的信号用。
 
 **`qtFontDual` 为什么必须存在（最容易踩的坑）**：内联 `:style` 优先级高于 class，
 一旦给某个 `<text>` 写了内联 `font-size`，它原本靠 `-wide` class 做的宽屏 px 覆盖就**整体失效**
@@ -1229,6 +1247,78 @@ backdrop-filter
 - 只有 `windowWidth/windowHeight` 真的变了才写 reactive 状态（旋转、分屏、自由窗口都能触发重排）；
 - `App.uvue` 的 `onShow`/`onHide` 调用 `resumeQtLayoutWatcher()` / `pauseQtLayoutWatcher()`，避免后台空转；
 - 每次 `useQtLayout()` 都会先 `syncQtLayout()` 同步一次，保证跨页面导航后拿到的是最新尺寸。
+
+### 10.3 矮横屏（`layout.isShort`，2026-10-25）
+
+`use-qt-layout.ts` 早就导出了 `isShort = windowHeight < QT_BREAKPOINT_SHORT(520)`，但此前**全仓零消费**。它的必要性在于：`isWide` 的判据是「宽 ≥ 900 或 横屏且宽 ≥ 600」，所以**手机横屏（如 780×360）也会落进宽屏分支**，而宽屏分支里的留白/封面尺寸都是按 pad 写的。
+
+首个消费点 = 播放页宽屏舞台（`pages/player/index.uvue`）：
+
+- 封面尺寸原来是 `windowHeight - 108`（下限 112），780×360 时算出 240 —— 而顶部留白 + 底部三行控件之后实际只剩一百多 px，封面卡直接盖住进度行与控制行；
+- 现在改为**由剩余高度反算**：`wideBodyHeight = windowHeight - widePadTop - widePadBottom - 底部三行占位`，封面卡 = `clamp(108, 260, wideBodyHeight)`，封面 = 卡片 − 20（`.cover-card` 的 `padding:10px × 2`）。三行占位是常量：正常 `138`（歌词工具行 34+6 / 进度行 32+12 / 控制行 46+8），矮窗 `116`（34+2 / 28+6 / 42+4）——歌词工具行的 34px 是触达高度下限（原来 26/24px 在 pad 上点不准），改它必须同步改这两个常量；
+- 矮窗额外把三行与按钮收紧：模板给三个行容器与三类按钮追加 `-short` 绑定（`.lyric-tools-row-short` / `.progress-row-short` / `.controls-short` / `.control-side-short` / `.icon-main-short` / `.tool-btn-short`），CSS 写在 `-wide` 批次**之后**（同级单类选择器靠书写顺序覆盖）；
+- `navStyle` 的宽屏高度同步收窄（`statusBar + 44` 而不是 `+ 52`），因为 `widePadTop` 与它同源 —— 两处不同步的话封面要么钻到导航按钮下面、要么白留一条缝。
+
+规则：**任何按 `windowHeight` 反算的宽屏尺寸，都要先扣掉本页固定的顶部/底部行占位，不要写 `windowHeight - 常数` 这种只对 pad 成立的公式**。
+
+### 10.4 宽屏 Parity 清单（对齐网易云 / QQ 音乐 Pad，2026-10-25）
+
+宽屏体验的对标基线从「能横过来看」提到「Pad 版该有的操作都在」，逐条落地如下。改这些位置前先读本节，避免又退回单入口/单档位。
+
+**底部播放栏（`qt-player-bar.uvue`，宽屏全站常驻）** —— 原来只有封面信息 / 三键 / 进度条，Pad 上缺失的四类高频操作按 **rail 右侧实际可用宽度分档**追加（`innerWidth = windowWidth - qtRailWidth()`）：
+
+| 档位 | 追加内容 | 说明 |
+| --- | --- | --- |
+| `>= 740px` | 收藏（`heart` / `heart-fill`，红色 = 已收藏）、播放模式（`repeat` / `shuffle` / `repeat-1`）、播放队列（`list`） | 收藏走 `player.showPlaylistPickerFor()`，与播放页同一套歌单选择器；模式点击 `player.cycleMode()` + toast；队列走 `/pages/player/index?queue=1` |
+| `>= 840px` | 静音键（`volume` / `volume-mute`）+ 音量条（原生 `<slider>`，`audioPlayer.setVolume`） | 音量与静音**已持久化**在 `audio-player.uts`（`qt-playback-volume` / `qt-playback-muted`），无需新原生能力；`@changing` 只更新本地值，`@change` 才写盘，避免每帧 I/O |
+| 更窄（中等横屏） | 只保留封面信息 / 三键 / 进度条 | 左块同时从 300 → 240 → 168px 收缩，文案列宽跟着收 |
+
+
+### 10.5 宽屏多列与网格的两条铁律（2026-10-25 真机踩坑）
+
+**1. 内联 width 干不过类内 width。** 本 Vapor 构建里，class 里声明的 `width` 会压过同
+节点的内联 `style` width —— 榜单卡 `.rank-card { width: 100% }` 曾把内联的 513px 卡宽
+整个压回整行，宽屏列数代码形同虚设（歌单广场 `.card` 类不含 width，内联才生效，所以
+它一直是对的）。规则：**凡是要用内联/脚本控制宽度的节点，它的类里就不能声明 width**；
+两种模式（竖屏 `100%`、宽屏 `Npx`）都必须走内联 —— 竖屏一侧用「内容宽 − 网格左右
+内边距」的 px 兜底（见 `pages/chart/index.uvue` 的 `chartRowStyle`）。
+
+**2. 网格容器必须有「实测出来的显式宽度」。** scroll-view 里的子节点 `width:100%`
+解析不出（会收缩成子项总宽），宽屏整格会向右溢出、第二列被屏幕裁掉。所以托管工具页
+的网格都要 `createSelectorQuery()` 实测外层定宽元素、把 px 写进容器内联样式
+（`gridStyle`）。配套教训：**选择器必须用模板里真实存在的 id** —— 榜单页旧代码写
+`#chart-scroll-` + sourceIndex，模板里从没有过这个 id，实测恒失败，`scrollWidth`
+恒为 0，这个 bug 在真机上藏了两轮才被像素测量抓出来。验证手段：截图后按边框色
+扫描卡片边缘坐标（`_tmp` 脚本），不要只看代码推算。
+音量条为什么用原生 `<slider>` 而不是自绘轨道（2026-10-25 真机踩坑）：
+
+- 自绘的 76px 轨道 + `@touchstart/@touchmove/@touchend` 在**宿主页底栏**能点，但一进宽屏托管浮层（`qt-wide-workspace`，`z-index:1000`）就完全收不到触摸事件 —— 同一根底栏里的 `@click`（静音、播放/暂停、收藏）都正常，只有自绘轨道的触摸穿透不到。把宽高、`z-index`、`position` 全试过无效，属于该浮层下的触摸分发限制。
+- 原生 `<slider>` 一次就正常（宿主页与托管浮层都可点），而且省掉自绘轨道的 `boundingClientRect` 实测宽度、`clientX - left` 换算、thumb 绝对定位等整套代码。
+- **样式只能用 class**：`slider` 的 `active-color` / `background-color` / `block-color` / `block-size` 在安卓 Vapor 模式下无效（HBuilderX 自带 schema 已标注），必须用 `track-class` / `track-active-class` / `thumb-class` 三个 class（与 `pages/equalizer`、`pages/theme` 一致）。`thumb-class` 的圆点按居中略偏左上画，需要 2px 的内缩补偿。
+
+为什么队列入口用 `?queue=1` 而不是事件：底栏挂在 `qt-page-frame` 上，播放页是 `full-width`（`showPlayerBar` 恒 false），点队列时播放页可能还没挂载，事件必丢；`onLoad` 读 query 是唯一可靠时机（入参是普通对象，必须下标取值，`.get()` 在真机会抛 `option.get is not a function`）。
+
+**桌面歌词入口（`pages/player/index.uvue`）** —— 原来只有「设置 - 桌面歌词」一条路径，Pad 上要翻两层。现在播放页**宽屏歌词工具行**多一个「桌面歌词」按钮（图标 `type`，颜色随 `lyricOn` 变 accent）；授权引导只在没有悬浮窗权限时用 `qtConfirm` 提示「去开启」，详细机型路径仍留在设置页（同一段长文案不维护两份）。鸿蒙走系统渲染、`hasPermission()` 恒 true，所以该分支天然只在安卓触发。
+
+**它只加在宽屏、不加竖屏**：竖屏 `.lyric-tools-row` 是 `justify-content:flex-end` 的单行（`padding:0 24rpx`，无换行），原本就最多三个药丸（偏移 / 恢复自动 / 搜索歌词），其中「偏移」文案会随偏移值变长；在 375dp 上再塞第四个会在 `lyricPicked` 为真时横向溢出，右侧药丸没有 `flex-shrink` 兜底。竖屏仍走「我的 - 设置 - 桌面歌词」，这是手机上的常规位置；Parity 缺口本身只存在于平板。
+
+**侧栏工具补全（`qt-side-nav.uvue`）** —— 宽屏此前**进不去「每日推荐」**：`/pages/daily-recommend/index` 的唯一入口是首页竖屏 `v-if="!layout.isWide"` 里的快捷药丸。现在 `ALL_TOOLS` 增加「每日推荐」（`sparkles` 图标，置于搜索与每日新歌之间），**不做能力门控** —— 它的候选来自历史/收藏 + 全源，规则模式恒有结果，不像每日新歌/歌单/榜单那样依赖源能力。同时 `qt-wide-workspace.ts` 的 `QT_WIDE_TOOL_ROUTES` 与 `qt-wide-workspace.uvue` 的 pane 列表都要加，否则宽屏会被 `qtRailNavigate` 甩到新 Activity（白闪）。
+
+**详情页左栏自适应（artist / playlist / daily / daily-recommend）** —— 原来 `.wide-left` 写死 272px（daily-recommend 296px），900dp 平板按 `detail` 档回落后右栏只剩 316px，中等横屏只有 260px，单行放不下封面 + 标题 + 时长 + 更多。现在：
+
+```
+WIDE_ASIDE_GAP_PX = 16, WIDE_ASIDE_MAX_PX = 272(296), WIDE_ASIDE_MIN_PX = 220, WIDE_LIST_MIN_PX = 360
+wideAsideWidth = clamp(MIN, MAX, qtContentWidth("detail") - 页内左右 padding - GAP - LIST_MIN)
+wideCoverSize  = wideAsideWidth - 卡片 padding/border（artist/playlist/daily 减 34，daily-recommend 减 58）
+```
+
+封面与骨架的 `width/height` 必须跟着 `wideCoverPx` 走（原来骨架写死 238/114px），否则加载态与真实内容尺寸不一致会跳一下。CSS 里的 `272px`/`238px` 保留作兜底并注明「内联样式优先」。
+
+**触达尺寸下限（宽屏）** —— 宽屏下 20–24px 的点击区在 10 寸屏上点不准，一律抬到 **32–36px**：`.search-clear-wide` 32、`.rc-check-wide` 24、`.rc-more-wide` 36、`.play-all-chip-wide` / `.all-play-chip-wide` 36、`.lyric-tool-wide` 高 32（连带 `WIDE_BOTTOM_ROWS_PX` 138 / 矮窗 116 与 §10.3 同步）、`.control-side-short` 36、`.tool-btn-short` 32。
+
+**宽屏浮层尺寸夹紧** —— `source-auth` 二维码 `380rpx` 在 1067dp 窗口约 540px，超出 480px 卡片内宽（432px）会被裁：宽屏改 300px 且 `.qr-wrap` padding/圆角改 px；`playlist-import` 的解析锁遮罩卡 `320rpx` ≈ 455px 宽、57/43px 内边距太糊，宽屏改 360px / `24px 28px` / 12px 圆角。**规则：遮罩/弹层里的 `rpx` 尺寸，只要该节点宽屏可达，就必须给 `-wide` px 覆盖。**
+
+**派生宽度算法不许有下界穿透** —— 首页歌单网格的「列数试探」原来写 `while (cols < 6 && floor((inner - 12*cols)/cols) > 200) cols++`，431dp 内宽时会从 2 列（203px）跳到 3 列（131px），**穿透自己声明的 150dp 下限**。正确写法是先算 `cols+1` 的卡宽、仍 `>= minCard` 才加列。同类「先加后算」的循环都要改成「先算后加」。
 
 ## 11. 演进方向
 

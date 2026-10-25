@@ -10,25 +10,16 @@
       <QtIcon class="switcher-caret" name="chevron-down" :size="layout.isWide ? 18 : 24" :color="theme.skin.iconMuted" />
     </view>
   </view>
-
-  <qt-action-sheet
-    v-model:visible="sheetVisible"
-    title="切换音源"
-    :actions="sheetActions"
-    @select="onSheetSelect"
-  />
 </template>
 
 <script setup lang="ts">
-import { qtShowToast } from "@/services/toast";
-import { ref, computed, onMounted } from "vue";
+import { onMounted } from "vue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useSourceStore } from "@/stores/source";
 import { useSourceRegistryStore } from "@/stores/source-registry";
 import { platformLabel } from "@/services/platform";
-import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
-import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import { pickSourceFromSheet } from "@/services/source-sheet";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
@@ -37,32 +28,20 @@ const store = useSourceStore();
 const registry = useSourceRegistryStore();
 const layout = useQtLayout();
 const theme = useThemeStore();
-// 音源清单来自数据包注册表（未装包时为空 → 打开时提示去设置页安装）
-const sources = computed<string[]>(() => registry.sourceIds());
-const sheetVisible = ref(false);
-
-const sheetActions = computed<SheetAction[]>(() =>
-  sources.value.map((s) => ({
-    name: platformLabel(s),
-    color: s == store.current ? theme.skin.accent : undefined,
-  }))
-);
 
 function label(): string {
   return platformLabel(store.current);
 }
 function open(): void {
-  if (sources.value.length == 0) {
-    qtShowToast({ title: "请先在 设置→音源包管理 安装数据包", icon: "none" });
-    return;
-  }
-  sheetVisible.value = true;
-}
-function onSheetSelect(_action: SheetAction, index: number): void {
-  const s = sources.value[index];
-  if (s == store.current) return;
-  store.setSource(s);
-  emit("change", s);
+  // 弹层与清单口径统一在 services/source-sheet（四个入口共用）：未装包提示、
+  // 当前项 accent 高亮、打开时自动滚到选中项都在那里，这里只接「换没换」。
+  // 必须走全局 host（qt-action-sheet-host，挂在 qt-page-frame 根）：原生渲染里
+  // absolute 锚定父节点，内联 <qt-action-sheet> 的蒙层只有本组件（头部一行）那么高，
+  // 弹层从蒙层底部向上溢出被屏幕裁掉（2026-10-25 真机：只剩最后一项+取消）。
+  pickSourceFromSheet().then((changed: boolean) => {
+    if (!changed) return;
+    emit("change", store.current);
+  });
 }
 
 onMounted(() => {

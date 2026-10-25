@@ -103,7 +103,7 @@
             >
               <view
                 v-for="item in row"
-                :key="item.platform + ':' + item.id"
+                :key="item.platform + ':' + item.id + (revealSettled ? ':s' : '')"
                 class="card" :class="layout.isWide ? 'card-wide' : ''"
                 :style="headItemStyle(rowIndex)"
                 :hover-class="layout.isWide ? 'card-hover' : 'none'"
@@ -513,8 +513,14 @@ const shining = computed((): boolean => skeletonOn.value && !skeletonLifted.valu
 
 /** 真实首屏第 rowIndex 行的卡片样式（尺寸 + 浮现透明度） */
 function headItemStyle(rowIndex: number): string {
+  // 错峰结束（含兜底闸门强推终态）后不再带 opacity/transition：
+  // 直接给尺寸样式。配合卡片 :key 的终态后缀，终态是一次节点重建而非
+  // 风格翻转 —— 新渲染器上前者可靠、后者有停摆先例（2026-10-25 实测）。
+  if (!reveal.revealing.value && playlists.value.length > 0) return cardStyle.value;
   return reveal.itemStyle(rowIndex, cardStyle.value);
 }
+/** 错峰是否已收尾：用于给首屏卡片换 key，把终态变成节点重建 */
+const revealSettled = computed((): boolean => !reveal.revealing.value && playlists.value.length > 0);
 
 /**
  * 尾部行的卡片样式：只给尺寸，不给错峰透明度。
@@ -1213,8 +1219,8 @@ function catTextStyle(id: string): string {
   margin-bottom: 18rpx;
 }
 .sk-cover-wide { border-radius: 12px; }
-.sk-line-wide { height: 13px; border-radius: 7px; }
-.sk-line-short-wide { width: 96px; }
+.sk-line-wide { height: 13px; border-radius: 7px; margin-top: 10px; margin-left: 11px; margin-right: 11px; }
+.sk-line-short-wide { width: 96px; margin-top: 7px; margin-bottom: 13px; }
 .name {
   margin: 12rpx 4rpx 0;
   font-size: 26rpx;

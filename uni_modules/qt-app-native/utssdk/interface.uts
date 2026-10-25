@@ -280,3 +280,38 @@ export type QueryPermissionStates = (ids: string[]) => PermissionState[];
  * @returns 已成功发起跳转返回 true；平台不支持或 Activity 不可用返回 false
  */
 export type OpenPermissionSettings = (id: string) => boolean;
+
+/** 内嵌标签的写入内容（JS 侧准备好；封面走临时文件路径，避免跨层传大数组） */
+export type EmbedTagsOptions = {
+	/** 音频扩展名（小写、不带点）。仅 "mp3" / "flac" 走内嵌，其余格式原样返回 */
+	ext: string;
+	/** 标题；空串 = 不写 */
+	title: string;
+	/** 歌手；空串 = 不写 */
+	artist: string;
+	/** 专辑；空串 = 不写 */
+	album: string;
+	/** LRC 歌词原文（含时间轴）；空串 = 不嵌歌词 */
+	lrcText: string;
+	/** 封面临时文件路径（file:// 前缀或绝对路径均可）；空串 = 不嵌封面 */
+	coverTempPath: string;
+	/** 封面 MIME（image/jpeg / image/png；coverTempPath 为空串时忽略） */
+	coverMime: string;
+};
+
+/**
+ * 把标题/歌手/专辑/LRC 歌词/封面内嵌进音频文件的标签区（ID3v2.3 / VorbisComment+PICTURE）。
+ *
+ * 结果约定（与 saveToPublicMedia 的「失败 resolve 空串」不同，这里是**文件替换语义**）：
+ *   - 成功：resolve **新文件**路径——同目录下 "<原名>.embed.<ext>" 副本，原文件不动；
+ *     调用方拿到新路径后自行改名/入库/落盘，旧临时文件由调用方决定去留；
+ *   - 失败 / 格式不在白名单 / 前缀嗅探不通过：resolve **原路径（去掉 file:// 前缀的绝对路径）**，
+ *     调用方继续按无内嵌流程走（侧车兜底由 JS 侧决定）；
+ *   - 失败残留的副本由本模块负责清理，不会留半截文件。
+ *
+ * 实现注意（为什么走 Base64 桥/纯字节层）：标签写入逻辑在 utssdk/embed-bytes.uts，
+ * 是与平台无关的纯函数（可进 node 自测）；Android 端经 android.util.Base64 与
+ * kotlin ByteArray 互转，避免 UTS 对 ByteArray 元素级写入的兼容风险；鸿蒙端直接
+ * fileIo.readSync/writeSync(ArrayBuffer)。
+ */
+export type EmbedAudioTags = (audioTempPath: string, opts: EmbedTagsOptions) => Promise<string>;

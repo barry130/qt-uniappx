@@ -24,8 +24,8 @@
           <text
             class="as-item-text"
             :class="layout.isWide ? 'as-item-text-wide' : ''"
-            :style="('color:' + actionColor(action) + ';') + qtFontDual(29, 15)"
-            >{{ action.name }}</text
+            :style="('color:' + actionColor(action, index) + ';') + qtFontDual(29, 15)"
+            >{{ actionLabel(action, index) }}</text
           >
         </view>
       </scroll-view>
@@ -65,17 +65,28 @@ const emit = defineEmits<{
 }>();
 const title = computed((): string => props.title != null ? props.title! : "");
 
-// 动作项文字颜色：自定义色优先，缺省退主题文字色。守卫收进脚本——模板里 &&
-// 不保证短路（两边都求值），color 为 undefined 时内联读 action.color.length 会炸
-function actionColor(action: SheetAction): string {
+// 动作项文字颜色：自定义色优先；否则选中项用主题色（selectedIndex 只负责滚动
+// 不够——列表短时既不滚也无标记，用户看不出当前是哪项，2026-10-25 真机反馈），
+// 缺省退主题文字色。守卫收进脚本——模板里 && 不保证短路（两边都求值），
+// color 为 undefined 时内联读 action.color.length 会炸
+function actionColor(action: SheetAction, index: number): string {
   if (action.color != null && action.color.length > 0) return action.color;
+  if (index == selectedIdx.value) return theme.skin.accent;
   return theme.skin.text;
+}
+// 选中项在文字后面补一个勾，和颜色标记互为冗余（色弱下也能认）
+function actionLabel(action: SheetAction, index: number): string {
+  return index == selectedIdx.value ? action.name + " ✓" : action.name;
 }
 
 /**
  * 打开弹窗时把选中项滚进视口：列表上限停在「半行」，选中项一旦在折叠区里
  * 用户既看不到高亮也想不到下面还能滑，所以打开瞬间用 scroll-into-view 定位。
- * 只在选中项超出整行视口时才滚（前几项时把选中行顶到顶部反而显得跳）。
+ * 只在选中项落在整行视口之外时才滚（前几项时把选中行顶到顶部反而显得跳）。
+ *
+ * 门限是 fullRows 而不是 fullRows+1：窄屏 572rpx/104rpx、宽屏 494px/52px 都只
+ * 容得下 5 / 9 个整行，第 6（10）项是被截掉半行的那个——它已经在「第一屏下方」，
+ * 不滚过去用户只能看到半截文字（用户 2026-10-25 反馈「选中项在下方时要自动滚下去」）。
  */
 const scrollAnchor = ref("");
 const selectedIdx = computed((): number => props.selectedIndex != null ? props.selectedIndex! : -1);
@@ -88,7 +99,7 @@ watch(() => props.visible, (v: boolean) => {
   if (idx < 0) return;
   // 整行视口数 = max-height ÷ 行高 向下取整（窄屏 572rpx/104rpx，宽屏 494px/52px）
   const fullRows = layout.isWide ? 9 : 5;
-  if (idx <= fullRows) return;
+  if (idx < fullRows) return;
   const target = "as-item-" + idx;
   nextTick(() => {
     scrollAnchor.value = target;
@@ -141,6 +152,12 @@ function pick(index: number): void {
 }
 .as-mask-wide {
   flex-direction: row;
+  /* 2026-10-25 用户反馈宽屏「切换音源」显示不全：此前沿用 flex-end，宽屏
+     row 轴把它推成贴右缘的 100% 高侧抽屉，顶部压进状态栏、底部被常驻播放条
+     盖住（取消键不可见）。改成居中对话框（对齐网易云 Pad 弹层），高度随内容，
+     上下都不再出界。 */
+  justify-content: center;
+  align-items: center;
 }
 .as-sheet {
   border-radius: 32rpx 32rpx 0 0;
@@ -149,10 +166,9 @@ function pick(index: number): void {
   padding-bottom: env(safe-area-inset-bottom);
 }
 .as-sheet-wide {
-  /* 宽度改由 sheetStyle 内联给出（走 qtSheetWidth 契约，窄窗口自动夹紧） */
-  height: 100%;
-  border-radius: 0;
-  padding-bottom: 0;
+  /* 宽度改由 sheetStyle 内联给出（走 qtSheetWidth 契约，窄窗口自动夹紧）。
+     高度随内容（标题 + 最多 9 行半列表 + 取消），居中展示不再整列贴边。 */
+  border-radius: 12px;
 }
 .as-title {
   padding: 30rpx 32rpx 18rpx;

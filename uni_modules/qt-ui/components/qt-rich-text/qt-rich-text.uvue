@@ -4,21 +4,22 @@
       v-for="(b, bi) in blocks"
       :key="bi"
       class="qrt-block"
-      :class="bi > 0 ? 'qrt-gap' : ''"
+      :class="bi > 0 ? (layout.isWide ? 'qrt-gap qrt-gap-wide' : 'qrt-gap') : ''"
     >
       <!-- 分割线 -->
-      <view v-if="b.kind == 'hr'" class="qrt-hr"></view>
+      <view v-if="b.kind == 'hr'" class="qrt-hr" :class="layout.isWide ? 'qrt-hr-wide' : ''"></view>
       <!-- 图片 -->
       <image
         v-else-if="b.kind == 'img'"
         class="qrt-img"
+        :class="layout.isWide ? 'qrt-img-wide' : ''"
         :src="b.src"
         mode="widthFix"
         @click="onTap(b.href)"
       />
       <!-- 列表项 -->
-      <view v-else-if="b.kind == 'li'" class="qrt-li" @click="onTap(blockHref(b))">
-        <view class="qrt-dot" :style="dotStyle()"></view>
+      <view v-else-if="b.kind == 'li'" class="qrt-li" :class="layout.isWide ? 'qrt-li-wide' : ''" @click="onTap(blockHref(b))">
+        <view class="qrt-dot" :class="layout.isWide ? 'qrt-dot-wide' : ''" :style="dotStyle()"></view>
         <text class="qrt-li-text" :style="liStyle(b)">
           <text v-for="(r, ri) in b.runs" :key="ri" :style="runStyle(r, b)">{{ r.text }}</text>
         </text>
@@ -208,9 +209,10 @@ function liStyle(b: RichBlock): string {
   return s;
 }
 
-/** 圆点垂直对齐首行文字中线 */
+/** 圆点垂直对齐首行文字中线（圆点高度：窄屏 8rpx / 宽屏 5px，与 .qrt-dot[-wide] 同步） */
 function dotStyle(): string {
-  const top = Math.round((scaledLine(baseSize.value) - 8) / 2);
+  const dot = layout.isWide ? 5 : 8;
+  const top = Math.round((scaledLine(baseSize.value) - dot) / 2);
   return "margin-top:" + top + (layout.isWide ? "px;" : "rpx;");
 }
 
@@ -284,4 +286,13 @@ function onTap(href: string): void {
 .qrt-li-text {
   flex: 1;
 }
+
+/* 宽屏 px 覆盖（rpx 在 1138dp 窗口里放大 1.4 倍，2560 宽时 3.4 倍，见 design.md §6.6）。
+   字号/行高已在 scaledSize() 里按 px 折算，这里只补块间距与圆点尺寸，
+   否则正文按 px 收小了、间距却还在按 rpx 放大，段落会被撑得很散。 */
+.qrt-gap-wide { margin-top: 8px; }
+.qrt-hr-wide { margin: 7px 0; }
+.qrt-img-wide { border-radius: 8px; }
+.qrt-li-wide { padding-left: 5px; }
+.qrt-dot-wide { width: 5px; height: 5px; margin-right: 9px; border-radius: 3px; }
 </style>

@@ -1171,16 +1171,20 @@ class PlayerStore {
     if (song.picUrl == null || song.picUrl.length == 0) {
       this.backfillCover(song);
     }
-    // 无缝播放：刚起播就顺手把下一首的地址取好（默认关闭，见 audio-player.uts GAPLESS_KEY）
+    // 无缝播放：刚起播就顺手把下一首的地址取好 + 整首预取（默认开启，见 audio-player.uts GAPLESS_KEY）
     this.preloadNextUrl();
   }
 
   /**
-   * 无缝播放：提前把「下一首」的播放地址取好。
+   * 无缝播放：提前把「下一首」准备好 —— 取链 + 整首预取。
    *
-   * 只做一件事 —— 调 `musicApi.playUrl(next, quality)` 让地址落进 musicApi 的
-   * urlCache（10 分钟 TTL）。真正切歌时原生发起懒解析，`fetchUrlWithTimeout` 的
-   * 取链会立刻命中缓存，省掉整条音源回退链（最坏 9s+）的耗时。
+   * 两件事：
+   * 1. 调 `musicApi.playUrl(next, quality)` 让地址落进 musicApi 的 urlCache
+   *    （10 分钟 TTL）。真正切歌时原生发起懒解析，`fetchUrlWithTimeout` 的
+   *    取链会立刻命中缓存，省掉整条音源回退链（最坏 9s+）的耗时；
+   * 2. 调 `audioPlayer.preloadTrack(占位URI)`（Android）让原生用与播放相同的
+   *    数据源栈把整首歌读进 SimpleCache —— 缓存 key 就是 qt-resolve 占位地址，
+   *    真正切歌时 CacheDataSource 全量命中磁盘，首字节网络等待也省掉。
    *
    * 为什么**不**提前调 `audioPlayer.resolveDone`：Android 侧 `audioResolveDone`
    * 在 `gPendingResolves` 里没有该 mediaId 的挂起请求时直接丢弃结果
@@ -1213,6 +1217,9 @@ class PlayerStore {
     this.preloadAt = Date.now();
     // 命中 urlCache 时 playUrl 内部直接返回，不会重复走网络
     musicApi.playUrl(song, this.quality).catch((_e: any) => {});
+    // 整首预取：用与时间线条目完全相同的占位地址（= 磁盘缓存 key），原生读完整首
+    // 落盘；已缓存的歌这条链路只会从缓存读（开销≈0），本地歌原生侧自动忽略
+    audioPlayer.preloadTrack(this.buildTimelineItem(song).uri);
   }
 
   /** 歌曲的全局唯一键（platform:id）：media3 条目 mediaId 与对账探针都用它 */

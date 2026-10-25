@@ -82,7 +82,10 @@
               />
             </view>
           </view>
-              <view v-if="!loading && filteredCharts.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
+              <!-- 空态必须同时满足「当前源确实拉过」：切到尚未加载的源时 filteredCharts
+                   本来就是空的，只看 !loading 会立刻误报「暂无榜单数据」
+                   （用户实测 2026-10-25：从咪咕切到网易云直接空态，等两分钟才出数据） -->
+              <view v-if="!loading && currentSourceLoaded && filteredCharts.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
                 <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="qtFontDual(26, 15)">暂无榜单数据</text>
               </view>
             </view>
@@ -138,6 +141,23 @@ let paramSi = -1;
 // 初值 true：onMounted 才发请求，首帧若按 false 渲染会先闪一下「暂无榜单数据」
 const loading = ref(true);
 const allCharts = ref<Chart[]>([]);
+/**
+ * 已经拿到过榜单结果的音源 id。
+ *
+ * 为什么需要它：榜单按需拉取（loadAll 只拉当前源，切 tab 才拉目标源），
+ * 切到还没拉过的源时 filteredCharts 天然为空。旧判据只看 !loading，
+ * 于是切 tab 立刻显示「暂无榜单数据」，而真实数据还在路上。
+ * 空态只允许出现在「这个源确实拉过、并且结果为空」的时候。
+ */
+const loadedSources = ref<string[]>([]);
+function markSourceLoaded(source: string): void {
+  if (source.length == 0) return;
+  const list = loadedSources.value;
+  if (list.indexOf(source) >= 0) return;
+  const next = list.slice();
+  next.push(source);
+  loadedSources.value = next;
+}
 
 // ── 榜单内前三名预览 ─────────────────────────────────────────────────────
 // 每张卡要单独拉一次 chartDetail（全量榜单接口），逐卡并发 3 个排队取，
@@ -319,10 +339,15 @@ let gridAlive = true;
 const scrollWidth = ref(0);
 // 列表可视高度：骨架块数要按「一屏能铺多少块」算，宽屏还得乘列数（见 skeletonRows）
 const scrollHeight = ref(0);
+// 选择器必须用模板里真实存在的 id（#chart-scroll）。
+// 旧代码写的是 "#chart-scroll-" + sourceIndex —— 模板里从没有过这个 id，
+// 实测永远测不到，scrollWidth 恒为 0：gridStyle 拿不到显式宽度，
+// .chart-grid 的 width:100% 在 scroll-view 里解析不出（会收缩成卡片总宽），
+// 宽屏整格向右溢出、第二列被屏幕裁掉 —— 列数代码形同虚设（真机 2026-10-25）。
 function measureGrid(attempt: number): void {
   if (!gridAlive) return;
   uni.createSelectorQuery()
-    .select("#chart-scroll-" + sourceIndex.value)
+    .select("#chart-scroll")
     .boundingClientRect((rect: UniNodeInfo) => {
       if (rect != null && rect.width > 0) {
         scrollWidth.value = rect.width;
@@ -359,6 +384,17 @@ const filteredCharts = computed<Chart[]>(() => {
   const currentSource = sources.value[sourceIndex.value];
   if (currentSource == null) return [];
   return allCharts.value.filter((chart) => chart.platform === currentSource);
+});
+/**
+ * 当前音源是否「确实拉过」。
+ *
+ * 空态与骨架都靠它分流：没拉过的源显示骨架（并触发拉取），拉过且为空才显示空态。
+ * 注册表未就绪（音源 id 为空串）时按 true 处理，维持旧行为不额外闪骨架。
+ */
+const currentSourceLoaded = computed<boolean>(() => {
+  const s = currentSourceId();
+  if (s.length == 0) return true;
+  return loadedSources.value.indexOf(s) >= 0;
 });
 
 // ── 骨架屏 ────────────────────────────────────────────────────────────────
@@ -397,12 +433,17 @@ const skeletonRowWidth = computed<number>(() => {
   const inner = scrollWidth.value > 0 ? scrollWidth.value : contentWidth.value;
   return Math.max(120, inner - qtRpx(48));
 });
-const skeletonOn = computed<boolean>(() => reveal.revealing.value || (loading.value && filteredCharts.value.length == 0));
+const skeletonOn = computed<boolean>(() => reveal.revealing.value || (filteredCharts.value.length == 0 && (loading.value || !currentSourceLoaded.value)));
 // 数据到达后骨架层脱离文档流，改由真实行决定高度，两层才能同位叠加
 const skeletonLifted = computed<boolean>(() => filteredCharts.value.length > 0);
 const shining = computed<boolean>(() => skeletonOn.value && !skeletonLifted.value);
 function chartRowStyle(index: number): string {
-  return reveal.itemStyle(index, layout.isWide ? "width:" + chartCardWidth.value + "px;" : "");
+  // 两种模式都必须走内联 width：宽屏 = 网格卡宽，竖屏 = 内容行宽。
+  // 不能把 width:100% 放回 .rank-card 类里 —— 本 Vapor 构建下类内 width 会压过
+  // 内联 width（歌单广场 .card 类不含 width 所以内联生效；本页类里曾经写了
+  // width:100%，真机把 513px 卡宽整个压回整行，宽屏列数代码形同虚设）。
+  const w = layout.isWide ? chartCardWidth.value : skeletonRowWidth.value;
+  return reveal.itemStyle(index, "width:" + w + "px;");
 }
 
 /** 上次加载时的包态指纹：音源包安装/更新/卸载/启停后变化，整页重拉 */
@@ -411,8 +452,76 @@ let loadedPackFp = "";
 // 若后到会把新数据覆盖掉、还会提前收走 loading——非最新序号的回调全部丢弃
 let loadAllSeq = 0;
 
+/**
+ * 拉单个音源的榜单，并把结果并进 allCharts。
+ *
+ * 为什么要单独有这个函数：切 tab / 后台补拉时按源拉取并入 allCharts，
+ * charts() 自带内存缓存与 12h TTL，命中时几乎秒回，只有真没缓存才发网络请求。
+ */
+async function fetchSource(source: string): Promise<void> {
+  const mySeq = loadAllSeq;
+  try {
+    const list = await musicApi.charts(source);
+    if (mySeq != loadAllSeq) return;
+    // 成功（哪怕是空列表）都算「这个源拉过了」：空列表要显示空态而不是一直转骨架
+    markSourceLoaded(source);
+    if (list.length == 0) return;
+    // 只替换该音源的部分：已经合并进来的其他源结果不能被覆盖掉
+    const kept = allCharts.value.filter((chart) => chart.platform !== source);
+    if (kept.length == 0) {
+      // 只有这一个源的数据时整组换（unkeyed v-for 按索引原地 diff 才可靠）
+      allCharts.value = list;
+    } else {
+      const merged = kept.slice();
+      for (let i = 0; i < list.length; i++) {
+        merged.push(list[i]);
+      }
+      allCharts.value = merged;
+    }
+    rebuildPreviews();
+    // 数据到了：骨架淡出、真实行错峰浮现（与 loadAll 的 settle 同款错峰）。
+    // 两个前提：① loading 仍为真时不动浮现进度——首屏由 loadAll 的 settle 统一起跑，
+    // 这里再起一次会把已经浮现的行重新按回 opacity:0，闪一下；
+    // ② 只在该源正是当前显示源时起跑——用户可能已经又切走了，
+    // 那时给别的源重置浮现进度会让屏幕上那组行整片重淡入。
+    if (!loading.value && currentSourceId() === source) {
+      reveal.startReveal(Math.min(skeletonRows.value, SKELETON_STAGGER_MAX));
+    }
+    gridTimers.push(setTimeout(() => {
+      if (!gridAlive) return;
+      measureGrid(0);
+      // 切换过来时还没数据、被 onChipTap 推迟的位置还原在这里补做：
+      // 此时真实行已经渲染，套上该源上次的深位置不会越过内容底。
+      if (currentSourceId() === source) {
+        restoreScroll();
+      }
+    }, 300) as number);
+  } catch (error) {
+    if (mySeq != loadAllSeq) return;
+    logMsgErr("[QT Music Chart Page]", error);
+    // 失败也记为「拉过」：否则骨架永远转下去，用户连空态都看不到
+    markSourceLoaded(source);
+  }
+}
+
 function onChipTap(index: number): void {
   if (index == sourceIndex.value) return;
+  // #ifdef APP-HARMONY
+  // 鸿蒙真机上「回顶 + 80ms 后整组换 filteredCharts」这套页内切换配方会让整块
+  // 子树丢渲染（2026-10-25 复现：切 tag 后药丸行与内容区全白，只剩状态栏和返回
+  // 箭头；安卓同构建无此问题）。Vapor 鸿蒙端对原地整组替换的兜底不如安卓可靠，
+  // 改走整页重载——本页不是 tabBar 页，鸿蒙上 redirectTo 可用；si 参数由 onLoad
+  // 接住（paramSi），syncSourceIndex 优先采用，滚动位置由 chart-tabs 记忆恢复，
+  // 代价只有一次重建闪黑，鸿蒙端可接受。
+  uni.redirectTo({ url: "/pages/chart/index?si=" + index });
+  return;
+  // #endif
+  // 目标源还没数据就立刻发请求，和下面的回顶/换源并行，不必等 allCharts 合并
+  const target = sources.value[index];
+  const needFetch = target != null && loadedSources.value.indexOf(target as string) < 0;
+  if (needFetch) {
+    fetchSource(target as string);
+  }
   // 页内切换，不整页重载（redirectTo 的重建间隙必然闪黑，且该基座不认动画参数）。
   // 换数据的唯一安全配方来自搜索页实证（pages/search L871/L977 注释）：
   // **先回顶、再整组换 filteredCharts**——停在滚动深处整组替换会让 scroll-view
@@ -421,9 +530,24 @@ function onChipTap(index: number): void {
   gridTimers.push(setTimeout(() => {
     if (!gridAlive) return;
     sourceIndex.value = index;
-    // 预览重建由下方 watch(sourceIndex) 统一负责；该音源上次的位置
-    // （顶部则不动）由重试逻辑在网格重排后落位
-    restoreScroll();
+    // 浮现进度按目标源的状态重新定档：
+    // - 目标源还没数据 → 清零，让骨架层立刻可见（不清零的话真实行还是全透明、
+    //   骨架行又早已淡出，换过去是一片空白），数据到达后由 fetchSource 起跑；
+    // - 目标源已有数据 → 直接推到终态。这一步防的是「切到未加载源、又马上切回
+    //   已加载源」：上一次清零的进度还在，不推终态的话整页会一直空白。
+    if (!currentSourceLoaded.value) {
+      reveal.resetReveal();
+    } else if (!loading.value) {
+      reveal.finishReveal();
+    }
+    // 预览重建由下方 watch(sourceIndex) 统一负责。位置还原只在目标源已有数据时
+    // 立即做：还没拉过的源内容只有一屏骨架，此刻把该源上次保存的深滚动位置套上
+    // 去，视口会被顶到内容之外的空白区——骨架滚出视野，看起来就是「一片空白、
+    // 也没有加载动画」（网络其实正在拉，真机 2026-10-25）。等数据到位后由
+    // fetchSource 的落位定时器再还原。
+    if (filteredCharts.value.length > 0) {
+      restoreScroll();
+    }
   }, 80) as number);
 }
 
@@ -442,8 +566,9 @@ function syncSourceIndex(): void {
 }
 
 /** 拉榜单（onMounted/onShow/包变更广播共用），完成后记录包态指纹。
- *  先拉当前源单独渲染（单源请求快、还命中 12h 缓存），全源合并放后台补——
- *  旧写法 await allCharts() 要等 6 个源全部返回才出第一屏，打开明显偏慢 */
+ *  只拉当前音源（charts() 命中 12h TTL 时几乎秒回）；其他源按需——
+ *  onChipTap 切到哪个源才拉哪个源。2026-10-25 移除后台全源合并
+ *  （6 源在引擎单线程排队最长两分钟，且合并到达时网格整段重排会跳）。 */
 async function loadAll(): Promise<void> {
   const mySeq = ++loadAllSeq;
   loadedPackFp = packsFingerprint();
@@ -451,6 +576,8 @@ async function loadAll(): Promise<void> {
   reveal.resetReveal();
   loading.value = true;
   allCharts.value = [];
+  // 整页重拉：之前「已拉过」的判定全部作废，否则空态会在新数据回来前抢先露出来
+  loadedSources.value = [];
   let firstShown = false;
   const settle = (): void => {
     if (mySeq != loadAllSeq || firstShown) return;
@@ -461,14 +588,21 @@ async function loadAll(): Promise<void> {
     loading.value = false;
     gridTimers.push(setTimeout(() => {
       measureGrid(0);
-      // 首屏就位后还原该音源上次的滚动位置（切 tab 是整页重载，位置靠存储带过来）
-      restoreScroll();
+      // 首屏就位后还原该音源上次的滚动位置（切 tab 是整页重载，位置靠存储带过来）。
+      // 拉到空榜单时内容为空，不能还原——视口会被顶到内容之外（同 onChipTap）
+      if (filteredCharts.value.length > 0) {
+        restoreScroll();
+      }
     }, 300) as number);
   };
   const applyCharts = (list: Chart[]): void => {
     if (mySeq != loadAllSeq) return;
     // unkeyed v-for 只做「按索引原地 diff」是安全的：唯一验证可靠的换数据方式
     allCharts.value = list;
+    // 合并结果里出现过的音源都算「拉过了」（空榜单的源不在这里，由下面的单源分支记）
+    for (let i = 0; i < list.length; i++) {
+      markSourceLoaded(list[i].platform);
+    }
     // 首轮也必须启动前三名预览：rebuildPreviews 原来只挂在 sourceIndex 的 watch 上，
     // 首次进入（sourceIndex 没变化过）时队列永远不会跑，三行一直是「···」占位
     rebuildPreviews();
@@ -478,16 +612,17 @@ async function loadAll(): Promise<void> {
     if (current != null) {
       const mine = await musicApi.charts(current);
       if (mySeq != loadAllSeq) return;
+      // 单源返回（哪怕为空）就记为该源已拉过：空榜单要显示空态而不是永远转骨架
+      markSourceLoaded(current);
       if (mine.length > 0) {
         applyCharts(mine);
-        settle();
       }
     }
-    const all = await musicApi.allCharts();
-    if (mySeq != loadAllSeq) return;
-    if (all.length > allCharts.value.length || allCharts.value.length == 0) {
-      applyCharts(all);
-    }
+    // 不再后台合并全源（2026-10-25 移除 await musicApi.allCharts()）：
+    // 全源合并要在引擎单线程上逐源排队（6 源 × 最多 4s 超时），首开慢的根源；
+    // 且合并结果到达时网格整段重排、屏幕上的卡片会跳。改成纯按需——
+    // onChipTap 切到哪个源才拉哪个源（fetchSource），charts() 自带 60s 内存
+    // 缓存与 12h TTL，命中时几乎秒回。空源/失败源走 markSourceLoaded 的空态分支。
     settle();
   } catch (error) {
     logMsgErr("[QT Music Chart Page]", error);
@@ -586,7 +721,7 @@ onUnmounted(() => {
    这里保留 width:100% 供竖屏兜底 */
 .chart-grid { width: 100%; padding: 20rpx 24rpx 0; flex-direction: row; flex-wrap: wrap; }
 /* QQ 音乐式榜单卡：卡头标题 + 左封面右前三名 */
-.rank-card { width: 100%; padding: 20rpx 24rpx 24rpx; margin-bottom: 20rpx; background-color: #ffffff; border-width: 1px; border-style: solid; border-color: #e6e8ee; border-radius: 24rpx; }
+.rank-card { padding: 20rpx 24rpx 24rpx; margin-bottom: 20rpx; background-color: #ffffff; border-width: 1px; border-style: solid; border-color: #e6e8ee; border-radius: 24rpx; }
 .rank-head { flex-direction: row; align-items: center; justify-content: space-between; }
 .rank-name { color: #1b202b; font-size: 32rpx; font-weight: 600; text-overflow: ellipsis; }
 .rank-meta { margin-left: 16rpx; color: #8b93a2; font-size: 24rpx; text-overflow: ellipsis; flex-shrink: 0; }

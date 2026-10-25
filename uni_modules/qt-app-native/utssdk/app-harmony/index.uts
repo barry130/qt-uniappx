@@ -25,13 +25,17 @@ import { notificationManager } from '@kit.NotificationKit';
 import { Environment, fileIo, fileShare, picker } from '@kit.CoreFileKit';
 import OpenLinkOptions from '@ohos.app.ability.OpenLinkOptions';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { util } from '@kit.ArkTS';
 import type {
   LocalAudioItem,
   DeleteLocalMediaResult,
   PickFileResult,
   PickDirectoryResult,
   PermissionState,
+  EmbedTagsOptions,
+  EmbedAudioTags,
 } from '../interface.uts';
+import { EmbedTagsData, Mp3Plan, FlacPlan, planMp3, planFlac } from '../embed-bytes.uts';
 
 // ==================== 系统交互 ====================
 
@@ -504,9 +508,109 @@ export function recreateActivity(): boolean {
   return false;
 }
 
-/** 选择 JS 文件：鸿蒙第一轮不实现（音源包安装入口在安卓端） */
+/**
+ * 按选择器 URI 读全文（最多 maxLen 字节）。
+ * 不复用 readFileBytes：那个先 accessSync/statSync(path)，对 DocumentViewPicker
+ * 返回的 file://docs/... URI 未必走得通；这里 open 后按 fd 逐块读（64KB/块），
+ * 读满上限或读到 EOF（n<=0）即止，天然兼容 URI 与普通路径。
+ */
+function readUriBytes(uri: string, maxLen: number): Uint8Array | null {
+  let fd: fileIo.File | null = null;
+  try {
+    fd = fileIo.openSync(uri, fileIo.OpenMode.READ_ONLY);
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    while (total < maxLen) {
+      const want = Math.min(64 * 1024, maxLen - total);
+      const ab = new ArrayBuffer(want);
+      const n = fileIo.readSync(fd.fd, ab);
+      if (n <= 0) break;
+      chunks.push(new Uint8Array(ab, 0, n));
+      total += n;
+    }
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (let i = 0; i < chunks.length; i++) {
+      out.set(chunks[i], off);
+      off += chunks[i].length;
+    }
+    return out;
+  } catch (e) {
+    console.log('[AppNative] readUriBytes 失败: ' + (e != null ? e.toString() : 'unknown'));
+    return null;
+  } finally {
+    if (fd != null) fileIo.closeSync(fd);
+  }
+}
+
+/**
+ * 选择 JS 文件并读回全文（音源包「本地文件安装」用）。
+ * 路数与 pickDirectory 同源：DocumentViewPicker 选单个文件 → 拿到带**临时读权限**
+ * 的 URI（本次会话内可读，无需 persistPermission）→ fileIo 按 URI 直接读全文 →
+ * util.TextDecoder 转 UTF-8 文本回传。2026-10-25 真机反馈：此前是桩，鸿蒙上
+ * 「本地文件安装音源包」整个入口不可用（安卓正常），故补齐。
+ * 文件名取 URI 最后一段并做 URI 解码；.js 后缀的格式把关留在 JS 侧
+ * （isJsPackFileName），原生层不重复判。
+ * 包体上限 8MB：音源包实际几十 KB～几百 KB，防误选大文件把内存打爆。
+ */
+const PICK_JS_FILE_MAX_BYTES = 8 * 1024 * 1024;
+
 export function pickJsFile(onResult: (result: PickFileResult) => void): void {
-  onResult({ ok: false, name: '', content: '', message: '鸿蒙端暂不支持选择本地 JS 文件' } as PickFileResult);
+  try {
+    const ctx = UTSHarmony.getUIAbilityContext() as common.UIAbilityContext;
+    if (ctx == null) {
+      onResult({ ok: false, name: '', content: '', message: '无法获取应用上下文' } as PickFileResult);
+      return;
+    }
+    const options: picker.DocumentSelectOptions = {
+      maxSelectNumber: 1,
+      selectMode: picker.DocumentSelectMode.FILE,
+    };
+    const viewPicker = new picker.DocumentViewPicker(ctx);
+    viewPicker.select(options)
+      .then((uris: Array<string>) => {
+        if (uris.length == 0) {
+          onResult({ ok: false, name: '', content: '', message: '已取消选择' } as PickFileResult);
+          return;
+        }
+        const uri = uris[0];
+        // 文件名：URI 最后一段；URI 可能是百分号编码，解码失败就原样用
+        let name = uri;
+        const slash = uri.lastIndexOf('/');
+        if (slash >= 0) name = uri.substring(slash + 1);
+        try {
+          name = decodeURIComponent(name);
+        } catch (_) {}
+        const bytes = readUriBytes(uri, PICK_JS_FILE_MAX_BYTES);
+        if (bytes == null) {
+          onResult({ ok: false, name: '', content: '', message: '读取文件失败，请重试' } as PickFileResult);
+          return;
+        }
+        if (bytes.length == 0) {
+          onResult({ ok: false, name: '', content: '', message: '文件内容为空' } as PickFileResult);
+          return;
+        }
+        let text = '';
+        try {
+          const decoder = util.TextDecoder.create('utf-8');
+          text = decoder.decodeToString(bytes);
+        } catch (e) {
+          console.log('[AppNative] pickJsFile 解码失败: ' + (e != null ? e.toString() : 'unknown'));
+          onResult({ ok: false, name: '', content: '', message: '文件解码失败（非 UTF-8 文本）' } as PickFileResult);
+          return;
+        }
+        onResult({ ok: true, name: name, content: text, message: '' } as PickFileResult);
+      })
+      .catch((err: BusinessError) => {
+        console.log('[AppNative] 选择文件失败: ' + err.code + ' ' + err.message);
+        // 用户取消时系统抛 13900042 / 13900020，按取消处理不打扰用户（与目录选择同口径）
+        const msg = err.code == 13900042 || err.code == 13900020 ? '已取消选择' : ('选择文件失败（' + err.code + '）');
+        onResult({ ok: false, name: '', content: '', message: msg } as PickFileResult);
+      });
+  } catch (e) {
+    console.log('[AppNative] 选择文件异常: ' + (e != null ? e.toString() : 'unknown'));
+    onResult({ ok: false, name: '', content: '', message: '当前设备不支持选择文件' } as PickFileResult);
+  }
 }
 
 /**
@@ -707,5 +811,228 @@ export function openPermissionSettings(id: string): boolean {
     return startAppDetailsSettings();
   } catch (e) {
     return false;
+  }
+}
+
+// ==================== 音频标签内嵌（下载内嵌封面/歌词） ====================
+
+/** 读文件最多 maxLen 字节（不足全量）。鸿蒙直接 fileIo.readSync(ArrayBuffer) → Uint8Array */
+function readFileBytes(path: string, maxLen: number): Uint8Array | null {
+  try {
+    if (!fileIo.accessSync(path)) return null;
+    const stat = fileIo.statSync(path);
+    let size = stat.size;
+    if (size > maxLen) size = maxLen;
+    if (size <= 0) return new Uint8Array(0);
+    const fd = fileIo.openSync(path, fileIo.OpenMode.READ_ONLY);
+    try {
+      // UTS 会把 options 字面量包成 UTSJSONObject，ArkTS 编不过；改为顺序读：
+      // 每轮新开一个「剩余长度」的缓冲，读完拷回主缓冲（本地文件通常一轮读满）
+      const ab = new ArrayBuffer(size);
+      const view = new Uint8Array(ab);
+      let got = 0;
+      while (got < size) {
+        const tail = new ArrayBuffer(size - got);
+        const n = fileIo.readSync(fd.fd, tail);
+        if (n <= 0) break;
+        view.set(new Uint8Array(tail, 0, n), got);
+        got += n;
+      }
+      if (got != size) return null;
+      return new Uint8Array(ab);
+    } finally {
+      fileIo.closeSync(fd);
+    }
+  } catch (e) {
+    console.log('[AppNative] readFileBytes 失败: ' + (e != null ? e.toString() : 'unknown'));
+    return null;
+  }
+}
+
+/** Uint8Array → 已打开的输出 fd（本模块产出的 Uint8Array 均为精确长度, .buffer 即数据本体） */
+function writeBytes(outFd: number, bytes: Uint8Array): void {
+  fileIo.writeSync(outFd, bytes.buffer);
+}
+
+/** 从源文件 [from, to) 区间拷贝到 outFd（分块 read/write，不整读进内存） */
+function copyRange(outFd: number, srcPath: string, from: number, to: number): boolean {
+  const inFd = fileIo.openSync(srcPath, fileIo.OpenMode.READ_ONLY);
+  try {
+    // 同样避开 options：先用「读丢」把文件指针走到 from，再顺序分块搬运
+    const BUF = 1024 * 1024;
+    let skip = from;
+    while (skip > 0) {
+      const s = new ArrayBuffer(skip < BUF ? skip : BUF);
+      const n = fileIo.readSync(inFd.fd, s);
+      if (n <= 0) return false;
+      skip -= n;
+    }
+    let pos = from;
+    while (pos < to) {
+      const want = to - pos < BUF ? to - pos : BUF;
+      const chunk = new ArrayBuffer(want);
+      const n = fileIo.readSync(inFd.fd, chunk);
+      if (n <= 0) return false;
+      fileIo.writeSync(outFd, n == chunk.byteLength ? chunk : chunk.slice(0, n));
+      pos += n;
+    }
+    return true;
+  } finally {
+    fileIo.closeSync(inFd);
+  }
+}
+
+/** 魔数校验：只认 JPEG/PNG（防把 HTML 错误页/占位图嵌进音频） */
+function looksLikeImage(bytes: Uint8Array): boolean {
+  if (bytes.length < 4) return false;
+  const b0 = bytes[0] & 0xff;
+  const b1 = bytes[1] & 0xff;
+  if (b0 == 0xff && b1 == 0xd8) return true;
+  if (b0 == 0x89 && b1 == 0x50) return true;
+  return false;
+}
+
+/** mp3 旧标签可能叠了多重 ID3 / 大 APIC：64B → 1MB → 16MB 前缀阶梯重试 */
+function planMp3WithPrefixLadder(src: string, data: EmbedTagsData): Mp3Plan | null {
+  const prefix64 = readFileBytes(src, 64);
+  if (prefix64 != null) {
+    const plan = planMp3(prefix64, data);
+    if (plan != null) return plan;
+  }
+  const prefix1m = readFileBytes(src, 1024 * 1024);
+  if (prefix1m != null) {
+    const plan = planMp3(prefix1m, data);
+    if (plan != null) return plan;
+  }
+  const prefix16m = readFileBytes(src, 16 * 1024 * 1024);
+  if (prefix16m != null) {
+    const plan = planMp3(prefix16m, data);
+    if (plan != null) return plan;
+  }
+  return null;
+}
+
+/** flac 元数据区可能含大 PADDING/旧封面：1MB → 16MB 前缀阶梯；保留成功前缀供块头复用 */
+type FlacPlanWithPrefix = {
+  plan: FlacPlan;
+  prefix: Uint8Array;
+};
+
+function planFlacWithPrefixLadder(src: string, data: EmbedTagsData): FlacPlanWithPrefix | null {
+  const prefix1m = readFileBytes(src, 1024 * 1024);
+  if (prefix1m != null) {
+    const plan = planFlac(prefix1m, data);
+    if (plan != null) {
+      const r: FlacPlanWithPrefix = { plan: plan, prefix: prefix1m };
+      return r;
+    }
+  }
+  const prefix16m = readFileBytes(src, 16 * 1024 * 1024);
+  if (prefix16m != null) {
+    const plan = planFlac(prefix16m, data);
+    if (plan != null) {
+      const r: FlacPlanWithPrefix = { plan: plan, prefix: prefix16m };
+      return r;
+    }
+  }
+  return null;
+}
+
+/** 内嵌标签（契约见 interface.uts EmbedAudioTags：成功=新副本路径, 失败=原路径） */
+export function embedAudioTags(audioTempPath: string, opts: EmbedTagsOptions): Promise<string> {
+  return new Promise<string>((resolve: (value: string) => void, reject: (err: any) => void) => {
+    resolve(embedAudioTagsSync(audioTempPath, opts));
+  });
+}
+
+function embedAudioTagsSync(audioTempPath: string, opts: EmbedTagsOptions): string {
+  let src = audioTempPath;
+  if (src.indexOf('file://') == 0) src = src.substring(7);
+  const ext = opts.ext;
+  if (src.length == 0 || (ext != 'mp3' && ext != 'flac')) return src;
+  let copyPath = '';
+  try {
+    if (!fileIo.accessSync(src)) return src;
+    const stat = fileIo.statSync(src);
+    const totalLen = stat.size;
+    if (totalLen < 128) return src;
+    // 封面字节（带魔数校验，失败按无封面处理）
+    let coverBytes: Uint8Array | null = null;
+    if (opts.coverTempPath.length > 0) {
+      let coverPath = opts.coverTempPath;
+      if (coverPath.indexOf('file://') == 0) coverPath = coverPath.substring(7);
+      const raw = readFileBytes(coverPath, 4 * 1024 * 1024);
+      if (raw != null && looksLikeImage(raw)) coverBytes = raw;
+    }
+    const data: EmbedTagsData = {
+      title: opts.title,
+      artist: opts.artist,
+      album: opts.album,
+      lrcText: opts.lrcText,
+      coverBytes: coverBytes,
+      coverMime: opts.coverMime,
+    };
+    // 先算计划再开输出（计划失败时连副本文件都不产生）
+    let isMp3 = ext == 'mp3';
+    const mp3Plan = isMp3 ? planMp3WithPrefixLadder(src, data) : null;
+    const flacPlan = !isMp3 ? planFlacWithPrefixLadder(src, data) : null;
+    if (isMp3 && mp3Plan == null) return src;
+    if (!isMp3 && flacPlan == null) return src;
+    copyPath = src + '.embed.' + ext;
+    const out = fileIo.openSync(copyPath, fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC | fileIo.OpenMode.READ_WRITE);
+    try {
+      if (isMp3 && mp3Plan != null) {
+        writeBytes(out.fd, mp3Plan.newTag);
+        if (!copyRange(out.fd, src, mp3Plan.oldTagSize, totalLen)) {
+          fileIo.closeSync(out);
+          fileIo.unlinkSync(copyPath);
+          return src;
+        }
+      } else if (flacPlan != null) {
+        // fLaC 魔数
+        const magic = new Uint8Array(4);
+        magic[0] = 0x66;
+        magic[1] = 0x4c;
+        magic[2] = 0x61;
+        magic[3] = 0x43;
+        writeBytes(out.fd, magic);
+        writeBytes(out.fd, flacPlan.plan.streamInfo);
+        // 保留块：块头 4B 从前缀取（last 位清零——它不再是最后一块），数据区从源文件搬运
+        const spans = flacPlan.plan.keptSpans;
+        for (let i = 0; i < spans.length; i++) {
+          const head = new Uint8Array(4);
+          const off = spans[i].headerOffset;
+          head[0] = flacPlan.prefix[off] & 0x7f;
+          head[1] = flacPlan.prefix[off + 1];
+          head[2] = flacPlan.prefix[off + 2];
+          head[3] = flacPlan.prefix[off + 3];
+          writeBytes(out.fd, head);
+          if (!copyRange(out.fd, src, off + 4, off + 4 + spans[i].dataLen)) {
+            fileIo.closeSync(out);
+            fileIo.unlinkSync(copyPath);
+            return src;
+          }
+        }
+        writeBytes(out.fd, flacPlan.plan.vorbisComment);
+        const pic = flacPlan.plan.picture;
+        if (pic != null) writeBytes(out.fd, pic);
+        if (!copyRange(out.fd, src, flacPlan.plan.audioOffset, totalLen)) {
+          fileIo.closeSync(out);
+          fileIo.unlinkSync(copyPath);
+          return src;
+        }
+      }
+    } finally {
+      fileIo.closeSync(out);
+    }
+    return copyPath;
+  } catch (e) {
+    console.log('[AppNative] embedAudioTags 失败: ' + (e != null ? e.toString() : 'unknown'));
+    if (copyPath.length > 0) {
+      try {
+        fileIo.unlinkSync(copyPath);
+      } catch (e2) {}
+    }
+    return src;
   }
 }

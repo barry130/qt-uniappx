@@ -10,7 +10,18 @@
   >
     <view class="qc-card" :class="layout.isWide ? 'qc-card-wide' : ''" :style="cardStyle" @click.stop>
       <text class="qc-title" :class="layout.isWide ? 'qc-title-wide' : ''" :style="titleStyle" :max-lines="2">{{ st.title.value }}</text>
-      <text v-if="st.content.value.length > 0" class="qc-content" :class="layout.isWide ? 'qc-content-wide' : ''" :style="contentStyle" :max-lines="5">{{ st.content.value }}</text>
+      <!-- 长内容（如「当前播放地址」的完整 URL）不截行：max-lines 会把换行后的
+           地址腰斩（2026-10-25 真机反馈「展示不全」），改为内容区可滚动，
+           上限半屏高；短内容不受影响。 -->
+      <scroll-view
+        v-if="st.content.value.length > 0"
+        class="qc-content-scroll"
+        :class="layout.isWide ? 'qc-content-scroll-wide' : ''"
+        :style="contentScrollStyle"
+        :show-scrollbar="false"
+      >
+        <text class="qc-content" :class="layout.isWide ? 'qc-content-wide' : ''" :style="contentStyle">{{ st.content.value }}</text>
+      </scroll-view>
       <view class="qc-btns" :class="layout.isWide ? 'qc-btns-wide' : ''">
         <view
           v-if="st.showCancel.value"
@@ -47,7 +58,12 @@ const titleStyle = computed((): string => {
   return "color:" + theme.skin.text + ";" + qtFontDual(32, 18);
 });
 const contentStyle = computed((): string => {
-  return "color:" + theme.skin.textMuted + ";" + qtFontDual(28, 15);
+  // 长内容（URL 一类）居中换行可读性差，改左对齐；短句保持居中
+  const align = st.content.value.length > 60 ? "left" : "center";
+  return "color:" + theme.skin.textMuted + ";text-align:" + align + ";" + qtFontDual(28, 15);
+});
+const contentScrollStyle = computed((): string => {
+  return "max-height:" + Math.round(layout.windowHeight * 0.5) + "px;";
 });
 const cancelTextStyle = computed((): string => {
   return "color:" + theme.skin.textMuted + ";" + qtFontDual(30, 16);
@@ -72,12 +88,14 @@ function onCancel() {
 .qc-card { width: 600rpx; border-width: 1px; border-style: solid; border-radius: 24rpx; overflow: hidden; }
 .qc-card-wide { width: 320px; border-radius: 14px; }
 .qc-title { text-align: center; font-weight: 600; margin-top: 40rpx; padding: 0 32rpx; }
-.qc-content { text-align: center; margin-top: 20rpx; padding: 0 36rpx; line-height: 44rpx; margin-bottom: 36rpx; }
+.qc-content-scroll { margin-top: 20rpx; margin-bottom: 36rpx; }
+.qc-content { padding: 0 36rpx; line-height: 44rpx; }
 .qc-btns { margin-top: 36rpx; flex-direction: row; }
 .qc-btn { flex: 1; height: 88rpx; align-items: center; justify-content: center; }
 .qc-btn-text { font-weight: 600; }
 .qc-title-wide { margin-top: 22px; padding: 0 18px; }
-.qc-content-wide { margin-top: 11px; padding: 0 20px; line-height: 24px; margin-bottom: 20px; }
+.qc-content-scroll-wide { margin-top: 11px; margin-bottom: 20px; }
+.qc-content-wide { padding: 0 20px; line-height: 24px; }
 .qc-btns-wide { margin-top: 20px; }
 .qc-btn-wide { height: 48px; }
 </style>

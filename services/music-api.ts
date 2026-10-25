@@ -21,6 +21,7 @@ import { logErrV, logWarn } from "./logger";
 import type { Playlist, Song, Artist, Album } from "@/types/music";
 import { mergeAggregateSongs } from "./aggregate-merge";
 import type { AggregateSongBatch } from "./aggregate-merge";
+import { sourcePlayLoginActive, sourceVipTierOf } from "./source-auth";
 
 
 /**
@@ -179,9 +180,16 @@ export type RegistrySource = {
   qualities?: string[];
   /** 歌单广场排序选项（v5 起下发；未声明 = 不支持排序） */
   playlistSorts?: RegistrySort[];
+  /** 账号登录能力（v9 起下发；未声明 = 该源不支持账号登录，不显示登录入口） */
+  auth?: RegistryAuthCaps;
 };
 /** 数据包注册表里的歌单排序选项（v5 契约；id 原样透传给 recommendations） */
 export type RegistrySort = { id: string; name: string };
+/** 某源的账号登录能力自述（v9 契约）：methods 含 qrcode/cookie，domains 为注入域后缀；
+ *  officialQualities（v11）非空 = 登录态下音质选择整体切官方清单（id=官方 level，
+ *  name=官方展示名，min=最低会员档 none/vip/svip，宿主按账号等级过滤展示） */
+export type RegistryOfficialQuality = { id: string; name: string; min: string };
+export type RegistryAuthCaps = { methods: string[]; domains: string[]; officialQualities?: RegistryOfficialQuality[] };
 /** 数据包注册表里的一个音质档位 */
 export type RegistryQuality = { id: string; name: string };
 /** 数据包注册表（音源清单 + 音质档位；宿主 UI 选项的唯一来源） */
@@ -202,6 +210,13 @@ export const DEFAULT_SEARCH_PAGE_MAX = 50;
  * 从低到高，因为 play-guard 的 qualityLadder() 直接反转它），故这里取反。
  * 不再硬编码表：包加新档位后硬编码表会与之脱节（见 registryQualities 的注释）。
  */
+/** 会员档高低序（v11 官方档位过滤用）：none < vip < svip；未知串按 0（多展示不隐藏） */
+function vipTierRank(tier: string | null): number {
+  if (tier == "vip") return 1;
+  if (tier == "svip") return 2;
+  return 0;
+}
+
 function qualityRanksOf(qualities: RegistryQuality[]): string[] {
   const ranks: string[] = [];
   for (let i = qualities.length - 1; i >= 0; i--) {
@@ -238,6 +253,26 @@ function gateway(
 }
 
 export class MusicApi {
+  /** 同键在飞请求合并：首页 onMounted/onShow/换包事件会前后脚触发同一轮数据，
+   *  重复的 400KB 新歌响应会在唯一引擎线程上再压 ~1.2s（settleOp 逐字符转义），
+   *  这里保证同一键同时最多只有一个请求真正发出去 */
+  private inflight = new Map<string, Promise<any>>();
+  private dedupe<T>(key: string, run: () => Promise<T>): Promise<T> {
+    const flying = this.inflight.get(key);
+    if (flying != null) return flying as Promise<T>;
+    const p = run().then(
+      (v) => {
+        this.inflight.delete(key);
+        return v;
+      },
+      (e) => {
+        this.inflight.delete(key);
+        throw e;
+      }
+    );
+    this.inflight.set(key, p);
+    return p;
+  }
   // 播放地址与歌词的内存缓存，避免重复请求同一首歌
   private urlCache = new UTSJSONObject();
   /** 播放地址的取址时间（毫秒），配合 PLAY_URL_TTL 判断缓存是否过期 */
@@ -269,6 +304,14 @@ export class MusicApi {
    * 换包后整表清空，字节数留着就会配到另一条地址上，算出假码率。
    */
   private urlSize = new Map<string, number>();
+  /**
+   * 宿主侧 HEAD 探测的去重标记：老音源包不回报 size（null）时，宿主自己用
+   * HEAD 量一次 Content-Length 兜底（qt-pc 是引擎侧从流里实测，包没做
+   * Range 预检时 uniappx 端只能这么补）。同一条地址只探一次，失败不重试。
+   */
+  private urlSizeProbed = new Set<string>();
+  /** 宿主探测到字节数后广播（无 payload，播放页听到就重算当前歌的 kbps） */
+  static readonly URL_SIZE_EVENT = "qt-url-size";
   private lyricCache = new UTSJSONObject();
   /** 播放地址缓存的存活键 FIFO（容量上限见 URL_CACHE_CAP，写入序淘汰最旧） */
   private urlCacheKeys: string[] = [];
@@ -587,6 +630,32 @@ export class MusicApi {
           }
           if (sorts.length > 0) src.playlistSorts = sorts;
         }
+        // 账号登录能力（v9 契约，{methods,domains}）：旧包没有时保持
+        // undefined（= 不支持登录，账号页不显示该源的登录入口）。
+        const rawAuth = item.get("auth") as UTSJSONObject | null;
+        if (rawAuth != null) {
+          const authMethods = rawAuth.get("methods") as string[] | null;
+          const authDomains = rawAuth.get("domains") as string[] | null;
+          if (authMethods != null && authMethods.length > 0) {
+            src.auth = { methods: authMethods, domains: authDomains != null ? authDomains : [] };
+            // 官方线路档位（v11 契约，{id,name,min} 对象数组低到高）：id=官方
+            // level 同名直通，name=官方展示名，min=最低会员档。旧包没有/空数组
+            // 时保持 undefined（= 登录态不切官方清单）。
+            const authOfficial = rawAuth.get("officialQualities") as UTSJSONObject[] | null;
+            if (authOfficial != null && authOfficial.length > 0) {
+              const oq: RegistryOfficialQuality[] = [];
+              for (let j = 0; j < authOfficial.length; j++) {
+                const oqItem = authOfficial[j];
+                const oqId = this.strOf(oqItem.get("id"));
+                if (oqId.length == 0) continue;
+                let oqMin = this.strOf(oqItem.get("min"));
+                if (oqMin != "vip" && oqMin != "svip") oqMin = "none";
+                oq.push({ id: oqId, name: this.strOf(oqItem.get("name")), min: oqMin });
+              }
+              if (oq.length > 0) src.auth.officialQualities = oq;
+            }
+          }
+        }
         sources.push(src);
       }
       const qualities: RegistryQuality[] = [];
@@ -652,12 +721,30 @@ export class MusicApi {
   /**
    * 该源播放/下载可用的音质档位（v5 契约；null = 未声明/不限 = 全部档位）。
    * `local` 不在注册表里，恒为不限。
+   *
+   * v10 官方档位切换：该源播放面登录态生效（有账号 + 播放面开关开）且注册表
+   * 声明了 auth.officialQualities 时，可用面整体换成官方清单——与
+   * stores/source-registry.sourceQualities（音质选项展示）同口径，钳位才不会
+   * 把用户在官方档位里选的值又钳回第三方子集。
    */
   supportedQualitiesOf(source: Source): string[] | null {
     if (source == "local") return null;
     for (let i = 0; i < this.registrySources.length; i++) {
       const item = this.registrySources[i] as RegistrySource;
       if (item.id != source) continue;
+      const auth = item.auth;
+      if (auth != null && auth.officialQualities != null && auth.officialQualities.length > 0 && sourcePlayLoginActive(source)) {
+        // v11：官方清单按登录账号会员档过滤（与 stores/source-registry
+        // .sourceQualities 展示同口径）；账号档未知 = 全清单
+        const tier = sourceVipTierOf(source);
+        const minRank = tier == null ? -1 : vipTierRank(tier);
+        const ids: string[] = [];
+        for (let j = 0; j < auth.officialQualities.length; j++) {
+          const oq = auth.officialQualities[j];
+          if (minRank < 0 || vipTierRank(oq.min) <= minRank) ids.push(oq.id);
+        }
+        return ids;
+      }
       if (item.qualities == null) return null;
       return item.qualities;
     }
@@ -672,23 +759,53 @@ export class MusicApi {
    * 取链包侧线路另有逐级降档兜底，这里是让请求值一开始就在支持面内——
    * UI 展示的档位与实际请求一致，不再对不支持的档位发无效请求。
    */
-  clampQualityFor(source: Source, wanted: string): string {
+  /**
+   * 把请求档归一到该源当前生效的档位面（v11）：官方清单生效时旧第三方档名
+   * （v11 前选的 128/320/flac/flac24bit）映射到官方 level id——不归一的话旧档名
+   * 不在官方清单里，钳位会把请求钳到清单最高档（jymaster）。清单未生效或映射
+   * 后仍不在可用面里 = 原样返回。
+   */
+  private normalizeOfficialQuality(source: Source, wanted: string): string {
     const supported = this.supportedQualitiesOf(source);
-    if (supported == null || supported.length == 0) return wanted;
+    if (supported == null || supported.indexOf(wanted) >= 0) return wanted;
+    let alias = "";
+    if (wanted == "128") alias = "standard";
+    else if (wanted == "320") alias = "exhigh";
+    else if (wanted == "flac") alias = "lossless";
+    else if (wanted == "flac24bit") alias = "hires";
+    if (alias.length > 0 && supported.indexOf(alias) >= 0) return alias;
+    return wanted;
+  }
+
+  clampQualityFor(source: Source, wanted: string): string {
+    const normalized = this.normalizeOfficialQuality(source, wanted);
+    const supported = this.supportedQualitiesOf(source);
+    if (supported == null || supported.length == 0) return normalized;
     for (let i = 0; i < supported.length; i++) {
-      if (supported[i] == wanted) return wanted;
+      if (supported[i] == normalized) return normalized;
     }
     const ranks = qualityRanksOf(this.registryQualities);
+    // 官方档 id（standard…jymaster）不在全局档位表里：把官方清单（低→高）
+    // 反转后插到高位，官方档之间才有正确的高低关系，否则下面 indexOf 全是
+    // -1、想要官方档会被错误钳到清单最低档。
+    let hasUnknown = false;
+    for (let i = 0; i < supported.length; i++) {
+      if (ranks.indexOf(supported[i]) < 0) {
+        hasUnknown = true;
+        break;
+      }
+    }
+    const ranksAll = hasUnknown ? supported.slice().reverse().concat(ranks) : ranks;
     // 档位序为空（清单还没装好/旧包没给）＝对高低一无所知，此时不动请求值：
     // 与「未声明就不动」同一保守口径，宁可原样发出去让包侧按线路能力兜底。
-    if (ranks.length == 0) return wanted;
-    const wantedRank = ranks.indexOf(wanted);
+    if (ranksAll.length == 0) return normalized;
+    const wantedRank = ranksAll.indexOf(normalized);
     if (wantedRank < 0) return supported[0];
     // 向下降：可用档里取 ≤ 想要排名的最高一档
     let best = "";
     let bestRank = -1;
     for (let i = 0; i < supported.length; i++) {
-      const rank = ranks.indexOf(supported[i]);
+      const rank = ranksAll.indexOf(supported[i]);
       if (rank < 0) continue;
       if (rank <= wantedRank && rank > bestRank) {
         best = supported[i];
@@ -698,16 +815,16 @@ export class MusicApi {
     if (bestRank >= 0) return best;
     // 想要的档位以下没有可用档 → 取最接近的更高一档
     let up = "";
-    let upRank = ranks.length;
+    let upRank = ranksAll.length;
     for (let i = 0; i < supported.length; i++) {
-      const rank = ranks.indexOf(supported[i]);
+      const rank = ranksAll.indexOf(supported[i]);
       if (rank < 0) continue;
       if (rank < upRank) {
         up = supported[i];
         upRank = rank;
       }
     }
-    return up.length > 0 ? up : wanted;
+    return up.length > 0 ? up : normalized;
   }
 
   private strOf(v: any): string {
@@ -855,6 +972,7 @@ export class MusicApi {
     const cacheKey = "rec:" + source + ":" + (category != null ? category : "") + ":" + (page != null ? page : 1) + ":" + sortId;
     const hit = this.dataGet(cacheKey);
     if (hit != null) return hit as Playlist[];
+    return this.dedupe(cacheKey, async (): Promise<Playlist[]> => {
     // 歌单广场列表（含对应 tag/排序的每一页）：本地持久缓存 12 小时。
     // 翻页维度已含在键里（source/category/page/sort 逐页各存一条），互不覆盖。
     const ttlKey = "rec:" + this.packFp() + ":" + cacheKey;
@@ -875,6 +993,7 @@ export class MusicApi {
     this.dataSet(cacheKey, lists);
     if (lists.length > 0) ttlWrite(ttlKey, lists);
     return lists;
+    });
   }
 
   // ==================== 歌曲/榜单/热词 ====================
@@ -883,14 +1002,23 @@ export class MusicApi {
     const cacheKey = "latest:" + source + ":" + limit + ":" + offset;
     const hit = this.dataGet(cacheKey);
     if (hit != null) return hit as Song[];
-    const args = new UTSJSONObject();
-    args.set("source", source);
-    args.set("limit", limit);
-    args.set("offset", offset);
-    const response = await this.engineInvoke("latest", args);
-    const songs = this.songsOf(response, source);
-    this.dataSet(cacheKey, songs);
-    return songs;
+    return this.dedupe(cacheKey, async (): Promise<Song[]> => {
+      // 新歌列表：本地持久缓存 12 小时。单次响应 ~400KB，跨运行时搬运要占引擎线程
+      // ~1.2s（期间所有点击/渲染排队，真机上就是「宽屏点击卡顿」的主源），且原生层
+      // 搬运大字符串有概率踩中 libext_component 的 memcpy 段错误 —— 冷启动能不拉就不拉
+      const ttlKey = "latest:" + this.packFp() + ":" + source + ":" + limit + ":" + offset;
+      const stored = this.ttlHit(ttlKey, MusicApi.TTL_12H, cacheKey) as Song[] | null;
+      if (stored != null && stored.length > 0) return stored;
+      const args = new UTSJSONObject();
+      args.set("source", source);
+      args.set("limit", limit);
+      args.set("offset", offset);
+      const response = await this.engineInvoke("latest", args);
+      const songs = this.songsOf(response, source);
+      this.dataSet(cacheKey, songs);
+      if (songs.length > 0) ttlWrite(ttlKey, songs);
+      return songs;
+    });
   }
 
   banners(): Promise<Banner[]> {
@@ -902,6 +1030,7 @@ export class MusicApi {
     const cacheKey = "charts:" + currentSource;
     const hit = this.dataGet(cacheKey);
     if (hit != null) return hit as Chart[];
+    return this.dedupe(cacheKey, async (): Promise<Chart[]> => {
     // 排行榜列表：本地持久缓存 12 小时（键带音源包指纹，换包即失效）
     const ttlKey = "charts:" + this.packFp() + ":" + currentSource;
     const stored = this.ttlHit(ttlKey, MusicApi.TTL_12H, cacheKey) as Chart[] | null;
@@ -918,6 +1047,7 @@ export class MusicApi {
     this.dataSet(cacheKey, charts);
     if (charts.length > 0) ttlWrite(ttlKey, charts);
     return charts;
+    });
   }
 
   /** 四源榜单合并（单源失败 bundle 内跳过） */
@@ -1526,8 +1656,11 @@ export class MusicApi {
    * 注意用缓存条目自身的时间戳而非当前时间，否则反复命中缓存会把有效期无限延长。
    */
   async playUrl(song: Song, quality: string = "320"): Promise<string> {
-    const cacheKey = song.platform + ":" + song.id + ":" + quality;
-    const resolved = await this.resolvePlayUrl(song, quality, cacheKey);
+    // v11：官方清单生效时旧档名归一到官方 level（存量 player.quality 可能还是
+    // flac/flac24bit），否则请求档不在官方清单里、按最高档起试
+    const effQuality = this.normalizeOfficialQuality(song.platform, quality);
+    const cacheKey = song.platform + ":" + song.id + ":" + effQuality;
+    const resolved = await this.resolvePlayUrl(song, effQuality, cacheKey);
     const url = resolved.url;
     if (url.length > 0) {
       const at = this.urlCacheAt.get(cacheKey);
@@ -1588,6 +1721,10 @@ export class MusicApi {
       // 实测字节数同理，只增不清：老包不返回 size（null）时保留上一次测到的值
       if (result.size != null && result.size > 0) {
         this.urlSize.set(cacheKey, result.size as number);
+      } else {
+        // 包没量到（老包没实现 Range 预检 / CDN 没回 Content-Range）→ 宿主
+        // HEAD 兜底测一次。异步不阻塞取链，测到就广播（播放页补算 kbps）。
+        this.probeUrlSize(cacheKey, result.url);
       }
       // 命中线路与地址一起记：管理端要看「这条地址是音源包里哪条源取到的」，
       // 而地址会被复用 10 分钟，线路必须跟着地址走
@@ -1666,6 +1803,47 @@ export class MusicApi {
     if (!(sec > 0)) return 0;
     const kbps = Math.round((size * 8) / sec / 1000);
     return kbps > 0 ? kbps : 0;
+  }
+
+  /**
+   * 宿主侧字节数兜底探测：老音源包取链不回报 size 时，对已拿到的地址发一个
+   * HEAD 请求量 `Content-Length`（对齐 qt-pc 的实测口径；qt-pc 是引擎从流里
+   * 量，uniappx 的 UTS 桥拿不到流字节数，只能 HEAD）。
+   *
+   * 约束：
+   * - 异步 fire-and-forget，不阻塞取链主链路；失败静默（宁缺毋滥，绝不写 0）。
+   * - 同一 cacheKey 只探一次（`urlSizeProbed`），失败也不重试——地址 10 分钟
+   *   复用期内不会变，重试只会白打请求。
+   * - 量到后写进 `urlSize`（与地址同生命周期，随 urlCache 清空一起失效）并
+   *   广播 `URL_SIZE_EVENT`，播放页听到就重算当前歌的 kbps。
+   */
+  private probeUrlSize(cacheKey: string, url: string): void {
+    if (this.urlSizeProbed.has(cacheKey)) return;
+    this.urlSizeProbed.add(cacheKey);
+    uni.request({
+      url: url,
+      method: "HEAD",
+      timeout: 8000,
+      success: (res) => {
+        if (res.statusCode < 200 || res.statusCode >= 300) return;
+        const header = res.header as UTSJSONObject | null;
+        if (header == null) return;
+        // 响应头大小写不保证，两个常见写法都试一遍
+        let length = 0;
+        for (const key of ["Content-Length", "content-length"]) {
+          const v = header.get(key);
+          if (v != null) {
+            const n = parseFloat("" + v);
+            if (Number.isFinite(n) && n > 0) length = n;
+            break;
+          }
+        }
+        if (length <= 0) return;
+        this.urlSize.set(cacheKey, length);
+        uni.$emit(MusicApi.URL_SIZE_EVENT, "");
+      },
+      fail: () => {},
+    });
   }
 
   /**

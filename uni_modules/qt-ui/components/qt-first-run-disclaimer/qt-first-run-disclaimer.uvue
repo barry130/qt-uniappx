@@ -70,7 +70,10 @@ const emit = defineEmits<{
  * 深色皮肤下写死 #ffffff 会得到一张白卡片压在暗界面上。
  */
 const cardStyle = computed((): string => {
-  const width = !layout.isWide ? "width:620rpx;" : "width:" + qtSheetWidth("modal") + "px;";
+  let width = !layout.isWide ? "width:620rpx;" : "width:" + qtSheetWidth("modal") + "px;";
+  // `.frd-card-wide` 的 max-height:560px 只防「大屏内容太长」，横屏矮窗（如 780×360，
+  // 会落进 isWide）整窗才 360px 高，必须再夹一道，否则标题和按钮被挤出屏幕。
+  if (layout.isWide) width += "max-height:" + Math.max(260, layout.windowHeight - 32) + "px;";
   return width + "background-color:" + theme.skin.sheetSurface + ";";
 });
 const maskStyle = computed((): string => "background-color:" + theme.skin.scrim + ";");
@@ -78,11 +81,12 @@ const maskStyle = computed((): string => "background-color:" + theme.skin.scrim 
 /**
  * 正文区尺寸：照抄 qt-notice-splash 的口径 —— 窄屏 `max-height`（内容短时卡片自然收窄），
  * 宽屏给**确定高度**（scroll-view 在 Vapor 宽屏下 max-height 不保证形成可滚动区块，
- * 内容一长就会把确认键顶出屏幕）。
+ * 内容一长就会把确认键顶出屏幕）。固定 360px 在横屏矮窗里超过整窗高，按窗口高反算。
  */
 const contentStyle = computed((): string => {
   if (!layout.isWide) return "margin-top:24rpx;margin-bottom:4rpx;max-height:760rpx;";
-  return "height:360px;margin-top:14px;";
+  const h = Math.max(120, Math.min(360, layout.windowHeight - 220));
+  return "height:" + h + "px;margin-top:14px;";
 });
 
 const active = computed((): boolean => props.visible && props.notice != null);

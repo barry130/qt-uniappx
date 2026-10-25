@@ -1,0 +1,699 @@
+<template>
+  <qt-page-frame width-kind="flow" :max-width="720">
+    <scroll-view class="auth-scroll" direction="vertical" :show-scrollbar="false">
+      <view class="auth-content" :class="layout.isWide ? 'auth-content-wide' : ''">
+        <qt-card class="auth-card" title="使用登录态" description="开启后对应面的请求会带上已登录音源的官方 Cookie，关闭则一律匿名。数据面与播放面独立控制，凭据只保存在本机。" elevated>
+          <view class="scope-row" :style="rowBorderStyle" @click="toggleMeta">
+            <view class="scope-main">
+              <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">数据面使用登录态</text>
+              <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">搜索、歌单、歌词等数据接口</text>
+            </view>
+            <view class="toggle" :class="layout.isWide ? 'toggle-wide' : ''" :style="'background-color:' + (metaOn ? theme.skin.accent : theme.skin.surfaceInset) + ';opacity:' + (hasAccounts ? '1' : '0.4') + ';'">
+              <view class="toggle-knob" :class="metaKnobClass" :style="'background-color:' + (metaOn ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
+            </view>
+          </view>
+          <view class="scope-row scope-row-last" @click="togglePlay">
+            <view class="scope-main">
+              <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">播放面使用登录态</text>
+              <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">在线播放取链（更高音质/会员内容等）</text>
+            </view>
+            <view class="toggle" :class="layout.isWide ? 'toggle-wide' : ''" :style="'background-color:' + (playOn ? theme.skin.accent : theme.skin.surfaceInset) + ';opacity:' + (hasAccounts ? '1' : '0.4') + ';'">
+              <view class="toggle-knob" :class="playKnobClass" :style="'background-color:' + (playOn ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
+            </view>
+          </view>
+          <text class="card-hint" :class="layout.isWide ? 'card-hint-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">未登录任何音源时开关不生效；先在下方添加登录。</text>
+        </qt-card>
+
+        <qt-card class="auth-card" title="已登录账号" description="登录走各平台官方接口；凭据只保存在本机，卸载重装数据包或重启应用都不会丢。">
+          <view v-if="accountRows.length == 0" class="empty">
+            <text class="empty-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">还没有登录任何音源账号，可在下方「添加登录」里扫码或导入 Cookie。</text>
+          </view>
+          <view v-for="row in accountRows" :key="'acc-' + row.source" class="acc-row" :class="row.last ? 'acc-row-last' : ''" :style="rowBorderStyle">
+            <view class="acc-main">
+              <view class="acc-name-line">
+                <text class="acc-source" :style="('color:' + theme.skin.text + ';') + qtFontDual(27, 15)">{{ row.name }}</text>
+                <text v-if="row.stale" class="acc-stale" :style="('color:' + theme.skin.danger + ';') + qtFontDual(22, 12)">Cookie 已失效，请重新登录</text>
+              </view>
+              <text class="acc-nick" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.nickname }}</text>
+            </view>
+            <qt-button class="acc-btn" label="退出" variant="ghost" size="sm" @click="logout(row.source, row.name)" />
+          </view>
+        </qt-card>
+
+        <qt-card class="auth-card auth-card-last" title="添加登录" description="扫码走各平台官方登录接口，二维码由数据包在本机生成；导入 Cookie 需从已登录的浏览器复制。">
+          <view v-if="authRows.length == 0" class="empty">
+            <text class="empty-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ authEmptyText }}</text>
+          </view>
+          <view v-for="row in authRows" :key="'src-' + row.id" class="src-row" :class="row.last ? 'src-row-last' : ''" :style="rowBorderStyle">
+            <view class="acc-main">
+              <text class="acc-source" :style="('color:' + theme.skin.text + ';') + qtFontDual(27, 15)">{{ row.name }}</text>
+              <text class="acc-nick" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.hint }}</text>
+            </view>
+            <qt-button v-if="row.qr" class="acc-btn" label="扫码登录" variant="secondary" size="sm" :disabled="qrBusy" @click="startQr(row.id, row.name)" />
+            <qt-button v-if="row.cookie" class="acc-btn" label="导入 Cookie" variant="outline" size="sm" @click="openCookieSheet(row.id, row.name)" />
+          </view>
+        </qt-card>
+      </view>
+    </scroll-view>
+
+    <!-- 扫码登录弹层 -->
+    <view v-if="qrVisible" class="sheet-mask" @click="closeQrSheet">
+      <view class="sheet-card" :class="layout.isWide ? 'sheet-card-wide' : ''" :style="layout.isWide ? sheetCardStyleWide : sheetCardStyle" @click.stop>
+        <text class="sheet-title" :class="layout.isWide ? 'sheet-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(30, 17)">{{ qrName }} 扫码登录</text>
+        <text class="sheet-desc" :class="layout.isWide ? 'sheet-desc-wide' : ''" :style="('color:' + qrStatusColor + ';') + qtFontDual(23, 13)">{{ qrStatusText }}</text>
+        <view class="qr-wrap" :class="layout.isWide ? 'qr-wrap-wide' : ''" :style="layout.isWide ? 'background-color:#ffffff;border-radius:10px;' : 'background-color:#ffffff;border-radius:16rpx;'">
+          <image v-if="qrImage.length > 0" class="qr-img" :class="layout.isWide ? (qrStatus == 'expired' ? 'qr-img-wide qr-img-expired' : 'qr-img-wide') : (qrStatus == 'expired' ? 'qr-img-expired' : '')" :src="qrImage" mode="aspectFit" />
+        </view>
+        <view class="sheet-btn-row" :class="layout.isWide ? 'sheet-btn-row-wide' : ''">
+          <qt-button class="sheet-btn" label="取消" variant="ghost" size="sm" @click="closeQrSheet" />
+          <qt-button v-if="qrStatus == 'expired'" class="sheet-btn" label="重新生成" variant="secondary" size="sm" @click="regenerateQr" />
+        </view>
+      </view>
+    </view>
+
+    <!-- 导入 Cookie 弹层 -->
+    <view v-if="cookieVisible" class="sheet-mask" @click="closeCookieSheet">
+      <view class="sheet-card" :class="layout.isWide ? 'sheet-card-wide' : ''" :style="layout.isWide ? sheetCardStyleWide : sheetCardStyle" @click.stop>
+        <text class="sheet-title" :class="layout.isWide ? 'sheet-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(30, 17)">{{ cookieName }} 导入 Cookie</text>
+        <text class="sheet-desc" :class="layout.isWide ? 'sheet-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">粘贴已登录浏览器的 Cookie 串，会先经官方接口校验，无效不保存</text>
+        <textarea
+          class="cookie-input"
+          :class="layout.isWide ? 'cookie-input-wide' : ''"
+          :style="layout.isWide ? cookieInputStyleWide : cookieInputStyle"
+          :value="cookieText"
+          @input="onCookieInput"
+          placeholder="粘贴 Cookie 内容"
+          :placeholder-class="layout.isWide ? 'cookie-ph-wide' : 'cookie-ph'"
+          :maxlength="8192"
+        />
+        <text v-if="cookieError.length > 0" class="sheet-error" :class="layout.isWide ? 'sheet-error-wide' : ''" :style="('color:' + theme.skin.danger + ';') + qtFontDual(22, 12)">{{ cookieError }}</text>
+        <view class="sheet-btn-row" :class="layout.isWide ? 'sheet-btn-row-wide' : ''">
+          <qt-button class="sheet-btn" label="取消" variant="ghost" size="sm" @click="closeCookieSheet" />
+          <qt-button class="sheet-btn" label="校验并保存" variant="secondary" size="sm" :disabled="cookieBusy" @click="submitCookie" />
+        </view>
+      </view>
+    </view>
+  </qt-page-frame>
+</template>
+<script setup lang="ts">
+import { computed, ref } from "vue";
+import { onShow, onUnload } from "@dcloudio/uni-app";
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import QtCard from "@/uni_modules/qt-ui/components/qt-card/qt-card.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtShowToast } from "@/services/toast";
+import { qtConfirm } from "@/services/confirm";
+import { useSourceRegistryStore } from "@/stores/source-registry";
+import {
+  authQrCreate,
+  authQrPoll,
+  authImportCookie,
+  authCheckUser,
+  saveSourceAuthAccount,
+  removeSourceAuthAccount,
+  readSourceAuthEntries,
+  readSourceAuthToggles,
+  setSourceAuthToggle,
+} from "@/services/source-auth";
+
+/**
+ * 音源账号登录页（v9 数据包契约）：账号列表 + 数据/播放两面登录态开关 +
+ * 扫码/Cookie 两种登录方式。状态在非响应式的 service（uni storage）里，
+ * 用 refreshTick 触发重算（音源包管理页同一套路）；storage 变化经
+ * SOURCE_AUTH_CHANGED_EVENT 广播对账。
+ * v10：播放面登录态生效时官方档位清单生效（音质选择整体切官方档位，切换
+ * 逻辑在 stores/source-registry），本页不再有「官方线路音质」配置卡。
+ */
+const theme = useThemeStore();
+const layout = useQtLayout();
+const registry = useSourceRegistryStore();
+
+const refreshTick = ref(0);
+const useMeta = ref(false);
+const usePlay = ref(false);
+/** 校验中判失效的源 id（authCheckUser 返回 null 时加入；重新登录后移除） */
+const staleIds = ref<string[]>([]);
+/** 进页只做一次凭据有效性校验（网络请求，不跟随 onShow 反复打） */
+let didValidate = false;
+
+// ── 已登录账号 ──
+type AccountRow = { source: string; name: string; nickname: string; stale: boolean; last: boolean };
+const accountRows = computed((): AccountRow[] => {
+  void refreshTick.value;
+  const entries = readSourceAuthEntries();
+  const out: AccountRow[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    out.push({
+      source: e.source,
+      name: registry.label(e.source),
+      nickname: e.account.user.nickname,
+      stale: staleIds.value.indexOf(e.source) >= 0,
+      last: i == entries.length - 1,
+    });
+  }
+  return out;
+});
+const hasAccounts = computed((): boolean => {
+  void refreshTick.value;
+  return readSourceAuthEntries().length > 0;
+});
+
+// ── 可登录音源（数据包 auth 能力自述；旧包没有时为空并提示升级）──
+type AuthRow = { id: string; name: string; hint: string; qr: boolean; cookie: boolean; last: boolean };
+const authRows = computed((): AuthRow[] => {
+  void refreshTick.value;
+  const out: AuthRow[] = [];
+  const sources = registry.sources;
+  for (let i = 0; i < sources.length; i++) {
+    const auth = sources[i].auth;
+    if (auth == null) continue;
+    const qr = auth.methods.indexOf("qrcode") >= 0;
+    const cookie = auth.methods.indexOf("cookie") >= 0;
+    out.push({
+      id: sources[i].id,
+      name: sources[i].name,
+      hint: qr && cookie ? "支持扫码登录与导入 Cookie" : qr ? "支持扫码登录" : "支持导入 Cookie",
+      qr: qr,
+      cookie: cookie,
+      last: false,
+    });
+  }
+  if (out.length > 0) out[out.length - 1].last = true;
+  return out;
+});
+const authEmptyText = computed((): string => {
+  void refreshTick.value;
+  if (!registry.ready) return "注册表尚未就绪：请稍候或到「设置 → 音源包管理」确认已安装数据包。";
+  return "当前数据包没有支持账号登录的音源（需要 2026.10.24 及以上的数据包）。";
+});
+
+// ── 两面开关（乐观更新 + 失败还原，语义对齐 qt-pc 设置页）──
+// 生效态收进 computed（模板里的 && 不做空值短路，布尔组合放脚本里更稳）
+const metaOn = computed((): boolean => hasAccounts.value && useMeta.value);
+const playOn = computed((): boolean => hasAccounts.value && usePlay.value);
+const metaKnobClass = computed((): string => knobClass(metaOn.value));
+const playKnobClass = computed((): string => knobClass(playOn.value));
+function knobClass(on: boolean): string {
+  const wide = layout.isWide;
+  if (on && wide) return "toggle-knob-on toggle-knob-on-wide toggle-knob-wide";
+  if (on) return "toggle-knob-on";
+  if (wide) return "toggle-knob-wide";
+  return "";
+}
+function toggleMeta(): void {
+  void toggleScope("meta", !useMeta.value);
+}
+function togglePlay(): void {
+  void toggleScope("play", !usePlay.value);
+}
+async function toggleScope(scope: "meta" | "play", next: boolean): Promise<void> {
+  if (!hasAccounts.value) {
+    qtShowToast({ title: "请先在下方添加一个音源登录", icon: "none" });
+    return;
+  }
+  if (scope == "meta") useMeta.value = next;
+  else usePlay.value = next;
+  try {
+    await setSourceAuthToggle(scope, next);
+  } catch (e) {
+    // 还原 UI：存储虽已写入，但引擎没吃进去（未就绪/旧包），装载成功钩子
+    // 之后会按存储重放；UI 先回到与引擎一致的状态，避免「看着开了实际没开」
+    if (scope == "meta") useMeta.value = !next;
+    else usePlay.value = !next;
+    qtShowToast({ title: "应用失败：" + errText(e), icon: "none" });
+  }
+}
+
+// ── 扫码登录 ──
+const qrVisible = ref(false);
+const qrBusy = ref(false);
+const qrSource = ref("");
+const qrName = ref("");
+const qrKey = ref("");
+const qrImage = ref("");
+/** waiting / scanned / expired */
+const qrStatus = ref("waiting");
+let pollTimer: number | null = null;
+
+const qrStatusText = computed((): string => {
+  if (qrStatus.value == "scanned") return "已扫码，请在手机上确认";
+  if (qrStatus.value == "expired") return "二维码已过期，可重新生成";
+  return "打开官方 App 扫码登录";
+});
+const qrStatusColor = computed((): string => {
+  if (qrStatus.value == "scanned") return theme.skin.accent;
+  if (qrStatus.value == "expired") return theme.skin.danger;
+  return theme.skin.textMuted;
+});
+
+function startQr(source: string, name: string): void {
+  if (qrBusy.value) return;
+  qrBusy.value = true;
+  authQrCreate(source)
+    .then((session) => {
+      qrSource.value = source;
+      qrName.value = name;
+      qrKey.value = session.key;
+      qrImage.value = session.image;
+      qrStatus.value = "waiting";
+      qrVisible.value = true;
+      startPolling();
+    })
+    .catch((e) => {
+      qtShowToast({ title: "创建二维码失败：" + errText(e), icon: "none" });
+    })
+    .finally(() => {
+      qrBusy.value = false;
+    });
+}
+function regenerateQr(): void {
+  const source = qrSource.value;
+  const name = qrName.value;
+  stopPolling();
+  qrVisible.value = false;
+  startQr(source, name);
+}
+function startPolling(): void {
+  stopPolling();
+  pollTimer = setInterval(() => {
+    void pollOnce();
+  }, 2000) as unknown as number;
+}
+function stopPolling(): void {
+  if (pollTimer != null) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+function pollOnce(): void {
+  const source = qrSource.value;
+  const key = qrKey.value;
+  authQrPoll(source, key)
+    .then((r) => {
+      if (r.status == "confirmed") {
+        stopPolling();
+        const user = r.user;
+        if (user == null || r.cookie.length == 0) {
+          qrStatus.value = "expired";
+          return;
+        }
+        const nickname = user.nickname;
+        saveSourceAuthAccount(source, r.cookie, user)
+          .then(() => {
+            closeQrSheet();
+            removeFromStale(source);
+            refreshFromStorage();
+            qtShowToast({ title: "已登录：" + nickname, icon: "none" });
+          })
+          .catch((e) => {
+            qtShowToast({ title: "保存登录失败：" + errText(e), icon: "none" });
+          });
+        return;
+      }
+      if (r.status == "expired") {
+        stopPolling();
+        qrStatus.value = "expired";
+        return;
+      }
+      qrStatus.value = r.status;
+    })
+    .catch((e) => {
+      // 确定性失败继续轮询没有意义（旧包缺入口/引擎下线），停下让用户重新生成；
+      // 普通网络抖动保持轮询（下一次 2s 后自然重试）
+      const message = errText(e);
+      if (message.indexOf("版本过旧") >= 0 || message.indexOf("引擎未就绪") >= 0) {
+        stopPolling();
+        qrStatus.value = "expired";
+        qtShowToast({ title: message, icon: "none" });
+      }
+    });
+}
+function closeQrSheet(): void {
+  stopPolling();
+  qrVisible.value = false;
+  qrImage.value = "";
+  qrKey.value = "";
+  qrSource.value = "";
+}
+
+// ── 导入 Cookie ──
+const cookieVisible = ref(false);
+const cookieBusy = ref(false);
+const cookieSource = ref("");
+const cookieName = ref("");
+const cookieText = ref("");
+const cookieError = ref("");
+
+function openCookieSheet(source: string, name: string): void {
+  cookieSource.value = source;
+  cookieName.value = name;
+  cookieText.value = "";
+  cookieError.value = "";
+  cookieVisible.value = true;
+}
+function onCookieInput(e: InputEvent): void {
+  cookieText.value = String((e.detail as any).value ?? "");
+}
+function closeCookieSheet(): void {
+  cookieVisible.value = false;
+  cookieText.value = "";
+  cookieError.value = "";
+}
+function submitCookie(): void {
+  const source = cookieSource.value;
+  const text = cookieText.value.trim();
+  if (text.length == 0) {
+    cookieError.value = "请粘贴 Cookie 内容";
+    return;
+  }
+  cookieBusy.value = true;
+  authImportCookie(source, text)
+    .then((user) => {
+      if (user == null) {
+        cookieError.value = "Cookie 无效或已过期，请检查后重试";
+        return;
+      }
+      const nickname = user.nickname;
+      return saveSourceAuthAccount(source, text, user).then(() => {
+        closeCookieSheet();
+        removeFromStale(source);
+        refreshFromStorage();
+        qtShowToast({ title: "已导入登录：" + nickname, icon: "none" });
+      });
+    })
+    .catch((e) => {
+      cookieError.value = "导入失败：" + errText(e);
+    })
+    .finally(() => {
+      cookieBusy.value = false;
+    });
+}
+
+// ── 退出登录 ──
+function logout(source: string, name: string): void {
+  qtConfirm({ title: "退出登录", content: "退出 " + name + " 的登录？已保存的凭据将从本机删除。", danger: true }).then((ok) => {
+    if (!ok) return;
+    removeSourceAuthAccount(source)
+      .then(() => {
+        removeFromStale(source);
+        refreshFromStorage();
+        qtShowToast({ title: "已退出 " + name + " 登录", icon: "none" });
+      })
+      .catch((e) => {
+        qtShowToast({ title: "退出失败：" + errText(e), icon: "none" });
+      });
+  });
+}
+
+// ── 对账与校验 ──
+function refreshFromStorage(): void {
+  const toggles = readSourceAuthToggles();
+  useMeta.value = toggles.useMeta;
+  usePlay.value = toggles.usePlay;
+  refreshTick.value++;
+}
+function removeFromStale(source: string): void {
+  const idx = staleIds.value.indexOf(source);
+  if (idx >= 0) {
+    const next = staleIds.value.slice(0);
+    next.splice(idx, 1);
+    staleIds.value = next;
+  }
+}
+/** 进页一次性校验已存凭据：失效的标红提示重登（不自动清除，用户可能只是断网） */
+function validateAccounts(): void {
+  const entries = readSourceAuthEntries();
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    authCheckUser(e.source, e.account.cookie)
+      .then((user) => {
+        if (user != null) return;
+        if (staleIds.value.indexOf(e.source) < 0) {
+          const next = staleIds.value.slice(0);
+          next.push(e.source);
+          staleIds.value = next;
+          refreshTick.value++;
+        }
+      })
+      .catch((_) => {
+        // 校验失败（断网/引擎未就绪）不动失效标记：宁可漏报也不误报
+      });
+  }
+}
+function errText(e: any | null): string {
+  const message = e instanceof Error ? e.message : String(e);
+  // 引擎/包错误文本可能带整段 URL，截断到可用长度（与全仓日志口径一致）
+  return message.length > 120 ? message.slice(0, 120) : message;
+}
+
+onShow(() => {
+  registry.ensure();
+  refreshFromStorage();
+  if (!didValidate) {
+    didValidate = true;
+    validateAccounts();
+  }
+});
+onUnload(() => {
+  stopPolling();
+});
+
+// ── 样式常量（对齐音源包管理页的弹层口径）──
+const rowBorderStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
+const sheetCardStyle = computed<string>(() => "background-color:" + theme.skin.surfaceStrong + ";border-radius:24rpx;");
+const sheetCardStyleWide = computed<string>(() => "background-color:" + theme.skin.surfaceStrong + ";border-radius:14px;");
+const cookieInputStyle = computed<string>(() => "background-color:" + theme.skin.surfaceInset + ";color:" + theme.skin.text + ";border-radius:14rpx;");
+const cookieInputStyleWide = computed<string>(() => "background-color:" + theme.skin.surfaceInset + ";color:" + theme.skin.text + ";border-radius:8px;");
+</script>
+
+<style>
+.auth-scroll {
+  flex: 1;
+  min-height: 0;
+}
+.auth-content {
+  padding: 28rpx 24rpx 120rpx;
+}
+.auth-content-wide {
+  padding: 18px 24px 72px;
+}
+/* qt-card 自身不带外边距，这里给卡片间加间距（音源包管理页同款） */
+.auth-card {
+  margin-bottom: 24rpx;
+}
+.auth-card-last {
+  margin-bottom: 0;
+}
+.card-hint {
+  margin-top: 14rpx;
+  line-height: 1.5;
+}
+.card-hint-wide {
+  margin-top: 8px;
+}
+
+.scope-row {
+  flex-direction: row;
+  align-items: center;
+  padding: 18rpx 0;
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+}
+.scope-row-last {
+  border-bottom-width: 0;
+}
+.scope-main {
+  flex-direction: column;
+  flex: 1;
+}
+.scope-key {
+  font-size: 26rpx;
+  font-weight: 600;
+}
+.scope-sub {
+  margin-top: 4rpx;
+  font-size: 23rpx;
+}
+
+/* 自绘开关（全仓无 switch 组件，尺寸与播放设置页一致） */
+.toggle {
+  width: 92rpx;
+  height: 52rpx;
+  border-radius: 26rpx;
+  padding: 6rpx;
+  margin-left: 16rpx;
+}
+.toggle-wide {
+  width: 46px;
+  height: 26px;
+  border-radius: 13px;
+  padding: 3px;
+  margin-left: 12px;
+}
+.toggle-knob {
+  width: 40rpx;
+  height: 40rpx;
+  border-radius: 20rpx;
+}
+.toggle-knob-wide {
+  width: 20px;
+  height: 20px;
+  border-radius: 10px;
+}
+.toggle-knob-on {
+  margin-left: 40rpx;
+}
+.toggle-knob-on-wide {
+  margin-left: 20px;
+}
+
+.empty {
+  padding: 8rpx 0 4rpx;
+}
+.empty-text {
+  line-height: 1.6;
+}
+
+.acc-row {
+  flex-direction: row;
+  align-items: center;
+  padding: 18rpx 0;
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+}
+.acc-row-last {
+  border-bottom-width: 0;
+}
+.acc-main {
+  flex-direction: column;
+  flex: 1;
+}
+.acc-name-line {
+  flex-direction: row;
+  align-items: center;
+}
+.acc-source {
+  font-size: 27rpx;
+  font-weight: 600;
+}
+.acc-stale {
+  margin-left: 14rpx;
+  font-size: 22rpx;
+}
+.acc-nick {
+  margin-top: 4rpx;
+  font-size: 23rpx;
+}
+.acc-btn {
+  margin-left: 16rpx;
+}
+
+.src-row {
+  flex-direction: row;
+  align-items: center;
+  padding: 18rpx 0;
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+}
+.src-row-last {
+  border-bottom-width: 0;
+}
+
+/* 弹层（音源包管理页「从链接安装」同款口径） */
+.sheet-mask {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background-color: rgba(0, 0, 0, 0.45);
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+}
+.sheet-card {
+  width: 560rpx;
+  padding: 32rpx 28rpx 24rpx;
+}
+.sheet-card-wide {
+  width: 480px;
+  padding: 22px 24px 18px;
+}
+.sheet-title {
+  font-size: 30rpx;
+  font-weight: 600;
+}
+.sheet-title-wide {
+  font-size: 17px;
+}
+.sheet-desc {
+  margin-top: 8rpx;
+  font-size: 23rpx;
+}
+.sheet-desc-wide {
+  margin-top: 4px;
+  font-size: 13px;
+}
+
+/* 二维码：白底保证任何主题下都可扫；过期时降透明度提示失效 */
+.qr-wrap {
+  margin-top: 24rpx;
+  align-self: center;
+  padding: 16rpx;
+}
+.qr-img {
+  width: 380rpx;
+  height: 380rpx;
+}
+.qr-img-expired {
+  opacity: 0.3;
+}
+/* 宽屏：380rpx 在 1067dp 窗口约 540px，超出 480px 卡片内宽（432px）会被裁掉 */
+.qr-wrap-wide { margin-top: 12px; padding: 10px; }
+.qr-img-wide { width: 300px; height: 300px; }
+
+.cookie-input {
+  margin-top: 22rpx;
+  height: 200rpx;
+  padding: 16rpx 20rpx;
+  font-size: 24rpx;
+}
+.cookie-input-wide {
+  margin-top: 12px;
+  height: 110px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+.cookie-ph {
+  font-size: 24rpx;
+  color: #9aa1b0;
+}
+.cookie-ph-wide {
+  font-size: 13px;
+  color: #9aa1b0;
+}
+.sheet-error {
+  margin-top: 10rpx;
+  font-size: 22rpx;
+  line-height: 1.5;
+}
+.sheet-error-wide {
+  margin-top: 6px;
+  font-size: 12px;
+}
+.sheet-btn-row {
+  flex-direction: row;
+  justify-content: flex-end;
+  margin-top: 24rpx;
+}
+.sheet-btn-row-wide {
+  margin-top: 14px;
+}
+.sheet-btn {
+  margin-left: 16rpx;
+}
+</style>

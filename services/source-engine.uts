@@ -176,6 +176,18 @@ let gPlayPackPromise: Promise<boolean> | null = null;
 let gReviveWindowStart = 0;
 let gRevivesInWindow = 0;
 let gLastReviveAt = 0;
+/**
+ * meta 装载成功钩子（services/source-auth.ts 注册）：数据包内的登录态副本
+ * 随包实例生灭——引擎每次（重）装 meta（冷启动预热/换包/引擎重建，全部经
+ * loadMetaIntoEngine）都从零开始，持久层要在装载成功后对账重灌。注册式解耦：
+ * 本文件是底层服务，不能反向 import 上层 source-auth（会成环）。
+ */
+let gMetaAuthHook: (() => void) | null = null;
+
+/** 注册/替换「meta 装载成功」钩子；传 null 清除。钩子需自吞异常，失败不影响装载结果 */
+export function setMetaAuthHook(hook: (() => void) | null): void {
+  gMetaAuthHook = hook;
+}
 
 export function engineStatus(): SourceEngineStatus {
   return gStatus;
@@ -572,6 +584,11 @@ async function loadMetaIntoEngine(): Promise<boolean> {
     gLastError = "";
     const revision = info.get("metaRevision");
     logInfo("SourceEngine", `meta 已装载：${meta.id} v${meta.code}（${name}，metaRevision=${revision}，hostApiVersion ${HOST_API_VERSION}）`);
+    // 登录态重灌钩子：包内凭据副本随装载清零，通知持久层对账重灌。
+    // 异步钩子（void 丢弃）不打断装载；ensureDataEngine 在 gMetaReady=true
+    // 后立即返回，不会与本装载 Promise 死锁。
+    const authHook = gMetaAuthHook;
+    if (authHook != null) authHook();
     return true;
   } catch (e) {
     // 装载阶段抛错多为包文本本身非法（插件 compile 校验不过）；环境级故障

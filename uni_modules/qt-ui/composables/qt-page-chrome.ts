@@ -119,6 +119,8 @@ const QT_SELF_HEADER_ROUTES: string[] = [
 export const QT_SETTINGS_ROUTES: string[] = [
   "/pages/settings/index",
   "/pages/source-pack/index",
+  "/pages/ai-providers/index",
+  "/pages/equalizer/index",
   "/pages/theme/index",
   "/pages/play-settings/index",
   "/pages/download-settings/index",

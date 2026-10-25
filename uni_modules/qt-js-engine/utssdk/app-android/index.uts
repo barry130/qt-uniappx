@@ -989,28 +989,42 @@ function injectHeader(headersJson: string, key: string, value: string): string {
 	return headersJson.substring(0, valStart) + val + headersJson.substring(valEnd)
 }
 
-/** 收集响应头为 JSON（按索引遍历，重复头只保留最后一次出现）
+/** 收集响应头为 JSON（按索引遍历，重复头（多值）按 fetch 语义用 ", " 合并）
  *
  * 头名一律小写：与 PC 的 Rust builtin_request 同契约（脚本按 res.headers["content-type"]
  * 这类小写键取值，大小写混用会让脚本取不到头）。
+ *
+ * 重复头不能 last-wins：一次下发多个的 Set-Cookie（如 bili 扫码确认回 4 个）
+ * 互相覆盖后只剩最后一个，包侧按 cookie 名白名单就取不到 SESSDATA 了。
+ * Expires 日期里自带的逗号由包侧按 cookie 名白名单拆分（wyy/bili 的
+ * cookieFromSetCookie 同口径）。双数组去重合并，不用 Map：序列化阶段的
+ * 迭代语义在 UTS 里不如数组下标直白。
  */
 function collectHeaders(c: HttpURLConnection): string {
-	let out = '{'
-	let first = true
+	const keys = new Array<string>()
+	const vals = new Array<string>()
 	let i: Int = 0
 	let key: string | null = c.getHeaderFieldKey(i)
 	let val: string | null = c.getHeaderField(i)
 	while ((key != null || val != null) && i < 200) {
 		if (key != null && val != null) {
-			if (!first) {
-				out += ','
+			const lowerKey = key!.toLowerCase()
+			const at = keys.indexOf(lowerKey)
+			if (at < 0) {
+				keys.push(lowerKey)
+				vals.push(val!)
+			} else {
+				vals[at] = vals[at] + ', ' + val!
 			}
-			out += quoteAscii(key!.toLowerCase()) + ':' + quoteAscii(val!)
-			first = false
 		}
 		i++
 		key = c.getHeaderFieldKey(i)
 		val = c.getHeaderField(i)
+	}
+	let out = '{'
+	for (let j = 0; j < keys.length; j++) {
+		if (j > 0) out += ','
+		out += quoteAscii(keys[j]) + ':' + quoteAscii(vals[j])
 	}
 	return out + '}'
 }

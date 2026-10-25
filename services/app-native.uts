@@ -282,10 +282,12 @@ export function applyLegacyInsets(): boolean {
 /**
  * 打开系统文件选择器选一个 .js 文件，读回全文（音源包「本地文件安装」用）。
  * Android 走 ACTION_OPEN_DOCUMENT + contentResolver（content URI 只有一次读
- * 权限，所以原生侧直接把内容读出来回传）；其他平台恒回调不支持。
+ * 权限，所以原生侧直接把内容读出来回传）；鸿蒙走 DocumentViewPicker 选文件 +
+ * 临时 URI 读全文（2026-10-25 补齐，此前恒「不支持」导致鸿蒙装不了本地音源包）；
+ * 其余平台恒回调不支持。
  */
 export function pickJsFile(): Promise<PickFileResult> {
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-HARMONY
   return new Promise((resolve) => {
     try {
       pickJsFileNative((result) => {
@@ -297,7 +299,7 @@ export function pickJsFile(): Promise<PickFileResult> {
     }
   });
   // #endif
-  // #ifndef APP-ANDROID
+  // #ifndef APP-ANDROID || APP-HARMONY
   return Promise.resolve({ ok: false, name: "", content: "", message: "当前平台不支持本地文件安装" } as PickFileResult);
   // #endif
 }

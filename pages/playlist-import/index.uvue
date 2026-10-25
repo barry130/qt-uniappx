@@ -28,27 +28,15 @@
           </view>
         </view>
 
-        <!-- 平台选择：内联下拉，不用弹窗 -->
+        <!-- 平台选择：走全站统一的操作表弹层（services/source-sheet），不再内联下拉 -->
         <view class="plat-row" :class="layout.isWide ? 'plat-row-wide' : ''">
           <text class="plat-label" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 14)">平台</text>
-          <view class="plat-select" :class="layout.isWide ? 'plat-select-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';' " @click="togglePlatMenu">
-            <text class="plat-select-text" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 14)">{{ platLabels[platIndex] }}</text>
-            <QtIcon name="chevron-right" :size="24" :color="themeStore.skin.textMuted" />
+          <view class="plat-select" :class="layout.isWide ? 'plat-select-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';' " @click="openPlatformSheet">
+            <text class="plat-select-text" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 14)">{{ platLabelText }}</text>
+            <QtIcon name="chevron-down" :size="24" :color="themeStore.skin.textMuted" />
           </view>
         </view>
         <text class="plat-hint" :class="layout.isWide ? 'plat-hint-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)">{{ platFormatHint }}</text>
-        <view v-if="platOpen" class="plat-menu" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
-          <view
-            v-for="(label, idx) in platLabels"
-            :key="idx"
-            class="plat-option" :hover-class="layout.isWide ? 'plat-option-hover' : 'none'"
-            :class="idx < platLabels.length - 1 ? 'plat-option-line' : ''"
-            @click="pickPlat(idx)"
-          >
-            <text class="plat-option-text" :style="('color:' + (platIndex == idx ? themeStore.skin.accent : themeStore.skin.text) + ';') + qtFontDual(26, 14)">{{ label }}</text>
-            <QtIcon v-if="platIndex == idx" name="check" :size="24" :color="themeStore.skin.accent" />
-          </view>
-        </view>
       </view>
 
       <!-- 第二步（导入歌曲）：预览 + 歌单名 + 导入 -->
@@ -117,7 +105,7 @@
 
       <!-- 全屏锁定层：拉取/导入进行中挡住整页并禁系统返回，防止中途离开留下半截状态 -->
       <view v-if="parsing || importing" class="lock-mask">
-        <view class="lock-card" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
+        <view class="lock-card" :class="layout.isWide ? 'lock-card-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
           <QtLoading :visible="true" :size="44" :color="themeStore.skin.accent" />
           <text class="lock-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 17)">{{ importing ? "正在导入" : "正在拉取歌单" }}</text>
           <text class="lock-sub" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)">{{ importing ? "共 " + importTotal + " 首歌曲" : "歌单较大时需要几秒，请稍候" }}</text>
@@ -139,6 +127,7 @@ import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { musicApi } from "@/services/music-api";
 import { usePlayerStore } from "@/stores/player";
 import { useSourceRegistryStore } from "@/stores/source-registry";
+import { showPlatformSheet, PLATFORM_SHEET_AUTO_LABEL } from "@/services/source-sheet";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
 import type { Playlist } from "@/types/music";
 import type { Source } from "@/services/music-api";
@@ -162,9 +151,14 @@ const importProgress = ref("");
 const importTotal = ref(0);
 /** 平台选择：0 自动识别，其余为数据包注册表声明的音源（顺序同切换器） */
 const platIndex = ref(0);
-const platOpen = ref(false);
 // 音源清单来自数据包注册表：未装包时只剩「自动识别」（链接解析仍可用）
-const platLabels = computed<string[]>(() => ["自动识别（链接）"].concat(registry.sources.map((s) => s.name)));
+const platLabels = computed<string[]>(() => [PLATFORM_SHEET_AUTO_LABEL].concat(registry.sources.map((s) => s.name)));
+/** 选择器上显示的平台名（越界一律回落「自动识别」，换包后清单变短不会显示空白） */
+const platLabelText = computed((): string => {
+  const list = platLabels.value;
+  if (platIndex.value < 0 || platIndex.value >= list.length) return PLATFORM_SHEET_AUTO_LABEL;
+  return list[platIndex.value];
+});
 /** 解析平台与手选不一致时的说明（带链接时域名优先） */
 const platNote = ref("");
 const platValues = computed<string[]>(() => [""].concat(registry.sourceIds()));
@@ -266,13 +260,21 @@ function switchMode(_index: number): void {
   targetOpen.value = false;
 }
 
-function togglePlatMenu(): void {
-  platOpen.value = !platOpen.value;
-}
-
-function pickPlat(idx: number): void {
-  platIndex.value = idx;
-  platOpen.value = false;
+/**
+ * 平台选择走全站统一的操作表弹层（services/source-sheet 的 showPlatformSheet）：
+ * 首项「自动识别（链接）」，其余为数据包注册表音源，当前项 accent 高亮并自动滚动定位。
+ *
+ * 原先这里是自绘内联下拉（.plat-select + v-if 的 .plat-menu），与设置页/搜索页/首页
+ * 的音源切换长相不一致；2026-10-25 统一口径后全部换成同一套弹层。
+ */
+function openPlatformSheet(): void {
+  const current = platValues.value[platIndex.value] ?? "";
+  showPlatformSheet("解析平台", current).then((index: number) => {
+    if (index < 0) return; // 取消：保持原选择
+    const values = platValues.value;
+    if (index >= values.length) return;
+    platIndex.value = index;
+  });
 }
 
 /**
@@ -404,6 +406,8 @@ async function onCollect(): Promise<void> {
 .lock-card { width: 320rpx; border-width: 1px; border-style: solid; border-radius: 20rpx; padding: 40rpx 30rpx; align-items: center; }
 .lock-title { margin-top: 20rpx; font-size: 28rpx; font-weight: bold; }
 .lock-sub { margin-top: 8rpx; font-size: 22rpx; }
+/* 宽屏：320rpx 在 1067dp 窗口约 455px，内边距 57/43px、圆角 28px，遮罩上显得又大又糊 */
+.lock-card-wide { width: 360px; padding: 24px 28px; border-radius: 12px; }
 .page { flex: 1; padding: 24rpx; }
 .page-wide { padding: 16px 24px; }
 .hint { margin-bottom: 20rpx; }
@@ -421,7 +425,7 @@ async function onCollect(): Promise<void> {
 .link-input { flex: 1; height: 72rpx; border-width: 1px; border-style: solid; border-radius: 12rpx; padding: 0 20rpx; font-size: 26rpx; }
 .link-input-wide { height: 40px; border-radius: 8px; padding: 0 12px; font-size: 14px; }
 .parse-btn { height: 72rpx; border-radius: 12rpx; padding: 0 30rpx; margin-left: 16rpx; align-items: center; justify-content: center; }
-.parse-btn-wide { height: 40px; border-radius: 8px; padding: 0 18px; }
+.parse-btn-wide { height: 40px; border-radius: 8px; padding: 0 18px; margin-left: 11px; }
 .parse-btn-text { font-size: 26rpx; font-weight: bold; }
 .parse-btn-text-wide { font-size: 14px; }
 .plat-row { flex-direction: row; align-items: center; margin-top: 16rpx; }
