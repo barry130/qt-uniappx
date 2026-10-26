@@ -20,6 +20,14 @@ function readAppBaseInfo(): any | null {
   return null;
 }
 
+/** 版本号文本/数字 → number；未知返回 0 */
+function parseVersionCode(raw: any | null): number {
+  if (raw == null) return 0;
+  if (typeof raw === "number") return raw > 0 ? Math.floor(raw) : 0;
+  const code = parseInt(String(raw), 10);
+  return isNaN(code) ? 0 : code;
+}
+
 /** 当前版本名（如 "3.0.1"）；未知返回空串 */
 export function getCurrentVersionName(): string {
   const info = readAppBaseInfo();
@@ -31,12 +39,18 @@ export function getCurrentVersionName(): string {
 /** 当前版本号（如 301）；未知返回 0 */
 export function getCurrentVersionCode(): number {
   const info = readAppBaseInfo();
-  if (info == null) return 0;
-  const raw = info.appVersionCode;
-  if (raw == null) return 0;
-  if (typeof raw === "number") return raw;
-  const code = parseInt(String(raw), 10);
-  return isNaN(code) ? 0 : code;
+  const fromBase = parseVersionCode(info != null ? info.appVersionCode : null);
+  if (fromBase > 0) return fromBase;
+  // 鸿蒙：getAppBaseInfo().appVersionCode 官方不支持（文档标注 HarmonyOS: x），
+  // 退回 getSystemInfoSync().appVersionCode（鸿蒙 4.61+ 支持）。
+  // 版本号拿不到时 source-update 的 manifest 请求会缺 appVersionCode 参数，
+  // astral 的版本准入表会把整张 manifest 挡成空 —— 绝不能走到那一步。
+  try {
+    const sys = uni.getSystemInfoSync() as any;
+    return parseVersionCode(sys != null ? sys.appVersionCode : null);
+  } catch (_) {
+    return 0;
+  }
 }
 
 /** 版本名 + 版本号的组合展示（如 "3.0.1 (301)"），用于「关于」页 */
