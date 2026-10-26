@@ -2708,7 +2708,7 @@ export async function generateDailyRecommend(
         ? styleOptions.length > 0
           ? "点上面的风格标签，我按你选的风格来挑；不选也行，先听这批新歌。"
           : "还没有你的口味数据，先听几首新歌，明天这里就会像你了。"
-        : `${DAILY_TASTE_LABEL[taste]}模式：共 ${ruleItems.length} 首，来自全部已装音源。`,
+        : `${DAILY_TASTE_LABEL[taste]}：共 ${ruleItems.length} 首，来自全部已装音源。`,
       items: ruleItems,
       notice: null,
       profileText,

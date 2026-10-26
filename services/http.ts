@@ -98,6 +98,8 @@ function tryRefreshToken(): Promise<RefreshResult> {
       data: new UTSJSONObject(),
       header: headers,
       timeout: REFRESH_TIMEOUT_MS,
+      // 鸿蒙默认 JSON 解析会在 success 前打印非 JSON 错误；在回调内判 HTTP 状态再解析。
+      dataType: "text",
       success: (response) => {
         // 非 2xx 多为网关瞬时故障（5xx/502 等），refresh token 并未失效：
         // 保留登录态、报网络失败，下次再试；仅 2xx 里的业务拒绝才判定失效
@@ -107,7 +109,7 @@ function tryRefreshToken(): Promise<RefreshResult> {
           return;
         }
         try {
-          const body = response.data as UTSJSONObject;
+          const body = asUtso(response.data);
           const code = body.get("code");
           // 业务成功（后端 QtRestResp code=200，兼容网关 code=0）
           if (code != null && ((code as number) === 0 || (code as number) === 200)) {
@@ -224,6 +226,8 @@ function requestWithRefresh(
     data,
     header: headers,
     timeout: REFRESH_TIMEOUT_MS,
+    // 保留原始文本到业务回调，避免运行时默认 JSON parse 抢先报错。
+    dataType: "text",
     success: (response) => {
       // 整个 success 回调必须兜住异常：success 是 uni.request 的原生回调，
       // 回调里抛出的错误既不会转成 reject、也不会冒泡到任何地方，Promise 就永久悬空。
@@ -244,19 +248,17 @@ function requestWithRefresh(
   });
 }
 
-// 把 uni.request 给的响应体归一成真正的 UTSJSONObject（带 .get/.set）。
-// uni-app x 的 JS 运行时里 uni.request 已经把 JSON 解析成了**普通对象**，
-// 直接 body.get(...) 会抛 TypeError: body.get is not a function —— 见
-// jsonValueToUtso 的注释：普通对象只保证下标访问，不保证 UTSJSONObject 方法。
+// HTTP 响应须是 JSON 对象。文本在这里严格解析；兼容已解析的普通对象与 UTSJSONObject。
+// null / 数组 / 标量不能伪装成成功的空对象，异常由各回调按 HTTP/刷新语义收口。
 function asUtso(raw: any): UTSJSONObject {
-  if (raw == null) return new UTSJSONObject();
-  const probe: any = raw;
-  if (typeof probe.get == "function" && typeof probe.set == "function") {
-    return raw as UTSJSONObject;
+  const parsed: any = typeof raw == "string" ? parseJsonToUtso(raw as string) : raw;
+  if (parsed == null || typeof parsed != "object" || Array.isArray(parsed)) {
+    throw new Error("响应数据格式异常");
   }
-  const converted = jsonValueToUtso(raw);
-  if (converted == null) return new UTSJSONObject();
-  return converted as UTSJSONObject;
+  if (typeof parsed.get == "function" && typeof parsed.set == "function") {
+    return parsed as UTSJSONObject;
+  }
+  return jsonValueToUtso(parsed) as UTSJSONObject;
 }
 
 function handleResponse(

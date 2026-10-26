@@ -9,20 +9,23 @@
   >
     <view class="cover-wrap" :class="layout.isWide ? 'cover-wrap-wide' : ''">
       <image class="cover" :class="layout.isWide ? 'cover-wide' : ''" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
-      <view v-if="showBadge" class="pbadge" :class="layout.isWide ? 'pbadge-wide' : ''" :style="badgeStyle"
-        ><text class="pbadge-text" :class="layout.isWide ? 'pbadge-text-wide' : ''" :style="('color:#ffffff;') + qtFontDual(18, 10)">{{ shortName(song.platform) }}</text></view
-      >
       <view v-if="selected" class="select-mark" :style="'background-color:' + themeStore.skin.accentSoft + ';border-color:' + themeStore.skin.accent + ';'"
         ><QtIcon name="check" :size="24" :color="themeStore.skin.accent" /></view
       >
     </view>
     <view class="info" :class="layout.isWide ? 'info-wide' : ''">
-      <text
-        class="name" :class="layout.isWide ? 'name-wide' : ''"
-        :style="('color:' + (disliked ? themeStore.skin.textMuted : themeStore.skin.text) + ';') + qtFontDual(29, 17)"
-        :max-lines="1"
-        >{{ song.name }}</text
-      >
+      <!-- 平台小签跟在歌名后面（与 qt-song-row-lite 同款）：不再盖在封面左下角 -->
+      <view class="name-row">
+        <text
+          class="name" :class="layout.isWide ? 'name-wide' : ''"
+          :style="('color:' + (disliked ? themeStore.skin.textMuted : themeStore.skin.text) + ';') + qtFontDual(29, 17)"
+          :max-lines="1"
+          >{{ song.name }}</text
+        >
+        <view v-if="showBadge" class="pbadge" :class="layout.isWide ? 'pbadge-wide' : ''" :style="('color:' + badgeColor + ';border-color:' + badgeColor + ';')"
+          ><text class="pbadge-text" :class="layout.isWide ? 'pbadge-text-wide' : ''" :style="('color:' + badgeColor + ';') + qtFontDual(19, 11)">{{ shortName(song.platform) }}</text></view
+        >
+      </view>
       <text
         class="meta" :class="layout.isWide ? 'meta-wide' : ''"
         :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 14)"
@@ -81,10 +84,7 @@ const downloaded = computed(() => downloads.has(props.song));
 // 不喜欢列表：命中任何规则（歌或歌手）→ 行置灰提示
 const disliked = computed(() => dislikes.isDisliked(props.song));
 
-const badgeStyle = computed(() => {
-  const color = platformColor(props.song.platform);
-  return "background-color:" + color + ";";
-});
+const badgeColor = computed(() => platformColor(props.song.platform));
 
 /**
  * 歌曲菜单走全局 host（services/action-sheet.ts）：原生渲染里 absolute 锚定
@@ -224,15 +224,35 @@ function shareSong(song: Song): void {
   height: 88rpx;
   border-radius: 12rpx;
 }
+/* 歌名与平台小签同行：小签随歌名走，歌名长时自行省略（与 lite 同款布局） */
+.name-row {
+  flex-direction: row;
+  align-items: center;
+}
+.name {
+  font-size: 29rpx;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+.meta {
+  margin-top: 10rpx;
+  font-size: 23rpx;
+  text-overflow: ellipsis;
+}
+/* 平台简写描边小签：同 qt-song-row-lite 的 lite-tag */
 .pbadge {
-  position: absolute;
-  left: 0;
-  bottom: 0;
-  padding: 2rpx 10rpx;
-  border-radius: 0 8rpx 0 12rpx;
+  flex-shrink: 0;
+  margin-left: 12rpx;
+  padding: 0 8rpx;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 6rpx;
 }
 .pbadge-text {
-  font-size: 18rpx;
+  font-size: 19rpx;
 }
 .select-mark {
   position: absolute;
@@ -249,16 +269,6 @@ function shareSong(song: Song): void {
   flex: 1;
   overflow: hidden;
 }
-.name {
-  font-size: 29rpx;
-  font-weight: 500;
-  text-overflow: ellipsis;
-}
-.meta {
-  margin-top: 10rpx;
-  font-size: 23rpx;
-  text-overflow: ellipsis;
-}
 .act-heart {
   margin-right: 18rpx;
 }
@@ -274,7 +284,7 @@ function shareSong(song: Song): void {
 .name-wide { font-size: 17px; }
 .meta-wide { margin-top: 6px; font-size: 14px; }
 .actions-wide { min-width: 78px; }
-.pbadge-wide { padding: 2px 6px; border-radius: 0 4px 0 6px; }
+.pbadge-wide { margin-left: 8px; padding: 0 5px; border-radius: 4px; }
 .pbadge-text-wide { font-size: 11px; }
 /* 桌面指针反馈：只在宽屏启用（手机上 hover-class 会在点按瞬间闪一下，观感不对） */
 .row-hover { background-color: rgba(255, 255, 255, 0.06); }

@@ -1,6 +1,6 @@
 <template>
   <!-- 每日推荐（智能推荐页，2026-10-24 移植自 qt-pc DailyRecommendPage）：
-       三种引擎模式（纯规则 / 本地模型 / 服务端 AI，全局于音乐助手共用，见 services/ai-mode.ts），
+       三种引擎模式（纯规则 / 本地模型精选 / 服务端 AI，全局于音乐助手共用，见 services/ai-mode.ts），
        三种口味（心动 / 常听 / 探索）与模式正交。列表默认按推荐顺序渲染（含开场、沉浸、
        收束的编排），排序与搜索为纯前端能力（同歌单详情/每日新歌：标题栏搜索 + 三点排序）。
        骨架 / hero / 吸顶操作条与 pages/daily 同一套模板（详情页一套模板）。 -->
@@ -19,15 +19,15 @@
   <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']"
     >
     <!-- 宽屏左栏：封面 + 元信息 + 口味/模式操作（与歌单详情 / 每日新歌同一套主从双栏） -->
-    <scroll-view v-if="layout.isWide" class="wide-left" :style="wideAsideStyle" direction="vertical" :show-scrollbar="false">
+    <scroll-view v-if="layout.isWide" class="wide-left" direction="vertical" :show-scrollbar="false">
       <view class="whero" :style="'background-color:' + themeStore.skin.surfaceStrong + ';border-color:' + themeStore.skin.border + ';'">
-        <QtSkeleton v-if="loading" tone="cover" :width="wideCoverPx" :height="wideCoverPx" radius="12px" />
-        <image v-else class="whero-cover" :style="wideCoverStyle" :src="displayPicUrl" mode="aspectFill" />
+        <QtSkeleton v-if="loading" tone="cover" width="238px" height="238px" radius="12px" />
+        <image v-else class="whero-cover" :src="displayPicUrl" mode="aspectFill" />
         <template v-if="loading">
           <view class="wsk-l1"><QtSkeleton tone="line" width="160px" height="18px" radius="4px" /></view>
           <view class="wsk-l2"><QtSkeleton tone="line" width="220px" height="13px" radius="4px" /></view>
           <view class="wsk-l3"><QtSkeleton tone="line" width="190px" height="13px" radius="4px" /></view>
-          <view class="wsk-l5"><QtSkeleton tone="block" :width="wideCoverPx" height="44px" radius="22px" /></view>
+          <view class="wsk-l5"><QtSkeleton tone="block" width="238px" height="44px" radius="22px" /></view>
         </template>
         <template v-else>
           <text class="whero-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(12)" :max-lines="1">{{ metaLine }}</text>
@@ -49,7 +49,7 @@
               @click="pickTaste(t)"
             ><text class="taste-chip-text" :style="tasteTextStyle(t)">{{ DAILY_TASTE_LABEL[t] }}</text></view>
           </view>
-          <view class="whero-actions" :style="wideActionsStyle">
+          <view class="whero-actions">
             <qt-batch-bar
               v-if="selecting"
               layout="column"
@@ -208,7 +208,16 @@
             <text v-else class="rc-idx" :class="layout.isWide ? 'rc-idx-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(24, 13)">{{ i + 1 }}</text>
             <image class="rc-cover" :class="layout.isWide ? 'rc-cover-wide' : ''" :src="song.picUrl" mode="aspectFill" />
             <view class="rc-info" :class="layout.isWide ? 'rc-info-wide' : ''">
-              <text class="rc-name" :class="layout.isWide ? 'rc-name-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 15)" :max-lines="1">{{ song.name }}</text>
+              <!-- 平台小签跟在歌名后（与歌单详情 qt-song-row-lite 同款） -->
+              <view class="rc-name-row">
+                <text class="rc-name" :class="layout.isWide ? 'rc-name-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 15)" :max-lines="1">{{ song.name }}</text>
+                <text
+                  class="rc-tag" :class="layout.isWide ? 'rc-tag-wide' : ''"
+                  :style="('color:' + platformColor(song.platform) + ';border-color:' + platformColor(song.platform) + ';') + qtFontDual(19, 11)"
+                  :max-lines="1"
+                  >{{ platformShort(song.platform) }}</text
+                >
+              </view>
               <text class="rc-sub" :class="layout.isWide ? 'rc-sub-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)" :max-lines="1">{{ reasonOf(song).length > 0 ? song.singer + " · " + reasonOf(song) : song.singer }}</text>
             </view>
             <view class="rc-more" :class="layout.isWide ? 'rc-more-wide' : ''" @click.stop="openSheet(song)">
@@ -232,7 +241,7 @@
       </list-item>
       <!-- 底部口径说明（qt-pc 页脚同款文案） -->
       <list-item v-if="!loading && songs.length > 0" class="foot-item" :class="layout.isWide ? 'foot-item-wide' : ''">
-        <text class="foot-text" :class="layout.isWide ? 'foot-text-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">候选来自全部已装音源；心动模式优先收藏（含收藏歌单）；近 {{ DAILY_HISTORY_DAYS }} 天推过的歌会排到后面，同一歌手不会连着排</text>
+        <text class="foot-text" :class="layout.isWide ? 'foot-text-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">候选来自全部已装音源；心动优先收藏（含收藏歌单）；近 {{ DAILY_HISTORY_DAYS }} 天推过的歌会排到后面，同一歌手不会连着排</text>
       </list-item>
     </list-view>
     <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
@@ -294,12 +303,12 @@ import { useSongSheet } from "@/composables/use-song-sheet";
 import { usePlayerStore } from "@/stores/player";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
-import { qtContentWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import type { Playlist, Song } from "@/types/music";
 import { qtFontPx, qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtShowToast } from "@/services/toast";
 import { isQtAdmin } from "@/services/music-api";
 import { readAiMode as readMode, saveAiMode as saveMode } from "@/services/ai-mode";
+import { platformShort, platformColor } from "@/services/platform";
 import type { AiEngineMode } from "@/services/ai-mode";
 import {
   DAILY_HISTORY_DAYS,
@@ -319,26 +328,6 @@ import type { DailyRecommendResult, DailyTaste } from "@/services/daily-recommen
 const player = usePlayerStore();
 const themeStore = useThemeStore();
 const layout = useQtLayout();
-/**
- * 宽屏左栏宽度按「详情页内宽 - 列表最小可用宽」反算，夹在 220~296px。
- * 本页 .page-wide 没有页内边距（左右留白靠 .whero 的 12px 外边距），所以不减 pagePad；
- * 列表最小可用宽取 360px：再窄歌曲行里「封面 + 歌名 + 时长 + 更多」就挤成一团。
- */
-const WIDE_ASIDE_GAP_PX = 0;
-const WIDE_ASIDE_MAX_PX = 296;
-const WIDE_ASIDE_MIN_PX = 220;
-const WIDE_LIST_MIN_PX = 360;
-const wideAsideWidth = computed((): number => {
-  const inner = qtContentWidth("detail");
-  const room = inner - WIDE_ASIDE_GAP_PX - WIDE_LIST_MIN_PX;
-  return Math.max(WIDE_ASIDE_MIN_PX, Math.min(WIDE_ASIDE_MAX_PX, room));
-});
-const wideAsideStyle = computed((): string => "width:" + wideAsideWidth.value + "px;");
-/** 封面边长 = 左栏宽 - 卡片外边距 24 - 内边距 32 - 边框 2，骨架用同一个值，加载完不会跳 */
-const wideCoverSize = computed((): number => wideAsideWidth.value - 58);
-const wideCoverStyle = computed((): string => "width:" + wideCoverSize.value + "px;height:" + wideCoverSize.value + "px;");
-const wideCoverPx = computed((): string => wideCoverSize.value + "px");
-const wideActionsStyle = computed((): string => "width:" + wideCoverSize.value + "px;");
 
 // 回到顶部
 const scrollTop = ref(0);
@@ -546,7 +535,10 @@ const styleOptions = computed<string[]>((): string[] => {
   const r = result.value;
   if (r == null || r.styleOptions == null) return [];
   const out: string[] = [];
-  for (let i = 0; i < r.styleOptions.length; i++) out.push(r.styleOptions[i].name);
+  for (let i = 0; i < r.styleOptions.length; i++) {
+    const opt = r.styleOptions[i];
+    if (opt != null && opt.name != null) out.push(opt.name);
+  }
   return out;
 });
 const laneChips = computed<string[]>((): string[] => {
@@ -672,7 +664,7 @@ const modeSheetVisible = ref(false);
 const modeActions = computed<SheetAction[]>((): SheetAction[] => {
   const acts: SheetAction[] = [];
   acts.push({ name: "纯规则（不联网，永远可用）", color: readMode() == "rule" ? themeStore.skin.accent : "" });
-  acts.push({ name: "本地模型（模型挂了自动退回规则）", color: readMode() == "local" ? themeStore.skin.accent : "" });
+  acts.push({ name: "本地模型精选（模型挂了自动退回规则）", color: readMode() == "local" ? themeStore.skin.accent : "" });
   if (isQtAdmin()) acts.push({ name: "服务端 AI（需登录，走 astral）", color: readMode() == "server" ? themeStore.skin.accent : "" });
   return acts;
 });
@@ -781,10 +773,8 @@ onUnmounted((): void => {
 .page { flex: 1; min-height: 0; }
 .page-wide { flex-direction: row; }
 .wide-left { width: 296px; flex-shrink: 0; }
-/* 宽屏左栏宽度已改由 wideAsideStyle 内联给出（窄平板横屏会收窄到 220~296 之间），这里只留兜底 */
 .whero { margin: 12px; padding: 16px; border-width: 1px; border-style: solid; border-radius: 16px; flex-direction: column; align-items: center; }
 .whero-cover { width: 238px; height: 238px; border-radius: 12px; background-color: #e6e8ee; }
-/* 宽屏封面边长由 wideCoverStyle 内联给出，与左栏宽度同步 */
 .wsk-l1 { margin-top: 14px; }
 .wsk-l2 { margin-top: 10px; }
 .wsk-l3 { margin-top: 8px; }
@@ -800,7 +790,6 @@ onUnmounted((): void => {
 .taste-chip { margin-left: 8px; padding: 4px 14px; border-width: 1px; border-style: solid; border-radius: 18px; }
 .taste-chip-text { color: #8b93a2; }
 .whero-actions { margin-top: 14px; width: 238px; flex-direction: column; }
-/* 宽屏按钮组宽度由 wideActionsStyle 内联给出 */
 .whero-play { height: 44px; border-radius: 22px; flex-direction: row; align-items: center; justify-content: center; }
 .whero-play-text { margin-left: 6px; }
 .whero-acts { margin-top: 10px; flex-direction: row; }
@@ -819,7 +808,7 @@ onUnmounted((): void => {
 .search-input { flex: 1; min-width: 0; height: 68rpx; font-size: 26rpx; }
 .search-input-wide { height: 34px; font-size: 14px; }
 .search-clear { width: 44rpx; height: 44rpx; align-items: center; justify-content: center; }
-.search-clear-wide { width: 32px; height: 32px; }
+.search-clear-wide { width: 24px; height: 24px; }
 .search-ph { color: #9aa0ad; font-size: 26rpx; }
 .search-ph-wide { color: #9aa0ad; font-size: 14px; }
 .scroll { flex: 1; min-width: 0; min-height: 0; }
@@ -868,19 +857,24 @@ onUnmounted((): void => {
 .rc-row { flex-direction: row; align-items: center; padding: 10rpx 0; }
 .rc-row-wide { padding: 4px 0; }
 .rc-check { width: 40rpx; height: 40rpx; border-width: 2rpx; border-style: solid; border-radius: 20rpx; align-items: center; justify-content: center; margin-right: 16rpx; }
-.rc-check-wide { width: 24px; height: 24px; border-radius: 12px; margin-right: 8px; border-width: 1px; }
+.rc-check-wide { width: 20px; height: 20px; border-radius: 10px; margin-right: 8px; border-width: 1px; }
 .rc-idx { width: 48rpx; text-align: center; }
 .rc-idx-wide { width: 24px; }
 .rc-cover { width: 80rpx; height: 80rpx; border-radius: 12rpx; margin-left: 12rpx; background-color: #e6e8ee; }
 .rc-cover-wide { width: 40px; height: 40px; border-radius: 6px; margin-left: 6px; }
 .rc-info { flex: 1; min-width: 0; margin-left: 18rpx; flex-direction: column; }
 .rc-info-wide { margin-left: 10px; }
-.rc-name { }
+/* 歌名与平台小签同行（与歌单详情 lite-tag 同款布局） */
+.rc-name-row { flex-direction: row; align-items: center; }
+.rc-name { flex-shrink: 1; min-width: 0; overflow: hidden; }
 .rc-name-wide { }
+/* 平台简写描边小签：不被歌名挤成 0 宽 */
+.rc-tag { flex-shrink: 0; margin-left: 12rpx; padding: 0 8rpx; border-width: 1px; border-style: solid; border-radius: 6rpx; }
+.rc-tag-wide { margin-left: 8px; padding: 0 5px; border-radius: 4px; }
 .rc-sub { margin-top: 4rpx; }
 .rc-sub-wide { margin-top: 2px; }
 .rc-more { width: 64rpx; height: 64rpx; align-items: center; justify-content: center; }
-.rc-more-wide { width: 36px; height: 36px; }
+.rc-more-wide { width: 32px; height: 32px; }
 .empty-item { padding: 80rpx 48rpx; flex-direction: column; align-items: center; }
 .empty-item-wide { padding: 40px 24px; }
 .empty-text { text-align: center; }

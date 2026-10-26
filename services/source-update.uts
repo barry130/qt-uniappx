@@ -25,7 +25,7 @@
  */
 
 import type { Song } from "@/types/music";
-import { resolveUrl } from "@/services/http";
+import { resolveUrl, parseJsonToUtso } from "@/services/http";
 import { mergeClientHeaders } from "@/services/client-info";
 import { getAccessToken } from "@/services/auth";
 import { getCurrentVersionCode, getCurrentVersionName } from "@/services/app-version";
@@ -288,22 +288,32 @@ export async function discoverUpdates(force: boolean): Promise<PackUpdateOffer[]
             release.sourceVersionName, release.notes, "manifest", a.url),
         );
       }
-      // meta 产物：版本号在产物头里，需要探测；同样仅对已装包提示更新（未装不下发）
+      // meta 产物：优先用 manifest 直发的 packId/packVersionCode（与 play 同口径，
+      // 免 Range 探测；包头校验留在 applyUpdate 下载后做，版本不符会拒绝安装）。
+      // 服务端未直发（旧后端）时回退产物头探测；同样仅对已装包提示更新。
       for (let i = 0; i < release.artifacts.length; i++) {
         const a = release.artifacts[i];
         if (a.path != ARTIFACT_META || a.url.length == 0) continue;
-        const remote = await probePackHeader(a.url);
-        if (remote == null || remote.kind != PACK_KIND_META) continue;
-        const localMeta = packById(remote.id);
+        let remoteId = a.packId;
+        let remoteCode = a.packVersionCode;
+        let remoteName = a.packVersionName.length > 0 ? a.packVersionName : release.sourceVersionName;
+        if (remoteCode <= 0 || remoteId.length == 0) {
+          const remote = await probePackHeader(a.url);
+          if (remote == null || remote.kind != PACK_KIND_META) continue;
+          remoteId = remote.id;
+          remoteCode = remote.versionCode;
+          remoteName = remote.versionName;
+        }
+        const localMeta = packById(remoteId);
         if (localMeta == null) continue;
         const currentCode = localMeta.versionCode;
         // 版本压制例外：本地 meta 官方包从未通过签名校验（历史冒充包）→ 不压制
-        const unverifiedMeta = isOfficialPackId(remote.id) && !localMeta.signVerified;
-        if ((remote.versionCode <= currentCode && !unverifiedMeta) || isPackBadVersion(remote.id, remote.versionCode)) continue;
-        if (hasOfferFor(found, remote.id, remote.versionCode)) continue;
+        const unverifiedMeta = isOfficialPackId(remoteId) && !localMeta.signVerified;
+        if ((remoteCode <= currentCode && !unverifiedMeta) || isPackBadVersion(remoteId, remoteCode)) continue;
+        if (hasOfferFor(found, remoteId, remoteCode)) continue;
         found.push(
-          offerOf(PACK_KIND_META, remote.id, currentCode, remote.versionCode,
-            remote.versionName, release.notes, "manifest", a.url),
+          offerOf(PACK_KIND_META, remoteId, currentCode, remoteCode,
+            remoteName, release.notes, "manifest", a.url),
         );
       }
     }
@@ -856,6 +866,18 @@ export type SourceArtifact = {
   /** 单文件版本号（play = release 发号；meta 实际版本以产物头为准） */
   version: number;
   url: string;
+  /**
+   * 产物包 id（如 meta-official）。服务端直发版本号时必填；空 = 服务端未下发
+   * （旧后端/旧发布），meta 更新判断回退到产物头探测。
+   */
+  packId: string;
+  /**
+   * 产物真实版本号（包头 versionCode）。>0 时 meta 与 play 同口径直接比较，
+   * 免 Range 探测；0 = 服务端未下发，回退探测。
+   */
+  packVersionCode: number;
+  /** 产物版本名（包头 versionName）。可缺省，缺省回落 release.sourceVersionName */
+  packVersionName: string;
 };
 
 /** manifest 里的 release 节点 */
@@ -902,26 +924,30 @@ function requestJson(
       data: data != null ? data : new UTSJSONObject(),
       header: headers,
       timeout: MANIFEST_TIMEOUT_MS,
+      // 先按 HTTP 状态判断，再手工解析；鸿蒙默认 JSON parse 会先打印网关 HTML 错误。
+      dataType: "text",
       success: (response) => {
         const status = response.statusCode;
         if (status < 200 || status >= 300) {
           resolve(null);
           return;
         }
-        const body = response.data as UTSJSONObject | null;
-        if (body == null) {
-          resolve(null);
-          return;
-        }
-        const code = body.get("code");
-        if (code == null) {
-          resolve(null);
-          return;
-        }
-        const n = code as number;
-        if (n == 0 || n == 200) {
-          resolve(body);
-        } else {
+        try {
+          const body = parseJsonToUtso(response.data as string);
+          if (body == null) {
+            resolve(null);
+            return;
+          }
+          const code = body.get("code");
+          if (code == null) {
+            resolve(null);
+            return;
+          }
+          const n = code as number;
+          resolve(n == 0 || n == 200 ? body : null);
+        } catch (_) {
+          // 格式错误沿用发现/上报的失败语义，不把异常抛出原生回调或记录响应正文。
+          logWarn("SourceUpdate", "响应数据格式异常（HTTP " + status + "）");
           resolve(null);
         }
       },
@@ -1011,11 +1037,51 @@ async function downloadText(url: string): Promise<string> {
  * GET + Range: bytes=0-4095 —— 支持 Range 的服务器回 206（省流量），
  * 不支持的回 200 全量（数据已在手，同样只用头部解析）。
  * 只解析首行 __QT_PACK__ 头；URL 是第三方直链，绝不合并客户端系统头。
+ * 跳转页兜底（2026-10-26 用户报「发布了 meta 但前端只更新成功 play」）：
+ * cnb.cool 等托管对部分客户端回 200+HTML 跳转页、或 302 重定向而非文件本体。
+ * 安装链路 downloadTextFollowHop 一直会跟（uni.downloadFile 原生跟随 302），
+ * 而探测链路的 uni.request 在部分端不跟 → manifest 的 meta 探测恒为 null，
+ * meta 更新被静默跳过、只剩 play 一条更新（play 无探测，直接用 release 版本号）。
+ * 这里与安装链路同口径：先按 HTML 跳转链接跟一跳；再不行就用安装链路的
+ * downloadTextFollowHop 全量兜底（同一传输、同样跟跳，代价是探测多下一个包）。
  */
-export function probePackHeader(url: string): Promise<PackHeaderInfo | null> {
-  return new Promise<PackHeaderInfo | null>((resolve) => {
+export async function probePackHeader(url: string): Promise<PackHeaderInfo | null> {
+  const text = await probeRangeText(url);
+  if (text.length > 0) {
+    const header = parsePackHeader(text);
+    if (header != null) {
+      return header;
+    }
+    const hop = extractHopLink(text);
+    if (hop.length > 0 && hop != url && isSecurePackLink(hop)) {
+      logWarn("SourceUpdate", "探测直链返回跳转页，跟随一跳：" + hop);
+      const next = await probeRangeText(hop);
+      if (next.length > 0) {
+        const hopped = parsePackHeader(next);
+        if (hopped != null) {
+          return hopped;
+        }
+      }
+    }
+  }
+  // 快路径拿不到包头（302 不跟/跳转页/网络栈差异）→ 与安装同传输兜底：
+  // uni.downloadFile 原生跟随 302，play 包 2026-10-26 09:31:53 已在真机验证
+  // 该通道可从 cnb.cool 拉到文件本体。
+  const full = await downloadTextFollowHop(url);
+  if (full.length > 0) {
+    const header = parsePackHeader(full);
+    if (header != null) {
+      return header;
+    }
+  }
+  return null;
+}
+
+/** Range GET 首 PROBE_RANGE_BYTES 字节；URL 非法/请求失败/非 200|206 回空串 */
+async function probeRangeText(url: string): Promise<string> {
+  return new Promise<string>((resolve) => {
     if (!url.startsWith("https://")) {
-      resolve(null);
+      resolve("");
       return;
     }
     const headers = new UTSJSONObject();
@@ -1025,21 +1091,23 @@ export function probePackHeader(url: string): Promise<PackHeaderInfo | null> {
       method: "GET",
       header: headers,
       timeout: PROBE_TIMEOUT_MS,
+      // 包是 JS 文本（或托管跳转 HTML），绝不能交给 uni.request 默认 JSON 解析。
+      dataType: "text",
       success: (response) => {
         const status = response.statusCode;
         if (status != 206 && status != 200) {
-          resolve(null);
+          resolve("");
           return;
         }
         const data = response.data;
         if (data == null) {
-          resolve(null);
+          resolve("");
           return;
         }
-        resolve(parsePackHeader(`${data}`));
+        resolve(`${data}`);
       },
       fail: (_) => {
-        resolve(null);
+        resolve("");
       },
     });
   });
@@ -1074,6 +1142,11 @@ function releaseFromJson(o: UTSJSONObject): SourceRelease {
         path: strOf(a, "path"),
         version: numOf(a, "version"),
         url: strOf(a, "url"),
+        // 服务端直发产物版本号（astral 发布行 → manifest DTO）；
+        // 旧服务端没有这三个字段 → 空/0，meta 分支回退产物头探测。
+        packId: strOf(a, "packId"),
+        packVersionCode: numOf(a, "packVersionCode"),
+        packVersionName: strOf(a, "packVersionName"),
       } as SourceArtifact);
     }
   }

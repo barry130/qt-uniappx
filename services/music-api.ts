@@ -580,6 +580,7 @@ export class MusicApi {
       const sources: RegistrySource[] = [];
       for (let i = 0; i < rawSources.length; i++) {
         const item = rawSources[i];
+        if (item == null) continue;
         const src: RegistrySource = {
           id: this.strOf(item.get("id")),
           name: this.strOf(item.get("name")),
@@ -624,6 +625,7 @@ export class MusicApi {
           const sorts: RegistrySort[] = [];
           for (let j = 0; j < rawSorts.length; j++) {
             const sortItem = rawSorts[j];
+            if (sortItem == null) continue;
             const sortId = this.strOf(sortItem.get("id"));
             const sortName = this.strOf(sortItem.get("name"));
             if (sortId.length > 0) sorts.push({ id: sortId, name: sortName });
@@ -646,6 +648,7 @@ export class MusicApi {
               const oq: RegistryOfficialQuality[] = [];
               for (let j = 0; j < authOfficial.length; j++) {
                 const oqItem = authOfficial[j];
+                if (oqItem == null) continue;
                 const oqId = this.strOf(oqItem.get("id"));
                 if (oqId.length == 0) continue;
                 let oqMin = this.strOf(oqItem.get("min"));
@@ -661,6 +664,7 @@ export class MusicApi {
       const qualities: RegistryQuality[] = [];
       for (let i = 0; i < rawQualities.length; i++) {
         const item = rawQualities[i];
+        if (item == null) continue;
         qualities.push({ id: this.strOf(item.get("id")), name: this.strOf(item.get("name")) });
       }
       if (sources.length == 0) return null;
@@ -685,7 +689,7 @@ export class MusicApi {
     if (source == "local") return DEFAULT_SEARCH_PAGE_MAX;
     for (let i = 0; i < this.registrySources.length; i++) {
       const item = this.registrySources[i] as RegistrySource;
-      if (item.id != source) continue;
+      if (item == null || item.id != source) continue;
       const max = item.searchPageMax;
       if (max != null && max > 0) return Math.floor(max);
       break;
@@ -710,7 +714,7 @@ export class MusicApi {
     if (source == "local") return "";
     for (let i = 0; i < this.registrySources.length; i++) {
       const item = this.registrySources[i] as RegistrySource;
-      if (item.id != source) continue;
+      if (item == null || item.id != source) continue;
       const referer = item.referer;
       if (referer != null && referer.length > 0) return referer;
       break;
@@ -731,7 +735,7 @@ export class MusicApi {
     if (source == "local") return null;
     for (let i = 0; i < this.registrySources.length; i++) {
       const item = this.registrySources[i] as RegistrySource;
-      if (item.id != source) continue;
+      if (item == null || item.id != source) continue;
       const auth = item.auth;
       if (auth != null && auth.officialQualities != null && auth.officialQualities.length > 0 && sourcePlayLoginActive(source)) {
         // v11：官方清单按登录账号会员档过滤（与 stores/source-registry
@@ -741,6 +745,7 @@ export class MusicApi {
         const ids: string[] = [];
         for (let j = 0; j < auth.officialQualities.length; j++) {
           const oq = auth.officialQualities[j];
+          if (oq == null) continue;
           if (minRank < 0 || vipTierRank(oq.min) <= minRank) ids.push(oq.id);
         }
         return ids;

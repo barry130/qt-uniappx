@@ -556,7 +556,11 @@ function onSearchClose(): void {
 }
 
 /** 搜索框右侧药丸（音源切换 / 聚合开关这类「开关型」入口收进标题栏用） */
-const headerChips = computed((): string[] => props.headerChipTexts != null ? props.headerChipTexts! : []);
+const headerChips = computed((): string[] => {
+  const texts = props.headerChipTexts;
+  if (texts == null) return [];
+  return texts;
+});
 function chipOn(index: number): boolean {
   const acts = props.headerChipActives;
   return acts != null && index < acts.length && acts[index] == true;
@@ -719,14 +723,13 @@ const chipScrollLeft = ref(0);
 // 用户手动横滑后的真实偏移：scroll 事件里只写普通变量（不写 ref，避免每次滚动
 // 都回写 :scroll-left 跟用户抢滚动），居中计算时用它当基准
 let chipLeftNow = 0;
-// 宽度实测后显式给；高度同理按字号算（固定 64rpx 在大字号档下会把 tab 上下裁掉）
+// 窄屏首帧就给显式宽：不能先用 flex:1 再量 scroll-view 自身，鸿蒙上它可能
+// 一直是 0 宽，重试读到的仍然是 0。用与标题栏同源的可用宽度也能跟随动作数/窗口变化。
 const chipRowStyle = computed((): string => {
   // 宽屏在药丸行区域容器（横向 flex 行）里，flex:1 吃右侧动作按钮以外的剩余宽；
   // 不能给显式 px 宽：按钮随页面状态显隐，实测宽会过期（量宽不会跟着重跑）。
-  // 窄屏维持 flex:1（mid 格横向 flex 上下文），实测后给显式宽防抖。
   if (layout.isWide) return "flex:1;height:" + WIDE_CHIP_ROW_PX + "px;";
-  const w = chipRowWidth.value;
-  return (w > 0 ? "width:" + w + "px;" : "flex:1;") + "height:" + chipRowRpx.value + "rpx;";
+  return "width:" + chipRowAvailPx.value + "px;height:" + chipRowRpx.value + "rpx;";
 });
 let chipMeasureTimer = 0;
 
@@ -764,9 +767,9 @@ function measureChipRow(attempt: number): void {
     if (attempt < 3) {
       chipMeasureTimer = setTimeout(() => { measureChipRow(attempt + 1); }, 150) as unknown as number;
     } else {
-      // 实测失败兜底：行宽按「窗口宽 - 返回键（88rpx≈44px）」估
-      chipRowWidth.value = 0;
-      centerActiveChip(layout.windowWidth - 44);
+      // 查询不可用时也保留正的可用宽；不能退回 0 再依赖同一个零宽节点自测。
+      chipRowWidth.value = chipRowAvailPx.value;
+      centerActiveChip(chipRowWidth.value);
     }
   });
   // 内行宽不能靠估算（字号缩放/字形宽度都会让估算偏小：尾部字符被裁 + scroll-view
@@ -833,8 +836,8 @@ function centerActiveChip(rowWidthPx: number): void {
 /** 把第 index 个 tab 滚到行中央（onChipTap 直接调，不等父组件回传 actives）。
  *  tab 位置优先用 measureChipRow 实测的 chipLefts（字号缩放/字形都不影响），
  *  没量到时退回按字数估算。 */
-function centerChipIndex(index: number, rowWidthPx: number): void {
-  if (rowWidthPx <= 0) rowWidthPx = chipRowWidth.value > 0 ? chipRowWidth.value : layout.windowWidth - 44;
+function centerChipIndex(index: number, rowWidthPx: number = 0): void {
+  if (rowWidthPx <= 0) rowWidthPx = chipRowWidth.value > 0 ? chipRowWidth.value : chipRowAvailPx.value;
   if (index < 0 || index >= headerChips.value.length) return;
   let chipStart = 0;
   let chipWidth = 0;

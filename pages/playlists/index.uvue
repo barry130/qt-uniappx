@@ -85,17 +85,17 @@
       @scrolltolower="onScrollToLower"
     >
       <!-- 头部条目：上留白 + 首屏（骨架 / 首屏真实行）。
-           骨架与真实行放在同一个 list-item 里，为的是两件事：
-           ① 高度由同一处撑起 —— 骨架 HEAD_ROWS 行、真实行也是 HEAD_ROWS 行，形状一致，
-              数据到达时头部条目高度几乎不变，下面的内容不会被顶动；
-           ② 骨架是后写的兄弟节点，天然画在真实行之上，交叉淡出时不会
-              被后面的 list-item 盖住（跨 list-item 的层级无法保证）。
+           请求期间由骨架撑起该条目；数据到达后骨架立即卸载、同一条目里的
+           首屏真实行接管，避免跨 list-item 的层级与回收问题。两种状态都使用
+           skeletonRowCount 行，替换时不改变头部高度。
            骨架整层只此一处，光带也只挂这一处，绝不每块骨架各挂一条。 -->
       <list-item class="head-item">
         <view class="head-inner">
           <view class="pad-top" :class="layout.isWide ? 'pad-top-wide' : ''" />
           <view class="sk-host">
-            <!-- 首屏真实行：与骨架同形同位，未浮现时 opacity:0 -->
+            <!-- 数据落地后直接显示真实首屏。这里曾做逐行淡入，但 Android/Harmony 的
+                 list-view 定时器偶发不继续推进，结果骨架层永久盖住前 4 行，只有尾行可见。
+                 骨架仅用于请求期间；数据回来便一次性卸载，避免「加载成功却像卡死」。 -->
             <view
               v-for="(row, rowIndex) in headRows"
               :key="'hr' + rowIndex"
@@ -103,9 +103,9 @@
             >
               <view
                 v-for="item in row"
-                :key="item.platform + ':' + item.id + (revealSettled ? ':s' : '')"
+                :key="item.platform + ':' + item.id"
                 class="card" :class="layout.isWide ? 'card-wide' : ''"
-                :style="headItemStyle(rowIndex)"
+                :style="cardStyle"
                 :hover-class="layout.isWide ? 'card-hover' : 'none'"
                 @click="openPlaylist(item)"
               >
@@ -119,16 +119,16 @@
                 <text class="name" :class="layout.isWide ? 'name-wide' : ''" :max-lines="2" :style="qtFontDual(26, 15) + 'color:' + theme.skin.text + ';'">{{ item.name }}</text>
               </view>
             </view>
-            <!-- 骨架层：数据到达后脱离文档流盖在真实行上，随真实行逐行淡出 -->
+            <!-- 骨架仅在请求尚未返回时出现。真实数据一到立即卸载：原生 list-view 下
+                 「绝对定位骨架 + 分行 transition」会偶发停在半途中，造成上方一直是灰块。 -->
             <view
               v-if="skeletonOn"
-              class="sk-layer" :class="skeletonLifted ? 'sk-layer-lifted' : ''"
+              class="sk-layer"
             >
               <view
                 v-for="ri in skeletonRowCount"
                 :key="'skr' + ri"
                 class="grid-row-inner" :class="layout.isWide ? 'grid-row-inner-wide' : ''"
-                :style="revealSkeletonStyle(ri - 1)"
               >
                 <view
                   v-for="ci in columns"
@@ -251,7 +251,6 @@ import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-t
 import QtSkeletonShine from "@/uni_modules/qt-ui/components/qt-skeleton-shine/qt-skeleton-shine.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtContentWidth, qtColumnCount, QT_MIN_COLUMN_WIDTH } from "@/uni_modules/qt-ui/composables/use-qt-widths";
-import { useQtReveal } from "@/uni_modules/qt-ui/composables/use-qt-reveal";
 import { qtTrackError } from "@/uni_modules/qt-stat";
 import type { Playlist } from "@/types/music";
 import type { Source } from "@/services/music-api";
@@ -310,12 +309,11 @@ watch(sorts, (list) => {
 }, { immediate: true });
 const layout = useQtLayout();
 const theme = useThemeStore();
-const reveal = useQtReveal();
-// setup 阶段就进入「全部未浮现」：useQtReveal 的初值是「全可见」哨兵（为了不改造的
-// 页面行为不变），而本页首帧就要显示骨架。若等到 onMounted 才 reset，首帧渲染出的
-// 骨架层透明度是 0 —— 正好闪一下白，与「不闪白」直接冲突。
-reveal.resetReveal();
-const screenWidth = ref(375);
+/**
+ * 窄屏栅格直接读全局响应式窗口宽。useQtLayout 每秒/旋转时会刷新它，
+ * 不能只在 onMounted 抄一次；否则横竖屏切换后仍按旧宽度算列数和封面宽。
+ */
+const screenWidth = computed((): number => layout.windowWidth);
 
 // 回到顶部
 const scrollTop = ref(0);
@@ -481,59 +479,38 @@ const playlistRows = computed((): Playlist[][] => {
 });
 
 /**
- * 骨架屏占位行数：固定与头部条目承载的真实行数一致。
- * 两处行数必须相等，否则数据到达、骨架从文档流切到绝对定位的那一刻，
- * 头部条目高度会变，下面所有内容整体位移 —— 这正是「整页不跳动」要防的。
+ * 请求期间固定铺满首屏。竖屏按 4 行（3 列首屏）铺满；宽屏则按各音源
+ * 最短常见首页（20 张）和实际列数估算行数。否则 8 列宽屏上 20 张真实数据
+ * 只有 3 行、骨架却有 4 行，数据落地会把下方内容突然上提一整行。
+ *
+ * 数据到达后 skeletonOn 会直接卸载整层，不再依赖原生 list-view 中不可靠的
+ * 绝对定位/错峰透明度切换。
  */
+const WIDE_SKELETON_ITEMS = 20;
 const skeletonRowCount = computed((): number => {
-  const real = playlistRows.value.length;
-  // 数据少于 HEAD_ROWS 行（冷门分类）时，骨架也跟着收窄：此时骨架已切到绝对定位，
-  // 收窄不会推动页面，反而避免多出来的骨架行盖在「已加载全部」上。
-  if (real > 0 && real < HEAD_ROWS) return real;
-  return HEAD_ROWS;
+  if (!layout.isWide) return HEAD_ROWS;
+  const rows = Math.ceil(WIDE_SKELETON_ITEMS / columns.value);
+  return rows < 1 ? 1 : (rows > HEAD_ROWS ? HEAD_ROWS : rows);
 });
 
-/** 头部条目承载首屏前 HEAD_ROWS 行真实卡片，与骨架同形同位 */
-const headRows = computed((): Playlist[][] => playlistRows.value.slice(0, HEAD_ROWS));
-/** 其余行仍走 list-item 复用池 */
-const tailRows = computed((): Playlist[][] => playlistRows.value.slice(HEAD_ROWS));
 /**
- * 骨架层是否挂载。两种时候要挂：
- * ① 还在加载（loading 且尚无数据）—— 首帧到数据到达之间的全部时间；
- * ② 数据已到但还在错峰浮现 —— 骨架正靠 transition 淡出，这时候卸载等于硬切。
- * 不能只写「列表为空」：请求真的返回空结果时骨架会一直杵在那儿，和「暂无歌单」打架。
+ * 头部条目与骨架使用同一行数：宽屏列数越多时，首个 list-item 也随之收窄，
+ * 避免骨架卸载后因为头部突然多出一行而把后续内容向下推。
  */
-const skeletonOn = computed(
-  (): boolean => reveal.revealing.value || (loading.value && playlists.value.length == 0)
-);
-/** 数据已到：骨架层脱离文档流盖在真实行上，高度改由真实行撑起 */
-const skeletonLifted = computed((): boolean => playlists.value.length > 0);
-/** 光带只在骨架还盖着真实内容时扫；数据一到就随骨架一起淡出 */
-const shining = computed((): boolean => skeletonOn.value && !skeletonLifted.value);
-
-/** 真实首屏第 rowIndex 行的卡片样式（尺寸 + 浮现透明度） */
-function headItemStyle(rowIndex: number): string {
-  // 错峰结束（含兜底闸门强推终态）后不再带 opacity/transition：
-  // 直接给尺寸样式。配合卡片 :key 的终态后缀，终态是一次节点重建而非
-  // 风格翻转 —— 新渲染器上前者可靠、后者有停摆先例（2026-10-25 实测）。
-  if (!reveal.revealing.value && playlists.value.length > 0) return cardStyle.value;
-  return reveal.itemStyle(rowIndex, cardStyle.value);
-}
-/** 错峰是否已收尾：用于给首屏卡片换 key，把终态变成节点重建 */
-const revealSettled = computed((): boolean => !reveal.revealing.value && playlists.value.length > 0);
-
+const headRows = computed((): Playlist[][] => playlistRows.value.slice(0, skeletonRowCount.value));
+/** 其余行仍走 list-item 原生复用池 */
+const tailRows = computed((): Playlist[][] => playlistRows.value.slice(skeletonRowCount.value));
 /**
- * 尾部行的卡片样式：只给尺寸，不给错峰透明度。
- * 尾部行走 list-item 原生复用池，滚动中会不断重建；错峰透明度挂在重建中的
- * 行上会出现「占位但透明」的空白行（真机实测），所以错峰只保留在首屏头部条目里。
+ * 骨架层只在「正在加载且没有结果」时挂载。空结果会在 load() 的 finally
+ * 清掉 loading，随后由尾部条目显示「暂无歌单」，不会让骨架和空态打架。
  */
+const skeletonOn = computed((): boolean => loading.value && playlists.value.length == 0);
+/** 光带只在真正等待网络数据时显示。 */
+const shining = computed((): boolean => skeletonOn.value);
+
+/** 尾部行走 list-item 原生复用池，只写固定尺寸，避免滚动复用时出现空白行。 */
 function tailItemStyle(_tailIndex: number): string {
   return cardStyle.value;
-}
-
-/** 骨架第 index 行的透明度：与同序号的真实行互补，同时淡出/淡入 */
-function revealSkeletonStyle(index: number): string {
-  return reveal.skeletonStyle(index);
 }
 
 /**
@@ -751,9 +728,8 @@ async function load(): Promise<void> {
     );
     if (seq !== loadSeq) return;
     playlists.value = list;
-    // 数据已到：骨架随即开始逐行淡出，真实行按同一节拍自上而下淡入。
-    // 计数单位是「行」不是「张」—— 一行内的卡片同属一块，一起浮现
-    reveal.startReveal(playlistRows.value.length);
+    // 数据到达后直接由 skeletonOn 卸载骨架。避免 list-view 内错峰动画
+    // 在 Android/Harmony 偶发停摆，留下「前四行灰块、尾行已显示」的假死页面。
     // 各平台单页条数不同（网易云/QQ 30 条、酷狗 20 条），
     // 因此只用“空结果”判定到底，不按固定页长推断
     if (list.length == 0) hasMore.value = false;
@@ -823,9 +799,6 @@ async function ensureLoad(): Promise<void> {
   const sortList = sorts.value;
   selectedSort.value = sortList.length > 0 ? sortList[0].id : "";
   playlists.value = [];
-  // 必须先回到「全部未浮现」：否则 revealedCount 还停在上一轮的全可见哨兵上，
-  // 清空列表后骨架会被判为「已浮现」而整层透明，重载期间就是一片空白
-  reveal.resetReveal();
   // 也要在这里就点亮 loading：下面 await 分类请求期间还没有人把 loading 置真，
   // 而骨架层的显示条件里有 loading 这一项 —— 漏掉这一句，切音源时从清空列表到
   // load() 真正开跑之间会有一段空窗，骨架不显示，正好闪一下白
@@ -847,7 +820,6 @@ function selectCategory(category: string): void {
   if (selectedCategory.value == category) return;
   selectedCategory.value = category;
   playlists.value = [];
-  reveal.resetReveal();
   load();
 }
 
@@ -942,7 +914,6 @@ function selectSort(sortId: string): void {
   if (selectedSort.value == sortId) return;
   selectedSort.value = sortId;
   playlists.value = [];
-  reveal.resetReveal();
   load();
 }
 
@@ -960,9 +931,6 @@ function onPacksChanged(): void {
 onMounted(() => {
   sourceStore.restore();
   sourceRegistry.ensure();
-  try {
-    screenWidth.value = uni.getWindowInfo().windowWidth;
-  } catch (_) {}
   ensureLoad();
   uni.$on(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
   // 首帧 list-view 还没完成布局，晚一点量（measureViewport 内部还有重试）
@@ -1146,28 +1114,19 @@ function catTextStyle(id: string): string {
 .pad-top {
   height: 16rpx;
 }
-/* 骨架宿主：真实首屏行与骨架层共用这一个定位容器。
-   两者行数相同（HEAD_ROWS），所以骨架脱离文档流的那一刻高度不变。
-   注意：列表不足 2 行时头部会矮一行，下方内容上移 —— 各平台单页 20~30 条，
-   实际取到的行数总在 3 行以上，这个边界不额外兜底。 */
+/* 骨架宿主：骨架与真实首屏行都由同一个 list-item 承载。
+   请求期间骨架参与文档流；数据到达后它直接卸载，真实首屏以相同行数接管。
+   行数由 skeletonRowCount 统一控制，避免宽屏多列时发生整行高度跳变。 */
 .sk-host {
   position: relative;
   flex-direction: column;
 }
-/* 骨架层：默认参与文档流，负责在无数据期间撑起头部高度。
-   position:relative 是给内部那道绝对定位的光带当定位基准的 ——
-   否则光带会往上找到 .sk-host，脱离骨架层的实际高度。 */
+/* 骨架层参与文档流，在请求期间撑起首屏高度；数据回来后由 v-if 直接卸载。
+   不用绝对定位叠层：Android/Harmony 的 list-view 上该组合偶发保留灰块。 */
 .sk-layer {
   position: relative;
   flex-direction: column;
   pointer-events: none;
-}
-/* 数据到达：骨架让出文档流，盖在真实行上方原地淡出（高度改由真实行撑起） */
-.sk-layer-lifted {
-  position: absolute;
-  left: 0;
-  top: 0;
-  right: 0;
 }
 /* 卡片走 QQ 音乐同款扁平形态：无底无框，封面即卡面，歌单名裸排在封面下 */
 .card {

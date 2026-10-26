@@ -90,7 +90,8 @@ class SourceRegistryStore {
   sourceIdsWith(feature: SourceFeature): string[] {
     const out: string[] = [];
     for (let i = 0; i < this.sources.length; i++) {
-      if (this.supports(this.sources[i].id, feature)) out.push(this.sources[i].id);
+      const source = this.sources[i];
+      if (source != null && this.supports(source.id, feature)) out.push(source.id);
     }
     return out;
   }
@@ -138,11 +139,12 @@ class SourceRegistryStore {
     return false;
   }
 
-  /** 音源展示名（本地音乐固定「本地」；未知 id 兜底「未知」） */
+  /** 音源展示名（本地音乐固定「本地」；未知 id 兜底「未知」) */
   label(id: string): string {
     if (id == "local") return "本地";
     for (let i = 0; i < this.sources.length; i++) {
-      if (this.sources[i].id == id) return this.sources[i].name;
+      const source = this.sources[i];
+      if (source != null && source.id == id) return source.name;
     }
     return "未知";
   }
@@ -151,7 +153,8 @@ class SourceRegistryStore {
   short(id: string): string {
     if (id == "local") return "本地";
     for (let i = 0; i < this.sources.length; i++) {
-      if (this.sources[i].id == id) return this.sources[i].short;
+      const source = this.sources[i];
+      if (source != null && source.id == id) return source.short;
     }
     return "未知";
   }
@@ -160,7 +163,8 @@ class SourceRegistryStore {
   color(id: string): string {
     if (id == "local") return "#8b93a7";
     for (let i = 0; i < this.sources.length; i++) {
-      if (this.sources[i].id == id) return this.sources[i].color;
+      const source = this.sources[i];
+      if (source != null && source.id == id) return source.color;
     }
     return "#8b92a1";
   }
