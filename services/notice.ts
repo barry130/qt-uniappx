@@ -10,14 +10,18 @@ import { logErrV, logWarnV } from "./logger";
 import type { Notice, NoticeDispatch } from "@/types/notice";
 import { getCurrentVersionCode } from "@/services/app-version";
 import { qtShowToast } from "@/services/toast";
+import { openAstralLink } from "@/services/notice-link";
 
 /**
  * 打开公告跳转目标
+ * - `astral://<目标>/<id>`：宿主自定义协议，解析成本地页面路由（反馈详情 / 通知详情）
  * - http/https 链接：跳系统浏览器
  * - 其他：视为内部页面路由，尝试 navigateTo
  */
 export function openNoticeUrl(url?: string): void {
   if (url == null || url.length == 0) return;
+  // 宿主协议必须先解析：直接 navigateTo("astral://...") 必失败并弹「链接无法打开」
+  if (openAstralLink(url)) return;
   if (url.startsWith("http://") || url.startsWith("https://")) {
     openInBrowser(url);
     return;
@@ -243,8 +247,13 @@ export function isNoticeBarClosedInSession(): boolean {
   return noticeBarClosedInSession;
 }
 
-/** 首次登录弹窗标记 key */
-const FIRST_LOGIN_KEY = "qt-notice-first-login";
+/** 「仅首次登录弹出」的已弹标记：按公告 id 各记一条 */
+const LEGACY_FIRST_LOGIN_KEY = "qt-notice-first-login";
+const FIRST_LOGIN_KEY_PREFIX = "qt-notice-first-login-";
+
+function firstLoginKey(noticeId: number): string {
+  return FIRST_LOGIN_KEY_PREFIX + noticeId;
+}
 
 /**
  * 通知类型标签文案：announce 公告 | feedback 反馈 | request 需求
@@ -256,26 +265,39 @@ export function noticeTypeLabel(noticeType?: string): string {
 }
 
 /**
- * 检查是否首次登录（用于 firstLoginOnly）
- * 登录后标记已弹过，后续不再弹
+ * 这条公告是否已经弹过（仅对 firstLoginOnly 有意义）。
+ * 按公告 id 记：用户看过了旧公告，后台新发布的「仅首次登录」公告仍会弹。
  */
-export function isFirstLogin(): boolean {
+export function isFirstLoginShown(noticeId: number): boolean {
   try {
-    const flag = uni.getStorageSync(FIRST_LOGIN_KEY) as string;
-    // 如果已登录且标记为已弹过，返回 false
-    if (isLoggedIn() && flag === "shown") return false;
-    // 未登录或未标记，视为首次
-    return true;
+    return (uni.getStorageSync(firstLoginKey(noticeId)) as string) == "shown";
   } catch (_) {
-    return true;
+    return false;
   }
 }
 
 /**
- * 标记首次登录弹窗已展示
+ * 标记这条「仅首次登录」公告已展示。
  */
-export function markFirstLoginShown(): void {
+export function markFirstLoginShown(noticeId: number): void {
   try {
-    uni.setStorageSync(FIRST_LOGIN_KEY, "shown");
-  } catch (_) {}
+    uni.setStorageSync(firstLoginKey(noticeId), "shown");
+  } catch (_) {
+    // 静默：写不进只让这条公告下次再弹一次，不影响功能
+  }
+}
+
+/**
+ * 老版本用一个全局标记（`qt-notice-first-login = "shown"`）表示「弹过首次登录公告」。
+ * 升级后把它一次性迁移成按条标记：当前已下发的这些公告都算已弹，再删掉老键。
+ * 不迁移的话，老用户会因为老标记而永远看不到新公告。
+ */
+export function migrateLegacyFirstLogin(noticeIds: readonly number[]): void {
+  try {
+    if ((uni.getStorageSync(LEGACY_FIRST_LOGIN_KEY) as string) != "shown") return;
+    for (const id of noticeIds) uni.setStorageSync(firstLoginKey(id), "shown");
+    uni.removeStorageSync(LEGACY_FIRST_LOGIN_KEY);
+  } catch (_) {
+    // 静默：迁移失败就保持原状，老键还在，下次启动再试
+  }
 }

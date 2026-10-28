@@ -1,5 +1,6 @@
 import { reactive } from "vue";
 import type { Notice, NoticeDispatch } from "@/types/notice";
+import { logWarn } from "@/services/logger";
 import {
   dispatchNotices,
   fetchActiveNotices,
@@ -8,8 +9,9 @@ import {
   isNoticeEffective,
   isNoticeVersionMatch,
   isNoticeVisibleForUser,
-  isFirstLogin,
+  isFirstLoginShown,
   markFirstLoginShown,
+  migrateLegacyFirstLogin,
   sortNotices,
   stripHtml,
 } from "@/services/notice";
@@ -90,6 +92,12 @@ class NoticeStore {
     // 后端若存在重复记录，点「我知道了」后弹出的下一条长得一模一样，
     // 用户会以为“点了没反应”，只能再点一次。
     const seen = new Set<string>();
+    // 老全局标记（弹过任意一条首次登录公告）→ 按条迁移，避免老用户看不到新公告
+    migrateLegacyFirstLogin(
+      splashes
+        .filter((s) => (s.firstLoginOnly ?? 0) == 1)
+        .map((s) => s.id),
+    );
     for (const s of splashes) {
       // 免责声明由 qt-first-run-disclaimer 独占展示（带读秒门禁、遮罩不可点），
       // 不能混进这条「可勾今天不显示」的开屏队列，否则同一条公告会弹两次，
@@ -97,7 +105,8 @@ class NoticeStore {
       if (isDisclaimerNotice(s)) continue;
       if (this.isHiddenToday(s.id)) continue;
       if ((s.firstLoginOnly ?? 0) == 1) {
-        if (!(isLoggedIn() && isFirstLogin())) continue;
+        // 每条公告各自记已弹：看过旧的那条，新发布的这条仍然要弹
+        if (!(isLoggedIn() && !isFirstLoginShown(s.id))) continue;
       }
       const key = splashDedupeKey(s);
       if (seen.has(key)) continue;
@@ -117,7 +126,7 @@ class NoticeStore {
     const current = this.splashNotice;
     if (current != null) {
       if (hideToday) this.markHiddenToday(current.id);
-      if ((current.firstLoginOnly ?? 0) == 1) markFirstLoginShown();
+      if ((current.firstLoginOnly ?? 0) == 1) markFirstLoginShown(current.id);
     }
     this.splashIndex++;
     this.splashNotice =
@@ -140,7 +149,9 @@ class NoticeStore {
   markHiddenToday(id: number): void {
     try {
       uni.setStorageSync(SplashHideKey(id), todayStr());
-    } catch (_) {}
+    } catch (_) {
+      logWarn("Notice", "「今日不显示」保存失败（下次启动可能再弹一次）");
+    }
   }
 
   /**
