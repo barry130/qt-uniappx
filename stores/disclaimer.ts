@@ -4,8 +4,9 @@
  * 与 qt-pc 的 `src/stores/disclaimer.ts` 同语义，差别只在存储介质：
  * PC 写 SQLite 的 settings 表，这里写 uni storage。
  *
- * **文案不在代码里**：后台「消息管理」发一条开屏公告（展示位含「开屏」，
- * 并填「条款版本号」）即可改，不用发版。改判定规则见下。
+ * **文案不在代码里**：后台「消息中心 → 通知管理」发一条通知并打开
+ * **「仅首次启动弹出」**开关即可改（服务端据此自动生成 `termsVersion` 并把展示位固定为开屏），
+ * 不用发版。改判定规则见下。
  *
  * 哪条公告算这份声明：**开屏位 + `termsVersion` 非空**。这是唯一判据
  * （服务端不认这个字段，它只负责把带版本号的公告渠道改写成 App 六端并强制可关闭）。
@@ -17,6 +18,7 @@
  */
 import { reactive } from "vue";
 import { fetchActiveNotices, sortNotices } from "@/services/notice";
+import { logWarn } from "@/services/logger";
 import type { Notice } from "@/types/notice";
 
 /** 开屏展示位（同 types/notice.ts 的 NoticeChannel = 1） */
@@ -176,7 +178,9 @@ class DisclaimerStore {
     };
     try {
       uni.setStorageSync(DISCLAIMER_KEY, JSON.stringify(rec));
-    } catch (_) {}
+    } catch (_) {
+      logWarn("Disclaimer", "接受记录持久化失败（本次已生效，重启后需重新同意）");
+    }
   }
 
   /**
