@@ -309,12 +309,12 @@ export function aiLocalChat(messages: AiLocalMessage[], temperature: number = 0.
   return new Promise<AiLocalReply>((resolve, reject) => {
     const profile = activeProfile();
     if (profile == null) {
-      reject(new Error("还没有配置本地模型接口（设置 · AI · 接口配置）"));
+      reject(new Error("还没有配置本地模型接口（设置 · AI 与模型 · 第 2 步 模型配置）"));
       return;
     }
     const model = activeModelOf(profile);
     if (model.length == 0) {
-      reject(new Error("接口配置里还没有选模型"));
+      reject(new Error("模型配置里还没有选模型"));
       return;
     }
     const req = buildChatRequest(profile, model, firstKeyOf(profile), messages, temperature);

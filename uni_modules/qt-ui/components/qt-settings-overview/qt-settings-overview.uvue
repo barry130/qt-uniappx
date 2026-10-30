@@ -63,8 +63,6 @@ import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtContentWidth, qtSplitByHeight, QT_GUTTER_PX } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { computed, onMounted, ref, watch } from "vue";
-import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
-import { qtShowActionSheet } from "@/services/action-sheet";
 import { showSourceSheet, SOURCE_SHEET_TITLE_DEFAULT } from "@/services/source-sheet";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { audioPlayer } from "@/services/audio-player";
@@ -83,13 +81,9 @@ import { isQtAdmin } from "@/services/music-api";
 import { platformLabel } from "@/services/platform";
 import {
   readAiMode,
-  saveAiMode,
   AI_MODE_LABEL_RULE,
   AI_MODE_LABEL_LOCAL,
   AI_MODE_LABEL_SERVER,
-  AI_MODE_HINT_RULE,
-  AI_MODE_HINT_LOCAL,
-  AI_MODE_HINT_SERVER,
 } from "@/services/ai-mode";
 import type { AiEngineMode } from "@/services/ai-mode";
 import { readProviders, activeProfile, activeModelOf } from "@/services/ai-providers";
@@ -267,8 +261,7 @@ const groups = computed((): SettingsGroup[] => [
   {
     id: "ai",
     cells: [
-      { key: "ai-mode", icon: "sparkles", color: "#7c6cf2", title: "AI 模式", value: aiModeLabelOf(aiMode.value), dot: false, go: showAiMode },
-      { key: "ai-providers", icon: "settings", color: "#5f9e6e", title: "接口配置", value: aiProvidersSummary(), dot: false, go: goAiProviders },
+      { key: "ai-providers", icon: "sparkles", color: "#7c6cf2", title: "AI 与模型", value: aiSettingsSummary(), dot: false, go: goAiSettings },
     ],
   },
   {
@@ -334,60 +327,29 @@ const colStyle = computed<string>(() => {
   return "width:" + (w > 320 ? w : 320) + "px;flex-shrink:0;";
 });
 
-function openSheet(title: string, actions: SheetAction[], select: (index: number) => void): void {
-  const names: string[] = [];
-  const colors: (string | null)[] = [];
-  for (let i = 0; i < actions.length; i++) {
-    names.push(actions[i].name);
-    const c = actions[i].color;
-    colors.push(c != null && c.length > 0 ? c : null);
-  }
-  qtShowActionSheet({ title: title, itemList: names, colors: colors }).then((index: number) => {
-    if (index >= 0) select(index);
-  });
-}
-
 function aiModeLabelOf(mode: AiEngineMode): string {
   if (mode == "local") return AI_MODE_LABEL_LOCAL;
   if (mode == "server") return AI_MODE_LABEL_SERVER;
   return AI_MODE_LABEL_RULE;
 }
 
-function aiModeHintOf(mode: AiEngineMode): string {
-  if (mode == "local") return AI_MODE_HINT_LOCAL;
-  if (mode == "server") return AI_MODE_HINT_SERVER;
-  return AI_MODE_HINT_RULE;
-}
-
 /**
- * 全局 AI 模式（qt-pc 设置页 AiSection 的移动端形态）。
- * 音乐助手与每日推荐共用；「服务端 AI」仅管理员可见（非管理员任何路径都存不进 server），
- * 选中后用 toast 弹一次该模式的说明 —— 设置页不落内联提示文字，避免行高跳动。
+ * 「AI 与模型」入口的右侧摘要。
+ *
+ * 原来这里是两行（「AI 模式」+「接口配置」），用户看不出两者的关系：接口配置
+ * 只服务于「本地模型精选」这一档，摆成并列第二行像是可有可无的东西。现在合并成
+ * 一页两步，摘要就把两件事一次说完 —— 当前引擎，以及本地档下正在用的模型。
  */
-function showAiMode(): void {
-  const modes: AiEngineMode[] = ["rule", "local"];
-  if (qtAdmin.value) modes.push("server");
-  const acts: SheetAction[] = [];
-  for (let i = 0; i < modes.length; i++) {
-    acts.push({ name: aiModeLabelOf(modes[i]), color: modes[i] == aiMode.value ? theme.skin.accent : "" });
-  }
-  openSheet("AI 模式", acts, (index: number): void => {
-    const next = modes[index];
-    aiMode.value = next;
-    saveAiMode(next);
-    qtShowToast({ title: aiModeHintOf(next), icon: "none" });
-  });
-}
-
-/** 接口配置入口：本地模型供应商管理页（pages/ai-providers）。 */
-function aiProvidersSummary(): string {
+function aiSettingsSummary(): string {
+  const mode = aiModeLabelOf(aiMode.value);
+  if (aiMode.value != "local") return mode;
   const cfg = readProviders();
   const p = activeProfile();
-  if (p == null) return cfg.profiles.length > 0 ? "未选生效档" : "未配置";
-  return (p.name.length > 0 ? p.name : "已配置") + " · " + activeModelOf(p);
+  if (p == null) return mode + " · " + (cfg.profiles.length > 0 ? "未选生效档" : "未配模型");
+  return mode + " · " + (p.name.length > 0 ? p.name : "已配置") + " · " + activeModelOf(p);
 }
 
-function goAiProviders(): void {
+function goAiSettings(): void {
   // 走 goSubpage：宽屏三栏下从右栏就地替换（redirectTo），不层层堆页
   goSubpage("/pages/ai-providers/index");
 }

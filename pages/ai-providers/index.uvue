@@ -1,14 +1,51 @@
 <template>
-  <qt-page-frame width-kind="list" title="AI 接口配置">
+  <qt-page-frame width-kind="list" title="AI 与模型">
     <scroll-view class="page" :class="layout.isWide ? 'page-wide' : ''" :show-scrollbar="false">
+      <!-- 第 1 步：引擎。原先设置里「AI 模式」与「接口配置」是两行并列入口，
+           用户看不出「模型配置」只服务于其中一种模式，故合并成一页两步（2026-10-30）。 -->
       <qt-card
         class="intro-card"
         :class="layout.isWide ? 'intro-card-wide' : ''"
-        title="本地模型供应商"
-        description="「本地模型」模式从这里取接口：配置任一 OpenAI / Anthropic / Gemini 兼容网关，每日推荐和音乐助手共用。"
+        title="第 1 步 · 选 AI 引擎"
+        description="每日推荐与音乐助手共用这一档选择。只有「本地模型精选」才需要往下填模型配置。"
       >
-        <text class="intro-hint" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)">密钥只保存在本机（明文存储），列表里仅显示掩码；请求直连你填的地址，不经过任何中转。</text>
+        <view
+          v-for="(m, index) in engineRows"
+          :key="m.key"
+          class="engine-row"
+          :class="layout.isWide ? 'engine-row-wide' : ''"
+          :style="engineMode == m.key ? 'background-color:' + theme.skin.accentSoft + ';border-radius:' + (layout.isWide ? '10px' : '16rpx') + ';' : ''"
+          @click="pickEngine(m.key)"
+        >
+          <view class="engine-dot" :class="layout.isWide ? 'engine-dot-wide' : ''" :style="'border-color:' + (engineMode == m.key ? theme.skin.accent : theme.skin.border) + ';'">
+            <view v-if="engineMode == m.key" class="engine-dot-in" :class="layout.isWide ? 'engine-dot-in-wide' : ''" :style="'background-color:' + theme.skin.accent + ';'"></view>
+          </view>
+          <view class="engine-main">
+            <text class="engine-name" :style="'color:' + theme.skin.text + ';' + qtFontDual(28, 15)">{{ m.name }}</text>
+            <text class="engine-sub" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(21, 12)">{{ m.sub }}</text>
+          </view>
+        </view>
       </qt-card>
+
+      <!-- 第 2 步：模型配置。只在「本地模型精选」下展开；其余模式收起并说明理由，
+           省得用户以为是自己没配好。 -->
+      <view v-if="isLocal" class="step-head" :class="layout.isWide ? 'step-head-wide' : ''">
+        <text class="step-title" :style="'color:' + theme.skin.text + ';' + qtFontDual(28, 15)">第 2 步 · 模型配置</text>
+        <text class="step-sub" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(21, 12)">填一个 OpenAI / Anthropic / Gemini 兼容网关即可。密钥只保存在本机（明文存储），列表里仅显示掩码；请求直连你填的地址，不经过任何中转。</text>
+      </view>
+
+      <view v-if="!isLocal" class="intro-card" :class="layout.isWide ? 'intro-card-wide' : ''">
+        <qt-card
+          title="第 2 步 · 模型配置"
+          :description="offHint"
+        >
+          <view class="add-row" :class="layout.isWide ? 'add-row-wide' : ''">
+            <qt-button class="add-btn" :class="layout.isWide ? 'add-btn-wide' : ''" label="改用本地模型精选" variant="secondary" size="md" @click="pickEngine('local')" />
+          </view>
+        </qt-card>
+      </view>
+
+      <view v-if="isLocal" class="step-body">
 
       <view
         v-for="(p, index) in profiles"
@@ -40,8 +77,9 @@
         <text class="empty-sub" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)">点下面「新增供应商」，填一个 OpenAI 兼容地址即可开始。</text>
       </view>
 
-      <view class="add-row" :class="layout.isWide ? 'add-row-wide' : ''">
+      <view v-if="isLocal" class="add-row" :class="layout.isWide ? 'add-row-wide' : ''">
         <qt-button class="add-btn" :class="layout.isWide ? 'add-btn-wide' : ''" label="新增供应商" variant="secondary" size="md" @click="openNew" />
+      </view>
       </view>
       <view class="pad"></view>
     </scroll-view>
@@ -98,7 +136,7 @@
 </template>
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { onUnload } from "@dcloudio/uni-app";
+import { onShow, onUnload } from "@dcloudio/uni-app";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
@@ -122,9 +160,61 @@ import {
   type AiProviderProtocol,
 } from "@/services/ai-providers";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import { readAiMode, saveAiMode } from "@/services/ai-mode";
+import type { AiEngineMode } from "@/services/ai-mode";
+import { isQtAdmin } from "@/services/music-api";
 
 const theme = useThemeStore();
 const layout = useQtLayout();
+
+/**
+ * 第 1 步的引擎选择。
+ *
+ * 这一页原本只有「接口配置」，而「AI 模式」是设置页上的另一个入口；两者其实
+ * 强耦合（只有本地模型精选会用到接口），并列摆着用户看不出关系（2026-10-30
+ * 用户要求合并成一页两步）。模式读写沿用 services/ai-mode 的全局单源，
+ * 与「每日推荐」「音乐助手」页完全同口径，不新增存储。
+ */
+interface EngineRow {
+  key: AiEngineMode;
+  name: string;
+  sub: string;
+}
+
+const engineMode = ref<AiEngineMode>(readAiMode());
+const isLocal = computed((): boolean => engineMode.value == "local");
+
+const engineRows = computed((): EngineRow[] => {
+  const rows: EngineRow[] = [
+    { key: "rule", name: "纯规则", sub: "不联网、不调模型，按口味与关键词选，永远可用" },
+    { key: "local", name: "本地模型精选", sub: "调你自己配的接口，只让模型在已搜好的候选里挑" },
+  ];
+  // 服务端 AI 只对管理员露出（与音乐助手、每日推荐同一口径，非管理员存不进 server）
+  if (isQtAdmin()) {
+    rows.push({ key: "server", name: "服务端 AI", sub: "走登录后的 astral 会话，需要登录（仅管理员）" });
+  }
+  return rows;
+});
+
+const offHint = computed((): string => {
+  const name = engineMode.value == "server" ? "服务端 AI" : "纯规则";
+  return "当前是「" + name + "」，用不到模型配置，所以这段收起来了。改成「本地模型精选」后在这里填接口地址与密钥。";
+});
+
+function pickEngine(mode: AiEngineMode): void {
+  if (engineMode.value == mode) return;
+  engineMode.value = mode;
+  saveAiMode(mode);
+  if (mode == "local") qtShowToast({ title: "已改成本地模型精选，往下填接口", icon: "none" });
+  else qtShowToast({ title: "已改成" + (mode == "server" ? "服务端 AI" : "纯规则"), icon: "none" });
+}
+
+// 模式可能在「每日推荐」页或音乐助手的胶囊里被改过，回到本页要对上，否则
+// 第 2 步的展开/收起会和真实设置相反。
+onShow((): void => {
+  const latest = readAiMode();
+  if (latest != engineMode.value) engineMode.value = latest;
+});
 
 /** 列表态：每次进页/保存后从 storage 重读，避免页面与其它入口写穿 */
 const profiles = ref<AiProviderProfile[]>([]);
@@ -390,6 +480,20 @@ const fieldInputStyle = computed((): string => {
 .intro-card { margin-bottom: 20rpx; }
 .intro-card-wide { margin-bottom: 12px; margin-right: 0; }
 .intro-hint { margin-top: 4rpx; line-height: 36rpx; }
+.engine-row { flex-direction: row; align-items: center; padding: 20rpx 0; }
+.engine-row-wide { padding: 11px 0; }
+.engine-dot { width: 36rpx; height: 36rpx; border-radius: 999rpx; border-width: 2rpx; border-style: solid; align-items: center; justify-content: center; margin-right: 20rpx; flex-shrink: 0; }
+.engine-dot-wide { width: 19px; height: 19px; border-width: 1px; margin-right: 11px; }
+.engine-dot-in { width: 18rpx; height: 18rpx; border-radius: 999rpx; }
+.engine-dot-in-wide { width: 10px; height: 10px; }
+.engine-main { flex: 1; min-width: 0; }
+.engine-name { font-weight: 600; }
+.engine-sub { margin-top: 6rpx; line-height: 32rpx; }
+.step-head { padding: 6rpx 4rpx 16rpx; }
+.step-head-wide { padding: 3px 2px 11px; }
+.step-title { font-weight: 600; }
+.step-sub { margin-top: 8rpx; line-height: 34rpx; }
+.step-body { flex-direction: column; }
 .profile-card { border-width: 1rpx; border-style: solid; border-radius: 20rpx; padding: 24rpx; margin-bottom: 20rpx; }
 .profile-card-wide { border-width: 1px; border-radius: 12px; padding: 14px; margin-bottom: 12px; margin-right: 0; }
 .profile-head { flex-direction: row; align-items: center; }
