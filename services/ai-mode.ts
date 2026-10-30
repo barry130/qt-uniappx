@@ -29,10 +29,6 @@ export const AI_MODE_LABEL_RULE = "纯规则";
 export const AI_MODE_LABEL_LOCAL = "本地模型";
 export const AI_MODE_LABEL_SERVER = "服务端 AI";
 
-export const AI_MODE_HINT_RULE = "不联网、不调模型：每日推荐按口味规则排，音乐助手按关键词规则选歌。永远可用。";
-export const AI_MODE_HINT_LOCAL = "调用配置的接口，只让模型在已搜好的候选里挑；模型挂了自动退回规则。";
-export const AI_MODE_HINT_SERVER = "走登录后的 astral 音乐助手：每日推荐与音乐助手都按服务端会话生成，需要登录。";
-
 const AI_MODE_KEY = "dailyRecommend.mode";
 
 /** 把库里读出来的字符串收敛成合法模式（未知值按规则处理，不报错） */
