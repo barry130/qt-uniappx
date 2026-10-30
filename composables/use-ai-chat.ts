@@ -21,6 +21,24 @@ import { useSourceRegistryStore } from "@/stores/source-registry";
 import { musicApi } from "@/services/music-api";
 import { qtShowToast } from "@/services/toast";
 import {
+  AI_MODE_LABEL_LOCAL,
+  AI_MODE_LABEL_RULE,
+  AI_MODE_LABEL_SERVER,
+  readAiMode,
+  saveAiMode,
+} from "@/services/ai-mode";
+import type { AiEngineMode } from "@/services/ai-mode";
+import { runAssistantTurn } from "@/services/ai-assistant-local";
+import type { AssistantTurnInput, AssistantTurnResult } from "@/services/ai-assistant-local";
+import {
+  deleteLocalConversation,
+  listLocalConversations,
+  loadLocalMessages,
+  saveLocalConversation,
+} from "@/services/ai-assistant-history";
+import { loadPreference } from "@/services/daily-recommend";
+import type { StyleProfile } from "@/services/recommend-types";
+import {
   AI_CANDIDATE_MAX,
   AI_MESSAGE_MAX_CHARS,
   actionLabel,
@@ -112,6 +130,34 @@ export function useAiChat() {
   const loadingMessages = ref(false);
   const sending = ref(false);
   const error = ref("");
+  /** 首次 init 是否已完成（本地模式下 agent 永远是 null，不能用 agent 判断免重复 init） */
+  const initialized = ref(false);
+
+  /**
+   * 当前生效的 AI 模式（与「每日推荐」共用同一份设置，见 services/ai-mode.ts）。
+   *
+   * 这个 ref 是本页唯一的分派开关：
+   * - `rule` / `local` → 本地引擎（ai-assistant-local），不建服务端会话、不调 astral；
+   * - `server` → 原来那条服务端会话 + 轮询路径，一行没动。
+   * 之前助手页无视这个设置、永远走服务端，用户选了「本地模型」还是被远端接入，
+   * 这就是本次要修的 bug（用户 2026-10-30 m02793）。
+   */
+  const engineMode = ref<AiEngineMode>(readAiMode());
+
+  /** 本地引擎（rule/local）为 true；服务端模式为 false */
+  const isLocalEngine = computed((): boolean => engineMode.value != "server");
+
+  /** 给页面吸顶/提示用的模式文案 */
+  const engineLabel = computed((): string => {
+    const m = engineMode.value;
+    if (m == "local") return AI_MODE_LABEL_LOCAL;
+    if (m == "server") return AI_MODE_LABEL_SERVER;
+    return AI_MODE_LABEL_RULE;
+  });
+
+  /** 听歌画像只取一次（loadPreference 会读本地库，每句话都读一次没必要） */
+  let profileLoaded = false;
+  let cachedProfile: StyleProfile | null = null;
 
   /** 正在跑的请求（0 表示空闲） */
   const runningRequestId = ref(0);
@@ -151,6 +197,19 @@ export function useAiChat() {
   async function init(): Promise<boolean> {
     loading.value = true;
     error.value = "";
+    if (isLocalEngine.value) {
+      // 本地引擎不拉智能体列表：那条路要登录 + 网络，正是要绕开的东西。
+      // 智能体卡片留空，页面用 agentName 的兜底「音乐助手」。
+      try {
+        agent.value = null;
+        capabilities.value = null;
+        conversations.value = listLocalConversations();
+        initialized.value = true;
+        return true;
+      } finally {
+        loading.value = false;
+      }
+    }
     try {
       const list = await fetchAgents();
       let picked: AiAgentCard | null = null;
@@ -168,6 +227,7 @@ export function useAiChat() {
       }
       capabilities.value = await fetchCapabilities(picked.agentCode);
       await loadConversations();
+      initialized.value = true;
       return true;
     } catch (e) {
       error.value = errText(e);
@@ -178,6 +238,10 @@ export function useAiChat() {
   }
 
   async function loadConversations(): Promise<void> {
+    if (isLocalEngine.value) {
+      conversations.value = listLocalConversations();
+      return;
+    }
     const a = agent.value;
     if (a == null) return;
     try {
@@ -201,6 +265,10 @@ export function useAiChat() {
     messages.value = [];
     error.value = "";
     if (id <= 0) return;
+    if (isLocalEngine.value) {
+      messages.value = loadLocalMessages(id);
+      return;
+    }
     loadingMessages.value = true;
     try {
       const page = await fetchMessages(id, 0, 30);
@@ -231,6 +299,13 @@ export function useAiChat() {
   }
 
   async function removeConversation(id: number): Promise<void> {
+    if (isLocalEngine.value) {
+      deleteLocalConversation(id);
+      if (activeConversationId.value == id) newConversation();
+      conversations.value = listLocalConversations();
+      qtShowToast({ title: "已删除", icon: "none" });
+      return;
+    }
     try {
       await deleteConversation(id);
       if (activeConversationId.value == id) newConversation();
@@ -254,6 +329,10 @@ export function useAiChat() {
     if (content.length == 0 || sending.value) return;
     if (content.length > AI_MESSAGE_MAX_CHARS) {
       qtShowToast({ title: "消息太长了，请分几次说", icon: "none" });
+      return;
+    }
+    if (isLocalEngine.value) {
+      await sendLocal(content);
       return;
     }
     const a = agent.value;
@@ -313,8 +392,163 @@ export function useAiChat() {
     }
   }
 
+  /**
+   * 本地引擎的一轮：搜候选 → 交 `ai-assistant-local` → 把结果铺成消息气泡。
+   *
+   * 与服务端路径的区别只有三处：不建会话、不提交请求、不轮询；界面上的
+   * 「用户气泡 + 思考中气泡」完全一致，所以用户看到的是同一套交互，
+   * 只是回答来自本机（规则或本机配置的模型）。
+   */
+  async function sendLocal(content: string): Promise<void> {
+    sending.value = true;
+    error.value = "";
+
+    const userBubble = emptyChatMessage("USER", content);
+    userBubble.status = "COMPLETED";
+    messages.value = messages.value.concat([userBubble]);
+    const assistantBubble = emptyChatMessage("ASSISTANT", "");
+    assistantBubble.streaming = true;
+    assistantBubble.progress = engineMode.value == "local" ? "正在请本机模型挑歌…" : "正在按关键词挑歌…";
+    messages.value = messages.value.concat([assistantBubble]);
+    const at = messages.value.length - 1;
+
+    try {
+      const candidates = await prepareCandidates(content);
+      const songs: Song[] = [];
+      for (let i = 0; i < candidates.length; i++) songs.push(songFromCandidate(candidates[i]));
+
+      const input: AssistantTurnInput = {
+        mode: engineMode.value == "local" ? "local" : "rule",
+        text: content,
+        // 末尾两条是本轮刚铺的气泡，不能当历史再喂回去
+        history: recentHistory(2),
+        candidates: songs,
+        profile: await profileOrNull(),
+      };
+      const result: AssistantTurnResult = await runAssistantTurn(input);
+
+      patchMessage(at, (m) => {
+        m.status = "COMPLETED";
+        m.streaming = false;
+        m.progress = "";
+        m.content = result.reply;
+        if (result.songs.length > 0) {
+          m.blocks = [songListBlockOf(result.songs)];
+          m.actions = [localPlayAllAction()];
+        }
+      });
+      if (result.note.length > 0) qtShowToast({ title: result.note, icon: "none" });
+      persistLocal(content);
+    } catch (e) {
+      const msg = errText(e);
+      error.value = msg;
+      patchMessage(at, (m) => {
+        m.status = "FAILED";
+        m.streaming = false;
+        m.progress = "";
+        m.error = msg;
+        m.content = "这次没挑出来：" + msg;
+      });
+    } finally {
+      sending.value = false;
+    }
+  }
+
+  /** 最近若干轮对话（`skipTail` 用来排除本轮刚铺的气泡） */
+  function recentHistory(skipTail: number): { role: string; content: string }[] {
+    const out: { role: string; content: string }[] = [];
+    const end = messages.value.length - skipTail;
+    const from = end - 6 > 0 ? end - 6 : 0;
+    for (let i = from; i < end; i++) {
+      const m = messages.value[i];
+      if (m.role != "USER" && m.role != "ASSISTANT") continue;
+      if (m.content.length == 0) continue;
+      const turn: { role: string; content: string } = {
+        role: m.role == "USER" ? "user" : "assistant",
+        content: m.content,
+      };
+      out.push(turn);
+    }
+    return out;
+  }
+
+  /** 听歌画像：只读一次，失败按「没有画像」处理（少一层口味加权，不影响出歌） */
+  async function profileOrNull(): Promise<StyleProfile | null> {
+    if (profileLoaded) return cachedProfile;
+    profileLoaded = true;
+    try {
+      const pref = await loadPreference();
+      cachedProfile = pref.style;
+    } catch (e) {
+      // 画像来自本地库，读失败（首次安装/库还没建）时不该让助手罢工
+      cachedProfile = null;
+    }
+    return cachedProfile;
+  }
+
+  /** 本地结果的歌单块：形状与服务端 `song_list` 完全一致，页面渲染不分叉 */
+  function songListBlockOf(songs: Song[]): AiBlock {
+    const candidates: AiMusicCandidate[] = [];
+    for (let i = 0; i < songs.length; i++) candidates.push(candidateFromSong(songs[i]));
+    const data = new UTSJSONObject();
+    data.set("items", candidatesToJson(candidates));
+    const block: AiBlock = { type: "song_list", title: "", data: data };
+    return block;
+  }
+
+  /** 本地结果只给「播放全部」一个动作：其余动作（收藏/加歌单）模型本来也决定不了 */
+  function localPlayAllAction(): AiAction {
+    const action: AiAction = { actionId: "local-play-all", type: "PLAY_LIST", payload: null };
+    return action;
+  }
+
+  /** 把当前会话落到本机（本地引擎的「历史对话」就是靠这个维持的） */
+  function persistLocal(content: string): void {
+    const id = activeConversationId.value;
+    let title = titleOf(content);
+    if (id > 0) {
+      // 已有会话沿用它原来的标题：用户追问「再来点」时不该把会话改名
+      for (let i = 0; i < conversations.value.length; i++) {
+        if (conversations.value[i].id == id) {
+          title = conversations.value[i].title;
+          break;
+        }
+      }
+    }
+    const realId = saveLocalConversation(id, title, messages.value);
+    activeConversationId.value = realId;
+    conversations.value = listLocalConversations();
+  }
+
+  /**
+   * 切换 AI 模式：换模式等于换引擎，当前会话的两侧数据形状不同（本地会话 id 是
+   * 时间戳、服务端是自增），混在一起既存不进也读不出，所以直接开新对话。
+   */
+  function setEngineMode(mode: AiEngineMode): void {
+    if (mode == engineMode.value) return;
+    saveAiMode(mode);
+    engineMode.value = mode;
+    profileLoaded = false;
+    newConversation();
+    error.value = "";
+    agent.value = null;
+    capabilities.value = null;
+    if (isLocalEngine.value) {
+      conversations.value = listLocalConversations();
+      initialized.value = true;
+    } else {
+      initialized.value = false;
+      init();
+    }
+  }
+
   /** 中止当前请求（后端幂等，重复取消不报错） */
   async function stop(): Promise<void> {
+    if (isLocalEngine.value) {
+      // 本地引擎没有可取消的远端请求：runAssistantTurn 一次调用就跑完，
+      // 期间强行把 sending 复位只会让用户能连点两次、造出重叠的两轮。
+      return;
+    }
     const rid = runningRequestId.value;
     if (rid <= 0) return;
     stopPolling();
@@ -755,8 +989,9 @@ export function useAiChat() {
 
     if (note.length > 0) qtShowToast({ title: note, icon: "none" });
 
-    // 真的执行过才回执，避免把「不支持」也算成采纳
-    if (ok) {
+    // 真的执行过才回执，避免把「不支持」也算成采纳。
+    // 本地引擎没有服务端动作回执这回事（没有 actionId 归属的会话），直接跳过。
+    if (ok && !isLocalEngine.value) {
       try {
         await reportAction(action.actionId, type, true, note);
       } catch (e) {
@@ -860,6 +1095,10 @@ export function useAiChat() {
     agent,
     capabilities,
     agentName,
+    engineMode,
+    engineLabel,
+    isLocalEngine,
+    initialized,
     conversations,
     activeConversationId,
     messages,
@@ -871,6 +1110,7 @@ export function useAiChat() {
     error,
     runningRequestId,
     init,
+    setEngineMode,
     loadConversations,
     openConversation,
     newConversation,

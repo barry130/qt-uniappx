@@ -8,6 +8,9 @@
           <text class="subtitle" :class="layout.isWide ? 'subtitle-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(22, 12)">说出想听的，我来挑歌</text>
         </view>
         <view class="topbar-actions" :class="layout.isWide ? 'topbar-actions-wide' : ''">
+          <view class="mode-chip" :class="layout.isWide ? 'mode-chip-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';'" @tap="onPickMode">
+            <text class="mode-chip-text" :class="layout.isWide ? 'mode-chip-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(21, 12)">{{ engineLabel }}</text>
+          </view>
           <view class="icon-btn" :class="layout.isWide ? 'icon-btn-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';'" @tap="toggleHistory">
             <QtIcon name="clock" :size="layout.isWide ? 18 : 34" :color="themeStore.skin.iconMuted" />
           </view>
@@ -219,6 +222,10 @@ import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
 import { qtShowToast } from "@/services/toast";
 import { qtConfirm } from "@/services/confirm";
+import { qtShowActionSheet } from "@/services/action-sheet";
+import { isQtAdmin } from "@/services/music-api";
+import { AI_MODE_LABEL_LOCAL, AI_MODE_LABEL_RULE, AI_MODE_LABEL_SERVER, readAiMode as readMode } from "@/services/ai-mode";
+import type { AiEngineMode } from "@/services/ai-mode";
 import { usePlayerStore } from "@/stores/player";
 import { useSongSheet } from "@/composables/use-song-sheet";
 import { actionText, statusText, songsOfBlock, useAiChat } from "@/composables/use-ai-chat";
@@ -243,6 +250,9 @@ const {
   agent,
   capabilities,
   agentName,
+  engineMode,
+  engineLabel,
+  initialized,
   conversations,
   activeConversationId,
   messages,
@@ -282,11 +292,52 @@ function canAction(type: string): boolean {
 
 onShow(() => {
   qtTrackPage("pages/ai-assistant/index");
-  // 只在首次进入初始化：重复 init 会把正在跑的对话清掉
-  if (agent.value == null) {
+  // 只在首次进入初始化：重复 init 会把正在跑的对话清掉。
+  // 不能用 agent 判空——本地模式下 agent 永远是 null，那样每次 onShow 都会重来一遍。
+  if (!initialized.value) {
     chat.init();
+    return;
   }
+  // 模式可能在「每日推荐」页被改过（同一份设置），回来要对账一次，
+  // 否则界面胶囊显示的是旧模式、发消息却按新模式走。
+  const latest = readMode();
+  if (latest != engineMode.value) chat.setEngineMode(latest);
 });
+
+/**
+ * 切换「音乐助手用哪种 AI」。
+ *
+ * 与「每日推荐」共用同一份设置（services/ai-mode.ts），改这里等于改那边：
+ * 用户不该在两个页面看到两个互相矛盾的 AI 开关。服务端选项仍只给管理员，
+ * 与每日推荐的选择器保持同一口径（非管理员选了也调不通，只会多一条失败提示）。
+ */
+function onPickMode(): void {
+  const labels: string[] = [];
+  const short: string[] = [];
+  const modes: AiEngineMode[] = [];
+  labels.push(AI_MODE_LABEL_RULE + "：不联网、不调模型，按关键词挑歌");
+  short.push(AI_MODE_LABEL_RULE);
+  modes.push("rule");
+  labels.push(AI_MODE_LABEL_LOCAL + "：用「AI 接口」里配置的供应商挑歌");
+  short.push(AI_MODE_LABEL_LOCAL);
+  modes.push("local");
+  if (isQtAdmin()) {
+    labels.push(AI_MODE_LABEL_SERVER + "：走登录后的 astral 会话");
+    short.push(AI_MODE_LABEL_SERVER);
+    modes.push("server");
+  }
+  let cur = -1;
+  for (let i = 0; i < modes.length; i++) {
+    if (modes[i] == engineMode.value) cur = i;
+  }
+  qtShowActionSheet({ itemList: labels, title: "音乐助手用哪种 AI", selectedIndex: cur }).then((idx) => {
+    if (idx < 0 || idx >= modes.length) return;
+    const picked = modes[idx];
+    if (picked == engineMode.value) return;
+    chat.setEngineMode(picked);
+    qtShowToast({ title: "已切换为「" + short[idx] + "」", icon: "none" });
+  });
+}
 
 onUnload(() => {
   chat.dispose();
@@ -425,6 +476,19 @@ function onLike(index: number, good: boolean): void {
   border-radius: 32rpx;
   justify-content: center;
   align-items: center;
+}
+
+/* 模式胶囊：点一下切换「规则 / 本地模型 / 服务端」 */
+.mode-chip {
+  margin-left: 16rpx;
+  padding: 12rpx 20rpx;
+  border-radius: 28rpx;
+  justify-content: center;
+  align-items: center;
+}
+.mode-chip-text {
+  color: #737b8e;
+  font-size: 21rpx;
 }
 
 /* 历史浮层 */
@@ -721,6 +785,8 @@ function onLike(index: number, good: boolean): void {
 .subtitle-wide { font-size: 12px; margin-top: 2px; }
 .topbar-actions-wide { flex-direction: row; }
 .icon-btn-wide { width: 34px; height: 34px; border-radius: 17px; margin-left: 8px; }
+.mode-chip-wide { margin-left: 8px; padding: 6px 10px; border-radius: 14px; }
+.mode-chip-text-wide { font-size: 12px; }
 .history-panel-wide { width: 420px; border-radius: 12px; padding: 14px; }
 .history-title-wide { font-size: 15px; margin-bottom: 6px; }
 .history-item-wide { padding: 10px 8px; border-radius: 8px; }

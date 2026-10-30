@@ -21,6 +21,7 @@
  */
 
 import { ref } from "vue";
+import { activeProfile } from "@/services/ai-providers";
 
 export type AiEngineMode = "rule" | "local" | "server";
 
@@ -42,8 +43,16 @@ export function parseAiMode(raw: string | null): AiEngineMode {
 function readAiModeFromStorage(): AiEngineMode {
   try {
     const raw = uni.getStorageSync(AI_MODE_KEY);
-    if (typeof raw === "string") return parseAiMode(raw as string);
-    return "rule";
+    if (typeof raw === "string") {
+      const text = raw as string;
+      if (text.length > 0) return parseAiMode(text);
+    }
+    // 从没选过模式：配了本机模型就用它，没配就用纯规则。
+    // 用户原话是「AI 调用应该完全取决于设置里的 AI」——「设置里配了模型」本身就是
+    // 最强信号，不该让他再手动选一次才生效；反过来没配模型时自动走规则，
+    // 不会第一次进页面就撞上「未配置接口」。
+    const profile = activeProfile();
+    return profile != null ? "local" : "rule";
   } catch (e) {
     return "rule";
   }
