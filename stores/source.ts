@@ -1,4 +1,5 @@
 import { reactive } from "vue";
+import { logWarn } from "@/services/logger";
 
 const SOURCE_KEY = "qt-source";
 
@@ -11,7 +12,9 @@ class SourceStore {
       const saved = uni.getStorageSync(SOURCE_KEY) as string;
       if (saved.length == 0) return;
       this.current = saved;
-    } catch (_) {}
+    } catch (_) {
+      // 静默：读不到存档按默认音源处理，失效存量值由注册表 validateCurrentSource 纠正
+    }
   }
 
   /**
@@ -23,7 +26,9 @@ class SourceStore {
     this.current = source;
     try {
       uni.setStorageSync(SOURCE_KEY, source);
-    } catch (_) {}
+    } catch (_) {
+      logWarn("Source", "音源持久化失败（本次已生效，重启后回默认）");
+    }
   }
 }
 

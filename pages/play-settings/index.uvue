@@ -2,8 +2,8 @@
   <qt-page-frame width-kind="flow">
   <view class="page">
     <scroll-view class="list" :class="layout.isWide ? 'list-wide' : ''" direction="vertical" :show-scrollbar="false">
-      <!-- 宽屏两列（≥1280）：左列「播放行为」4 行，右列「音质与缓存」2 行。
-           单列时这两组在 1920 下拉成 1312px 宽、每行右侧空出 600px，纵向还要滚两屏。 -->
+      <!-- 宽屏两列（≥1280）：左列「播放行为」6 行，右列「音质与输出」3 行 +「缓存」1 行。
+           单列时这几组在 1920 下拉成 1312px 宽、每行右侧空出 600px，纵向还要滚两屏。 -->
       <view v-if="twoColumn" class="cols" :style="colsStyle">
         <view class="col" :style="colStyle">
           <view class="group group-wide group-col" :style="groupStyle">
@@ -39,6 +39,19 @@
                 <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
               </view>
             </view>
+            <!-- 本地优先播放：行内自绘开关（同无缝播放） -->
+            <view class="cell cell-wide gapless-cell gapless-cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleLocalFirst">
+              <QtIcon class="cell-icon cell-icon-wide" name="folder" :size="36" color="#c9904f" />
+              <view class="cell-main">
+                <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">本地优先播放</text>
+                <text class="cell-desc cell-desc-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">在线歌先查本地（下载与本地曲库），命中直接播本地文件，不取链。</text>
+              </view>
+              <view class="cell-right">
+                <view class="toggle" :class="layout.isWide ? 'toggle-wide' : ''" :style="'background-color:' + (localFirst ? theme.skin.accent : theme.skin.surfaceInset) + ';'">
+                  <view class="toggle-knob" :class="lfKnobClass" :style="'background-color:' + (localFirst ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
+                </view>
+              </view>
+            </view>
             <!-- 无缝播放：行内用自绘开关（全仓无 switch 组件，范本 pages/equalizer） -->
             <view class="cell cell-no-border cell-wide gapless-cell gapless-cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleGapless">
               <QtIcon class="cell-icon cell-icon-wide" name="gauge" :size="36" color="#d97f9b" />
@@ -55,16 +68,47 @@
           </view>
         </view>
         <view class="col col-right" :style="colStyle">
+          <!-- 音质与输出：三项都是「同码率下的听感」开关，与音源档位无关（默认全关） -->
           <view class="group group-wide group-col" :style="groupStyle">
-            <view class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showPlayQuality">
-              <QtIcon class="cell-icon cell-icon-wide" name="music" :size="36" color="#4fb186" />
-              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">播放默认音质</text>
+            <view class="cell cell-wide gapless-cell gapless-cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleFloatOutput">
+              <QtIcon class="cell-icon cell-icon-wide" name="headset" :size="36" color="#8b7bd9" />
+              <view class="cell-main">
+                <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">32bit 浮点输出</text>
+                <text class="cell-desc cell-desc-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">以 32bit 浮点混音输出，省掉 16bit 量化；出现爆音/无声请关回。</text>
+              </view>
               <view class="cell-right">
-                <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ playQualityText() }}</text>
-                <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+                <view class="toggle toggle-wide" :style="'background-color:' + (floatOutput ? theme.skin.accent : theme.skin.surfaceInset) + ';'">
+                  <view class="toggle-knob" :class="floatKnobClass" :style="'background-color:' + (floatOutput ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
+                </view>
               </view>
             </view>
-            <view class="cell cell-no-border cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showCacheLimit">
+            <view class="cell cell-wide gapless-cell gapless-cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="togglePreferSw">
+              <QtIcon class="cell-icon cell-icon-wide" name="settings" :size="36" color="#6f9bd9" />
+              <view class="cell-main">
+                <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">软解优先</text>
+                <text class="cell-desc cell-desc-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">改用软件解码器，换兼容性与稳定性；默认硬件解码更省电。</text>
+              </view>
+              <view class="cell-right">
+                <view class="toggle toggle-wide" :style="'background-color:' + (preferSw ? theme.skin.accent : theme.skin.surfaceInset) + ';'">
+                  <view class="toggle-knob" :class="swKnobClass" :style="'background-color:' + (preferSw ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
+                </view>
+              </view>
+            </view>
+            <view class="cell cell-no-border cell-wide gapless-cell gapless-cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleEnhance">
+              <QtIcon class="cell-icon cell-icon-wide" name="volume" :size="36" color="#d98b5b" />
+              <view class="cell-main">
+                <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">音量增强</text>
+                <text class="cell-desc cell-desc-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">整体响度 +3dB；母带本就很响的曲子可能削波，默认关闭。</text>
+              </view>
+              <view class="cell-right">
+                <view class="toggle toggle-wide" :style="'background-color:' + (enhanceOn ? theme.skin.accent : theme.skin.surfaceInset) + ';'">
+                  <view class="toggle-knob" :class="enhanceKnobClass" :style="'background-color:' + (enhanceOn ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
+                </view>
+              </view>
+            </view>
+          </view>
+          <view class="group group-wide group-col" :style="groupStyle">
+            <view class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showCacheLimit">
               <QtIcon class="cell-icon cell-icon-wide" name="download" :size="36" color="#6d8fd6" />
               <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">音乐缓存上限</text>
               <view class="cell-right">
@@ -111,6 +155,19 @@
             <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
           </view>
         </view>
+        <!-- 本地优先播放：行内自绘开关（同无缝播放） -->
+        <view class="cell gapless-cell" :class="layout.isWide ? 'cell-wide gapless-cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleLocalFirst">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="folder" :size="36" color="#c9904f" />
+          <view class="cell-main">
+            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">本地优先播放</text>
+            <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">在线歌先查本地（下载与本地曲库），命中直接播本地文件，不取链。</text>
+          </view>
+          <view class="cell-right">
+            <view class="toggle" :class="layout.isWide ? 'toggle-wide' : ''" :style="'background-color:' + (localFirst ? theme.skin.accent : theme.skin.surfaceInset) + ';'">
+              <view class="toggle-knob" :class="lfKnobClass" :style="'background-color:' + (localFirst ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
+            </view>
+          </view>
+        </view>
         <!-- 无缝播放：行内用自绘开关（全仓无 switch 组件，范本 pages/equalizer） -->
         <view class="cell cell-no-border gapless-cell" :class="layout.isWide ? 'cell-wide gapless-cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleGapless">
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="gauge" :size="36" color="#d97f9b" />
@@ -126,16 +183,48 @@
         </view>
       </view>
 
+      <!-- 音质与输出：同为「同码率下的听感」开关，单列时紧跟播放行为组（默认全关） -->
       <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
-        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showPlayQuality">
-          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="music" :size="36" color="#4fb186" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">播放默认音质</text>
+        <view class="cell gapless-cell" :class="layout.isWide ? 'cell-wide gapless-cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleFloatOutput">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="headset" :size="36" color="#8b7bd9" />
+          <view class="cell-main">
+            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">32bit 浮点输出</text>
+            <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">以 32bit 浮点混音输出，省掉 16bit 量化；出现爆音/无声请关回。</text>
+          </view>
           <view class="cell-right">
-            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ playQualityText() }}</text>
-            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
+            <view class="toggle" :class="layout.isWide ? 'toggle-wide' : ''" :style="'background-color:' + (floatOutput ? theme.skin.accent : theme.skin.surfaceInset) + ';'">
+              <view class="toggle-knob" :class="floatKnobClass" :style="'background-color:' + (floatOutput ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
+            </view>
           </view>
         </view>
-        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showCacheLimit">
+        <view class="cell gapless-cell" :class="layout.isWide ? 'cell-wide gapless-cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="togglePreferSw">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="settings" :size="36" color="#6f9bd9" />
+          <view class="cell-main">
+            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">软解优先</text>
+            <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">改用软件解码器，换兼容性与稳定性；默认硬件解码更省电。</text>
+          </view>
+          <view class="cell-right">
+            <view class="toggle" :class="layout.isWide ? 'toggle-wide' : ''" :style="'background-color:' + (preferSw ? theme.skin.accent : theme.skin.surfaceInset) + ';'">
+              <view class="toggle-knob" :class="swKnobClass" :style="'background-color:' + (preferSw ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
+            </view>
+          </view>
+        </view>
+        <view class="cell cell-no-border gapless-cell" :class="layout.isWide ? 'cell-wide gapless-cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleEnhance">
+          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="volume" :size="36" color="#d98b5b" />
+          <view class="cell-main">
+            <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">音量增强</text>
+            <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">整体响度 +3dB；母带本就很响的曲子可能削波，默认关闭。</text>
+          </view>
+          <view class="cell-right">
+            <view class="toggle" :class="layout.isWide ? 'toggle-wide' : ''" :style="'background-color:' + (enhanceOn ? theme.skin.accent : theme.skin.surfaceInset) + ';'">
+              <view class="toggle-knob" :class="enhanceKnobClass" :style="'background-color:' + (enhanceOn ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showCacheLimit">
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="download" :size="36" color="#6d8fd6" />
           <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">音乐缓存上限</text>
           <view class="cell-right">
@@ -153,6 +242,9 @@
       </view>
       <view class="hint">
         <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">音乐缓存上限是播放过的歌曲在本地保留的音频总量，超出后按最早播放的依次清理。改小上限会在下次播放时重建缓存。</text>
+      </view>
+      <view class="hint">
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">32bit 浮点输出、软解优先、音量增强都要重建输出通道，改动在下一首（或停止后重播）生效，不会打断正在放的这首。三项默认关闭，与旧版本行为一致；听感不对可以逐项打开对比，也能随时关回。</text>
       </view>
     </scroll-view>
 
@@ -195,17 +287,15 @@ import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { useQtTwoColumn } from "@/uni_modules/qt-ui/composables/use-qt-columns";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { computed, ref, onMounted, onUnmounted } from "vue";
+import { computed, ref } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import { audioPlayer } from "@/services/audio-player";
+import { localFirstEnabled, setLocalFirst } from "@/services/local-first";
 import { usePlayerStore } from "@/stores/player";
-import { useSourceStore } from "@/stores/source";
-import { useSourceRegistryStore } from "@/stores/source-registry";
-import { SOURCE_AUTH_CHANGED_EVENT } from "@/services/source-auth";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 /**
@@ -214,8 +304,6 @@ import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
  * 这里是唯一的数据源，设置主页不再保留任何副本。
  */
 const player = usePlayerStore();
-const sourceStore = useSourceStore();
-const registry = useSourceRegistryStore();
 /** 宽屏两列（≥1280）：布局档位、列宽与两列容器留白全部来自公共口径 */
 const { layout, twoColumn, colStyle, colsStyle } = useQtTwoColumn();
 const theme = useThemeStore();
@@ -331,6 +419,22 @@ function showConcurrent(): void {
 // 提前把下一首准备好：取链预热 + 整首预取（默认开启）。语义见 services/audio-player.uts
 // 的 GAPLESS_KEY 注释：Android 端 audioPreloadTrack 会把下一首整首读进磁盘缓存。
 const gapless = ref(audioPlayer.getGapless());
+// 本地优先播放（services/local-first.ts）：键不存在按开（默认生效）
+const localFirst = ref(localFirstEnabled());
+/** 本地优先开关旋钮的 class 组合（同 knobClass，Vapor 下 :class 只能绑一个表达式） */
+const lfKnobClass = computed((): string => {
+  const on = localFirst.value;
+  const wide = layout.isWide;
+  if (on && wide) return "toggle-knob-on toggle-knob-on-wide toggle-knob-wide";
+  if (on) return "toggle-knob-on";
+  if (wide) return "toggle-knob-wide";
+  return "";
+});
+function toggleLocalFirst(): void {
+  localFirst.value = !localFirst.value;
+  setLocalFirst(localFirst.value);
+  qtShowToast({ title: "本地优先播放已" + (localFirst.value ? "开启" : "关闭"), icon: "none" });
+}
 /** 开关旋钮的 class 组合（:class 只能绑一个表达式，Vapor 后者覆盖前者，同 pages/equalizer） */
 const knobClass = computed((): string => {
   const on = gapless.value;
@@ -346,40 +450,42 @@ function toggleGapless(): void {
   qtShowToast({ title: "无缝播放已" + (gapless.value ? "开启" : "关闭"), icon: "none" });
 }
 
-// ==================== 播放默认音质 ====================
+// ==================== 音质与输出（浮点输出 / 软解优先 / 音量增强） ====================
+// 三项都在原生**构建播放器时**生效（media3 的 RenderersFactory 只读一次）：
+// 播放中点开关不打断当前曲，空闲/已播完时原生会立刻重建，下一次播放即用新参数。
+// 默认全关 = 与改动前行为完全一致，避免默认给所有人套上音效链/软解耗电。
+const floatOutput = ref(audioPlayer.floatOutput);
+const preferSw = ref(audioPlayer.preferSoftwareDecoder);
+const enhanceOn = ref(audioPlayer.enhanceEnabled);
 
-// 音质档位来自数据包注册表，并按**当前选中的音源**收敛（v5 契约：包侧声明了
-// 该源可用档位，如 B 站无真无损就不展示 flac；未声明 = 全部档位）
-//（未装包为空 → 打开时提示安装）。computed 依赖 sourceStore.current，切源自动重算；
-// v10：播放面登录态生效时整体切官方档位清单——登录态不进响应式系统（uni storage
-// 同步读），用 loginTick 进依赖 + SOURCE_AUTH_CHANGED_EVENT 触发重算。
-const loginTick = ref(0);
-const qualityOptions = computed<{ value: string; name: string }[]>(() => {
-  loginTick.value;
-  return registry.sourceQualities(sourceStore.current).map((q) => ({ value: q.id, name: q.name }));
-});
-function onLoginChanged(): void {
-  loginTick.value++;
+/** 自绘开关旋钮的 class 组合（:class 只能绑一个表达式，同上面的 knobClass） */
+function knobOf(on: boolean): string {
+  const wide = layout.isWide;
+  if (on && wide) return "toggle-knob-on toggle-knob-on-wide toggle-knob-wide";
+  if (on) return "toggle-knob-on";
+  if (wide) return "toggle-knob-wide";
+  return "";
 }
-function qualityLabel(q: string): string {
-  return registry.qualityLabel(q);
+const floatKnobClass = computed((): string => knobOf(floatOutput.value));
+const swKnobClass = computed((): string => knobOf(preferSw.value));
+const enhanceKnobClass = computed((): string => knobOf(enhanceOn.value));
+
+function toggleFloatOutput(): void {
+  floatOutput.value = !floatOutput.value;
+  audioPlayer.setFloatOutput(floatOutput.value);
+  qtShowToast({ title: "32bit 浮点输出已" + (floatOutput.value ? "开启" : "关闭"), icon: "none" });
 }
-function playQualityText(): string {
-  return qualityLabel(player.quality);
+function togglePreferSw(): void {
+  preferSw.value = !preferSw.value;
+  audioPlayer.setPreferSoftwareDecoder(preferSw.value);
+  qtShowToast({ title: preferSw.value ? "已改为软解优先" : "已改为自动解码（硬件优先）", icon: "none" });
 }
-function showPlayQuality(): void {
-  const opts = qualityOptions.value;
-  if (opts.length == 0) {
-    qtShowToast({ title: "请先在 设置→音源包管理 安装数据包", icon: "none" });
-    return;
-  }
-  openSheet("播放默认音质", opts.map((opt) => ({
-    name: opt.name,
-    color: opt.value == player.quality ? theme.skin.accent : undefined,
-  })), (index) => {
-    player.setQuality(opts[index].value);
-    qtShowToast({ title: "播放音质：" + opts[index].name, icon: "none" });
-  });
+function toggleEnhance(): void {
+  enhanceOn.value = !enhanceOn.value;
+  // 增益固定 +3dB：再高会在母带接近满刻度的曲目上削波（原生侧 12dB 上限只是兜底）
+  if (enhanceOn.value) audioPlayer.setEnhanceGain(3);
+  audioPlayer.setEnhanceEnabled(enhanceOn.value);
+  qtShowToast({ title: "音量增强已" + (enhanceOn.value ? "开启（+3dB）" : "关闭"), icon: "none" });
 }
 
 // ==================== 音乐缓存上限 ====================
@@ -462,16 +568,13 @@ onShow(() => {
   concurrentMode.value = audioPlayer.getConcurrentMode();
   cacheLimitMb.value = audioPlayer.getCacheLimitMb();
   gapless.value = audioPlayer.getGapless();
-  sourceStore.restore();
-  registry.ensure();
+  localFirst.value = localFirstEnabled();
+  // 音质与输出三项：别处（清空数据、恢复备份）可能复位，进页面统一对账
+  floatOutput.value = audioPlayer.floatOutput;
+  preferSw.value = audioPlayer.preferSoftwareDecoder;
+  enhanceOn.value = audioPlayer.enhanceEnabled;
 });
 
-onMounted(() => {
-  uni.$on(SOURCE_AUTH_CHANGED_EVENT, onLoginChanged);
-});
-onUnmounted(() => {
-  uni.$off(SOURCE_AUTH_CHANGED_EVENT, onLoginChanged);
-});
 </script>
 
 <style>

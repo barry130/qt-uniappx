@@ -17,15 +17,25 @@
           </view>
         </view>
         <qt-notice-bar :notice="barNotice" @closed="barNotice = null" />
+        <!-- 失败横条：非模态、不挡操作，点右侧重试整轮 -->
+        <view v-if="loadFailed" class="home-fail" :class="layout.isWide ? 'home-fail-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
+          <QtIcon name="alert" :size="26" :color="themeStore.skin.warning" />
+          <text class="home-fail-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 13)" :max-lines="2">部分内容没加载出来，可能是网络或音源包的问题</text>
+          <view class="home-fail-btn" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="retryLoad">
+            <text class="home-fail-btn-text" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(22, 12)">重试</text>
+          </view>
+        </view>
         <!-- 两种音源包都不内置：播放包（版权风险）与数据包（在线搜索/歌单/歌词）都由用户
              在设置页自行安装。没有生效中的播放包时给一条引导条；没有生效中的数据包时弹
-             QtMetaPackGuide（下方）。两者都只指路「音源包管理」页（pages/source-pack/index），
-             不带下载动作；本地音乐照常播放 -->
-        <view v-if="sourceUpdateStore.sourceMissing" class="source-tip" :class="layout.isWide ? 'source-tip-wide' : ''" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="goSourcePack">
+             QtMetaPackGuide（下方）。横幅现唤起半屏直装（官方包一键安装，拉不到 offer 才
+             退回跳管理页，见 openPackSheetFromBanner），文案同步为「点此直接安装官方包」，
+             避免「说去管理页、实际弹半屏」的文不对题；数据包引导仍只指路「音源包管理」页；
+             本地音乐照常播放 -->
+        <view v-if="sourceUpdateStore.sourceMissing" class="source-tip" :class="layout.isWide ? 'source-tip-wide' : ''" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="openPackSheetFromBanner">
           <QtIcon name="music" :size="26" :color="themeStore.skin.accent" />
           <view class="source-tip-copy" :class="layout.isWide ? 'source-tip-copy-wide' : ''">
             <text class="source-tip-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(27, 15)" :max-lines="1">未安装播放音源包</text>
-            <text class="source-tip-desc" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)" :max-lines="2">在线播放需要先安装播放音源包，点此去音源包管理安装；本地音乐播放不受影响</text>
+            <text class="source-tip-desc" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)" :max-lines="2">在线播放需要先安装播放音源包，点此直接安装官方包；本地音乐播放不受影响</text>
           </view>
           <QtIcon name="chevron-right" :size="24" :color="themeStore.skin.iconMuted" />
         </view>
@@ -226,7 +236,18 @@
          详见 qt-wide-workspace.ts。窄屏不渲染（托管状态恒为空）。
          2026-10-25 教训：不能挪到页面根做多根节点 —— 字节码模板渲染器直接
          std::runtime_error 崩溃（unsupported component sharedData source）。 -->
-    <qt-wide-workspace host-route="/pages/home/index" />
+    <qt-wide-workspace host-route="/pages/home/index">
+      <!-- 页面槽位（2026-10-27 解耦）：工具页由本宿主页以默认插槽传入
+           （qt-ui 不再 import 业务页面）。单活动 pane：qtPaneOn＝当前托管
+           路由匹配才挂载，切换即换挂 16~300ms，保活方案真机史见
+           composables/qt-wide-workspace.ts 的 qtPaneOn 注释。 -->
+      <view v-if="qtPaneOn('/pages/search/index')" class="qtww-pane"><SearchPage /></view>
+      <view v-if="qtPaneOn('/pages/daily-recommend/index')" class="qtww-pane"><DailyRecommendPage /></view>
+      <view v-if="qtPaneOn('/pages/daily/index')" class="qtww-pane"><DailyPage /></view>
+      <view v-if="qtPaneOn('/pages/playlists/index')" class="qtww-pane"><PlaylistsPage /></view>
+      <view v-if="qtPaneOn('/pages/chart/index')" class="qtww-pane"><ChartPage /></view>
+      <view v-if="qtPaneOn('/pages/settings/index')" class="qtww-pane"><SettingsPage /></view>
+    </qt-wide-workspace>
   </qt-page-frame>
 </template>
 <script setup lang="ts">
@@ -234,6 +255,12 @@ import { qtShowToast } from "@/services/toast";
 import { formatBigCount } from "@/services/format";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtWideWorkspace from "@/uni_modules/qt-ui/components/qt-wide-workspace/qt-wide-workspace.uvue";
+import SearchPage from "@/pages/search/index.uvue";
+import DailyRecommendPage from "@/pages/daily-recommend/index.uvue";
+import DailyPage from "@/pages/daily/index.uvue";
+import PlaylistsPage from "@/pages/playlists/index.uvue";
+import ChartPage from "@/pages/chart/index.uvue";
+import SettingsPage from "@/pages/settings/index.uvue";
 import QtTabBar from "@/uni_modules/qt-ui/components/qt-tab-bar/qt-tab-bar.uvue";
 import { useQtTabBarSync } from "@/uni_modules/qt-ui/composables/use-qt-tab-bar";
 import { qtContentWidth, qtColumnCount } from "@/uni_modules/qt-ui/composables/use-qt-widths";
@@ -271,7 +298,9 @@ import { qtFontDual, qtFont, qtFontPx } from "@/uni_modules/qt-ui/stores/font-sc
 import { logMsgErr } from "@/services/logger";
 import { buildLocalMixes, shouldShowLocalMixes, type LocalMix } from "@/services/local-mixes";
 import { useListenStatsStore } from "@/stores/listen-stats";
-import { qtCloseWideTool, qtWideWorkspaceRefresh } from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
+import { qtCloseWideTool, qtPaneOn, qtWideWorkspaceRefresh } from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
+import { openPackInstallSheet, PACK_SHEET_UNAVAILABLE } from "@/services/pack-install-sheet";
+import { useHomePopupStore } from "@/stores/home-popup";
 
 const player = usePlayerStore();
 const sourceStore = useSourceStore();
@@ -281,6 +310,8 @@ const updateDotPaths = computed<string[]>(() => sourceUpdateStore.updatePending 
 const themeStore = useThemeStore();
 const noticeStore = useNoticeStore();
 const layout = useQtLayout();
+// 首页全屏弹窗占用态镜像的写入端（读取方是启动弹窗队列），见下方 watch(activePopup)
+const homePopupStore = useHomePopupStore();
 const statsStore = useListenStatsStore();
 const localMixes = ref<LocalMix[]>([]);
 // “为你整理”有固定的五类合辑，但攒不齐是常态：出场门槛见 shouldShowLocalMixes。
@@ -312,7 +343,9 @@ async function loadLocalMixes(): Promise<void> {
   try {
     await statsStore.load(player.history, player.playCounts);
     await statsStore.flush();
-  } catch (_) {}
+  } catch (_) {
+    // 静默：统计加载失败不拦首页本地歌单展示，下次进入会重试
+  }
   refreshLocalMixes();
 }
 
@@ -412,6 +445,9 @@ onUnmounted(() => {
     upgradeTimer = null;
   }
   uni.$off(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
+  // 占用态放掉：首页销毁（tab 页常驻，这里是防御性收口）时不能让启动弹窗队列
+  // 永远等一个不存在的弹窗
+  homePopupStore.busy = false;
 });
 function onUpgradeClosed(): void {
   upgradeVisible.value = false;
@@ -447,6 +483,18 @@ const activePopup = computed((): string => {
 // 弹层（公告/升级/数据包引导）期间临时隐藏 tabbar；平时宽屏隐藏（rail 取代）、竖屏显示
 const popupBlocking = computed<boolean>(() => noticeStore.splashNotice != null || upgradeVisible.value || metaGuideVisible.value);
 useQtTabBarSync(popupBlocking);
+// activePopup 占用态镜像给启动弹窗队列（services/boot-modal-queue.ts）：队列在放下
+// 一个引导前轮询它，首页这三个全屏弹窗在场时电池引导/更新提示/播放包引导都不冒出来。
+// 用「页面持续上报、队列轮询读取」而不是让队列直接 watch 本页 computed——队列是
+// service，没有组件生命周期，跨模块 watch 的 unwatch 收口比这行 watch 更绕。
+// immediate 同步初值；声明必须在 activePopup 之后（上方 metaGuideVisible 同款 TDZ 教训）
+watch(
+  activePopup,
+  (p: string): void => {
+    homePopupStore.busy = p != "none";
+  },
+  { immediate: true }
+);
 
 /** 自定义导航页需自行让出状态栏高度 */
 function statusBarPx(): number {
@@ -469,6 +517,8 @@ const charts = ref<Chart[]>([]);
  * 逐块撤下，不需要等整轮结束。
  */
 const loading = ref(true);
+/** 首屏请求失败过就置真：用一条可重试的横条代替「静默空列表 + toast」 */
+const loadFailed = ref(false);
 let loadedSource = "";
 /** 上次加载时的包态指纹：安装/更新/卸载/启停音源包后指纹变化，触发整页重拉 */
 let loadedPackFp = "";
@@ -485,6 +535,7 @@ async function load(): Promise<void> {
   homeLoading = true;
   homeLoadingSource = sourceStore.current;
   loading.value = true;
+  loadFailed.value = false;
   // seq 必须在 try 之外声明：finally 里要用它判断「本轮是否已被新轮顶掉」
   const source = sourceStore.current;
   const seq = ++homeLoadSeq;
@@ -525,7 +576,8 @@ async function load(): Promise<void> {
       })
       .catch((error) => {
         logMsgErr("[QT Music Home Load] " + source, error);
-        if (!stale()) qtShowToast({ title: "加载失败，请检查网络", icon: "none" });
+        // 失败不弹 toast：顶部已有可重试横条，toast 只会盖住 hero
+        if (!stale()) loadFailed.value = true;
       });
     await Promise.all([recsTask, chartsTask]);
     // 新歌放最后：与原来「无论推荐/榜单成败都拉新歌」一致
@@ -543,6 +595,9 @@ async function load(): Promise<void> {
       }
     }
   }
+}
+function retryLoad(): void {
+  ensureLoad();
 }
 function ensureLoad(): void {
   // 冷启动时本地包态是异步从磁盘恢复的：恢复完成前 packsFingerprint() 恒为空态，
@@ -615,6 +670,18 @@ function refreshSourcePackState(): void {
 function goSourcePack(): void {
   uni.navigateTo({ url: "/pages/source-pack/index" });
 }
+/**
+ * 横幅点击 → 播放包半屏直装（官方包一键安装）。用户直接点的横幅**不进启动
+ * 弹窗队列**：队列是给系统侧引导串行用的，用户点击要立即响应——且首页三个
+ * 全屏弹窗在场时横幅本来就被遮罩盖住点不到，无重叠可治。拿不到官方包 offer
+ * （离线/无发布/版本被拉黑）时退回老行为：直跳音源包管理页。注意区分收口
+ * 结果——「dismissed」是用户主动关掉半屏，不跳转；只有「unavailable」才兜底跳转。
+ */
+function openPackSheetFromBanner(): void {
+  openPackInstallSheet().then((result: string): void => {
+    if (result == PACK_SHEET_UNAVAILABLE) goSourcePack();
+  });
+}
 onMounted(() => {
   sourceStore.restore();
   sourceRegistry.ensure();
@@ -657,7 +724,12 @@ onBackPress((options: OnBackPressOptions): boolean => {
 async function play(song: Song): Promise<void> {
   try {
     song.url = await musicApi.playUrl(song, player.quality);
-    try { await player.playSingle(song); } catch (_) {}
+    try {
+      await player.playSingle(song);
+    } catch (_) {
+      // 取到链接但起播失败：与取链失败同口径提示，不留无声失败
+      qtShowToast({ title: "该歌曲暂时无法播放", icon: "none" });
+    }
   } catch (_) {
     qtShowToast({ title: "该歌曲暂时无法播放", icon: "none" });
   }
@@ -854,13 +926,29 @@ const quickPillWidth = computed<number>(() => {
 const formatCount = formatBigCount;
 </script>
 <style>
+/* 宽屏托管覆盖层的 pane（页面槽位解耦后样式随插槽内容落在本页作用域；
+   覆盖层 stage 是 fixed 铺满，pane 四边钉死其上，见 qt-wide-workspace.uvue） */
+.qtww-pane {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+}
 .home-page { flex: 1; min-height: 0; }
 .home-body { flex: 1; min-width: 0; min-height: 0; flex-direction: column; }
 .home-scroll { flex: 1; min-height: 0; }
+/* 失败横条：与 source-tip 同宽同圆角，用「卡片 + 警告图标」而不是大块橙底，
+   避免和上方音源包引导条撞色抢视觉重心 */
+.home-fail { margin: 0 26rpx 12rpx; padding: 18rpx 22rpx; flex-direction: row; align-items: center; border-width: 1px; border-style: solid; border-radius: 16rpx; }
+.home-fail-wide { margin: 0 20px 10px; padding: 10px 14px; border-radius: 10px; }
+.home-fail-text { flex: 1; min-width: 0; margin-left: 12rpx; }
+.home-fail-btn { margin-left: 16rpx; padding: 0 20rpx; height: 56rpx; align-items: center; justify-content: center; border-radius: 28rpx; }
+.home-fail-btn-text { font-weight: 600; }
 .home-header { padding: 26rpx 26rpx 18rpx; flex-direction: row; align-items: center; }
-.home-search { flex: 1; min-width: 0; height: 68rpx; margin-left: 20rpx; padding: 0 20rpx; flex-direction: row; align-items: center;  border-width: 1px; border-style: solid; border-color: #e5e8ee; border-radius: 16rpx; }
-.home-search-text { margin-left: 12rpx; color: #8b93a2; font-size: 23rpx; }
-.home-bell { position: relative; width: 68rpx; height: 68rpx; margin-left: 12rpx; align-items: center; justify-content: center;  border-width: 1px; border-style: solid; border-color: #e5e8ee; border-radius: 16rpx; }
+.home-search { flex: 1; min-width: 0; height: 88rpx; margin-left: 20rpx; padding: 0 20rpx; flex-direction: row; align-items: center;  border-width: 1px; border-style: solid; border-radius: 16rpx; }
+.home-search-text { margin-left: 12rpx; color: #737b8e; font-size: 23rpx; }
+.home-bell { position: relative; width: 88rpx; height: 88rpx; margin-left: 12rpx; align-items: center; justify-content: center;  border-width: 1px; border-style: solid; border-radius: 16rpx; }
 .home-bell-dot { position: absolute; top: 8rpx; right: 8rpx; min-width: 26rpx; height: 26rpx; padding: 0 6rpx; align-items: center; justify-content: center; background-color: #1f2430; border-radius: 13rpx; }
 .home-bell-dot-text { color: #ffffff; font-size: 16rpx; }
 .portrait-home { padding: 0 24rpx 140rpx; }
@@ -912,17 +1000,17 @@ const formatCount = formatBigCount;
 .section-more-text { color: #8a919f; font-size: 21rpx; }
 .chart-list { margin-top: 20rpx; }
 /* 与 .song-row 同款扁平行：去灰底卡片，只留分隔线（分隔线颜色由模板按主题覆盖） */
-.chart-row { height: 136rpx; flex-direction: row; align-items: center; border-bottom-width: 1px; border-bottom-style: solid; border-bottom-color: #eff1f5; }
+.chart-row { height: 136rpx; flex-direction: row; align-items: center; border-bottom-width: 1px; border-bottom-style: solid; }
 .chart-cover { width: 92rpx; height: 92rpx; border-radius: 14rpx;  }
 .chart-info { flex: 1; min-width: 0; margin-left: 22rpx; }
 .chart-name { color: #1b202b; font-size: 30rpx; font-weight: 600; text-overflow: ellipsis; }
-.chart-meta { margin-top: 8rpx; color: #8b93a2; font-size: 23rpx; text-overflow: ellipsis; }
+.chart-meta { margin-top: 8rpx; color: #737b8e; font-size: 23rpx; text-overflow: ellipsis; }
 .song-list { margin-top: 18rpx; }
-.song-row { height: 136rpx; flex-direction: row; align-items: center; border-bottom-width: 1px; border-bottom-style: solid; border-bottom-color: #eff1f5; }
+.song-row { height: 136rpx; flex-direction: row; align-items: center; border-bottom-width: 1px; border-bottom-style: solid; }
 .song-cover { width: 92rpx; height: 92rpx; border-radius: 14rpx;  }
 .song-info { flex: 1; min-width: 0; margin-left: 22rpx; }
 .song-name { color: #1b202b; font-size: 30rpx; font-weight: 600; text-overflow: ellipsis; }
-.song-meta { margin-top: 8rpx; color: #8b93a2; font-size: 23rpx; text-overflow: ellipsis; }
+.song-meta { margin-top: 8rpx; color: #737b8e; font-size: 23rpx; text-overflow: ellipsis; }
 /* 播放按钮：整行不可点，唯一入口是这枚圆形按钮。
    白色底 + 细描边 + 极淡投影：新歌速递的行本身就在白色卡片上，
    纯白圆形会融入背景，必须靠描边和投影勾出轮廓才看得清。
@@ -950,9 +1038,9 @@ const formatCount = formatBigCount;
 .wide-empty { height: 48px; align-items: center; justify-content: center; }
 .wide-empty-text { color: #929aa8; font-size: 12px; }
 .home-header-wide { padding-left: 16px; padding-right: 16px; padding-bottom: 8px; }
-.home-search-wide { height: 36px; border-radius: 10px; margin-left: 14px; padding-left: 14px; padding-right: 14px; }
+.home-search-wide { height: 40px; border-radius: 10px; margin-left: 14px; padding-left: 14px; padding-right: 14px; }
 .home-search-text-wide { margin-left: 8px; font-size: 13px; }
-.home-bell-wide { width: 36px; height: 36px; border-radius: 10px; margin-left: 10px; }
+.home-bell-wide { width: 40px; height: 40px; border-radius: 10px; margin-left: 10px; }
 .wide-home { align-self: center; padding-bottom: 28px; }
 .wide-shell { flex-direction: row; align-items: flex-start; padding: 0 16px; }
 .wide-shell-compact { flex-direction: column; padding: 0 12px; }
@@ -974,7 +1062,7 @@ const formatCount = formatBigCount;
 .wide-primary-text { margin-left: 5px; font-size: 12px; font-weight: 700; }
 .wide-secondary { height: 34px; padding: 0 12px; margin-left: 8px; align-items: center; justify-content: center; background-color: rgba(255,255,255,0.12); border-radius: 9px; }
 .wide-secondary-text { color: #ffffff; font-size: 12px; }
-.wide-panel { margin-top: 14px; padding: 16px;  border-width: 1px; border-style: solid; border-color: #e5e8ee; border-radius: 14px; }
+.wide-panel { margin-top: 14px; padding: 16px;  border-width: 1px; border-style: solid; border-radius: 14px; }
 .wide-panel-head { flex-direction: row; align-items: flex-end; justify-content: space-between; margin-bottom: 12px; }
 .wide-panel-title { margin-top: 3px; color: #12151d; font-size: 18px; font-weight: 700; }
 /* 行由 widePlaylistRows 在数据层切好，这里只做纵向堆叠 */
@@ -983,7 +1071,7 @@ const formatCount = formatBigCount;
 .wide-playlist-card { margin-right: 12px; margin-bottom: 14px; }
 .wide-playlist-cover { border-radius: 10px;  }
 .wide-playlist-name { margin-top: 7px; color: #1b202b; font-size: 13px; line-height: 17px; font-weight: 600; }
-.wide-playlist-count { margin-top: 3px; color: #8b93a2; font-size: 11px; }
+.wide-playlist-count { margin-top: 3px; color: #737b8e; font-size: 11px; }
 .wide-song-grid { flex-direction: row; flex-wrap: wrap; }
 .wide-song-row { width: 50%; height: 54px; flex-direction: row; align-items: center; }
 .wide-song-cover { width: 38px; height: 38px; border-radius: 8px;  }
@@ -992,12 +1080,12 @@ const formatCount = formatBigCount;
    margin-right 拉开与右列封面的距离（行是 50% 定宽，不能加 padding 免得换行） */
 .wide-song-play { width: 28px; height: 28px; border-radius: 14px; margin-left: 10px; margin-right: 14px; flex-shrink: 0; justify-content: center; align-items: center; }
 .wide-song-name { color: #1b202b; font-size: 13px; font-weight: 600; text-overflow: ellipsis; }
-.wide-song-meta { margin-top: 3px; color: #8b93a2; font-size: 11px; text-overflow: ellipsis; }
-.wide-chart-row { height: 54px; flex-direction: row; align-items: center; border-top-width: 1px; border-top-style: solid; border-top-color: #eff1f5; }
+.wide-song-meta { margin-top: 3px; color: #737b8e; font-size: 11px; text-overflow: ellipsis; }
+.wide-chart-row { height: 54px; flex-direction: row; align-items: center; border-top-width: 1px; border-top-style: solid; }
 .wide-chart-cover { width: 38px; height: 38px; margin-left: 5px; border-radius: 8px;  }
 .wide-chart-info { flex: 1; min-width: 0; margin-left: 10px; }
 .wide-chart-name { color: #1b202b; font-size: 13px; font-weight: 600; text-overflow: ellipsis; }
-.wide-chart-meta { margin-top: 3px; color: #8b93a2; font-size: 11px; text-overflow: ellipsis; }
+.wide-chart-meta { margin-top: 3px; color: #737b8e; font-size: 11px; text-overflow: ellipsis; }
 /* 桌面指针反馈：只在宽屏启用（手机上 hover-class 会在点按瞬间闪一下） */
 .shelf-card-hover { background-color: rgba(255, 255, 255, 0.06); border-radius: 12px; }
 .chart-row-hover { background-color: rgba(255, 255, 255, 0.06); }

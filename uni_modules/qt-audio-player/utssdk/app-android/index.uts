@@ -47,6 +47,8 @@ import AudioFocusRequest from 'android.media.AudioFocusRequest'
 import ExoPlayer from 'androidx.media3.exoplayer.ExoPlayer'
 import DefaultMediaSourceFactory from 'androidx.media3.exoplayer.source.DefaultMediaSourceFactory'
 import DefaultLoadControl from 'androidx.media3.exoplayer.DefaultLoadControl'
+import DefaultRenderersFactory from 'androidx.media3.exoplayer.DefaultRenderersFactory'
+import MediaCodecSelector from 'androidx.media3.exoplayer.mediacodec.MediaCodecSelector'
 import MediaItem from 'androidx.media3.common.MediaItem'
 import MediaMetadata from 'androidx.media3.common.MediaMetadata'
 import Rating from 'androidx.media3.common.Rating'
@@ -109,6 +111,7 @@ import NotificationManager from 'android.app.NotificationManager'
 import NotificationChannel from 'android.app.NotificationChannel'
 import NotificationCompat from 'androidx.core.app.NotificationCompat'
 import Equalizer from 'android.media.audiofx.Equalizer'
+import LoudnessEnhancer from 'android.media.audiofx.LoudnessEnhancer'
 import AppWidgetManager from 'android.appwidget.AppWidgetManager'
 import AppWidgetProvider from 'android.appwidget.AppWidgetProvider'
 import PendingIntent from 'android.app.PendingIntent'
@@ -169,6 +172,16 @@ const SPEED_MIN: number = 0.5
 const SPEED_MAX: number = 3.0
 // 蓝牙/耳机断开自动暂停：becoming_noisy 广播接收器（与 ExoPlayer 内置处理双保险）
 
+// ---- 车机蓝牙 AVRCP 歌词去重状态（详见文件末尾「车机蓝牙 AVRCP 歌词」一节） ----
+// gCarLyricGen = 当前时间线代数（audioSetPlaylist / loadAndPlay 重建媒体项时递增）；
+// gCarLyricTextGen/Mid/Text = 上次成功下发时的（代数, mediaId, 歌词全文）。三者与当前
+// 值全等才判定为无效推送——重建后的元数据不再携带 LYRICS key，此时同文本的下发
+// 必须放行，否则车机会一直停在上一轮（或干脆没有）歌词。
+let gCarLyricGen: number = 0
+let gCarLyricTextGen: number = 0
+let gCarLyricMid: string = ''
+let gCarLyricText: string | null = null
+
 // ==================== 音频磁盘缓存（SimpleCache + LRU） ====================
 // 缓存目录：应用 cacheDir/audio_cache；LRU 淘汰，上限由设置页下发（默认 1G，不设上限）。
 // 只挂在 HTTP 数据源链路上，content:// 本地文件不经过缓存。
@@ -197,7 +210,7 @@ function releaseAudioCache(): void {
   try {
     cache.release()
   } catch (e) {
-    // 忽略
+    // 静默：释放失败由下次重建兜底
   }
   gAudioCache = null
 }
@@ -302,7 +315,7 @@ function nativeClearAudioCache(): boolean {
     // SimpleCache 的 span 索引库一并删除，避免残留孤儿记录
     context.deleteDatabase('exoplayer_internal')
   } catch (e) {
-    // 索引库删不掉不影响缓存清空（下次初始化会自动对账）
+    // 静默：索引库删不掉不影响缓存清空，下次初始化自动对账
   }
   return ok
 }
@@ -422,7 +435,7 @@ function pauseForFocus(): void {
   try {
     mp.pause()
   } catch (e) {
-    // 忽略
+    // 静默：暂停失败说明播放器已异常，重播时重建
   }
 }
 
@@ -432,7 +445,7 @@ function resumeFromFocus(): void {
   try {
     mp.play()
   } catch (e) {
-    // 忽略
+    // 静默：恢复失败说明播放器已异常，用户手动重播时重建
   }
 }
 
@@ -543,7 +556,7 @@ function requestAudioFocusIfNeeded(): void {
     // 诊断日志：确认我们确实拿到了焦点（拿到后才可能收到别人的抢焦点通知）
     console.log('[QT Audio] 申请音频焦点: ' + (gFocusHeld ? '已获得' : '被拒绝 result=' + result) + ' (mode=' + gConcurrentMode + ')')
   } catch (e) {
-    // 忽略
+    // 静默：焦点申请异常按未获得处理，播放照常（最多被别人抢焦点）
   }
 }
 
@@ -562,7 +575,7 @@ function abandonAudioFocus(): void {
     // 传 listener 的那个才是 deprecated 版本。
     am.abandonAudioFocusRequest(req)
   } catch (e) {
-    // 忽略
+    // 静默：归还焦点失败系统侧会自动回收
   }
 }
 
@@ -625,7 +638,7 @@ class ProgressRunnable implements Runnable {
         }
         fireTimeUpdate(current / 1000.0, dur / 1000.0)
       } catch (e) {
-        // 忽略
+        // 静默：单次取进度失败跳过该次回调，下轮轮询恢复
       }
       // 歌词高亮/进度条的主时间源是 stores/player.ts 的进度时钟（每 100ms 自己取一次
       // 位置），这里只作兜底。原来 1 秒一次会让最坏情况晚整整一秒才换行
@@ -982,9 +995,16 @@ export function audioSetPlaylist(items: AudioPlaylistItem[], startIndex: number,
   if (context == null) return
   // 整条重推 = 新一轮取址：清掉旧条目的解析记忆，refetch 流程才能拿到新地址
   gResolvedUrls.clear()
+  // 整条重推也 = 车机歌词新一轮：setMediaItems 用 buildPlaylistMediaItem 重建全部条目，
+  // 旧条目 extras 里的 LYRICS key 随之消失，同文本的下发必须放行（gCarLyricGen 见文末）
+  gCarLyricGen++
   // 队列路径不再经过 nativePlay，播放器/媒体服务/控制器的首播引导必须搬到这里：
   // 不引导的话 gMediaPlayer 恒为 null，下面直接 return —— 整条链路静默空转
   // （不播放、无通知栏、也无报错）。buildPlayerOnce 内部含 ensureMediaSession 与 applySpeed。
+  // 输出/解码设置改过就先拆掉旧管线（队列重推本身就是没在出声的边界），下面重建即生效
+  if (gRenderersDirty && !isPlayerPlayingSafely()) {
+    teardownPlayerForRebuild()
+  }
   if (gMediaPlayer == null) {
     buildPlayerOnce()
     startMediaService(context)
@@ -1136,8 +1156,9 @@ function attachPlayerListener(exo: ExoPlayer): void {
 class QtPlayerListener extends Player.Listener {
   override onPlaybackStateChanged(state: Int): void {
     if (state == Player.STATE_READY) {
-      // 首个条目就绪 = 音频会话 id 已可用，这里惰性补挂 EQ
+      // 首个条目就绪 = 音频会话 id 已可用，这里惰性补挂 EQ 与音量增强
       attachEqualizerIfNeeded()
+      attachLoudnessEnhancerIfNeeded()
       if (gAwaitPrepare) {
         gAwaitPrepare = false
         gPrepared = true
@@ -1826,6 +1847,148 @@ function buildAudioDataSourceFactory(context: Context): DefaultDataSource.Factor
   return new DefaultDataSource.Factory(context, resolvingFactory)
 }
 
+// ==================== 音频输出通道 / 解码方式 / 音量增强 ====================
+// 同一个文件、同一副耳机，「听起来不如以前」往往不是码率掉了，而是**输出路径**变了：
+// - 整型 16bit 输出在混音/重采样处会丢精度（32bit 浮点输出省掉这一段量化）；
+// - 硬件解码器在个别 SoC + 个别编码组合上（AAC-LC 变体、FLAC 24bit、高采样率）
+//   输出不如软件解码器干净，软解优先能换回稳定性（代价是耗电与高码率下的发热）。
+//
+// media3 的这三项都在**构建播放器时**确定（RenderersFactory / AudioSink 的构造参数），
+// 运行时改不了，所以切换后要重建播放器实例：播放中不打断（避免切歌现场卡住），
+// 空闲/已结束时立刻释放，下一次播放自然按新参数重建。
+// 默认全部关闭：与系统/厂商音效链（Dolby、DTS）的兼容性最好，等同改动前的行为。
+
+/** 32bit 浮点输出（默认关） */
+let gFloatOutput = false
+/** 软解优先（默认关：硬件优先，省电） */
+let gPreferSoftwareDecoder = false
+/** 音量增强开关与目标增益（毫贝尔，默认 +300mB ≈ +3dB） */
+let gEnhanceEnabled = false
+let gEnhanceGainMb = 300
+let gLoudnessEnhancer: LoudnessEnhancer | null = null
+
+/** 按当前设置构建 RenderersFactory（浮点输出 / 解码器偏好都挂在这里） */
+function buildQtRenderersFactory(appContext: Context): DefaultRenderersFactory {
+  const rf = new DefaultRenderersFactory(appContext)
+  if (gFloatOutput) {
+    // float 输出 + 让 AudioTrack 自己处理倍速（避免 Sonic 重采样在非 1.0x 时的音染）
+    rf.setEnableAudioFloatOutput(true)
+    rf.setEnableAudioTrackPlaybackParams(true)
+  }
+  if (gPreferSoftwareDecoder) {
+    // PREFER_SOFTWARE：同一编码优先用软件解码器，硬件仅在无软解时兜底
+    rf.setMediaCodecSelector(MediaCodecSelector.PREFER_SOFTWARE)
+  }
+  return rf
+}
+
+/**
+ * 把音量增强（LoudnessEnhancer）挂到当前音频会话。
+ *
+ * 与 EQ 同样的惰性策略：只在开启时创建效果器，且要等 audioSessionId 就绪
+ * （首条目 STATE_READY 后必为正）。LoudnessEnhancer 是纯增益（不是压限器），
+ * 增益过高会在母带本来就接近满刻度的曲目上削波，所以 JS 侧只给 0–12dB 且默认 +3dB。
+ */
+function attachLoudnessEnhancerIfNeeded(): void {
+  if (gLoudnessEnhancer != null) return
+  if (!gEnhanceEnabled) return
+  const mp = gMediaPlayer
+  if (mp == null) return
+  try {
+    const sessionId = mp.getAudioSessionId()
+    if (sessionId <= 0) return
+    const enh = new LoudnessEnhancer(sessionId)
+    enh.setTargetGain(gEnhanceGainMb.toInt())
+    enh.setEnabled(true)
+    gLoudnessEnhancer = enh
+    console.log('[QT Audio] 音量增强已挂载 session=' + sessionId.toString() + ' gainMb=' + gEnhanceGainMb.toString())
+  } catch (e) {
+    console.log('[QT Audio] 音量增强挂载失败: ' + (e != null ? e.toString() : 'unknown'))
+  }
+}
+
+/** 释放音量增强（播放器销毁 / 用户关闭时都要调用，否则供应商音效链被顶替） */
+function releaseLoudnessEnhancer(): void {
+  const enh = gLoudnessEnhancer
+  if (enh == null) return
+  try {
+    enh.setEnabled(false)
+  } catch (e) {
+    // 静默：停用失败不影响 release
+  }
+  try {
+    enh.release()
+  } catch (e) {
+    // 静默：释放失败交给 GC
+  }
+  gLoudnessEnhancer = null
+}
+
+/**
+ * 输出/解码设置变过的标记：RenderersFactory（浮点输出、解码器偏好）只在
+ * `new ExoPlayer.Builder(...).build()` 那一刻读取，所以改过就置脏，让下一个
+ * 自然的边界（换歌 / 队列重推 / 停止后重播）顺手重建，而不是在设置页当场拆机。
+ *
+ * 为什么不当场拆：拆播放器必须连着 MediaSession / MediaController 一起拆（会话持有
+ * Player 引用，只 release 播放器会让通知栏与媒体键拿到已释放对象），而这条链路一旦
+ * 走到 stopService 就会把前台服务也停掉——用户在设置页点个开关不该看到通知消失。
+ */
+let gRenderersDirty = false
+
+/** 当前是否真的在出声（异常一律当「在播」，宁可晚一点生效也不打断） */
+function isPlayerPlayingSafely(): boolean {
+  const mp = gMediaPlayer
+  if (mp == null) return false
+  try {
+    return mp.isPlaying()
+  } catch (e) {
+    return true
+  }
+}
+
+/**
+ * 把播放器连同 MediaSession / MediaController 一起拆掉，让下一次 buildPlayerOnce
+ * 用新的输出/解码参数重建。**只在没有出声的边界调用**（换歌、队列重推、停止）。
+ */
+function teardownPlayerForRebuild(): void {
+  const mp = gMediaPlayer
+  if (mp != null) {
+    try {
+      mp.stop()
+    } catch (e) {
+      // 静默：停止失败也继续释放
+    }
+    try {
+      mp.release()
+    } catch (e) {
+      // 静默：释放失败交给 GC
+    }
+    gMediaPlayer = null
+  }
+  // 效果器也跟着播放器走：新会话的 audioSessionId 变了，旧效果器挂不住
+  releaseEqualizer()
+  releaseLoudnessEnhancer()
+  const ctrl = gMediaController
+  if (ctrl != null) {
+    try {
+      ctrl.release()
+    } catch (e) {
+      // 静默：释放失败交给 GC，下次播放重建
+    }
+  }
+  gMediaController = null
+  try {
+    gMediaSession3?.release()
+  } catch (e) {
+    // 静默：释放失败交给 GC，下次播放重建
+  }
+  gMediaSession3 = null
+  gControllerConnecting = false
+  gPrepared = false
+  gAwaitPrepare = false
+  gRenderersDirty = false
+}
+
 function buildPlayerOnce(): void {
   const appContext = UTSAndroid.getAppContext()
   if (appContext == null) return
@@ -1838,6 +2001,8 @@ function buildPlayerOnce(): void {
   // 用应用级 context（而非 Activity），避免 ExoPlayer 持有已销毁 Activity 泄漏
   const exo = new ExoPlayer.Builder(appContext)
     .setMediaSourceFactory(mediaSourceFactory)
+    // 输出通道与解码器偏好（浮点输出 / 软解优先）只能在这里定，见 buildQtRenderersFactory
+    .setRenderersFactory(buildQtRenderersFactory(appContext))
     // false：音频焦点改由上面「手动音频焦点」管理（播放申请、暂停保持、丢失暂停）。
     // media3 自动处理在暂停后会让会话失去媒体键优先级，导致蓝牙耳机暂停后按播放无响应。
     .setAudioAttributes(attr, false)
@@ -1852,6 +2017,8 @@ function buildPlayerOnce(): void {
     .setStuckBufferingDetectionTimeoutMs(45000)
     .build()
   gMediaPlayer = exo
+  // 这次的 RenderersFactory 已经是最新设置，脏标记到此为止
+  gRenderersDirty = false
   attachPlayerListener(exo)
   // 播放器新建时套用当前倍速（设置页可能早于首次播放已经设过倍速）
   applySpeed(exo)
@@ -1876,6 +2043,8 @@ function loadAndPlay(url: string): void {
     }
     // 给当前媒体项写入元数据（标题/歌手/专辑/封面URL），MediaSessionService 据它填充
     // 系统媒体通知；蓝牙连车机时这些字段经 AVRCP 广播给车机屏幕显示。
+    // 单曲链路每次换歌都重建元数据，车机歌词去重的旧记忆随之作废（gCarLyricGen 见文末）
+    gCarLyricGen++
     const metadataBuilder = new MediaMetadata.Builder()
     metadataBuilder.setTitle(gTitle)
     metadataBuilder.setArtist(gSinger)
@@ -1916,6 +2085,15 @@ function nativePlay(): void {
 
   // 申请音频焦点（已持有则跳过）：耳机/蓝牙媒体键由系统派发给焦点持有会话
   requestAudioFocusIfNeeded()
+
+  // 输出/解码设置改过：换歌（或已播完）时顺手重建，让新参数从这一首开始生效；
+  // 同一首的续播/暂停恢复不重建，避免丢进度和重新缓冲。
+  if (gRenderersDirty && gMediaPlayer != null) {
+    const sameSong = gPrepared && gLoadedSrc == gSrc
+    if (!sameSong && !isPlayerPlayingSafely()) {
+      teardownPlayerForRebuild()
+    }
+  }
 
   // 首次：创建并复用同一个 ExoPlayer（避免每次切歌都重建造成的卡顿）
   if (gMediaPlayer == null) {
@@ -1972,17 +2150,18 @@ function nativeStop(): void {
     try {
       mp.stop()
     } catch (e) {
-      // 忽略
+      // 静默：停止失败同样走下面的释放兜底
     }
     try {
       mp.release()
     } catch (e) {
-      // 忽略
+      // 静默：释放失败对象交给 GC，下次播放重建
     }
     gMediaPlayer = null
   }
-  // EQ 随播放器销毁：释放原生音效资源并复位挂载标志（下次建播放器重挂新 session）
+  // EQ / 音量增强随播放器销毁：释放原生音效资源并复位挂载标志（下次建播放器重挂新 session）
   releaseEqualizer()
+  releaseLoudnessEnhancer()
   // 注销 becoming_noisy 接收器，避免泄漏；下次播放重建
   // 释放 ForwardingPlayer、MediaController 与 MediaSession（下次播放时 buildPlayerOnce 重建）
   const ctrl = gMediaController
@@ -1990,14 +2169,14 @@ function nativeStop(): void {
     try {
       ctrl.release()
     } catch (e) {
-      // 忽略
+      // 静默：释放失败对象交给 GC，下次播放重建
     }
   }
   gMediaController = null
   try {
     gMediaSession3?.release()
   } catch (e) {
-    // 忽略
+    // 静默：释放失败对象交给 GC，下次播放重建
   }
   gMediaSession3 = null
   gPrepared = false
@@ -2026,7 +2205,7 @@ function nativeStop(): void {
       intent.setClassName(context, SERVICE_CLASS)
       context.stopService(intent)
     } catch (e) {
-      // 忽略
+      // 静默：停服失败系统迟早会回收该空闲服务
     }
   }
   fireStop()
@@ -2310,7 +2489,7 @@ class QtAudioService extends MediaSessionService {
       try {
         sp.release()
       } catch (e) {
-        // 忽略
+        // 静默：服务销毁路径，释放失败交给系统进程回收
       }
       gMediaSession3 = null
     }
@@ -2319,12 +2498,13 @@ class QtAudioService extends MediaSessionService {
       try {
         mp.release()
       } catch (e) {
-        // 忽略
+        // 静默：服务销毁路径，释放失败交给系统进程回收
       }
       gMediaPlayer = null
     }
-    // EQ 随会话销毁：兜底释放（正常停止路径已在 nativeStop 释放并复位标志）
+    // EQ / 音量增强随会话销毁：兜底释放（正常停止路径已在 nativeStop 释放并复位标志）
     releaseEqualizer()
+    releaseLoudnessEnhancer()
     super.onDestroy()
   }
 }
@@ -2452,8 +2632,11 @@ export function audioCacheSize(): number { return nativeAudioCacheSize() }
 // ==================== EQ 均衡器（android.media.audiofx.Equalizer） ====================
 // 效果器挂在 ExoPlayer 底层 AudioTrack 的会话 id 上，作用于播放器全部输出。
 // audioSessionId 要等音频引擎真正初始化才有值（首条目 STATE_READY 后必为正），
-// 挂载点放在播放器监听器与设置入口里惰性触发；gEqBands 随时缓存 5 段增益，
-// 挂载晚于设置也不会丢配置。个别 ROM 不支持效果器时静默降级（等同无 EQ）。
+// 挂载点放在播放器监听器与设置入口里惰性触发，且**只在用户真的打开 EQ 时**才创建
+// 效果器实例：关闭态也 new Equalizer(0, sessionId) 会让每个播放会话（含本地文件）
+// 都挂上一条音效链，部分 ROM/机型上会接管输出链路（顶掉厂商音效 Dolby/DTS、强制
+// 重采样），听感比不挂更闷更平。gEqBands 随时缓存 5 段增益，挂载晚于设置也不会丢配置。
+// 个别 ROM 不支持效果器时静默降级（等同无 EQ）。
 
 const EQ_BAND_COUNT = 5
 /** 应用侧限幅 ±12dB（毫贝尔 ±1200；设备能力多为 ±15dB，framework 侧还会按自身范围收敛） */
@@ -2475,6 +2658,10 @@ function clampEqMb(db: number): number {
 /** 把当前 EQ 配置挂到播放器音频会话（会话 id 未就绪就跳过，等下一次惰性触发） */
 function attachEqualizerIfNeeded(): void {
   if (gEqAttached) return
+  // 只在用户真的开着 EQ 时才创建效果器：关闭态也 new Equalizer(0, sessionId) 会把
+  // 每个播放会话（含本地文件）都挂上一条音效链，部分 ROM/机型上会接管输出链路
+  // （顶掉厂商音效 Dolby/DTS、强制重采样），听感比不挂更闷更平。
+  if (!gEqEnabled) return
   const mp = gMediaPlayer
   if (mp == null) return
   try {
@@ -2498,7 +2685,9 @@ function attachEqualizerIfNeeded(): void {
  * 释放当前 EQ 并复位挂载标志。播放器销毁后音频会话 id 作废：
  * 不释放会泄漏原生音效资源；gEqAttached 不复位的话，新播放器的新
  * session id 永远挂不上 EQ（attachEqualizerIfNeeded 恒早退），EQ 静默
- * 失效直到进程重启。nativeStop / 服务 onDestroy 都要调用。
+ * 失效直到进程重启。nativeStop / 服务 onDestroy 都要调用；
+ * 用户关掉 EQ 时也调用（audioSetEqualizerEnabled(false)），把会话的音效链让回去，
+ * 否则「关了 EQ」只是停用而不是摘链，厂商音效仍然被顶掉。
  */
 function releaseEqualizer(): void {
   const eq = gEqualizer
@@ -2506,12 +2695,12 @@ function releaseEqualizer(): void {
     try {
       eq.setEnabled(false)
     } catch (e) {
-      // 忽略
+      // 静默：关闭均衡器失败随后整体释放
     }
     try {
       eq.release()
     } catch (e) {
-      // 忽略
+      // 静默：释放失败对象交给 GC，下次开均衡器重建
     }
   }
   gEqualizer = null
@@ -2563,7 +2752,7 @@ class WidgetCoverRunnable implements Runnable {
       }
       getHandler().post(new WidgetApplyCoverRunnable(this.url, bmp))
     } catch (e) {
-      // 下载/解码失败：保持当前封面
+      // 静默：下载/解码失败保持当前封面
     }
   }
 }
@@ -2872,14 +3061,24 @@ export function audioSetEqualizerBands(levelsDb: number[]): void {
   }
 }
 
-/** 打开/关闭 EQ（不销毁实例：关闭只是 setEnabled(false)，参数保留） */
+/**
+ * 打开/关闭 EQ。
+ *
+ * 关闭走 releaseEqualizer() 而不是只 setEnabled(false)：效果器实例留在会话上仍然占着
+ * 音效链，关掉 EQ 却依旧影响输出（与 attachEqualizerIfNeeded 只按需挂载同一个原因）。
+ * 5 段增益始终缓存在 gEqBands，重新打开时按缓存恢复，用户不用重设。
+ */
 export function audioSetEqualizerEnabled(on: boolean): void {
   gEqEnabled = on
+  if (!on) {
+    releaseEqualizer()
+    return
+  }
   attachEqualizerIfNeeded()
   const eq = gEqualizer
   if (eq == null) return
   try {
-    eq.setEnabled(on)
+    eq.setEnabled(true)
   } catch (e) {
     console.log('[QT Audio] EQ 开关失败: ' + (e != null ? e.toString() : 'unknown'))
   }
@@ -2962,3 +3161,164 @@ export function audioSetLiked(mediaId: string, liked: boolean): void {
 
 /** 与系统时间调整无关，含锁屏经过时间。 */
 export function audioMonotonicTime(): number { return SystemClock.elapsedRealtime().toDouble() }
+
+// ==================== 车机蓝牙 AVRCP 歌词（android.media.metadata.LYRICS） ====================
+// 追加在文件**最末尾**（methodId 顺序，同上文各处注释）。
+//
+// 背景：AVRCP 1.3+ 的车机（如各品牌车机屏）普遍从媒体元数据 bundle 里读裸 key
+// "android.media.metadata.LYRICS" 来展示整首歌词（事实标准 key，media3 与 compat
+// 都没有对应常量，车机按原始字符串读）。本 API 把歌词全文写进当前条目的
+// MediaMetadata.extras，下面的链路（对着 media3 1.11.1 AAR 字节码逐条核实，非推测）：
+//   MediaMetadata.extras（String 值原样保留）
+//   → LegacyConversions.convertToMediaMetadataCompat：遍历 extras，CharSequence 值走
+//     MediaMetadataCompat.Builder.putText(key, value) 写进 compat 元数据包
+//     （无 key 白名单；LYRICS 未注册进 METADATA_KEYS_TYPE，putText 不抛
+//      IllegalArgumentException——它只对「已注册且类型非 TEXT」的 key 抛异常）；
+//   → MediaSessionLegacyStub$ControllerLegacyCbForBroadcast.onMediaMetadataChanged
+//     → MediaSessionLegacyStub.setMetadata → MediaSessionCompat.setMetadata
+//     → framework android.media.session.MediaSession.setMetadata：MediaMetadataCompat
+//       .getMediaMetadata() 对未注册 key（含 LYRICS）走 default 分支
+//       framework Builder.putText → 车机蓝牙栈收到整包元数据。
+// 通知栏/系统卡片/桌面歌词不读这个 key，本 API 不影响它们。
+//
+// 更新方式与 audioSetLiked 同构：replaceMediaItem 原地更新（URI 不变、仅元数据变 →
+// ExoPlayerImpl.java:3187-3222 原地替换——不重建 MediaSource、不重新缓冲、不误报切歌）。
+// extras 必须显式复制补写：buildUpon 会继承原 extras 引用，但我们不能原地改
+// MediaMetadata.extras（public final Bundle，可能仍被旧条目引用），所以 new Bundle(旧)
+// 再 putString 后整体 setExtras 替换，vivo 握手位等原有内容原样保留。
+const CAR_LYRIC_KEY = 'android.media.metadata.LYRICS'
+
+/** 非主线程调用时经主 looper 派发的载体（QtResolveFire 同款 Runnable 形态） */
+class QtCarLyricPush implements Runnable {
+  private text: string
+  constructor(text: string) {
+    this.text = text
+  }
+  override run(): void {
+    applyCarLyric(this.text)
+  }
+}
+
+/** 主线程侧执行体：校验去重 → 复制 extras 补 LYRICS → replaceMediaItem 原地更新 */
+function applyCarLyric(text: string): void {
+  const mp = gMediaPlayer
+  if (mp == null) return
+  try {
+    const cur = mp.getCurrentMediaItem()
+    // 无当前条目就没有可挂歌词的会话元数据（车机读的就是当前条目元数据）
+    if (cur == null) return
+    // 去重：下发时的代数 == 当前代数（期间没有重建媒体项）+ 同一条目 + 同一份歌词
+    // 文本 = 无效推送。AVRCP 每次 push 都整包重发元数据，逐行/逐句推送时不去重
+    // 会让车机反复重绘。gCarLyricGen 在 audioSetPlaylist/loadAndPlay 重建媒体项时
+    // 递增（见模块状态区），重建后同文本也会重新下发。
+    if (gCarLyricTextGen == gCarLyricGen && cur.mediaId == gCarLyricMid && gCarLyricText != null && gCarLyricText == text) return
+    // 复制现有 extras（vivo support_event 位等），再补歌词 key；不动原 Bundle。
+    // extras 理论可为 null（media3 MediaMetadata 构造器对 builder.extras 不做兜底，
+    // 未 setExtras 的元数据 extras == null；本文件的条目都设了 vivo extras，仅防御）
+    const oldExtras = cur.mediaMetadata.extras
+    const extras = oldExtras != null ? new Bundle(oldExtras) : new Bundle()
+    extras.putString(CAR_LYRIC_KEY, text)
+    const meta = cur.mediaMetadata.buildUpon().setExtras(extras).build()
+    mp.replaceMediaItem(
+      mp.getCurrentMediaItemIndex(),
+      cur.buildUpon().setMediaMetadata(meta).build()
+    )
+    // 只有 replaceMediaItem 成功才更新去重记忆，失败时下次还允许重试
+    gCarLyricTextGen = gCarLyricGen
+    gCarLyricMid = cur.mediaId
+    gCarLyricText = text
+  } catch (e) {
+    // 静默：车机歌词是增强项，失败不影响播放与其他元数据通道
+    console.log('[QT Audio] 车机歌词下发失败: ' + (e != null ? e.toString() : 'unknown'))
+  }
+}
+
+/**
+ * 下发整首歌词到车机蓝牙（AVRCP 1.3+，key "android.media.metadata.LYRICS"）。
+ *
+ * @param text 歌词全文（JS 侧通常传整首 LRC 原文或纯文本歌词，车机自行解析/滚动）。
+ *             空串也允许下发：表示「本曲无词」，用于清掉车机上一首残留的歌词。
+ *
+ * 幂等性：当前条目 + 时间线代数 + 文本三者都未变时为 no-op（整包重发只会让车机
+ * 反复重绘）；时间线代数在队列重推（audioSetPlaylist）或单曲换歌（loadAndPlay）
+ * 重建元数据时递增，重建后同文本也会重新下发。
+ *
+ * 线程：内部保证在主 looper 执行（ExoPlayer 会话元数据只能在其应用线程——即本文件
+ * 的主线程——上变更）；已在主线程时同步执行，否则经 getHandler() 转投。
+ *
+ * 必须追加在文件**最末尾**：UTS 插件的导出 methodId 按声明顺序生成，插在中间会让
+ * 其后所有导出整体错位（同上文各处注释）。
+ */
+export function audioSetCarLyric(text: string): void {
+  if (Looper.myLooper() != Looper.getMainLooper()) {
+    getHandler().post(new QtCarLyricPush(text))
+    return
+  }
+  applyCarLyric(text)
+}
+
+// ==================== 音频输出 / 解码方式 / 音量增强 ====================
+// 必须追加在文件**最末尾**：UTS 插件的导出 methodId 按声明顺序生成，插在中间会让
+// 其后所有导出整体错位，与旧基座（已安装的 APK）方法表对不上（同 audioSetVolume /
+// audioSetCarLyric 处的注释）。因此这几个导出只能排在 audioSetCarLyric 之后。
+
+/**
+ * 32bit 浮点输出开关（默认关）。
+ *
+ * 关：走系统默认的 16bit 整数输出，与厂商音效链（Dolby/DTS）、蓝牙编解码的
+ *     兼容性最好，等同改动前的行为。
+ * 开：AudioSink 以 float 混音并交给 AudioTrack，省掉 int16 量化与部分重采样，
+ *     在高端解码器/有线耳机上更通透；个别老机型可能反而出现兼容问题（无声/爆音），
+ *     所以做成开关而不是默认开启。
+ *
+ * 生效时机：media3 在构建播放器时确定输出格式，切换后需要重建播放器。播放中不打断：
+ * 只置脏，等下一个边界（换歌 / 队列重推 / 停止后重播）重建。
+ */
+export function audioSetFloatOutput(on: boolean): void {
+  gFloatOutput = on
+  // 已有播放器时必须走过一次脏标记；没播放器时下次 buildPlayerOnce 直接读新值
+  gRenderersDirty = true
+}
+
+/**
+ * 软解优先开关（默认关）。
+ *
+ * 关：MediaCodecSelector.DEFAULT —— 硬件解码优先，省电、多数机型音质更好。
+ * 开：MediaCodecSelector.PREFER_SOFTWARE —— 同一编码优先软件解码器，硬件仅在无软解
+ *     时兜底。用于「某机型硬解 AAC/FLAC 有杂音、爆音、音量偏小」这类兼容问题，
+ *     代价是耗电与高码率下的发热上升。生效时机同浮点输出：置脏，下个边界重建。
+ */
+export function audioSetPreferSoftwareDecoder(on: boolean): void {
+  gPreferSoftwareDecoder = on
+  gRenderersDirty = true
+}
+
+/**
+ * 音量增强开关（LoudnessEnhancer，默认关）。
+ *
+ * 与 EQ 一样挂在音频会话上、关闭时释放（不释放会一直占着音效链）。纯增益效果，
+ * 响度提升明显但母带本就接近满刻度的曲目可能削波，故默认关闭且增益上限 12dB。
+ */
+export function audioSetEnhanceEnabled(on: boolean): void {
+  gEnhanceEnabled = on
+  if (!on) {
+    releaseLoudnessEnhancer()
+    return
+  }
+  attachLoudnessEnhancerIfNeeded()
+}
+
+/** 音量增强目标增益（毫贝尔，0–1200 = 0–12dB）；挂载前调用也会缓存下来 */
+export function audioSetEnhanceGain(gainMb: number): void {
+  let mb = gainMb
+  if (mb < 0.0) mb = 0.0
+  if (mb > 1200.0) mb = 1200.0
+  gEnhanceGainMb = mb.toInt()
+  const enh = gLoudnessEnhancer
+  if (enh == null) return
+  try {
+    enh.setTargetGain(gEnhanceGainMb.toInt())
+  } catch (e) {
+    console.log('[QT Audio] 音量增强增益下发失败: ' + (e != null ? e.toString() : 'unknown'))
+  }
+}

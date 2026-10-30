@@ -1,18 +1,18 @@
 <template>
   <qt-page-frame width-kind="prose">
-  <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']">
+  <view class="page" :class="layout.isWide ? 'page-wide' : ''">
     <scroll-view class="scroll" :class="layout.isWide ? 'scroll-wide' : ''" direction="vertical" :show-scrollbar="false">
       <view v-if="loading" class="sk" :class="layout.isWide ? 'sk-wide' : ''">
         <QtSkeletonList kind="feedback" :rows="SKELETON_ROWS" />
       </view>
       <view v-else-if="notFound" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
-        <QtIcon name="info" :size="layout.isWide ? 44 : 72" color="#c3c9d6" />
-        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="qtFontDual(26, 14)">反馈不存在或无权查看</text>
+        <QtIcon name="info" :size="layout.isWide ? 44 : 72" :color="themeStore.skin.textSubtle" />
+        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(26, 14)">反馈不存在或无权查看</text>
       </view>
 
       <template v-else>
         <!-- 反馈主体 -->
-        <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
+        <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="cardStyle">
           <view class="fb-head" :class="layout.isWide ? 'fb-head-wide' : ''">
             <view class="type-badge" :class="layout.isWide ? 'type-badge-wide' : ''" :style="'background-color:' + feedbackTypeColor(fb.type)">
               <text class="type-badge-text" :class="layout.isWide ? 'type-badge-text-wide' : ''" :style="qtFontDual(20, 11)">{{ feedbackTypeLabel(fb.type) }}</text>
@@ -21,20 +21,20 @@
               <text class="status-badge-text" :class="layout.isWide ? 'status-badge-text-wide' : ''" :style="qtFontDual(20, 11)">{{ feedbackStatusLabel(fb.status) }}</text>
             </view>
           </view>
-          <text class="fb-title" :class="layout.isWide ? 'fb-title-wide' : ''" :style="qtFontDual(32, 20)">{{ fb.title }}</text>
-          <text class="fb-content" :class="layout.isWide ? 'fb-content-wide' : ''" :style="qtFontDual(27, 16)">{{ fb.content }}</text>
+          <text class="fb-title" :class="layout.isWide ? 'fb-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(32, 20)">{{ fb.title }}</text>
+          <text class="fb-content" :class="layout.isWide ? 'fb-content-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(27, 16)">{{ fb.content }}</text>
           <view class="meta" :class="layout.isWide ? 'meta-wide' : ''">
-            <text v-if="fb.createTime != null && fb.createTime!.length > 0" class="meta-text" :class="layout.isWide ? 'meta-text-wide' : ''" :style="qtFontDual(22, 12)">{{ fb.createTime }}</text>
-            <text v-if="deviceLine.length > 0" class="meta-text" :class="layout.isWide ? 'meta-text-wide' : ''" :style="qtFontDual(22, 12)">{{ deviceLine }}</text>
-            <text v-if="fb.appVersion != null && fb.appVersion!.length > 0" class="meta-text" :class="layout.isWide ? 'meta-text-wide' : ''" :style="qtFontDual(22, 12)">版本 {{ fb.appVersion }}</text>
+            <text v-if="fb.createTime != null && fb.createTime!.length > 0" class="meta-text" :class="layout.isWide ? 'meta-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)">{{ fb.createTime }}</text>
+            <text v-if="deviceLine.length > 0" class="meta-text" :class="layout.isWide ? 'meta-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)">{{ deviceLine }}</text>
+            <text v-if="fb.appVersion != null && fb.appVersion!.length > 0" class="meta-text" :class="layout.isWide ? 'meta-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)">版本 {{ fb.appVersion }}</text>
           </view>
         </view>
 
         <!-- 回复时间线 -->
-        <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
-          <text class="label" :class="layout.isWide ? 'label-wide' : ''" :style="qtFontDual(27, 16)">回复（{{ replies.length }}）</text>
+        <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="cardStyle">
+          <text class="label" :class="layout.isWide ? 'label-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(27, 16)">回复（{{ replies.length }}）</text>
           <view v-if="replies.length == 0" class="reply-empty" :class="layout.isWide ? 'reply-empty-wide' : ''">
-            <text class="reply-empty-text" :class="layout.isWide ? 'reply-empty-text-wide' : ''" :style="qtFontDual(25, 14)">暂无回复，官方会尽快处理</text>
+            <text class="reply-empty-text" :class="layout.isWide ? 'reply-empty-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(25, 14)">暂无回复，官方会尽快处理</text>
           </view>
           <view v-for="(r, idx) in replies" :key="r.id" class="reply-item" :class="layout.isWide ? 'reply-item-wide' : ''">
             <view class="reply-avatar" :class="[isOfficial(r) ? 'reply-avatar-official' : '', layout.isWide ? 'reply-avatar-wide' : '']" :style="isOfficial(r) ? 'background-color:' + themeStore.skin.accent + ';' : ''">
@@ -42,13 +42,13 @@
             </view>
             <view class="reply-body" :class="layout.isWide ? 'reply-body-wide' : ''">
               <view class="reply-head" :class="layout.isWide ? 'reply-head-wide' : ''">
-                <text class="reply-nickname" :class="layout.isWide ? 'reply-nickname-wide' : ''" :style="qtFontDual(25, 14)">{{ r.nickname != null && r.nickname!.length > 0 ? r.nickname : "用户" }}</text>
+                <text class="reply-nickname" :class="layout.isWide ? 'reply-nickname-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(25, 14)">{{ r.nickname != null && r.nickname!.length > 0 ? r.nickname : "用户" }}</text>
                 <view v-if="isOfficial(r)" class="official-badge" :class="layout.isWide ? 'official-badge-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'">
                   <text class="official-badge-text" :class="layout.isWide ? 'official-badge-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(18, 10)">官方</text>
                 </view>
-                <text class="reply-time" :class="layout.isWide ? 'reply-time-wide' : ''" :style="qtFontDual(21, 12)">{{ formatTime(r.replyTime) }}</text>
+                <text class="reply-time" :class="layout.isWide ? 'reply-time-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(21, 12)">{{ formatTime(r.replyTime) }}</text>
               </view>
-              <text class="reply-content" :class="layout.isWide ? 'reply-content-wide' : ''" :style="qtFontDual(26, 15)">{{ r.content }}</text>
+              <text class="reply-content" :class="layout.isWide ? 'reply-content-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(26, 15)">{{ r.content }}</text>
             </view>
           </view>
         </view>
@@ -57,17 +57,18 @@
     </scroll-view>
 
     <!-- 底部回复输入框：公开反馈不允许继续回复，改为只读提示 -->
-    <view v-if="!notFound" class="input-bar" :class="[themeStore.dark ? 'input-bar-dark' : '', layout.isWide ? 'input-bar-wide' : '']">
-      <view v-if="!canReply" class="input-locked" :class="[themeStore.dark ? 'input-row-dark' : '', layout.isWide ? 'input-locked-wide' : '']">
+    <view v-if="!notFound" class="input-bar" :class="layout.isWide ? 'input-bar-wide' : ''" :style="inputBarStyle">
+      <view v-if="!canReply" class="input-locked" :class="layout.isWide ? 'input-locked-wide' : ''" :style="rowStyle">
         <QtIcon name="info" :size="layout.isWide ? 14 : 26" :color="themeStore.skin.textMuted" />
         <text class="input-locked-text" :class="layout.isWide ? 'input-locked-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(25, 13)">公开反馈不支持回复</text>
       </view>
-      <view v-else class="input-row" :class="[themeStore.dark ? 'input-row-dark' : '', layout.isWide ? 'input-row-wide' : '']">
+      <view v-else class="input-row" :class="layout.isWide ? 'input-row-wide' : ''" :style="rowStyle">
         <input
           :value="replyText"
           @input="onReplyInput"
           class="reply-input" :class="[[layout.isWide ? 'reply-input-wide' : ''], layout.isWide ? 'reply-input-wide' : '']"
-          
+          :style="inputStyle"
+          :placeholder-style="'color:' + themeStore.skin.placeholder + ';'"
           placeholder="回复..."
           :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
           confirm-type="send"
@@ -106,6 +107,14 @@ import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const themeStore = useThemeStore();
 const layout = useQtLayout();
+// 皮肤令牌：卡片底与描边 / 底部输入条底与上分隔线 / 输入行底 / 输入文字。
+// 这些原先由手写的深色覆盖类写死成 graphite 色值，换 linen/aurora 等皮肤时不跟着变；
+// 本仓库没有 CSS 变量，只能内联输出 skin 令牌。
+const cardStyle = computed((): string => "background-color:" + themeStore.skin.surface + ";border-color:" + themeStore.skin.border + ";");
+// 输入条贴屏幕底，比卡片更暗一档，用 background
+const inputBarStyle = computed((): string => "background-color:" + themeStore.skin.background + ";border-top-color:" + themeStore.skin.border + ";");
+const rowStyle = computed((): string => "background-color:" + themeStore.skin.surfaceMuted + ";");
+const inputStyle = computed((): string => "color:" + themeStore.skin.text + ";");
 
 const fb = ref<FeedbackItem>({ id: 0 });
 const replies = ref<FeedbackReplyItem[]>([]);
@@ -220,16 +229,9 @@ onShow(() => {
 .card {
   margin: 20rpx 24rpx 0;
   padding: 28rpx 24rpx;
-  background-color: rgba(255, 255, 255, 0.62);
   border-width: 1px; border-style: solid;
-  border-color: rgba(255, 255, 255, 0.6);
   border-radius: 20rpx;
   box-shadow: 0 10rpx 30rpx rgba(16, 22, 38, 0.08);
-}
-.card-dark {
-  background-color: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.12);
-  box-shadow: 0 10rpx 30rpx rgba(0, 0, 0, 0.22);
 }
 .fb-head {
   flex-direction: row;
@@ -256,14 +258,12 @@ onShow(() => {
 }
 .fb-title {
   margin-top: 18rpx;
-  color: #191d26;
   font-size: 32rpx;
   font-weight: 700;
   line-height: 1.4;
 }
 .fb-content {
   margin-top: 14rpx;
-  color: #41485a;
   font-size: 27rpx;
   line-height: 1.6;
 }
@@ -274,11 +274,9 @@ onShow(() => {
 }
 .meta-text {
   margin-right: 24rpx;
-  color: #6b7385;
   font-size: 22rpx;
 }
 .label {
-  color: #191d26;
   font-size: 27rpx;
   font-weight: 600;
 }
@@ -289,7 +287,6 @@ onShow(() => {
   align-items: center;
 }
 .reply-empty-text {
-  color: #6b7385;
   font-size: 25rpx;
 }
 .reply-item {
@@ -321,7 +318,6 @@ onShow(() => {
   align-items: center;
 }
 .reply-nickname {
-  color: #191d26;
   font-size: 25rpx;
   font-weight: 600;
 }
@@ -336,34 +332,22 @@ onShow(() => {
 }
 .reply-time {
   margin-left: 16rpx;
-  color: #6b7385;
   font-size: 21rpx;
 }
 .reply-content {
   margin-top: 10rpx;
-  color: #41485a;
   font-size: 26rpx;
   line-height: 1.55;
 }
 .input-bar {
   padding: 16rpx 24rpx 30rpx;
-  background-color: rgba(255, 255, 255, 0.92);
   border-top-width: 1px; border-top-style: solid;
-  border-top-color: rgba(16, 22, 38, 0.06);
-}
-.input-bar-dark {
-  background-color: #161a24;
-  border-top-color: rgba(255, 255, 255, 0.08);
 }
 .input-row {
   flex-direction: row;
   align-items: center;
-  background-color: #f4f5fa;
   border-radius: 36rpx;
   padding: 0 8rpx 0 28rpx;
-}
-.input-row-dark {
-  background-color: rgba(255, 255, 255, 0.08);
 }
 /* 公开反馈：不可回复，用等高的只读提示条替代输入框 */
 .input-locked {
@@ -371,7 +355,6 @@ onShow(() => {
   align-items: center;
   justify-content: center;
   height: 72rpx;
-  background-color: #f4f5fa;
   border-radius: 36rpx;
 }
 .input-locked-wide { height: 40px; border-radius: 20px; }
@@ -380,11 +363,9 @@ onShow(() => {
 .reply-input {
   flex: 1;
   height: 72rpx;
-  color: #191d26;
   font-size: 26rpx;
 }
 .field-ph {
-  color: #6b7385;
   font-size: 26rpx;
 }
 .send-btn {
@@ -412,7 +393,6 @@ onShow(() => {
 }
 .empty-text {
   margin-top: 20rpx;
-  color: #6b7385;
   font-size: 26rpx;
 }
 

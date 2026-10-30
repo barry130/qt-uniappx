@@ -321,7 +321,7 @@ export function useAiChat() {
     try {
       await cancelRequest(rid, "用户主动停止");
     } catch (e) {
-      // 取消失败也照样停本地轮询，否则界面永远卡在「思考中」
+      // 静默：取消失败也照样停本地轮询，否则界面永远卡在「思考中」
     }
     const idx = indexOfRequest(rid);
     if (idx >= 0) {
@@ -551,7 +551,7 @@ export function useAiChat() {
         if (found.citations.length > 0) m.citations = found.citations;
       });
     } catch (e) {
-      // 回读失败不影响已经显示的内容
+      // 静默：回读失败不影响已经显示的内容
     }
   }
 
@@ -760,7 +760,7 @@ export function useAiChat() {
       try {
         await reportAction(action.actionId, type, true, note);
       } catch (e) {
-        // 回执失败不影响用户，后台只少一条采纳统计
+        // 静默：回执失败不影响用户，后台只少一条采纳统计
       }
     }
   }

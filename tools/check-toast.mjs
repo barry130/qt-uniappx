@@ -122,6 +122,7 @@ const frame = read(FRAME);
 require(frame, /<qt-toast-host\s*\/>/, "qt-page-frame 里没有挂 qt-toast-host", FRAME);
 require(frame, /<qt-confirm-host\s*\/>/, "qt-page-frame 里没有挂 qt-confirm-host", FRAME);
 require(frame, /<qt-action-sheet-host\s*\/>/, "qt-page-frame 里没有挂 qt-action-sheet-host", FRAME);
+require(frame, /<qt-pack-install-sheet\s*\/>/, "qt-page-frame 里没有挂 qt-pack-install-sheet", FRAME);
 
 const layout = read(LAYOUT);
 require(layout, /QT_TAB_BAR_HEIGHT_RPX\s*=\s*144/, "TabBar 总占位常量丢失（qt-toast-host 依赖它）", LAYOUT);

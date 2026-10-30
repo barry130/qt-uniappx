@@ -272,7 +272,9 @@ export function readTaste(): DailyTaste {
 export function saveTaste(taste: DailyTaste): void {
   try {
     uni.setStorageSync(DAILY_RECOMMEND_TASTE_KEY, taste);
-  } catch {}
+  } catch {
+    // 静默：口味存不进去，本次会话内调用方已拿到返回值，重启回缺省
+  }
 }
 
 /**
@@ -331,7 +333,9 @@ export function readStyleSeeds(): string[] {
 export function saveStyleSeeds(names: string[]): void {
   try {
     uni.setStorageSync(DAILY_RECOMMEND_SEEDS_KEY, JSON.stringify(parseStyleSeeds(JSON.stringify(names))));
-  } catch {}
+  } catch {
+    // 静默：风格种子存不进去，内存值仍生效，下次生成回冷启动
+  }
 }
 
 /** 冷启动时给用户点的风格选项（来自平台分类，名字就是风格名） */
@@ -603,7 +607,7 @@ function writeDailyCache(store: DailyCacheStore): void {
   try {
     uni.setStorageSync(DAILY_RECOMMEND_CACHE_KEY, JSON.stringify(store));
   } catch {
-    // 存储失败只能放弃：页面仍能拿到本次结果，只是下次进页面要重算
+    // 静默：存储失败只能放弃，页面仍能拿到本次结果，只是下次进页面要重算
   }
 }
 
@@ -1139,7 +1143,7 @@ export async function buildCandidatePool(
       const songs = await musicApi.allLatest(EXPLORE_LATEST_MAX, 0);
       for (let i = 0; i < songs.length; i++) latest.push(songs[i]);
     } catch {
-      // 全部音源都失败时这一路为空，不影响其它路
+      // 静默：全部音源都失败时这一路为空，不影响其它路
     }
     tick();
   }
@@ -1235,7 +1239,7 @@ export async function buildCandidatePool(
         for (let i = 0; i < rows[r].length; i++) byStylePlaylist.push(rows[r][i]);
       }
     } catch {
-      // 整条风格歌单路失败（分类接口挂了）：按空处理
+      // 静默：整条风格歌单路失败（分类接口挂了），按空处理
     }
     tick();
   }
@@ -2263,7 +2267,7 @@ export function parsePicks(raw: string, poolSize: number): ParsedPicks {
           if (picks.length > 0) return { title: "", summary: "", picks, error: null };
         }
       } catch {
-        // 数组也坏了，继续用扫描捞
+        // 静默：数组也坏了，继续用扫描捞兜底
       }
     }
     const picks = salvagePicks(raw, poolSize);

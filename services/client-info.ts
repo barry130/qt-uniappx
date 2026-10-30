@@ -78,7 +78,9 @@ export function getClientDevice(): string {
     if (model != null && model.length > 0) {
       return clip(model, MAX_DEVICE);
     }
-  } catch (_) {}
+  } catch (_) {
+    // 静默：取不到设备型号按空串降级（诊断头少个字段而已）
+  }
   return "";
 }
 
@@ -95,7 +97,9 @@ export function getClientOs(): string {
     if (os.length > 0) {
       return clip(os, MAX_OS);
     }
-  } catch (_) {}
+  } catch (_) {
+    // 静默：取不到系统信息按空串降级（诊断头少个字段而已）
+  }
   return "";
 }
 

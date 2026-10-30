@@ -1,13 +1,12 @@
 <template>
   <!-- 宽屏工具页覆盖层：同窗口、同 Activity 地把 rail 工具入口的整页内容换进当前 tab 页。
-       核心是「保活」：每个工具页只在第一次打开时创建（v-if 只增不减），之后切换/关闭
-       只改 visibility —— 官方多子页保活的建议写法（docs/collocation/pagesjson.md：
-       『不要再 v-if 设为 false 去掉，也不通过 v-show 控制，而是通过 css 的
-       visibility 来控制显示和隐藏』；v-show 在 Android(Vapor) 本身就不支持）。
-       已创建的工具页不销毁、不重建：
-         - 切换工具 = 改一个 CSS 属性，同帧完成，没有「旧页拆掉、露出空白、新页建好」
-           的频闪（v-if 分支互换版每次点击都要整页销毁重建，用户实测每点必闪）；
-         - 滚动位置、输入内容、已加载的数据全部保留，第二次进入是瞬时恢复。 -->
+       单活动 pane（2026-10-25 定稿）：覆盖层根 v-if="ws.route.length>0"，每个工具页
+       v-if="paneOn(route)" —— 当前托管路由匹配才挂载，切换即换挂（16~300ms）。
+       演进史：v-if 分支互换版每点必频闪；visibility 互切保活版在真机 Vapor 上接连
+       翻车（隐藏 pane 漏画、切出 pane 整块不渲染、关闭后宿主重挂失败、RecycleList
+       在 hidden pane 上 onScrollStart SIGSEGV）。
+       工具页组件不在这里 import：由宿主 tab 根页（发现/我的）经默认插槽传入
+       （2026-10-27 槽位解耦，qt-ui 零反向依赖业务页面）。 -->
   <view v-if="ws.route.length > 0" class="qt-wide-workspace">
     <!-- 显隐全部落在这个非 fixed 的内层 stage 上：真机实测 fixed 根节点的动态
          visibility 关不下去（12:52 logcat：route 已清、rail current 已回落，
@@ -15,13 +14,12 @@
          铺满窗口的几何，不挂任何动态样式；背景也移到 stage，避免根节点
          「内容藏了、底色还盖着宿主页」。 -->
     <view class="qtww-stage" :style="stageStyle">
-    <view v-if="paneOn('/pages/search/index')" class="qtww-pane"><SearchPage /></view>
-    <view v-if="paneOn('/pages/daily-recommend/index')" class="qtww-pane"><DailyRecommendPage /></view>
-    <view v-if="paneOn('/pages/daily/index')" class="qtww-pane"><DailyPage /></view>
-    <view v-if="paneOn('/pages/playlists/index')" class="qtww-pane"><PlaylistsPage /></view>
-    <view v-if="paneOn('/pages/chart/index')" class="qtww-pane"><ChartPage /></view>
-    <view v-if="paneOn('/pages/settings/index')" class="qtww-pane"><SettingsPage /></view>
-    <!-- 停靠 rail：覆盖层自己画的那条左导航（docked 模式 = 子树内 absolute，随覆盖层
+    <!-- 页面槽位（2026-10-27 解耦）：六个工具页由宿主页通过默认插槽传入（宿主页里
+         的 v-if 链与 qtPaneOn 谓词见两个 tab 根页模板），qt-ui 不再 import 任何
+         pages/* 组件 —— UI 库对业务页面的反向依赖从根上断开。插槽内容渲染在
+         宿主页作用域，.qtww-pane 的样式也随之定义在两个宿主页里。
+         插槽放在停靠 rail/底栏之前 = 同级后绘者在上，压住 pane 让给 rail 的左条。 -->
+    <slot />    <!-- 停靠 rail：覆盖层自己画的那条左导航（docked 模式 = 子树内 absolute，随覆盖层
          一起显隐）。工具页不再渲染自带的 fixed rail（真机实测：fixed 会被本覆盖层的
          不透明背景压住、关闭后又漏在宿主页上，见 qt-side-nav 的 docked 注释与
          qt-page-frame 的 showRail 注释），这条是托管期间唯一可见的 rail。
@@ -53,12 +51,6 @@ import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useSourceUpdateStore } from "@/stores/source-update";
 import QtSideNav from "@/uni_modules/qt-ui/components/qt-side-nav/qt-side-nav.uvue";
 import QtPlayerBar from "@/uni_modules/qt-ui/components/qt-player-bar/qt-player-bar.uvue";
-import SearchPage from "@/pages/search/index.uvue";
-import DailyPage from "@/pages/daily/index.uvue";
-import DailyRecommendPage from "@/pages/daily-recommend/index.uvue";
-import PlaylistsPage from "@/pages/playlists/index.uvue";
-import ChartPage from "@/pages/chart/index.uvue";
-import SettingsPage from "@/pages/settings/index.uvue";
 
 /**
  * 宽屏工具页「就地托管」的渲染层。由两个 tab 根页（发现 / 我的）各挂一份。
@@ -70,6 +62,11 @@ import SettingsPage from "@/pages/settings/index.uvue";
  * 它必须**不透明**：宿主 tab 页自己的 rail 与底部播放栏就在下面，覆盖层负责把它们
  * 盖住（否则会看到两份 rail 叠在一起），导航由本覆盖层自画的停靠 rail 接管
  * （工具页自带的 fixed rail 已在框架层禁用，见 qt-page-frame 的 showRail 注释）。
+ *
+ * 2026-10-27 页面槽位解耦：本组件不再 import 任何 pages/* 工具页 —— 覆盖层只画
+ * 外壳（stage + 停靠 rail/底栏 + 默认插槽），六个工具页由两个宿主 tab 根页各自
+ * import 并通过默认插槽传入（v-if 链 + qtPaneOn 见宿主页模板）。qt-ui 从此没有
+ * 对业务页面的反向依赖，可独立复用。
  */
 const props = defineProps<{
   /** 本覆盖层所在的宿主页路由（两个 tab 根页各传各的） */
@@ -95,17 +92,8 @@ watch((): boolean => layout.isWide, (wide: boolean): void => {
   if (!wide && ws.route.length > 0) qtCloseWideTool();
 });
 
-/** 该工具页是否正在托管（单活动 pane：route 匹配才挂载） */
-function paneOn(route: string): boolean {
-  // 2026-10-25 改为「单活动 pane」：只挂当前工具页，切换即换挂。
-  // 旧的「多 pane 常挂 + visibility 互切」保活方案在真机 Vapor 上接连翻车：
-  // 隐藏 pane 漏画（设置栏叠在排行榜左边）、切出的 pane 整块不渲染（榜单只有
-  // tab 行下面全空）、关闭后宿主重挂失败（我的页白屏点击全无响应），以及
-  // RecycleList 在多份存活列表间滚动时的 SIGSEGV。全部指向同一件事：这个
-  // 渲染器对「已存在节点改 visibility」不可靠，对「新挂节点」一直可靠。
-  // 代价：每次切换重新建页（16~300ms，榜单最重），换来以上四类问题根除。
-  return ws.route == route;
-}
+// （2026-10-27 页面槽位解耦：pane 链移入宿主页，本组件不再持 pane 的 v-if；
+//  单活动 pane 谓词 qtPaneOn 及真机翻车史注释移至 composables/qt-wide-workspace.ts。）
 
 // （2026-10-25 移除空闲预挂载与保活清单：单活动 pane 下预挂载无处可挂，
 //  且隐藏保活页正是 RecycleList SIGSEGV 的触发面。等 DCloud 修 recycler、
@@ -150,17 +138,11 @@ const stageStyle = computed((): string => {
 }
 /* 内层舞台：背景 + 显隐都在这里（非 fixed 节点，样式更新可靠）。
    每个 pane 都四边钉死在 stage 上（绝对定位），而不是挤在 flex 流里平分高度
-   —— 工具页是整页组件（自带 flex:1 的 .qt-page-frame），多页常驻必须各自
-   独立铺满，谁可见由 visibility 决定。（不能用 v-show 切换：Android(Vapor)
-   不支持，见组件头部注释。） */
+   —— 工具页是整页组件（自带 flex:1 的 .qt-page-frame），必须各自独立铺满。
+   .qtww-pane 样式随页面槽位解耦移到两个宿主页（插槽内容渲染在宿主页作用域，
+   本组件的样式管不到它）。（不能用 v-show 切换：Android(Vapor) 不支持，
+   见组件头部注释。） */
 .qtww-stage {
-  position: absolute;
-  left: 0;
-  top: 0;
-  right: 0;
-  bottom: 0;
-}
-.qtww-pane {
   position: absolute;
   left: 0;
   top: 0;

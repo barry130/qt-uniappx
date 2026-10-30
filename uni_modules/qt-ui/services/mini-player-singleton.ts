@@ -1,5 +1,6 @@
 import { computed, ref } from "vue";
 import { qtLayout, qtRpx, qtRailWidth } from "../composables/use-qt-layout";
+import { logWarn } from "@/services/logger";
 
 /**
  * 悬浮播放器（qt-mini-player）的全站共享 UI 状态。
@@ -172,7 +173,7 @@ export function ensureMiniPositioned(): void {
   }
   if (winW <= 0 || winH <= 0) return;
   let x = qtRpx(LEFT_MARGIN_RPX);
-  let y = winH - (layout.isWide ? 96 : qtRpx(BOTTOM_MARGIN_RPX)) - miniFabPx.value;
+  let y = winH - (layout.isWide ? 96 : qtRpx(BOTTOM_MARGIN_RPX) + layout.safeBottomPx) - miniFabPx.value;
   if (layout.isWide) {
     // 宽屏左侧有导航 rail（wide/desktop 208px，medium 64px），默认落在 rail 右侧
     x = qtRailWidth() + 16;
@@ -193,7 +194,9 @@ export function ensureMiniPositioned(): void {
         }
       }
     }
-  } catch (_) {}
+  } catch (_) {
+    // 静默：坐标存档解析失败走默认定位兜底，不影响悬浮球显示
+  }
   const minX = layout.isWide ? qtRailWidth() + 8 : 0;
   const maxX = Math.max(minX, winW - miniFabPx.value);
   const maxY = Math.max(0, winH - miniFabPx.value);
@@ -221,7 +224,9 @@ function persistPosition(): void {
   if (winH <= 0 || (win.windowHeight > 0 && layout.windowHeight > 0 && Math.abs(win.windowHeight - layout.windowHeight) > 24)) return;
   try {
     uni.setStorageSync(POS_KEY, Math.round(miniFabX.value) + "," + Math.round(miniFabY.value) + "," + Math.round(winH));
-  } catch (_) {}
+  } catch (_) {
+    logWarn("MiniPlayer", "悬浮球位置持久化失败（本次已生效，重启后回默认）");
+  }
 }
 
 /* ---------------- 渲染尺寸（显式跨两帧，防 Vapor 合并成瞬移） ---------------- */

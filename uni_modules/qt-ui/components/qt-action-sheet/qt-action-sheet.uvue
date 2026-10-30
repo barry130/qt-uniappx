@@ -89,8 +89,17 @@ function actionLabel(action: SheetAction, index: number): string {
  * 不滚过去用户只能看到半截文字（用户 2026-10-25 反馈「选中项在下方时要自动滚下去」）。
  */
 const scrollAnchor = ref("");
+// 打开时上滑入场：根节点是 v-show（常驻挂载），所以有可靠的「从无到有」起点。
+// 480 行列表滚起来要跟手，24、240ms 是仓库里最短的一档（pages/playlists transform 0.2s）。
+const slideIn = ref(false);
 const selectedIdx = computed((): number => props.selectedIndex != null ? props.selectedIndex! : -1);
 watch(() => props.visible, (v: boolean) => {
+  slideIn.value = false;
+  if (v) {
+    setTimeout(() => {
+      slideIn.value = true;
+    }, 16);
+  }
   if (!v) {
     scrollAnchor.value = "";
     return;
@@ -112,7 +121,12 @@ watch(() => props.visible, (v: boolean) => {
  * 高度/圆角仍由 .as-sheet-wide 管，这里只补宽度与底色。
  */
 const sheetStyle = computed((): string => {
-  let style = "background-color:" + theme.skin.sheetSurface + ";";
+  let style =
+    "background-color:" +
+    theme.skin.sheetSurface +
+    ";transform:translateY(" +
+    (slideIn.value ? "0" : "40px") +
+    ");transition:transform 0.24s ease-out;";
   if (layout.isWide) {
     const w = qtSheetWidth("drawer");
     style += "width:" + w + "px;";

@@ -55,6 +55,7 @@ const QT_ROUTES: string[] = [
   "/pages/logs/index",
   "/pages/download-settings/index",
   "/pages/play-settings/index",
+  "/pages/source-auth/index",
   "/pages/ai-assistant/index",
 ];
 
@@ -97,6 +98,7 @@ const QT_TITLES: string[] = [
   "运行日志",
   "下载设置",
   "播放设置",
+  "音源账号",
   "音乐助手",
 ];
 
@@ -119,6 +121,7 @@ const QT_SELF_HEADER_ROUTES: string[] = [
 export const QT_SETTINGS_ROUTES: string[] = [
   "/pages/settings/index",
   "/pages/source-pack/index",
+  "/pages/source-auth/index",
   "/pages/ai-providers/index",
   "/pages/equalizer/index",
   "/pages/theme/index",
@@ -226,7 +229,9 @@ export function qtTopRoute(): string {
       const r = pages[pages.length - 1].route;
       if (r != null && r.length > 0) return r.charAt(0) == "/" ? r : "/" + r;
     }
-  } catch (_) {}
+  } catch (_) {
+    // 静默：页面栈读不出按空路由处理，仅影响返回按钮显隐判定
+  }
   return "";
 }
 

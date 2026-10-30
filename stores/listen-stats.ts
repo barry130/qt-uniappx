@@ -308,7 +308,9 @@ class ListenStatsStore {
   private async loadNow(history: Song[], counts: Map<string, number>): Promise<void> {
     this.storagePath = listenStatsPath();
     let fallback: Snapshot | null = null;
-    try { fallback = parseSnapshot(uni.getStorageSync(FALLBACK_KEY) as string); } catch (_) {}
+    try { fallback = parseSnapshot(uni.getStorageSync(FALLBACK_KEY) as string); } catch (_) {
+      // 静默：兜底存档解析失败按无兜底处理，主文件读取不受影响
+    }
     const accessible = canWriteListenStats();
     const loadStarted = Date.now();
     const savedRead = await readListenStatsFile();
@@ -420,7 +422,7 @@ class ListenStatsStore {
       if (generation != this.generation || !/^https?:\/\//.test(url)) return;
       this.artistPics.set(name, url);
       this.scheduleSave();
-    } catch (_) { /* 此平台失败不拦截播放；换平台播放同一歌手时仍会尝试。*/ }
+    } catch (_) { /* 静默：此平台失败不拦截播放；换平台播放同一歌手时仍会尝试。*/ }
   }
 
   private scheduleSave(): void {
@@ -586,7 +588,9 @@ class ListenStatsStore {
   private async queueArchive(pack: ArchivePack, through: string): Promise<boolean> {
     const previous = this.archiveTask;
     const run = async (): Promise<boolean> => {
-      if (previous != null) { try { await previous; } catch (_) {} }
+      if (previous != null) { try { await previous; } catch (_) {
+        // 静默：前一个备份任务自身已报结果，这里只等它结束不传播异常
+      } }
       const ok = await this.commitArchive(pack);
       if (ok && through > this.archivedThrough) this.archivedThrough = through;
       return ok;
@@ -645,7 +649,9 @@ class ListenStatsStore {
     const ranges: string[][] = [];
     for (let i = 0; i < pack.first.length; i++) ranges.push([pack.first[i], pack.last[i]]);
     const index: ArchiveIndex = { v: ARCHIVE_VERSION, m: mode, a: Date.now(), p: ranges };
-    try { await writeListenStatsArchiveIndex(JSON.stringify(index)); } catch (_) {}
+    try { await writeListenStatsArchiveIndex(JSON.stringify(index)); } catch (_) {
+      // 静默：索引写失败仅本次恢复需全量探测分片，下次备份会重写索引
+    }
   }
 
   /** 读并校验备份索引；不可用（缺失/损坏/对不上实际分片）一律返回 null。 */
@@ -720,7 +726,9 @@ class ListenStatsStore {
     // 串行：报告页与年度页可能同时请求，别让它们并发读同一批分片。
     const previous = this.rangeTask;
     const run = async (): Promise<void> => {
-      if (previous != null) { try { await previous; } catch (_) {} }
+      if (previous != null) { try { await previous; } catch (_) {
+        // 静默：前一个读任务自身已有三态处理，这里只等它结束不传播异常
+      } }
       await this.readRange(wanted);
     };
     const task = run();
@@ -760,7 +768,9 @@ class ListenStatsStore {
       // 读出错（文件打不开、内容坏了）：一个字都别标记，下次进页面再试。
       if (outcome == READ_ERROR) return;
       for (let i = 0; i < keys.length; i++) this.archiveQueried.add(keys[i]);
-    } catch (_) {}
+    } catch (_) {
+      // 静默：读备份异常不标记已查，下次进页面自动重试
+    }
   }
 
   /**
@@ -1134,7 +1144,9 @@ class ListenStatsStore {
       this.publicSaved = await writeListenStatsFile(text);
       if (this.publicSaved) {
         // 权限恢复并成功迁移后移除私有兜底。
-        try { uni.removeStorageSync(FALLBACK_KEY); } catch (_) {}
+        try { uni.removeStorageSync(FALLBACK_KEY); } catch (_) {
+          // 静默：兜底清不掉只多占一份旧快照，下次保存成功会再清
+        }
       } else {
         try { uni.setStorageSync(FALLBACK_KEY, text); } catch (_) { this.dirty = true; }
       }

@@ -52,6 +52,11 @@ import {
   audioEvictSongCache,
   audioOnSetRating,
   audioSetLiked,
+  audioSetCarLyric,
+  audioSetFloatOutput,
+  audioSetPreferSoftwareDecoder,
+  audioSetEnhanceEnabled,
+  audioSetEnhanceGain,
 } from "@/uni_modules/qt-audio-player";
 // #endif
 // #ifdef APP-ANDROID || APP-HARMONY
@@ -93,6 +98,20 @@ const GAPLESS_KEY = "qt-playback-gapless";
 /** EQ 设置持久化 key：开关 + 5 段增益（dB，逗号分隔串） */
 const EQ_ENABLED_KEY = "qt-eq-enabled";
 const EQ_BANDS_KEY = "qt-eq-bands";
+/**
+ * 音频输出通道 / 解码方式 / 音量增强（"1"/"0" + 毫贝尔数值）。
+ *
+ * 三者都是「同码率下听感」的开关，与音源无关：
+ * - float：32bit 浮点输出，省掉 int16 量化（高端解码器/有线耳机更通透）；
+ * - sw：软解优先，换稳定性换耗电（个别机型硬解 AAC/FLAC 有杂音时用）；
+ * - enhance：LoudnessEnhancer 音量增强（默认关，纯增益可能削波）。
+ * 默认全关 = 与改动前行为一致，避免给所有人默认套上音效链。
+ */
+const FLOAT_OUTPUT_KEY = "qt-audio-float-output";
+const PREFER_SOFTWARE_KEY = "qt-audio-prefer-software-decoder";
+const ENHANCE_KEY = "qt-audio-enhance";
+const ENHANCE_GAIN_KEY = "qt-audio-enhance-gain";
+const ENHANCE_GAIN_DEFAULT_MB = 300;
 /** 用户音量（0–1，字符串存储）与静音开关（"1"/"0"）。静音独立存，不覆盖音量值 */
 const VOLUME_KEY = "qt-playback-volume";
 const MUTED_KEY = "qt-playback-muted";
@@ -122,6 +141,11 @@ export class AudioPlayer {
   /** EQ 当前开关与 5 段增益（dB，-12~12），启动时从持久化恢复 */
   eqEnabled = false;
   eqBands: number[] = [0, 0, 0, 0, 0];
+  /** 输出通道/解码方式/音量增强（默认全关，等同改动前行为），启动时从持久化恢复 */
+  floatOutput = false;
+  preferSoftwareDecoder = false;
+  enhanceEnabled = false;
+  enhanceGainMb = ENHANCE_GAIN_DEFAULT_MB;
 
   // #ifdef APP-ANDROID || APP-HARMONY
   /** 原生回调是否已绑定（模块级回调全局，绑定一次即可；重复绑定覆盖也无害） */
@@ -136,7 +160,9 @@ export class AudioPlayer {
         const value = parseFloat(raw);
         if (value > 0 && value <= 3) this.rate = value;
       }
-    } catch (_) {}
+    } catch (_) {
+      // 静默：读不到倍速存档按默认值处理，后续配置照常下发
+    }
     // 启动时把持久化的音频缓存上限与「同时播放」模式下发给原生播放器
     // #ifdef APP-ANDROID || APP-HARMONY
     this.ensureNativeBound();
@@ -148,6 +174,8 @@ export class AudioPlayer {
     this.applyVolume();
     // EQ 配置一并下发：原生挂载是惰性的，播放器首个条目 READY 时生效
     this.restoreEqSettings();
+    // 输出通道 / 解码方式 / 音量增强同样要在建播放器之前下发（这三项决定 RenderersFactory）
+    this.restoreOutputSettings();
     // #endif
   }
 
@@ -172,7 +200,9 @@ export class AudioPlayer {
     if (!(value >= 0) || value > 2) value = CONCURRENT_DEFAULT;
     try {
       uni.setStorageSync(CONCURRENT_KEY, value.toString());
-    } catch (_) {}
+    } catch (_) {
+      logWarnV("QT Audio", "同时播放模式持久化失败（本次已生效，重启后回默认）", "");
+    }
     // #ifdef APP-ANDROID || APP-HARMONY
     this.ensureNativeBound();
     // 归一成整数再下发：Math.round 在 UTS 里可能返回 Long/Double，
@@ -202,7 +232,9 @@ export class AudioPlayer {
     if (value > 1) value = 1;
     try {
       uni.setStorageSync(VOLUME_KEY, value.toString());
-    } catch (_) {}
+    } catch (_) {
+      logWarnV("QT Audio", "音量持久化失败（本次已生效，重启后回默认）", "");
+    }
     this.applyVolume();
   }
 
@@ -223,7 +255,9 @@ export class AudioPlayer {
   setMuted(m: boolean): void {
     try {
       uni.setStorageSync(MUTED_KEY, m ? "1" : "0");
-    } catch (_) {}
+    } catch (_) {
+      logWarnV("QT Audio", "静音开关持久化失败（本次已生效，重启后回默认）", "");
+    }
     this.applyVolume();
   }
 
@@ -264,7 +298,9 @@ export class AudioPlayer {
     if (!(value > 0)) value = CACHE_LIMIT_DEFAULT_MB;
     try {
       uni.setStorageSync(CACHE_LIMIT_KEY, value.toString());
-    } catch (_) {}
+    } catch (_) {
+      logWarnV("QT Audio", "缓存上限持久化失败（本次已生效，重启后回默认）", "");
+    }
     // #ifdef APP-ANDROID || APP-HARMONY
     this.ensureNativeBound();
     audioSetCacheLimit(value);
@@ -466,7 +502,9 @@ export class AudioPlayer {
       if (attempts > 12) return;
       try {
         audioSeek(time);
-      } catch (_) {}
+      } catch (_) {
+        // 静默：原生层未就绪抛的 seek 异常由 500ms 后重试兜底（最多 12 次）
+      }
       setTimeout(trySeek, 500);
       // #endif
       // #ifndef APP-ANDROID || APP-HARMONY
@@ -478,19 +516,23 @@ export class AudioPlayer {
       if (attempts > 12) return;
       try {
         audio.seek(time);
-      } catch (_) {}
+      } catch (_) {
+        // 静默：seek 异常由 500ms 后重试兜底（最多 12 次）
+      }
       setTimeout(trySeek, 500);
       // #endif
     };
     setTimeout(trySeek, 800);
   }
 
-  /** EQ 开关：持久化 + 即时下发原生（参数保留，关闭只 setEnabled(false)） */
+  /** EQ 开关：持久化 + 即时下发原生（存档里的曲线保留；关闭时原生会释放效果器，避免关着也占用音效链） */
   setEqualizerEnabled(on: boolean): void {
     this.eqEnabled = on;
     try {
       uni.setStorageSync(EQ_ENABLED_KEY, on ? "1" : "0");
-    } catch (_) {}
+    } catch (_) {
+      logWarnV("QT Audio", "EQ 开关持久化失败（本次已生效，重启后回默认）", "");
+    }
     // #ifdef APP-ANDROID || APP-HARMONY
     this.ensureNativeBound();
     audioSetEqualizerEnabled(on);
@@ -513,7 +555,9 @@ export class AudioPlayer {
     }
     try {
       uni.setStorageSync(EQ_BANDS_KEY, raw);
-    } catch (_) {}
+    } catch (_) {
+      logWarnV("QT Audio", "EQ 频段持久化失败（本次已生效，重启后回默认）", "");
+    }
     // #ifdef APP-ANDROID || APP-HARMONY
     this.ensureNativeBound();
     audioSetEqualizerBands(next);
@@ -525,7 +569,9 @@ export class AudioPlayer {
     try {
       const raw = uni.getStorageSync(EQ_ENABLED_KEY) as string;
       this.eqEnabled = raw == "1";
-    } catch (_) {}
+    } catch (_) {
+      // 静默：读不到 EQ 开关存档按关闭处理
+    }
     try {
       const raw = uni.getStorageSync(EQ_BANDS_KEY) as string;
       if (raw.length > 0) {
@@ -539,11 +585,114 @@ export class AudioPlayer {
         }
         this.eqBands = levels;
       }
-    } catch (_) {}
+    } catch (_) {
+      // 静默：EQ 频段存档损坏按默认曲线处理
+    }
     // #ifdef APP-ANDROID || APP-HARMONY
     this.ensureNativeBound();
     audioSetEqualizerBands(this.eqBands);
     audioSetEqualizerEnabled(this.eqEnabled);
+    // #endif
+  }
+
+  /** 32bit 浮点输出：持久化 + 下发原生（原生置脏，下一首 / 停止后重播时重建输出通道） */
+  setFloatOutput(on: boolean): void {
+    this.floatOutput = on;
+    try {
+      uni.setStorageSync(FLOAT_OUTPUT_KEY, on ? "1" : "0");
+    } catch (_) {
+      logWarnV("QT Audio", "浮点输出开关持久化失败（本次已生效，重启后回默认）", "");
+    }
+    // #ifdef APP-ANDROID || APP-HARMONY
+    this.ensureNativeBound();
+    audioSetFloatOutput(on);
+    // #endif
+  }
+
+  /** 软解优先：持久化 + 下发原生（同上，播放中不打断） */
+  setPreferSoftwareDecoder(on: boolean): void {
+    this.preferSoftwareDecoder = on;
+    try {
+      uni.setStorageSync(PREFER_SOFTWARE_KEY, on ? "1" : "0");
+    } catch (_) {
+      logWarnV("QT Audio", "解码方式持久化失败（本次已生效，重启后回默认）", "");
+    }
+    // #ifdef APP-ANDROID || APP-HARMONY
+    this.ensureNativeBound();
+    audioSetPreferSoftwareDecoder(on);
+    // #endif
+  }
+
+  /** 音量增强开关：持久化 + 下发（关闭时原生释放 LoudnessEnhancer，不占音效链） */
+  setEnhanceEnabled(on: boolean): void {
+    this.enhanceEnabled = on;
+    try {
+      uni.setStorageSync(ENHANCE_KEY, on ? "1" : "0");
+    } catch (_) {
+      logWarnV("QT Audio", "音量增强开关持久化失败（本次已生效，重启后回默认）", "");
+    }
+    // #ifdef APP-ANDROID || APP-HARMONY
+    this.ensureNativeBound();
+    audioSetEnhanceGain(this.enhanceGainMb);
+    audioSetEnhanceEnabled(on);
+    // #endif
+  }
+
+  /** 音量增强增益（dB，0–12）：持久化 + 下发，超出范围收敛到边界 */
+  setEnhanceGain(db: number): void {
+    let value = db;
+    if (!(value >= 0)) value = 0;
+    if (value > 12) value = 12;
+    const mb = Math.round(value * 100);
+    this.enhanceGainMb = mb;
+    try {
+      uni.setStorageSync(ENHANCE_GAIN_KEY, mb.toString());
+    } catch (_) {
+      logWarnV("QT Audio", "音量增强增益持久化失败（本次已生效，重启后回默认）", "");
+    }
+    // #ifdef APP-ANDROID || APP-HARMONY
+    this.ensureNativeBound();
+    audioSetEnhanceGain(mb);
+    // #endif
+  }
+
+  /**
+   * 启动时恢复输出通道/解码方式/音量增强并下发。
+   * 顺序要紧：三项都要在**首次构建播放器之前**下发，否则首播用的是旧参数
+   * （RenderersFactory 只在 new ExoPlayer.Builder(...).build() 时读取一次）。
+   */
+  private restoreOutputSettings(): void {
+    try {
+      const raw = uni.getStorageSync(FLOAT_OUTPUT_KEY) as string;
+      this.floatOutput = raw == "1";
+    } catch (_) {
+      // 静默：读不到浮点输出存档按关闭处理（关闭 = 与改动前一致）
+    }
+    try {
+      const raw = uni.getStorageSync(PREFER_SOFTWARE_KEY) as string;
+      this.preferSoftwareDecoder = raw == "1";
+    } catch (_) {
+      // 静默：读不到解码方式存档按「自动（硬件优先）」处理
+    }
+    try {
+      const raw = uni.getStorageSync(ENHANCE_KEY) as string;
+      this.enhanceEnabled = raw == "1";
+    } catch (_) {
+      // 静默：读不到音量增强开关按关闭处理
+    }
+    try {
+      const raw = uni.getStorageSync(ENHANCE_GAIN_KEY) as string;
+      const mb = parseFloat(raw);
+      if (mb >= 0 && mb <= 1200) this.enhanceGainMb = Math.round(mb);
+    } catch (_) {
+      // 静默：增益存档损坏按默认 +3dB 处理
+    }
+    // #ifdef APP-ANDROID || APP-HARMONY
+    this.ensureNativeBound();
+    audioSetFloatOutput(this.floatOutput);
+    audioSetPreferSoftwareDecoder(this.preferSoftwareDecoder);
+    audioSetEnhanceGain(this.enhanceGainMb);
+    audioSetEnhanceEnabled(this.enhanceEnabled);
     // #endif
   }
 
@@ -557,7 +706,9 @@ export class AudioPlayer {
     // #endif
     try {
       uni.setStorageSync(RATE_KEY, rate.toString());
-    } catch (_) {}
+    } catch (_) {
+      logWarnV("QT Audio", "倍速持久化失败（本次已生效，重启后回默认）", "");
+    }
   }
 
   pause(): void {
@@ -758,6 +909,17 @@ export class AudioPlayer {
     // #endif
   }
 
+  /**
+   * 下发整首歌词到车机蓝牙（AVRCP 1.3+，媒体元数据 key "android.media.metadata.LYRICS"）。
+   * text = 歌词全文（LRC 原文或纯文本，车机自行解析）；空串 = 清掉上一首残留歌词。
+   * 原生侧有（代数, mediaId, 文本）三键去重，重复推送无效但无害；iOS 无对应通道，静默忽略。
+   */
+  setCarLyric(text: string): void {
+    // #ifdef APP-ANDROID || APP-HARMONY
+    audioSetCarLyric(text);
+    // #endif
+  }
+
   /** 无缝播放是否开启（默认开启；控制 store 是否预热下一首地址 + 原生整首预取） */
   getGapless(): boolean {
     try {
@@ -774,7 +936,9 @@ export class AudioPlayer {
   setGapless(enabled: boolean): void {
     try {
       uni.setStorageSync(GAPLESS_KEY, enabled ? "1" : "0");
-    } catch (_) {}
+    } catch (_) {
+      logWarnV("QT Audio", "无缝播放开关持久化失败（本次已生效，重启后回默认）", "");
+    }
   }
 }
 export const audioPlayer = new AudioPlayer();

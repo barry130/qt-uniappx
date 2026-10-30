@@ -1,0 +1,226 @@
+<!--
+  空状态 / 列表为空 / 错误占位（统一口径）
+
+  用法：
+    <QtEmpty icon="heart" title="还没有收藏歌单"
+             description="在发现页找到喜欢的歌单，点收藏即可出现在这里"
+             ghost-text="新建歌单" ghost-icon="folder"
+             action-text="去发现音乐" action-icon="compass"
+             @ghost="createPlaylist" @action="discover" />
+
+  为什么要有这个组件（2026-10-29）：全仓原本 53 处手写空态，其中大半只是一行
+  text（"暂无数据"/"加载失败"），既没有图标也没有下一步动作，用户在这些页面上
+  是死路。歌单页（pages/collection）那一版是唯一做全了的：accentSoft 圆角芯片
+  + 内联图标 + 标题 + 一行说明 + 一主一次两颗药丸按钮。这里把那一版抽成组件，
+  视觉完全对齐（同尺寸/同圆角/同字号/同留白），让其它页直接用而不是各写一套。
+
+  约定：
+  - 圆角 44rpx（宽屏 30px）的方形芯片而不是正圆，和卡片/弹层族保持一致；
+  - 芯片底色用 accentSoft（强调色的弱化版），图标用 accent —— 浅色深色皮肤都成立；
+  - 主按钮 = 强调色实底，次按钮 = surfaceMuted 底 + border 描边（与歌单页一致）；
+  - 文案一律由宿主传入，组件不做任何业务判断；
+  - compact=true 用于嵌在小节/卡片内部的空态，收紧上下留白（如歌词/评论小节）。
+-->
+<template>
+  <view
+    class="qt-empty"
+    :class="[(layout.isWide ? 'qt-empty-wide' : ''), (compact ? 'qt-empty-compact' : ''), (compact && layout.isWide ? 'qt-empty-compact-wide' : '')]"
+  >
+    <view class="qt-empty-chip" :class="layout.isWide ? 'qt-empty-chip-wide' : ''" :style="chipStyle">
+      <QtIcon :name="icon" :size="layout.isWide ? 36 : 64" :color="themeStore.skin.accent" />
+    </view>
+    <text
+      v-if="title != ''"
+      class="qt-empty-title"
+      :class="layout.isWide ? 'qt-empty-title-wide' : ''"
+      :style="('color:' + themeStore.skin.text + ';') + qtFontDual(32, 20)"
+    >{{ title }}</text>
+    <text
+      v-if="description != ''"
+      class="qt-empty-desc"
+      :class="layout.isWide ? 'qt-empty-desc-wide' : ''"
+      :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 14)"
+      :max-lines="3"
+    >{{ description }}</text>
+    <view v-if="ghostText != '' || actionText != ''" class="qt-empty-actions" :class="layout.isWide ? 'qt-empty-actions-wide' : ''">
+      <view
+        v-if="ghostText != ''"
+        class="qt-empty-ghost"
+        :class="layout.isWide ? 'qt-empty-ghost-wide' : ''"
+        :style="ghostStyle"
+        @click="$emit('ghost')"
+      >
+        <QtIcon v-if="ghostIcon != ''" :name="ghostIcon" :size="layout.isWide ? 16 : 28" :color="themeStore.skin.text" />
+        <text
+          class="qt-empty-btn-text"
+          :class="[(layout.isWide ? 'qt-empty-btn-text-wide' : ''), (ghostIcon != '' ? (layout.isWide ? 'qt-empty-btn-text-gap-wide' : 'qt-empty-btn-text-gap') : '')]"
+          :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 16)"
+        >{{ ghostText }}</text>
+      </view>
+      <view
+        v-if="actionText != ''"
+        class="qt-empty-primary"
+        :class="layout.isWide ? 'qt-empty-primary-wide' : ''"
+        :style="'background-color:' + themeStore.skin.accent + ';'"
+        @click="$emit('action')"
+      >
+        <QtIcon v-if="actionIcon != ''" :name="actionIcon" :size="layout.isWide ? 16 : 28" :color="themeStore.skin.onAccent" />
+        <text
+          class="qt-empty-btn-text"
+          :class="[(layout.isWide ? 'qt-empty-btn-text-wide' : ''), (actionIcon != '' ? (layout.isWide ? 'qt-empty-btn-text-gap-wide' : 'qt-empty-btn-text-gap') : '')]"
+          :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(28, 16)"
+        >{{ actionText }}</text>
+      </view>
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { computed } from 'vue';
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+
+const props = withDefaults(defineProps<{
+  /** 芯片里的图标名，见 qt-icon 图标表 */
+  icon?: string;
+  /** 主文案（一句话说清"这里为什么空"） */
+  title?: string;
+  /** 副文案（告诉用户下一步能做什么），可空 */
+  description?: string;
+  /** 主按钮文案/图标，二者都传才显示 */
+  actionText?: string;
+  actionIcon?: string;
+  /** 次按钮文案/图标 */
+  ghostText?: string;
+  ghostIcon?: string;
+  /** 嵌在小节/卡片里时收紧留白 */
+  compact?: boolean;
+}>(), {
+  icon: 'music',
+  title: '',
+  description: '',
+  actionText: '',
+  actionIcon: '',
+  ghostText: '',
+  ghostIcon: '',
+  compact: false,
+});
+
+defineEmits<{
+  (e: 'action'): void;
+  (e: 'ghost'): void;
+}>();
+
+const layout = useQtLayout();
+const themeStore = useThemeStore();
+
+/** 芯片底色：强调色弱化版（浅色 12% / 深色 20%，见 theme.ts） */
+const chipStyle = computed<string>(() => 'background-color:' + themeStore.skin.accentSoft + ';');
+/** 次按钮：与歌单页 empty-ghost 完全一致（surfaceMuted 底 + border 描边） */
+const ghostStyle = computed<string>(() =>
+  'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'
+);
+</script>
+
+<style>
+.qt-empty {
+  align-items: center;
+  justify-content: center;
+  padding: 140rpx 48rpx 60rpx;
+}
+.qt-empty-wide {
+  padding: 100px 40px 50px;
+}
+/* 小节内空态：不再用大留白把内容顶下去，只留一点呼吸 */
+.qt-empty-compact {
+  padding: 48rpx 32rpx 24rpx;
+}
+.qt-empty-compact-wide {
+  padding: 32px 24px 18px;
+}
+.qt-empty-chip {
+  width: 144rpx;
+  height: 144rpx;
+  border-radius: 44rpx;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 34rpx;
+}
+.qt-empty-chip-wide {
+  width: 96px;
+  height: 96px;
+  border-radius: 30px;
+  margin-bottom: 26px;
+}
+.qt-empty-title {
+  font-size: 32rpx;
+  font-weight: 700;
+  text-align: center;
+}
+.qt-empty-title-wide {
+  font-size: 20px;
+}
+.qt-empty-desc {
+  font-size: 24rpx;
+  margin-top: 12rpx;
+  text-align: center;
+  line-height: 1.5;
+}
+.qt-empty-desc-wide {
+  font-size: 14px;
+  margin-top: 10px;
+}
+.qt-empty-actions {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  margin-top: 44rpx;
+}
+.qt-empty-actions-wide {
+  margin-top: 34px;
+}
+.qt-empty-ghost {
+  flex-direction: row;
+  align-items: center;
+  height: 80rpx;
+  padding: 0 32rpx;
+  border-radius: 40rpx;
+  border-width: 1rpx;
+  border-style: solid;
+  margin-right: 18rpx;
+}
+.qt-empty-ghost-wide {
+  height: 52px;
+  padding: 0 24px;
+  border-radius: 26px;
+  margin-right: 14px;
+  border-width: 1px;
+}
+.qt-empty-primary {
+  flex-direction: row;
+  align-items: center;
+  height: 80rpx;
+  padding: 0 34rpx;
+  border-radius: 40rpx;
+}
+.qt-empty-primary-wide {
+  height: 52px;
+  padding: 0 26px;
+  border-radius: 26px;
+}
+.qt-empty-btn-text {
+  font-size: 28rpx;
+  font-weight: 600;
+}
+.qt-empty-btn-text-wide {
+  font-size: 16px;
+}
+.qt-empty-btn-text-gap {
+  margin-left: 8rpx;
+}
+.qt-empty-btn-text-gap-wide {
+  margin-left: 7px;
+}
+</style>

@@ -34,8 +34,11 @@ import type {
   PermissionState,
   EmbedTagsOptions,
   EmbedAudioTags,
+  EmbeddedReadResult,
+  ReadEmbeddedTags,
 } from '../interface.uts';
 import { EmbedTagsData, Mp3Plan, FlacPlan, planMp3, planFlac } from '../embed-bytes.uts';
+import { EmbeddedRead, readMp3Embedded, readFlacEmbedded } from '../read-embed.uts';
 
 // ==================== 系统交互 ====================
 
@@ -580,7 +583,9 @@ export function pickJsFile(onResult: (result: PickFileResult) => void): void {
         if (slash >= 0) name = uri.substring(slash + 1);
         try {
           name = decodeURIComponent(name);
-        } catch (_) {}
+        } catch (_) {
+          // 静默：解码失败就原样用编码名（见上行注释）
+        }
         const bytes = readUriBytes(uri, PICK_JS_FILE_MAX_BYTES);
         if (bytes == null) {
           onResult({ ok: false, name: '', content: '', message: '读取文件失败，请重试' } as PickFileResult);
@@ -1031,8 +1036,98 @@ function embedAudioTagsSync(audioTempPath: string, opts: EmbedTagsOptions): stri
     if (copyPath.length > 0) {
       try {
         fileIo.unlinkSync(copyPath);
-      } catch (e2) {}
+      } catch (e2) {
+        // 静默：清理残留副本失败只占一个临时文件位
+      }
     }
     return src;
   }
+}
+
+// ==================== 内嵌标签读取侧（与 embedAudioTags 写入侧对偶） ====================
+
+/** 上一次写出的封面缓存文件路径：重复读取先删它，避免 cache 目录堆积 */
+let lastCoverCachePath = '';
+
+/** 封面缓存自增序号：与 Date.now() 一起构成唯一文件名，防同毫秒覆盖 */
+let coverCacheSeq = 0;
+
+/** 封面字节 → cache 目录缓存文件，返回绝对路径（失败返回空串，调用方按无封面走） */
+function writeCoverCache(bytes: Uint8Array, mime: string): string {
+  try {
+    if (lastCoverCachePath.length > 0) {
+      try {
+        fileIo.unlinkSync(lastCoverCachePath);
+      } catch (e1) {
+        // 静默：旧封面缓存删除失败不阻塞新缓存写出
+      }
+      lastCoverCachePath = '';
+    }
+    const ctx = UTSHarmony.getUIAbilityContext() as common.UIAbilityContext;
+    if (ctx == null) return '';
+    const dir = ctx.cacheDir;
+    if (dir == null || dir.length == 0) return '';
+    const ext = mime.indexOf('png') >= 0 ? 'png' : 'jpg';
+    coverCacheSeq++;
+    const path = dir + '/qt-embed-cover-' + Date.now() + '-' + coverCacheSeq + '.' + ext;
+    const out = fileIo.openSync(path, fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC | fileIo.OpenMode.READ_WRITE);
+    try {
+      writeBytes(out.fd, bytes);
+    } finally {
+      fileIo.closeSync(out);
+    }
+    lastCoverCachePath = path;
+    return path;
+  } catch (e) {
+    console.log('[AppNative] writeCoverCache 失败: ' + (e != null ? e.toString() : 'unknown'));
+    return '';
+  }
+}
+
+function readEmbeddedTagsSync(filePath: string): EmbeddedReadResult | null {
+  let src = filePath;
+  if (src.indexOf('file://') == 0) src = src.substring(7);
+  if (src.length == 0) return null;
+  try {
+    if (!fileIo.accessSync(src)) return null;
+    const stat = fileIo.statSync(src);
+    if (stat.size < 32) return null;
+    // 封面与歌词固定写在文件头的标签区（写入侧 planMp3/planFlac 的产物），
+    // 1MiB 前缀必然覆盖（大 APIC 场景由字节层「截断降级」处理：歌词照出、封面置空）
+    const prefix = readFileBytes(src, 1024 * 1024);
+    if (prefix == null) return null;
+    let read: EmbeddedRead | null = readMp3Embedded(prefix);
+    if (read == null) read = readFlacEmbedded(prefix);
+    if (read == null) return null;
+    let coverPath = '';
+    const cover = read.coverBytes;
+    if (cover != null) {
+      coverPath = writeCoverCache(cover, read.coverMime);
+    }
+    const result: EmbeddedReadResult = { coverPath: coverPath, lrcText: read.lrcText };
+    return result;
+  } catch (e) {
+    console.log('[AppNative] readEmbeddedTags 失败: ' + (e != null ? e.toString() : 'unknown'));
+    return null;
+  }
+}
+
+/**
+ * 读取本地音频文件头部的内嵌标签（契约见 interface.uts 的 ReadEmbeddedTags）。
+ * mp3 → ID3v2 封面+歌词；flac → PICTURE+VORBIS_COMMENT；其余格式/无标签 → null。
+ */
+export function readEmbeddedTags(filePath: string): EmbeddedReadResult | null {
+  return readEmbeddedTagsSync(filePath);
+}
+
+/**
+ * 读取系统 WebView Cookie（契约见 interface.uts 的 GetWebCookies）。
+ * 鸿蒙端 @ohos.webview 的 CookieManager 通道暂未接（网页登录 Android 先行）：
+ * 恒返回空数组，宿主按「本轮未捕获到」处理，账号页也不显示网页登录入口。
+ */
+export function getWebCookies(urls: string[]): Promise<string[]> {
+  return new Promise<string[]>((resolve: (value: string[]) => void, _reject: (err: any) => void) => {
+    const empty: string[] = [];
+    resolve(empty);
+  });
 }

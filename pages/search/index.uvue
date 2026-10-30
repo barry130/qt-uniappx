@@ -148,8 +148,24 @@
         <view v-if="searching && !allReady" class="all-sk">
           <QtSkeletonList kind="song" :rows="SKELETON_ROWS" />
         </view>
+        <view v-if="searchFailed && !searching" class="all-empty" :class="layout.isWide ? 'all-empty-wide' : ''">
+          <QtEmpty
+            icon="alert"
+            title="搜索没成功"
+            description="网络或音源包有问题时会这样，重试一次通常就好了"
+            action-text="重试"
+            action-icon="refresh"
+            :compact="true"
+            @action="retrySearch"
+          />
+        </view>
         <view v-if="allReady && allEmpty && !searching" class="all-empty" :class="layout.isWide ? 'all-empty-wide' : ''">
-          <text class="all-empty-text" :class="layout.isWide ? 'all-empty-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(26, 16)">没有找到相关结果</text>
+          <QtEmpty
+            icon="search"
+            title="没有找到相关结果"
+            description="换个关键词试试；如果这个音源还没接入，可以去设置里多开一个音源"
+            :compact="true"
+          />
         </view>
       </scroll-view>
       <!-- 歌曲 -->
@@ -355,6 +371,7 @@
   </qt-page-frame>
 </template><script setup lang="ts">
 import { qtShowToast } from "@/services/toast";
+import { logWarn } from "@/services/logger";
 import { formatBigCount } from "@/services/format";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
@@ -369,6 +386,7 @@ import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import qtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import QtEmpty from "@/uni_modules/qt-ui/components/qt-empty/qt-empty.uvue";
 import { useSongSheet } from "@/composables/use-song-sheet";
 import { musicApi } from "@/services/music-api";
 import { aggregateSongKey } from "@/services/aggregate-merge";
@@ -435,6 +453,8 @@ const playlists = ref<Playlist[]>([]);
 const artists = ref<Artist[]>([]);
 const albums = ref<Album[]>([]);
 const searched = ref(false);
+/** 本轮搜索整体失败：用带重试按钮的空状态代替一闪而过的 toast */
+const searchFailed = ref(false);
 const searching = ref(false);
 /** 骨架行数：首屏 5 行（640rpx / 410px），与 .sk-item 的高度严格对应 */
 const SKELETON_ROWS = 5;
@@ -555,7 +575,9 @@ function toggleAggregateMode(): void {
   aggregateMode.value = !aggregateMode.value;
   try {
     uni.setStorageSync(AGGREGATE_MODE_KEY, aggregateMode.value ? "1" : "0");
-  } catch (_) {}
+  } catch (_) {
+    logWarn("Search", "聚合模式持久化失败（本次已生效，重启后回默认）");
+  }
   // 每页条数与合并规则都变了，旧的歌曲结果不能再续用
   aggSeenKeys.splice(0, aggSeenKeys.length);
   lastMergeFull = true;
@@ -608,7 +630,9 @@ function loadHistory(): void {
 function saveHistory(): void {
   try {
     uni.setStorageSync(HISTORY_KEY, JSON.stringify(history.value));
-  } catch (_) {}
+  } catch (_) {
+    logWarn("Search", "搜索历史持久化失败（本次已生效，重启后清空）");
+  }
 }
 function pushHistory(word: string): void {
   const next: string[] = [word];
@@ -921,6 +945,9 @@ async function runSearch(text: string, page: number, seq: number): Promise<void>
   }
   songsAggLoaded = false;
 }
+function retrySearch(): void {
+  doSearch();
+}
 async function doSearch(): Promise<void> {
   const text = keyword.value.trim();
   if (!text) return;
@@ -928,6 +955,7 @@ async function doSearch(): Promise<void> {
   pushHistory(text);
   searched.value = true;
   searching.value = true;
+  searchFailed.value = false;
   resultsLoadingMore.value = false;
   // 新搜索：重置所有类型的分页与数据，从当前类型的第 1 页开始
   resultsPage.song = 1;
@@ -954,7 +982,7 @@ async function doSearch(): Promise<void> {
       await runSearch(text, 1, seq);
     }
   } catch (_) {
-    if (seq == searchSeq) qtShowToast({ title: "搜索服务暂不可用", icon: "none" });
+    if (seq == searchSeq) searchFailed.value = true;
   } finally {
     if (seq == searchSeq) searching.value = false;
   }
@@ -1423,7 +1451,5 @@ function openAlbum(al: Album): void {
 .all-media-sub { font-size: 22rpx; margin-top: 4rpx; }
 .all-media-sub-wide { font-size: 13px; margin-top: 2px; }
 .all-empty { padding: 120rpx 0; align-items: center; }
-.all-empty-wide { padding: 80px 0; align-items: center; }
-.all-empty-text { font-size: 26rpx; }
-.all-empty-text-wide { font-size: 16px; }
+.all-empty-wide { align-items: center; }
 </style>

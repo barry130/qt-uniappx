@@ -104,7 +104,9 @@ function currentTopRoute(): string {
       const route = top.route;
       if (route != null) return route;
     }
-  } catch (_) {}
+  } catch (_) {
+    // 静默：取不到页面栈按空路由处理，守卫按「非首页」继续判断
+  }
   return "";
 }
 
@@ -162,7 +164,9 @@ function scheduleCheck(): void {
     // 首屏没挂上时界面不可交互，把首页整个重建一次作为唯一手段
     try {
       uni.reLaunch({ url: HOME_ROUTE, fail: (_: any) => {} });
-    } catch (_) {}
+    } catch (_) {
+      // 静默：reLaunch 抛异常不阻断兜底循环，用尽次数自会打点上报
+    }
     scheduleCheck();
   }, CHECK_DELAY_MS) as number;
 }
@@ -192,7 +196,9 @@ function reportNotMounted(attempt: number): void {
     // 于是 theme= 从未出现在上报里——是一处死代码。
     const osTheme = info.osTheme as string | null;
     if (osTheme != null) detail = detail + " theme=" + osTheme;
-  } catch (_) {}
+  } catch (_) {
+    // 静默：取不到窗口现场就不带 window/screen 字段，上报照发
+  }
   // 页面栈现场：top= 为空串说明栈里一个页面都没有（最严重的白屏形态）
   const top = currentTopRoute();
   detail = detail + " top=" + (top.length > 0 ? top : "-");

@@ -2,7 +2,21 @@ import { reactive } from "vue";
 import { musicApi, RegistryOfficialQuality, RegistryQuality, RegistrySort, RegistrySource } from "@/services/music-api";
 import { SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
 import { useSourceStore } from "@/stores/source";
-import { sourcePlayLoginActive, sourceVipTierOf } from "@/services/source-auth";
+import { SOURCE_AUTH_CHANGED_EVENT, sourcePlayLoginActive, sourceVipTierOf } from "@/services/source-auth";
+import {
+  cachedQualityProfileOf,
+  clearQualityProfiles,
+  fetchSourceQualityProfile,
+  PROFILE_MODE_OFFICIAL,
+  setSourceDownloadQuality,
+  setSourcePlayQuality,
+  sourceDownloadQualityOf,
+  sourcePlayQualityOf,
+  storeQualityProfile,
+} from "@/services/source-quality";
+import type { QualityProfile } from "@/services/source-quality";
+import { usePlayerStore } from "@/stores/player";
+import { useDownloadsStore } from "@/stores/downloads";
 
 /**
  * 会员档高低序（v11 官方档位过滤用）：none < vip < svip。
@@ -72,6 +86,9 @@ class SourceRegistryStore {
       this.qualities = registry.qualities;
       this.ready = true;
       this.validateCurrentSource();
+      // v12：注册表就绪后重拉各源生效清单（包侧判定 → 缓存 → 存量档位迁移）。
+      // fire-and-forget：注册表加载不等它，没拉到时消费方回落宿主 v10/v11 判定。
+      refreshQualityProfiles();
     } finally {
       this.loading = null;
     }
@@ -195,7 +212,21 @@ class SourceRegistryStore {
    * SOURCE_AUTH_CHANGED_EVENT 广播，页面据此重算。
    */
   sourceQualities(id: string): RegistryQuality[] {
-    if (id != "local" && sourcePlayLoginActive(id)) {
+    // v12：包侧判定的生效清单优先（refreshQualityProfiles 拉取后缓存）。
+    // mode=official：展示面直接用包下发的官方档（已按会员档过滤、旧档名已
+    // 归一）；mode=platform：包判定「官方清单未生效」——**跳过**下面的宿主
+    // v11 判定回落普通子集（包才持有注入后的真实凭据状态，与 music-api
+    // .supportedQualitiesOf 同口径）。profile==null（没拉到/旧包）走原判定。
+    const profile = cachedQualityProfileOf(id);
+    if (profile != null && profile.mode == PROFILE_MODE_OFFICIAL && profile.qualities.length > 0) {
+      const out: RegistryQuality[] = [];
+      for (let j = 0; j < profile.qualities.length; j++) {
+        const q = profile.qualities[j];
+        out.push({ id: q.id, name: q.name });
+      }
+      return out;
+    }
+    if (id != "local" && profile == null && sourcePlayLoginActive(id)) {
       const official = this.officialQualities(id);
       if (official.length > 0) {
         // v11：官方展示名随包下发 + 按账号会员档过滤（VIP 到 VIP 级、SVIP 到
@@ -270,11 +301,87 @@ class SourceRegistryStore {
 
 const sourceRegistryStore = reactive(new SourceRegistryStore()) as SourceRegistryStore;
 
-// 音源包安装/更新/卸载完成后重取注册表（bumpPacksChanged 在引擎重载后才广播，
-// 这里拿到的一定是新版包的清单；重取失败维持原清单，下次 ensure 再试）
+// 音源包安装/更新/卸载后重取注册表 + 清 v12 生效清单缓存（bumpPacksChanged
+// 在引擎重载后才广播，这里拿到的一定是新版包的清单；重取失败维持原清单，下次
+// ensure 再试。新包的生效判定与旧包缓存无从对比，先清掉回落宿主判定，下面的
+// 重取完成后由 load() 里的 refreshQualityProfiles 首拉重建）
 uni.$on(SOURCE_PACKS_CHANGED_EVENT, () => {
   sourceRegistryStore.ready = false;
+  clearQualityProfiles();
   sourceRegistryStore.ensure();
+});
+
+// ─── v12 生效档位清单：缓存刷新与存量迁移 ───
+
+/**
+ * 重拉所有源的生效档位清单（v12 getSourceQualities，包侧判定）并迁移存量
+ * 档位。触发点：注册表加载成功后（启动/换包重取完成，见 load()）；播放面
+ * 登录态变化（SOURCE_AUTH_CHANGED_EVENT，250ms 去抖见文件尾）。单源失败不
+ * 拖垮其它源：storeQualityProfile(id, null) 记「试过但没拉到」，消费方回落
+ * 宿主 v10/v11 判定，不弹提示（旧包缺入口是合法状态，等用户更新包）。
+ */
+async function refreshQualityProfiles(): Promise<void> {
+  if (sourceRegistryStore.sources.length == 0) return;
+  const tasks: Promise<void>[] = [];
+  for (let i = 0; i < sourceRegistryStore.sources.length; i++) {
+    const src = sourceRegistryStore.sources[i];
+    if (src == null) continue;
+    const id = src.id;
+    tasks.push(
+      fetchSourceQualityProfile(id, sourceVipTierOf(id))
+        .then((profile: QualityProfile) => {
+          storeQualityProfile(id, profile);
+        })
+        .catch((_e) => {
+          // 旧包缺入口 / 引擎空窗：记失败回落宿主判定，不打扰用户
+          storeQualityProfile(id, null);
+        }),
+    );
+  }
+  await Promise.all(tasks);
+  migrateStaleQualities();
+}
+
+/**
+ * 生效清单翻面后的存量档位迁移（对齐 PC 2026-10-25 需求「切开关后没有之前
+ * 那个音质，直接默认最高」）：某平台存的播放/下载档位不在当前生效清单里 →
+ * 自动改存清单最高档。生效清单官方面来自包侧 profile（已按会员档过滤），
+ * 没拉到时回落注册表声明的 qualities 子集（v10/v11 口径），迁移仍生效。
+ * 写入走 setSource*Quality：同值短路，正常翻面只有真正过期的档位落库。
+ */
+function migrateStaleQualities(): void {
+  // 全局默认从持有方现取（player/downloads 的 reactive 实例在函数调用时
+  // 一定已初始化：refreshQualityProfiles 只会在注册表加载/事件回调里跑）
+  const player = usePlayerStore();
+  const downloads = useDownloadsStore();
+  for (let i = 0; i < sourceRegistryStore.sources.length; i++) {
+    const src = sourceRegistryStore.sources[i];
+    if (src == null) continue;
+    let ids: string[] = [];
+    const profile = cachedQualityProfileOf(src.id);
+    if (profile != null && profile.mode == PROFILE_MODE_OFFICIAL && profile.qualities.length > 0) {
+      for (let j = 0; j < profile.qualities.length; j++) ids.push(profile.qualities[j].id);
+    } else if (src.qualities != null) {
+      ids = src.qualities;
+    }
+    if (ids.length == 0) continue;
+    const highest = ids[ids.length - 1];
+    const playEff = sourcePlayQualityOf(src.id, player.quality);
+    if (ids.indexOf(playEff) < 0) setSourcePlayQuality(src.id, highest);
+    const dlEff = sourceDownloadQualityOf(src.id, downloads.downloadQuality);
+    if (ids.indexOf(dlEff) < 0) setSourceDownloadQuality(src.id, highest);
+  }
+}
+
+// 播放面登录态变化（账号写入/开关切换/退出）必然翻面：250ms 去抖等 setAuth
+// 对数据包的凭据注入落地后再重查，避免包侧读到旧登录态；连发事件只重拉一次。
+let profileRefreshTimer: number | null = null;
+uni.$on(SOURCE_AUTH_CHANGED_EVENT, () => {
+  if (profileRefreshTimer != null) clearTimeout(profileRefreshTimer);
+  profileRefreshTimer = setTimeout(() => {
+    profileRefreshTimer = null;
+    refreshQualityProfiles();
+  }, 250) as number;
 });
 
 export function useSourceRegistryStore(): SourceRegistryStore {

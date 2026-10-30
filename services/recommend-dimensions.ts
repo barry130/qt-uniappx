@@ -595,7 +595,7 @@ export async function collectDimensionLanes(input: DimensionCollectInput): Promi
       append(chartLane(picked[i].name), "chart", rows[i], i);
     }
   } catch (e) {
-    // 榜单这一路整体不可用：候选池还有关键词与歌单两路
+    // 静默：榜单这一路整体不可用，候选池还有关键词与歌单两路
   }
   if (input.onProgress != null) (input.onProgress as () => void)();
 
@@ -616,7 +616,7 @@ export async function collectDimensionLanes(input: DimensionCollectInput): Promi
       }
     }
   } catch (e) {
-    // 聚合搜索失败只损失关键词这一路
+    // 静默：聚合搜索失败只损失关键词这一路
   }
   if (input.onProgress != null) (input.onProgress as () => void)();
 
@@ -650,7 +650,7 @@ export async function collectDimensionLanes(input: DimensionCollectInput): Promi
       append(query.lane, query.kind, songs, queryOrder(query));
     }
   } catch (e) {
-    // 歌单这一路失败不影响其它维度
+    // 静默：歌单这一路失败不影响其它维度
   }
   if (input.onProgress != null) (input.onProgress as () => void)();
 

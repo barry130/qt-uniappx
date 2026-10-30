@@ -1,0 +1,646 @@
+/**
+ * qt-app-native —— 音频标签内嵌「读取层」（平台无关，Android / Harmony 双端复用）
+ *
+ * 职责（embed-bytes.uts 写入侧的读回镜像）：
+ *   - readMp3Embedded()  : 解析文件前缀里的 ID3v2 标签（v2.2/2.3/2.4），
+ *                          抽出 APIC/PIC 封面与 USLT/ULT 歌词
+ *   - readFlacEmbedded() : 解析 fLaC 元数据块，抽出 PICTURE 与
+ *                          VORBIS_COMMENT 的 LYRICS= 字段
+ *
+ * 设计约束：
+ *   - 只做纯内存计算，不碰任何文件/平台 API —— 与 embed-bytes.uts 写出的字节
+ *     严格 round-trip；同一份逻辑在 node（strip-types 自测）与真机（Kotlin / ArkTS）行为一致；
+ *   - 失败一律返回 null（魔数不符/字段损坏/全空且截断），**绝不抛异常**：
+ *     所有字节访问走 at() 越界安全通道，解析器面对任意不可信前缀都安静退出；
+ *   - 标签体被前缀截断时允许「部分成功」：只要抽出歌词或封面其一，就返回对象
+ *     （封面拿不全时 coverBytes = null）；全空且截断才算失败。
+ *
+ * ID3v2 版本覆盖（对照 id3.org/id3v2-00 与 id3v2.4.0-structure）：
+ *   - v2.2：3 字符帧标识（PIC/ULT）+ 3 字节普通大端帧长；标签长 4×SyncSafe（28bit）；
+ *     整签压缩位（bit6，zlib）不支持 → 忽略整签返回 null；
+ *   - v2.3：4 字符帧标识（APIC/USLT）+ 4 字节普通大端帧长 + 2 字节帧标志
+ *     （压缩/加密/分组位 → 跳过该帧）；扩展头尺寸域为普通 4B（不含自身）；
+ *   - v2.4：同 v2.3 但帧长改 SyncSafe，帧级 unsynchronisation / 数据长度指示位单独处理；
+ *     扩展头尺寸域为 SyncSafe（含自身）；
+ *   - 标签级 unsynchronisation（三版通用，标志 bit7）：先把整个标签体去反同步
+ *     （摘掉每个 0xFF 后紧跟的 0x00）再解析帧；
+ *   - 文本编码 0=ISO-8859-1、1=UTF-16(带 BOM)、2=UTF-16BE(v2.4)、3=UTF-8。
+ *
+ * UTS 编码约束（同 embed-bytes.uts，两端编译器都吃得下）：
+ *   - 全部公开函数显式 export；显式类型标注；可空一律 `| null`；
+ *   - 不用解构/扩展/模板串/ts 特有语法；字符串拼接用 +；
+ *   - 字节读一律经 at()（内部 & 0xff + 越界返回 -1）；不用 ++ 于下标表达式；
+ *   - Array<T> 显式声明；循环用 for(;;)/for(let)。
+ *   - node 自测：本文件不含 UTS 专属类型，strip-types 后可直接跑
+ *     （tools/check-read-embed.mjs，与 embed-bytes.uts 的写出侧做往返）。
+ */
+
+/** 读取结果（字节层出参） */
+export type EmbeddedRead = {
+	/** 封面原始字节（jpg/png）；null = 无封面，或封面在截断区拿不全 */
+	coverBytes: Uint8Array | null;
+	/** 封面 MIME（image/jpeg / image/png 等）；无封面 = 空串 */
+	coverMime: string;
+	/** LRC 歌词原文（已含时间轴）；无歌词 = 空串 */
+	lrcText: string;
+};
+
+/** 封面帧解析产物（内部用） */
+type CoverFrame = {
+	/** 归一化后的 MIME（v2.2 的 'JPG'/'PNG' 写法一并归一） */
+	mime: string;
+	/** APIC/PIC 的图片类型（0x03 = front cover，多封面时优先取它） */
+	picType: number;
+	/** 封面字节 */
+	data: Uint8Array;
+};
+
+/** 越界安全读字节：越界返回 -1（调用方按失败处理，绝不抛异常） */
+function at(bytes: Uint8Array, i: number): number {
+	if (i < 0 || i >= bytes.length) return -1;
+	return bytes[i] & 0xff;
+}
+
+/** 4 字节 SyncSafe 整数（ID3v2 尺寸域：每字节 7bit，高位恒 0）；越界返回 -1 */
+function readSyncSafe32(bytes: Uint8Array, off: number): number {
+	const b0 = at(bytes, off);
+	const b1 = at(bytes, off + 1);
+	const b2 = at(bytes, off + 2);
+	const b3 = at(bytes, off + 3);
+	if (b0 < 0 || b1 < 0 || b2 < 0 || b3 < 0) return -1;
+	return b0 * 2097152 + b1 * 16384 + b2 * 128 + b3;
+}
+
+/** 4 字节大端整数；越界返回 -1 */
+function readBe32(bytes: Uint8Array, off: number): number {
+	const b0 = at(bytes, off);
+	const b1 = at(bytes, off + 1);
+	const b2 = at(bytes, off + 2);
+	const b3 = at(bytes, off + 3);
+	if (b0 < 0 || b1 < 0 || b2 < 0 || b3 < 0) return -1;
+	return (b0 << 24) + (b1 << 16) + (b2 << 8) + b3;
+}
+
+/** 3 字节大端整数（v2.2 帧长 / flac 块长）；越界返回 -1 */
+function readBe24(bytes: Uint8Array, off: number): number {
+	const b0 = at(bytes, off);
+	const b1 = at(bytes, off + 1);
+	const b2 = at(bytes, off + 2);
+	if (b0 < 0 || b1 < 0 || b2 < 0) return -1;
+	return (b0 << 16) + (b1 << 8) + b2;
+}
+
+/** 4 字节小端整数（VorbisComment 长度域）；越界返回 -1 */
+function readLe32(bytes: Uint8Array, off: number): number {
+	const b0 = at(bytes, off);
+	const b1 = at(bytes, off + 1);
+	const b2 = at(bytes, off + 2);
+	const b3 = at(bytes, off + 3);
+	if (b0 < 0 || b1 < 0 || b2 < 0 || b3 < 0) return -1;
+	return b0 + (b1 << 8) + (b2 << 16) + (b3 << 24);
+}
+
+/**
+ * 去除 unsynchronisation（id3 §5 的反向）：把 [from, to) 里每个 0xFF 后紧跟的
+ * 0x00 摘掉（写入时 FF → FF 00 的补偿）。输出 ≤ 输入长度，末尾按实际长度裁齐。
+ */
+function deUnsync(src: Uint8Array, from: number, to: number): Uint8Array {
+	const cap = to - from;
+	if (cap <= 0) return new Uint8Array(0);
+	const out = new Uint8Array(cap);
+	let p = 0;
+	let i = from;
+	while (i < to) {
+		const b = at(src, i);
+		if (b < 0) break;
+		out[p] = b;
+		p += 1;
+		i += 1;
+		if (b == 0xff) {
+			const n = at(src, i);
+			if (n == 0x00) i += 1; // 摘掉写入时补进来的 0x00
+		}
+	}
+	if (p == cap) return out;
+	const exact = new Uint8Array(p);
+	for (let j = 0; j < p; j++) {
+		exact[j] = out[j];
+	}
+	return exact;
+}
+
+/** 复制 [from, to) 为新数组（不用 slice/subarray，规避平台层视图兼容风险；调用方保证边界） */
+function copyBytes(src: Uint8Array, from: number, to: number): Uint8Array {
+	const len = to - from;
+	if (len <= 0) return new Uint8Array(0);
+	const out = new Uint8Array(len);
+	for (let i = 0; i < len; i++) {
+		out[i] = at(src, from + i) & 0xff;
+	}
+	return out;
+}
+
+/** 码元数组 → string（分片拼接：单次巨型 fromCharCode 与逐字 += 都要规避） */
+function charsFromUnits(units: Array<number>): string {
+	const pieces: Array<string> = [];
+	const n = units.length;
+	let i = 0;
+	while (i < n) {
+		const end = i + 2048 < n ? i + 2048 : n;
+		let piece = '';
+		for (let j = i; j < end; j++) {
+			piece += String.fromCharCode(units[j] ?? 0);
+		}
+		pieces.push(piece);
+		i = end;
+	}
+	return pieces.join('');
+}
+
+/** ISO-8859-1 → string（每字节一个码元） */
+function decodeLatin1(bytes: Uint8Array, from: number, to: number): string {
+	const units: Array<number> = [];
+	for (let i = from; i < to; i++) {
+		const b = at(bytes, i);
+		if (b < 0) break;
+		units.push(b);
+	}
+	return charsFromUnits(units);
+}
+
+/**
+ * UTF-16 → string。BOM 自动识别（FF FE = LE，FE FF = BE）；无 BOM 按 LE 处理
+ * （ID3v2.4 规定缺 BOM 走 BE，但现实文件大量缺 BOM 且多为 LE，按更常见的口径兜底）。
+ * forcedBe = 强制大端（v2.4 文本编码 2，无 BOM）。
+ */
+function decodeUtf16(bytes: Uint8Array, from: number, to: number, forcedBe: boolean): string {
+	let start = from;
+	let be = forcedBe;
+	if (!forcedBe && to - from >= 2) {
+		const b0 = at(bytes, from);
+		const b1 = at(bytes, from + 1);
+		if (b0 == 0xff && b1 == 0xfe) {
+			start = from + 2; // LE BOM
+		} else if (b0 == 0xfe && b1 == 0xff) {
+			be = true; // BE BOM
+			start = from + 2;
+		}
+	}
+	const units: Array<number> = [];
+	for (let i = start; i + 1 < to; i += 2) {
+		const b1st = at(bytes, i);
+		const b2nd = at(bytes, i + 1);
+		if (b1st < 0 || b2nd < 0) break;
+		units.push(be ? ((b1st << 8) | b2nd) : ((b2nd << 8) | b1st));
+	}
+	return charsFromUnits(units);
+}
+
+/** UTF-8 → string（4 字节序列手工拆代理对；非法序列以 U+FFFD 容错替换，绝不抛） */
+function decodeUtf8(bytes: Uint8Array, from: number, to: number): string {
+	const units: Array<number> = [];
+	let i = from;
+	while (i < to) {
+		const b = at(bytes, i);
+		if (b < 0) break;
+		if (b < 0x80) {
+			units.push(b);
+			i += 1;
+		} else if (b >= 0xc0 && b < 0xe0) {
+			const b1 = at(bytes, i + 1);
+			if (b1 >= 0x80 && b1 < 0xc0 && i + 1 < to) {
+				units.push(((b & 0x1f) << 6) | (b1 & 0x3f));
+				i += 2;
+			} else {
+				units.push(0xfffd);
+				i += 1;
+			}
+		} else if (b >= 0xe0 && b < 0xf0) {
+			const b1 = at(bytes, i + 1);
+			const b2 = at(bytes, i + 2);
+			if (b1 >= 0x80 && b1 < 0xc0 && b2 >= 0x80 && b2 < 0xc0 && i + 2 < to) {
+				units.push(((b & 0x0f) << 12) | ((b1 & 0x3f) << 6) | (b2 & 0x3f));
+				i += 3;
+			} else {
+				units.push(0xfffd);
+				i += 1;
+			}
+		} else if (b >= 0xf0 && b < 0xf8) {
+			const b1 = at(bytes, i + 1);
+			const b2 = at(bytes, i + 2);
+			const b3 = at(bytes, i + 3);
+			if (b1 >= 0x80 && b1 < 0xc0 && b2 >= 0x80 && b2 < 0xc0 && b3 >= 0x80 && b3 < 0xc0 && i + 3 < to) {
+				let cp = ((b & 0x07) << 18) | ((b1 & 0x3f) << 12) | ((b2 & 0x3f) << 6) | (b3 & 0x3f);
+				if (cp > 0xffff) {
+					cp -= 0x10000;
+					units.push(0xd800 + (cp >> 10));
+					units.push(0xdc00 + (cp & 0x3ff));
+				} else {
+					units.push(cp);
+				}
+				i += 4;
+			} else {
+				units.push(0xfffd);
+				i += 1;
+			}
+		} else {
+			units.push(0xfffd);
+			i += 1;
+		}
+	}
+	return charsFromUnits(units);
+}
+
+/** ID3 文本编码分发：0=Latin1 1=UTF-16(BOM) 2=UTF-16BE(v2.4) 3=UTF-8；未知按 Latin1 兜底 */
+function decodeId3String(bytes: Uint8Array, from: number, to: number, enc: number): string {
+	if (to <= from) return '';
+	if (enc == 1) return decodeUtf16(bytes, from, to, false);
+	if (enc == 2) return decodeUtf16(bytes, from, to, true);
+	if (enc == 3) return decodeUtf8(bytes, from, to);
+	return decodeLatin1(bytes, from, to);
+}
+
+/** 终止符长度：编码 1/2（UTF-16 系）为 2 字节，其余 1 字节 */
+function termLen(enc: number): number {
+	return enc == 1 || enc == 2 ? 2 : 1;
+}
+
+/** 在 [from, to) 内找 ISO-8859-1 终止符 0x00，返回其下标；找不到返回 -1（整段当内容） */
+function findLatinTerm(bytes: Uint8Array, from: number, to: number): number {
+	for (let i = from; i < to; i++) {
+		if (at(bytes, i) == 0x00) return i;
+	}
+	return -1;
+}
+
+/** 在 [from, to) 内按 2 字节对齐找 UTF-16 终止符 00 00；找不到返回 -1 */
+function findUtf16Term(bytes: Uint8Array, from: number, to: number): number {
+	for (let i = from; i + 1 < to; i += 2) {
+		if (at(bytes, i) == 0x00 && at(bytes, i + 1) == 0x00) return i;
+	}
+	return -1;
+}
+
+/** 图片格式 → MIME（v2.2 的 'JPG'/'PNG' 3 字符写法与完整 'image/jpeg' 都接） */
+function normalizeImageMime(raw: string): string {
+	const upper = raw.toUpperCase();
+	if (upper.indexOf('JPEG') == 0 || upper == 'JPG') return 'image/jpeg';
+	if (upper.indexOf('PNG') == 0) return 'image/png';
+	if (upper.indexOf('IMAGE/') == 0) return raw.toLowerCase();
+	return raw;
+}
+
+/**
+ * 解析 APIC(v2.3/2.4) / PIC(v2.2) 帧体 → 封面。
+ * 帧体布局：编码(1B) + [MIME 0x00 终止 | v2.2: 3 字符图片格式] + 类型(1B)
+ *           + 描述(终止符) + 图片字节。
+ * 返回 null = 帧体损坏（描述未终止/字段越界）——调用方跳过该帧，不整个判失败。
+ */
+function parseCoverFrame(body: Uint8Array, isV22: boolean): CoverFrame | null {
+	const len = body.length;
+	if (len < 5) return null;
+	const enc = at(body, 0);
+	let p = 1;
+	let mime = '';
+	if (isV22) {
+		if (len < 1 + 3 + 1) return null;
+		mime = normalizeImageMime(decodeLatin1(body, 1, 4));
+		p = 4;
+	} else {
+		const term = findLatinTerm(body, 1, len);
+		if (term < 0) return null;
+		mime = normalizeImageMime(decodeLatin1(body, 1, term));
+		p = term + 1;
+	}
+	if (p >= len) return null;
+	const picType = at(body, p);
+	p += 1;
+	const tl = termLen(enc);
+	const dt = tl == 2 ? findUtf16Term(body, p, len) : findLatinTerm(body, p, len);
+	if (dt < 0) return null; // 描述未终止：无法可靠定位封面数据起点
+	p = dt + tl;
+	if (p >= len) return null; // 描述后没有封面字节
+	const frame: CoverFrame = { mime: mime, picType: picType, data: copyBytes(body, p, len) };
+	return frame;
+}
+
+/**
+ * 解析 USLT(v2.3/2.4) / ULT(v2.2) 帧体 → 歌词正文。
+ * 帧体布局：编码(1B) + 语言(3B) + 描述(终止符) + 歌词正文。
+ * 歌词正文不强制终止符（embed-bytes 写出时不带；第三方软件通常带）：
+ * 帧体读到哪算哪，结尾恰好是终止符则摘掉一个。
+ * 返回 null = 帧体损坏（描述未终止等）——调用方跳过，不影响已解析出的封面。
+ */
+function parseUsltFrame(body: Uint8Array): string | null {
+	const len = body.length;
+	if (len < 5) return null;
+	const enc = at(body, 0);
+	const p0 = 4; // 编码 1B + 语言 3B（v2.2 ULT 与 v2.3/2.4 USLT 布局相同）
+	if (p0 >= len) return null;
+	const tl = termLen(enc);
+	const dt = tl == 2 ? findUtf16Term(body, p0, len) : findLatinTerm(body, p0, len);
+	if (dt < 0) return null;
+	let lyricFrom = dt + tl;
+	if (lyricFrom >= len) return ''; // 描述后无正文 = 空歌词
+	if (tl == 2) {
+		if (len - lyricFrom >= 2 && at(body, len - 2) == 0x00 && at(body, len - 1) == 0x00) {
+			lyricFrom = len - 2;
+		}
+	} else {
+		if (at(body, len - 1) == 0x00) {
+			lyricFrom = len - 1;
+		}
+	}
+	return decodeId3String(body, lyricFrom, len, enc);
+}
+
+/** 帧标识字节必须是 [A-Z0-9]：垃圾字节 = 帧区损坏，停止解析（防错位读出假帧） */
+function isFrameIdByte(b: number): boolean {
+	return (b >= 0x41 && b <= 0x5a) || (b >= 0x30 && b <= 0x39);
+}
+
+/** 多封面择优：已有非 front cover 且来者是 front cover(0x03) 时替换 */
+function preferCover(current: CoverFrame | null, next: CoverFrame): CoverFrame {
+	if (current == null) return next;
+	if (current.picType != 0x03 && next.picType == 0x03) return next;
+	return current;
+}
+
+/** 解析收尾：全空结果的处理口径（截断/损坏 → null，完整标签 → 空对象） */
+function assembleRead(cover: CoverFrame | null, lrcText: string, failed: boolean): EmbeddedRead | null {
+	if (cover == null && lrcText.length == 0 && failed) {
+		return null;
+	}
+	const result: EmbeddedRead = {
+		coverBytes: cover == null ? null : cover.data,
+		coverMime: cover == null ? '' : cover.mime,
+		lrcText: lrcText,
+	};
+	return result;
+}
+
+/**
+ * mp3 读取：解析前缀里第一个 ID3v2 标签（多重旧标签时首个即最新一次写入，
+ * 与 planMp3 的「新标签叠在旧标签前」写入顺序对应）。
+ * 前缀无需盖住整个标签：标签体被截断时已解析出的内容照常返回。
+ * 返回 null = 前 10 字节不是合法 ID3v2 头 / 版本不支持 / 整签压缩 / 全空且截断。
+ */
+export function readMp3Embedded(prefix: Uint8Array): EmbeddedRead | null {
+	if (prefix.length < 10) return null;
+	if (at(prefix, 0) != 0x49 || at(prefix, 1) != 0x44 || at(prefix, 2) != 0x33) return null; // "ID3"
+	const major = at(prefix, 3);
+	if (major < 2 || major > 4) return null;
+	const flags = at(prefix, 5); // 标签头布局：ID3(3) + major(3) + minor(4) + flags(5) + size(6..9)
+	if (major == 2 && (flags & 0x40) != 0) return null; // v2.2 整签压缩（zlib）：无法解 → 忽略整签
+	const tagSize = readSyncSafe32(prefix, 6);
+	if (tagSize <= 0) return null;
+	let bodyEnd = 10 + tagSize;
+	let failed = false;
+	if (bodyEnd > prefix.length) {
+		bodyEnd = prefix.length;
+		failed = true; // 标签体被前缀截断
+	}
+	// 标签级 unsynchronisation（标志 bit7，三版通用）：先整签去反同步再解析帧
+	let body: Uint8Array;
+	if ((flags & 0x80) != 0) {
+		body = deUnsync(prefix, 10, bodyEnd);
+	} else {
+		body = copyBytes(prefix, 10, bodyEnd);
+	}
+	let cover: CoverFrame | null = null;
+	let lrcText = '';
+	let pos = 0;
+	// v2.3/2.4 扩展头：v2.3 尺寸域为普通 4B（不含自身）；v2.4 为 SyncSafe（含自身）
+	if (major != 2 && (flags & 0x40) != 0) {
+		let extSize = -1;
+		if (major == 3) {
+			extSize = readBe32(body, 0);
+			if (extSize >= 0 && 4 + extSize <= body.length) {
+				pos = 4 + extSize;
+			} else {
+				return assembleRead(cover, lrcText, true); // 扩展头损坏，直接收摊
+			}
+		} else {
+			extSize = readSyncSafe32(body, 0);
+			if (extSize >= 6 && extSize <= body.length) {
+				pos = extSize;
+			} else {
+				return assembleRead(cover, lrcText, true);
+			}
+		}
+	}
+	// 帧区顺序解析
+	for (;;) {
+		const headLen = major == 2 ? 6 : 10;
+		if (pos + headLen > body.length) break;
+		if (at(body, pos) == 0x00) break; // 帧后填充区
+		if (!isFrameIdByte(at(body, pos))) {
+			failed = true; // 帧标识损坏（既不是合法帧也不是填充）
+			break;
+		}
+		let frameId = '';
+		let frameSize = 0;
+		let flags1 = 0;
+		let flags2 = 0;
+		if (major == 2) {
+			frameId =
+				String.fromCharCode(at(body, pos) ?? 0) +
+				String.fromCharCode(at(body, pos + 1) ?? 0) +
+				String.fromCharCode(at(body, pos + 2) ?? 0);
+			frameSize = readBe24(body, pos + 3);
+		} else {
+			frameId =
+				String.fromCharCode(at(body, pos) ?? 0) +
+				String.fromCharCode(at(body, pos + 1) ?? 0) +
+				String.fromCharCode(at(body, pos + 2) ?? 0) +
+				String.fromCharCode(at(body, pos + 3) ?? 0);
+			if (major == 3) {
+				frameSize = readBe32(body, pos + 4);
+			} else {
+				frameSize = readSyncSafe32(body, pos + 4);
+			}
+			flags1 = at(body, pos + 8);
+			flags2 = at(body, pos + 9);
+		}
+		if (frameSize < 0 || flags1 < 0 || flags2 < 0) {
+			failed = true;
+			break;
+		}
+		if (frameSize == 0) {
+			pos += headLen;
+			continue; // 空帧跳过
+		}
+		if (pos + headLen + frameSize > body.length) {
+			failed = true; // 帧体被截断（超出标签/前缀）
+			break;
+		}
+		let data = copyBytes(body, pos + headLen, pos + headLen + frameSize);
+		// 帧标志位处理（压缩/加密帧直接跳过，本解析器不解 zlib/DRM 体）
+		if (major == 3) {
+			if ((flags2 & 0xe0) != 0) {
+				pos += headLen + frameSize;
+				continue; // v2.3：压缩(0x80)/加密(0x40)/分组(0x20)
+			}
+		} else if (major == 4) {
+			if ((flags2 & 0x0c) != 0) {
+				pos += headLen + frameSize;
+				continue; // v2.4：压缩(0x08)/加密(0x04)
+			}
+			if ((flags2 & 0x02) != 0 && (flags & 0x80) == 0) {
+				// v2.4 帧级 unsynchronisation（标签级未开时逐帧处理；尺寸域按存储值读）
+				data = deUnsync(data, 0, data.length);
+			}
+		}
+		// 帧体起算（v2.4 分组字节/数据长度指示在数据前缀里）
+		let bodyFrom = 0;
+		if (major == 4) {
+			if ((flags1 & 0x40) != 0) bodyFrom += 1; // 分组字节
+			if ((flags2 & 0x01) != 0) bodyFrom += 4; // 数据长度指示（4B SyncSafe，弃用）
+		}
+		const frameData = copyBytes(data, bodyFrom, data.length);
+		if (major == 2) {
+			if (frameId == 'PIC') {
+				const cf = parseCoverFrame(frameData, true);
+				if (cf != null) cover = preferCover(cover, cf);
+			} else if (frameId == 'ULT') {
+				const t = parseUsltFrame(frameData);
+				if (t != null && t.length > 0 && lrcText.length == 0) lrcText = t;
+			}
+		} else {
+			if (frameId == 'APIC') {
+				const cf = parseCoverFrame(frameData, false);
+				if (cf != null) cover = preferCover(cover, cf);
+			} else if (frameId == 'USLT') {
+				const t = parseUsltFrame(frameData);
+				if (t != null && t.length > 0 && lrcText.length == 0) lrcText = t;
+			}
+		}
+		pos += headLen + frameSize;
+	}
+	return assembleRead(cover, lrcText, failed);
+}
+
+/**
+ * VORBIS_COMMENT 块体 → LYRICS 字段值（长度域小端 + 条目 UTF-8，键值以 '=' 分隔）。
+ * 找不到 LYRICS / 块体损坏 = 空串。多个 LYRICS 条目取第一个非空。
+ */
+function parseVorbisComment(bytes: Uint8Array, from: number, to: number): string {
+	if (from + 8 > to) return '';
+	const vLen = readLe32(bytes, from);
+	if (vLen < 0) return '';
+	let p = from + 4 + vLen;
+	if (p + 4 > to) return '';
+	const count = readLe32(bytes, p);
+	if (count < 0 || count > 65536) return ''; // 条数异常当损坏
+	p += 4;
+	let lyrics = '';
+	for (let i = 0; i < count; i++) {
+		if (p + 4 > to) return lyrics; // 块体中途截断：返回已抽到的
+		const eLen = readLe32(bytes, p);
+		if (eLen < 0) return lyrics;
+		p += 4;
+		if (p + eLen > to) return lyrics;
+		const entry = decodeUtf8(bytes, p, p + eLen);
+		p += eLen;
+		const eq = entry.indexOf('=');
+		if (eq <= 0) continue;
+		const key = entry.substring(0, eq).toUpperCase();
+		if (key == 'LYRICS' && lyrics.length == 0) lyrics = entry.substring(eq + 1);
+	}
+	return lyrics;
+}
+
+/** FLAC PICTURE 块体（长度域全 32 位大端）→ 封面；字段越界/损坏 = null */
+function parseFlacPicture(body: Uint8Array): CoverFrame | null {
+	// 骨架：type(4) + mimeLen(4) + descLen(4) + 宽/高/深/色(16) + dataLen(4) = 32B 最小
+	if (body.length < 32) return null;
+	const picType = readBe32(body, 0);
+	const mLen = readBe32(body, 4);
+	if (mLen < 0 || picType < 0) return null;
+	let p = 8;
+	if (p + mLen > body.length) return null;
+	const mime = decodeLatin1(body, p, p + mLen);
+	p += mLen;
+	if (p + 4 > body.length) return null;
+	const dLen = readBe32(body, p);
+	if (dLen < 0) return null;
+	p += 4 + dLen; // 描述跳过
+	if (p + 16 > body.length) return null;
+	p += 16;
+	if (p + 4 > body.length) return null;
+	const cLen = readBe32(body, p);
+	if (cLen < 0) return null;
+	p += 4;
+	if (p + cLen > body.length || cLen <= 0) return null;
+	const frame: CoverFrame = { mime: normalizeImageMime(mime), picType: picType, data: copyBytes(body, p, p + cLen) };
+	return frame;
+}
+
+/**
+ * flac 读取：解析 fLaC 元数据块序列，抽 PICTURE（类型 6，大端长度域）与
+ * VORBIS_COMMENT（类型 4，小端长度域）的 LYRICS= 字段。
+ * 兼容真实世界：flac 前面可能被塞了 ID3v2 标签（部分抓轨器行为），先同款跳过。
+ * 返回 null = 魔数不符 / 全空且截断；块体截断时已抽到的内容照常返回。
+ */
+export function readFlacEmbedded(prefix: Uint8Array): EmbeddedRead | null {
+	let base = 0;
+	let scanning = true;
+	while (scanning) {
+		scanning = false;
+		if (prefix.length >= base + 10) {
+			if (at(prefix, base) == 0x49 && at(prefix, base + 1) == 0x44 && at(prefix, base + 2) == 0x33) {
+				// "ID3"：前置标签，与 planMp3 的跳法一致（含 footer）
+				const size = readSyncSafe32(prefix, base + 6);
+				if (size < 0) return null;
+				let seg = 10 + size;
+				if ((at(prefix, base + 5) & 0x10) != 0) seg += 10;
+				base += seg;
+				scanning = true;
+			}
+		}
+	}
+	if (prefix.length < base + 8) return null;
+	if (
+		at(prefix, base) != 0x66 ||
+		at(prefix, base + 1) != 0x4c ||
+		at(prefix, base + 2) != 0x61 ||
+		at(prefix, base + 3) != 0x43
+	) {
+		return null; // "fLaC"
+	}
+	let cover: CoverFrame | null = null;
+	let lrcText = '';
+	let failed = false;
+	let pos = base + 4;
+	for (;;) {
+		if (pos + 4 > prefix.length) {
+			failed = true; // 没读到 last 块就到头了：块区被截断
+			break;
+		}
+		const head = at(prefix, pos);
+		const isLast = (head & 0x80) != 0;
+		const type = head & 0x7f;
+		const bLen = readBe24(prefix, pos + 1);
+		if (bLen < 0) {
+			failed = true;
+			break;
+		}
+		const bFrom = pos + 4;
+		const bTo = bFrom + bLen;
+		if (bTo > prefix.length) {
+			failed = true; // 块体被前缀截断（大 PICTURE 常见）
+			break;
+		}
+		if (type == 4) {
+			const t = parseVorbisComment(prefix, bFrom, bTo);
+			if (t.length > 0 && lrcText.length == 0) lrcText = t;
+		} else if (type == 6) {
+			const cf = parseFlacPicture(copyBytes(prefix, bFrom, bTo));
+			// mime '-->' = 数据是 URL 引用而非字节，不当封面
+			if (cf != null && cf.mime != '-->' && cf.data.length > 0) cover = preferCover(cover, cf);
+		}
+		pos = bTo;
+		if (isLast) break;
+	}
+	return assembleRead(cover, lrcText, failed);
+}

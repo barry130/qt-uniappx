@@ -149,14 +149,17 @@
     </list-view>
     <!-- 当前筛选为空、但整体还有内容：筛选行保留，占位用普通 view。
          不能用 list-view 承载——内容不足一屏时它仍会上下回弹，像能滚动一样。
-         没有任何下载记录时也走这里（新模板保持一致），不再单独做「去发现音乐」空态页。 -->
-    <view
-      v-if="allItems.length == 0"
-      class="tab-empty" :class="layout.isWide ? 'tab-empty-wide' : ''"
-      :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';'"
-    >
-      <QtIcon name="download" :size="72" :color="theme.skin.placeholder" />
-      <text class="tab-empty-text" :class="layout.isWide ? 'tab-empty-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(25, 15)">{{ emptyText }}</text>
+         没有任何下载记录时也走这里（新模板保持一致），不再单独做「去发现音乐」空态页。
+         2026-10-29：改用统一的 QtEmpty（芯片 + 标题 + 一句说明 + 主按钮），
+         原来只有一枚图标加一行灰字，用户看不出「下一步该干什么」。
+         注意 desc 与 emptyText 区分：标题说「这一档为什么空」，说明说「下载从哪来」。 -->
+    <view v-if="allItems.length == 0" class="tab-empty" :class="layout.isWide ? 'tab-empty-wide' : ''" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';'">
+      <QtEmpty
+        icon="download"
+        :title="emptyText"
+        :description="hasAny ? '其它状态的任务在上面的分档里，切过去看看' : '在歌曲、歌单或专辑里点下载，任务会出现在这里'"
+        :compact="hasAny"
+      />
     </view>
     <!-- 列表为空时按钮可能残留（滚到底后任务被删光），一并收掉 -->
     <QtBackToTop v-if="allItems.length > 0" :visible="showBackToTop" @tap="backToTop" />
@@ -171,6 +174,7 @@ import { onShow } from "@dcloudio/uni-app";
 import { computed, ref } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import QtEmpty from "@/uni_modules/qt-ui/components/qt-empty/qt-empty.uvue";
 import { useDownloadsStore, type DownloadItem, type DownloadTask } from "@/stores/downloads";
 import { usePlayerStore } from "@/stores/player";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
@@ -850,7 +854,8 @@ function removeTask(song: Song): void {
 .checkbox-gap-wide {
   margin-right: 14px;
 }
-/* 当前页签为空时的占位：做成和 .scroll 同样的卡片，撑满剩余空间且**不可滚动** */
+/* 当前页签为空时的占位：做成和 .scroll 同样的卡片，撑满剩余空间且**不可滚动**；
+   内容交给 QtEmpty（2026-10-29），原来这里只有一枚图标 + 一行灰字 */
 .tab-empty {
   flex: 1;
   margin: 20rpx 24rpx 0;
@@ -862,14 +867,6 @@ function removeTask(song: Song): void {
 .tab-empty-wide {
   margin: 14px 24px 0;
   border-radius: 14px;
-}
-.tab-empty-text {
-  margin-top: 18rpx;
-  font-size: 25rpx;
-}
-.tab-empty-text-wide {
-  margin-top: 13px;
-  font-size: 15px;
 }
 
 /* Vapor 宽屏：使用 px 覆盖移动端 rpx，避免 1600x900 下按窗口比例放大 */

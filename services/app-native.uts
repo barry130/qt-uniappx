@@ -9,7 +9,7 @@
  * （编译进原生层），此处通过平台分发导入调用；H5 保留 window 实现，其余降级为复制+提示。
  */
 
-import { openExternalUrl, exitAppNative, installApkNative, openNotificationSettings as openNotificationSettingsNative, isIgnoringBatteryOptimizations as isIgnoringBatteryOptimizationsNative, openBatteryOptimizationSettings as openBatteryOptimizationSettingsNative, openAutoStartSettings as openAutoStartSettingsNative, openAppDetailsSettings as openAppDetailsSettingsNative, applyLegacyInsets as applyLegacyInsetsNative, pickJsFile as pickJsFileNative, pickDirectory as pickDirectoryNative, setCustomDirUri as setCustomDirUriNative, queryPermissionStates as queryPermissionStatesNative, openPermissionSettings as openPermissionSettingsNative } from "@/uni_modules/qt-app-native";
+import { openExternalUrl, exitAppNative, installApkNative, openNotificationSettings as openNotificationSettingsNative, isIgnoringBatteryOptimizations as isIgnoringBatteryOptimizationsNative, openBatteryOptimizationSettings as openBatteryOptimizationSettingsNative, openAutoStartSettings as openAutoStartSettingsNative, openAppDetailsSettings as openAppDetailsSettingsNative, applyLegacyInsets as applyLegacyInsetsNative, pickJsFile as pickJsFileNative, pickDirectory as pickDirectoryNative, setCustomDirUri as setCustomDirUriNative, queryPermissionStates as queryPermissionStatesNative, openPermissionSettings as openPermissionSettingsNative, getWebCookies as getWebCookiesNative } from "@/uni_modules/qt-app-native";
 import type { PickFileResult, PickDirectoryResult, PermissionState } from "@/uni_modules/qt-app-native";
 import { logErrV } from "@/services/logger";
 import { ensureNotificationPermission as ensureNotificationPermissionNative } from "@/uni_modules/qt-audio-player";
@@ -55,7 +55,9 @@ export function exitApp(): void {
       w.close();
       return;
     }
-  } catch (e) {}
+  } catch (e) {
+    // 静默：关不掉就落到下面的「已退出」提示
+  }
   // #endif
   qtShowToast({ title: "已退出", icon: "none" });
 }
@@ -76,7 +78,9 @@ export function openInBrowser(url: string): void {
       w.open(url, "_blank");
       return;
     }
-  } catch (e) {}
+  } catch (e) {
+    // 静默：window.open 不可用时落到下面「复制链接 + 提示」兜底
+  }
   // #endif
   // 降级：复制链接 + 提示
   uni.setClipboardData({
@@ -402,5 +406,24 @@ export function openPermissionSettings(id: string): boolean {
   // #endif
   // #ifndef APP-ANDROID || APP-HARMONY
   return false;
+  // #endif
+}
+
+/**
+ * 读取系统 WebView Cookie 库中一批 URL 的 Cookie（网页登录 v17 契约的捕获通道，
+ * 契约细节见 qt-app-native 的 interface.uts）：返回逐 URL 拼好的
+ * "name=value; name2=v2" 串数组，读不到的 URL 不出现在结果里。
+ *
+ * Android 主线程 CookieManager（可读 httpOnly）；鸿蒙/iOS 原生侧暂未实现
+ * （恒空数组），宿主按「本轮未捕获到」处理。失败绝不抛异常——轮询调用方
+ * 只需要「这轮拿到了什么」，异常一律归为空结果。
+ */
+export function getWebCookies(urls: string[]): Promise<string[]> {
+  // #ifdef APP-ANDROID || APP-HARMONY
+  // 原生侧已保证「异常也 resolve 空数组」（Runnable 内部 try/catch），这里不再包一层
+  return getWebCookiesNative(urls);
+  // #endif
+  // #ifndef APP-ANDROID || APP-HARMONY
+  return Promise.resolve([] as string[]);
   // #endif
 }

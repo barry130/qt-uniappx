@@ -22,6 +22,7 @@ import type { Playlist, Song, Artist, Album } from "@/types/music";
 import { mergeAggregateSongs } from "./aggregate-merge";
 import type { AggregateSongBatch } from "./aggregate-merge";
 import { sourcePlayLoginActive, sourceVipTierOf } from "./source-auth";
+import { cachedQualityProfileOf, PROFILE_MODE_OFFICIAL } from "./source-quality";
 
 
 /**
@@ -83,7 +84,9 @@ export function isContentFailError(e: any): boolean {
   try {
     const message = (e as any).message as string;
     if (message != null && message.indexOf(CONTENT_FAIL_MESSAGE) >= 0) return true;
-  } catch (_) {}
+  } catch (_) {
+    // 静默：message 取不到就走下一行整体字符串化判定
+  }
   return `${e}`.indexOf(CONTENT_FAIL_MESSAGE) >= 0;
 }
 
@@ -189,7 +192,12 @@ export type RegistrySort = { id: string; name: string };
  *  officialQualities（v11）非空 = 登录态下音质选择整体切官方清单（id=官方 level，
  *  name=官方展示名，min=最低会员档 none/vip/svip，宿主按账号等级过滤展示） */
 export type RegistryOfficialQuality = { id: string; name: string; min: string };
-export type RegistryAuthCaps = { methods: string[]; domains: string[]; officialQualities?: RegistryOfficialQuality[] };
+/** 网页登录声明（v17 契约）：url=官方登录页地址，cookieMarkers=「可以开始校验」的
+ *  Cookie 名（任一命中即尝试；空数组=有域 Cookie 就试），captureUrls=逐 URL 读
+ *  Cookie 的地址（空=按 domains 拼 https://{domain}/，host-only Cookie 如
+ *  y.qq.com 的 qm_keyst 必须精确到登录域才读得到），note=展示给用户的一句话说明 */
+export type RegistryWebLogin = { url: string; cookieMarkers: string[]; note: string; captureUrls: string[] };
+export type RegistryAuthCaps = { methods: string[]; domains: string[]; officialQualities?: RegistryOfficialQuality[]; webLogin?: RegistryWebLogin };
 /** 数据包注册表里的一个音质档位 */
 export type RegistryQuality = { id: string; name: string };
 /** 数据包注册表（音源清单 + 音质档位；宿主 UI 选项的唯一来源） */
@@ -657,6 +665,23 @@ export class MusicApi {
               }
               if (oq.length > 0) src.auth.officialQualities = oq;
             }
+            // 网页登录声明（v17 契约，{url,cookieMarkers,captureUrls?,note?}）：宿主
+            // 打开官方登录页轮询读 Cookie，命中 marker 走 authImportCookie 校验入库。
+            // 旧包没有时保持 undefined（= 账号页不显示「网页登录」按钮）。
+            const rawWebLogin = rawAuth.get("webLogin") as UTSJSONObject | null;
+            if (rawWebLogin != null) {
+              const wlUrl = this.strOf(rawWebLogin.get("url"));
+              if (wlUrl.length > 0) {
+                const wlMarkers = rawWebLogin.get("cookieMarkers") as string[] | null;
+                const wlCapture = rawWebLogin.get("captureUrls") as string[] | null;
+                src.auth.webLogin = {
+                  url: wlUrl,
+                  cookieMarkers: wlMarkers != null ? wlMarkers : [],
+                  note: this.strOf(rawWebLogin.get("note")),
+                  captureUrls: wlCapture != null ? wlCapture : [],
+                };
+              }
+            }
           }
         }
         sources.push(src);
@@ -730,14 +755,33 @@ export class MusicApi {
    * 声明了 auth.officialQualities 时，可用面整体换成官方清单——与
    * stores/source-registry.sourceQualities（音质选项展示）同口径，钳位才不会
    * 把用户在官方档位里选的值又钳回第三方子集。
+   * v12：优先用包侧 getSourceQualities 判定的生效清单（见函数体 v12 分支），
+   * 宿主 v10/v11 判定退为旧包兜底。
    */
   supportedQualitiesOf(source: Source): string[] | null {
     if (source == "local") return null;
+    // v12：包侧判定的生效清单优先（stores/source-registry 的 refreshQualityProfiles
+    // 拉取后缓存于此）。mode=official：直接用包下发的官方档 ids（已按会员档
+    // 过滤）；mode=platform：包判定「官方清单未生效」——**跳过**下面的宿主
+    // v10/v11 判定（宿主 storage 可能有竞态残值，包才持有注入后的真实凭据
+    // 状态），回落注册表第三方子集。profile==null（没拉到/旧包）走原判定。
+    const profile = cachedQualityProfileOf(source);
+    if (profile != null && profile.mode == PROFILE_MODE_OFFICIAL && profile.qualities.length > 0) {
+      const ids: string[] = [];
+      for (let j = 0; j < profile.qualities.length; j++) ids.push(profile.qualities[j].id);
+      return ids;
+    }
     for (let i = 0; i < this.registrySources.length; i++) {
       const item = this.registrySources[i] as RegistrySource;
       if (item == null || item.id != source) continue;
       const auth = item.auth;
-      if (auth != null && auth.officialQualities != null && auth.officialQualities.length > 0 && sourcePlayLoginActive(source)) {
+      if (
+        profile == null &&
+        auth != null &&
+        auth.officialQualities != null &&
+        auth.officialQualities.length > 0 &&
+        sourcePlayLoginActive(source)
+      ) {
         // v11：官方清单按登录账号会员档过滤（与 stores/source-registry
         // .sourceQualities 展示同口径）；账号档未知 = 全清单
         const tier = sourceVipTierOf(source);
@@ -773,6 +817,15 @@ export class MusicApi {
   private normalizeOfficialQuality(source: Source, wanted: string): string {
     const supported = this.supportedQualitiesOf(source);
     if (supported == null || supported.indexOf(wanted) >= 0) return wanted;
+    // v12：包侧下发的别名表优先（旧第三方档名 → 官方 level id），映射表随
+    // 包走、宿主不再内置平台知识；profile 没拉到（旧包缺入口）才用 v11 的
+    // 内置映射。映射不到 = 原样返回（与 PC 同款语义），交给钳位取最接近档。
+    const profile = cachedQualityProfileOf(source);
+    if (profile != null && profile.mode == PROFILE_MODE_OFFICIAL) {
+      const aliasV = profile.aliases.get(wanted);
+      if (aliasV != null && supported.indexOf(aliasV.toString()) >= 0) return aliasV.toString();
+      return wanted;
+    }
     let alias = "";
     if (wanted == "128") alias = "standard";
     else if (wanted == "320") alias = "exhigh";
@@ -1513,7 +1566,7 @@ export class MusicApi {
       // 形状不对（理论上不会）：按「无法识别」处理，同样不覆盖
       return null;
     } catch (_) {
-      // 引擎未就绪 / 老包无此入口 / 调用超时 → 静默回退本地实现。
+      // 静默：引擎未就绪 / 老包无此入口 / 调用超时 → 回退本地实现，
       // 解析失败绝不能让导入弹窗报错，这里绝不再往外抛。
     }
     return this.localParsePlaylistInput(text, fallback);
@@ -2005,7 +2058,9 @@ export class MusicApi {
           const response = await this.engineInvoke("lyric", this.lyricArgs(hit));
           tr = this.strOf(response.get("translation"));
         }
-      } catch (_) {}
+      } catch (_) {
+        // 静默：翻译歌词拿不到按无翻译缓存，已标记 asked 不再重试
+      }
       if (tr.length > 0) this.cacheSet(this.lyricCache, trKey, tr);
       this.lyricAsked.set(key, Date.now());
       return;
@@ -2264,7 +2319,9 @@ export class MusicApi {
       const keys = Object.keys(picks);
       for (let i = 0; i < keys.length; i++) obj[keys[i]] = picks[keys[i]];
       uni.setStorageSync(LYRIC_PICK_KEY, JSON.stringify(obj));
-    } catch (_) {}
+    } catch (_) {
+      // 静默：偏移挑选存不进去只丢持久化，内存值仍生效
+    }
   }
 
   /**
@@ -2434,13 +2491,17 @@ export function persistUserRoles(user: UTSJSONObject | null): void {
   if (roles != null) {
     try {
       uni.setStorageSync("qt-roles", JSON.stringify(roles));
-    } catch (_) {}
+    } catch (_) {
+      // 静默：roles 存不进去按未持久化处理，下次登录会重写
+    }
   }
   const permissions = user.get("permissions");
   if (permissions != null) {
     try {
       uni.setStorageSync("qt-permissions", JSON.stringify(permissions));
-    } catch (_) {}
+    } catch (_) {
+      // 静默：permissions 存不进去按未持久化处理，下次登录会重写
+    }
   }
 }
 
@@ -2456,7 +2517,9 @@ function cachedStringList(key: string): string[] {
       const v = arr[i];
       if (v != null) out.push(v.toString());
     }
-  } catch (_) {}
+  } catch (_) {
+    // 静默：存档解析失败按空数组返回（缺失/损坏视为无数据）
+  }
   return out;
 }
 

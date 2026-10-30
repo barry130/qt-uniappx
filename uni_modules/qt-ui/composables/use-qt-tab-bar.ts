@@ -14,7 +14,9 @@ export function useQtTabBarSync(forceHide?: Ref<boolean>): void {
     // 宽屏由 qt-side-nav 接管，同样不需要原生 tabBar。
     try {
       uni.hideTabBar({ animation: false, fail: (_: any) => {} });
-    } catch (_) {}
+    } catch (_) {
+      // 静默：原生 tabBar 隐藏失败由自绘导航接管，重启后再次尝试隐藏
+    }
   };
   watch(() => layout.isWide, apply, { immediate: true });
   if (forceHide != null) watch(forceHide, apply);

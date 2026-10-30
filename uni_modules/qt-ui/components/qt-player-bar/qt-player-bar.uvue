@@ -211,7 +211,8 @@ const artist = computed((): string => {
 });
 const cover = computed((): string => {
   const cur = player.current;
-  return cur != null ? cur.picUrl : "";
+  // 在播本地文件有内嵌封面就用它（coverOf 内部回落到 song.picUrl）
+  return cur != null ? player.coverOf(cur) : "";
 });
 const playing = computed((): boolean => player.playing);
 
@@ -352,7 +353,9 @@ function openPlayerPage(): void {
       const route = top.route;
       if (route != null && route == "pages/player/index") return;
     }
-  } catch (_) {}
+  } catch (_) {
+    // 静默：页面栈读不到时照常跳转播放页（守卫只为防重复进入）
+  }
   uni.navigateTo({ url: "/pages/player/index" });
 }
 
@@ -365,6 +368,13 @@ let trackLeft = 0;
 let trackWidth = 0;
 let dragging = false;
 let measureRetry = 0;
+/**
+ * 组件存活标记。进度条测量是「测量 → 失败 → 延时重测」的链式回调，
+ * 只清 timer 不足以拦住已经在途的 selector 回调（回调里可能再次排 timer）。
+ * 卸载后置 false，所有测量回调与重测排期都据此短路，
+ * 避免对已销毁的节点/已回收的 UTS 实例继续调用框架 API。
+ */
+let barAlive = false;
 
 /**
  * 实测到的轨道宽度（响应式，供滑块 px 定位用）。
@@ -374,19 +384,29 @@ let measureRetry = 0;
 const trackW = ref(0);
 
 function measureTrack(attempt: number): void {
+  if (!barAlive) {
+    return;
+  }
   const query = uni.createSelectorQuery();
   query
     .select(".pbar-track")
     .boundingClientRect((rect: UniNodeInfo) => {
+      if (!barAlive) {
+        return;
+      }
       if (rect != null && rect.width > 0) {
         trackLeft = rect.left;
         trackWidth = rect.width;
         trackW.value = rect.width;
-        measureRetry = 0;
+        if (measureRetry != 0) {
+          clearTimeout(measureRetry);
+          measureRetry = 0;
+        }
         return;
       }
       if (attempt < 3) {
         measureRetry = setTimeout(() => {
+          measureRetry = 0;
           measureTrack(attempt + 1);
         }, 120) as unknown as number;
       }
@@ -399,21 +419,36 @@ function measureTrack(attempt: number): void {
  * 底栏随「有没有当前歌曲」挂载/卸载，宽度也会跟着变（进度区是 flex:1）。
  */
 onMounted(() => {
+  barAlive = true;
   measureTrack(0);
 });
 onUnmounted(() => {
+  barAlive = false;
   // 布局变化触发的延迟测量若跨过销毁时点，会对已卸载节点空跑一次，显式清掉
   if (measureTimer != null) {
     clearTimeout(measureTimer);
     measureTimer = null;
+  }
+  // 链式重测的 timer 同样要清，否则卸载后仍会再触发一次 selector 查询
+  if (measureRetry != 0) {
+    clearTimeout(measureRetry);
+    measureRetry = 0;
   }
 });
 let measureTimer: number | null = null;
 watch(
   () => [layout.windowWidth, layout.windowHeight, player.current != null],
   () => {
+    if (!barAlive) {
+      return;
+    }
     trackW.value = 0;
+    if (measureTimer != null) {
+      clearTimeout(measureTimer);
+      measureTimer = null;
+    }
     measureTimer = setTimeout(() => {
+      measureTimer = null;
       measureTrack(0);
     }, 60) as unknown as number;
   }

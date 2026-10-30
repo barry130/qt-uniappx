@@ -2,55 +2,89 @@
   <qt-page-frame width-kind="flow" :max-width="720">
     <scroll-view class="auth-scroll" direction="vertical" :show-scrollbar="false">
       <view class="auth-content" :class="layout.isWide ? 'auth-content-wide' : ''">
-        <qt-card class="auth-card" title="使用登录态" description="开启后对应面的请求会带上已登录音源的官方 Cookie，关闭则一律匿名。数据面与播放面独立控制，凭据只保存在本机。" elevated>
-          <view class="scope-row" :style="rowBorderStyle" @click="toggleMeta">
-            <view class="scope-main">
-              <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">数据面使用登录态</text>
-              <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">搜索、歌单、歌词等数据接口</text>
-            </view>
-            <view class="toggle" :class="layout.isWide ? 'toggle-wide' : ''" :style="'background-color:' + (metaOn ? theme.skin.accent : theme.skin.surfaceInset) + ';opacity:' + (hasAccounts ? '1' : '0.4') + ';'">
-              <view class="toggle-knob" :class="metaKnobClass" :style="'background-color:' + (metaOn ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
-            </view>
-          </view>
-          <view class="scope-row scope-row-last" @click="togglePlay">
-            <view class="scope-main">
-              <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">播放面使用登录态</text>
-              <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">在线播放取链（更高音质/会员内容等）</text>
-            </view>
-            <view class="toggle" :class="layout.isWide ? 'toggle-wide' : ''" :style="'background-color:' + (playOn ? theme.skin.accent : theme.skin.surfaceInset) + ';opacity:' + (hasAccounts ? '1' : '0.4') + ';'">
-              <view class="toggle-knob" :class="playKnobClass" :style="'background-color:' + (playOn ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
-            </view>
-          </view>
-          <text class="card-hint" :class="layout.isWide ? 'card-hint-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">未登录任何音源时开关不生效；先在下方添加登录。</text>
-        </qt-card>
+        <!-- 页头：说明 + 全部折叠/展开（对齐 qt-pc 2026-10-27：每源一张卡、默认折叠） -->
+        <view class="page-head" :class="layout.isWide ? 'page-head-wide' : ''">
+          <text class="page-desc" :class="layout.isWide ? 'page-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 12)">每个音源一张卡片：登录、两面登录态开关与播放/下载音质全部按源独立。点标题行展开或收起，凭据只保存在本机。</text>
+          <text v-if="sourceCards.length > 0" class="head-toggle-all" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 12)" @click="toggleAllCards">{{ anyCardExpanded ? '全部折叠' : '全部展开' }}</text>
+        </view>
 
-        <qt-card class="auth-card" title="已登录账号" description="登录走各平台官方接口；凭据只保存在本机，卸载重装数据包或重启应用都不会丢。">
-          <view v-if="accountRows.length == 0" class="empty">
-            <text class="empty-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">还没有登录任何音源账号，可在下方「添加登录」里扫码或导入 Cookie。</text>
+        <view v-if="sourceCards.length == 0" class="empty auth-empty">
+          <text class="empty-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13)">{{ authEmptyText }}</text>
+        </view>
+
+        <qt-card
+          v-for="(row, idx) in sourceCards"
+          :key="'card-' + row.id"
+          class="src-card"
+          :class="idx == sourceCards.length - 1 ? 'src-card-last' : ''"
+          elevated
+        >
+          <!-- 标题行：chevron + 源名 + 状态标签，点它展开/收起 -->
+          <view class="src-head" @click="toggleCard(row.id)">
+            <qt-icon :name="isCardExpanded(row.id) ? 'chevron-down' : 'chevron-right'" :size="layout.isWide ? 16 : 26" :color="theme.skin.textMuted" />
+            <text class="src-name" :style="('color:' + theme.skin.text + ';') + qtFontDual(27, 15)">{{ row.name }}</text>
+            <text v-if="row.orphan" class="src-tag" :style="('color:' + theme.skin.danger + ';') + qtFontDual(21, 11)">{{ registry.ready ? '音源包已卸载' : '音源包未就绪' }}</text>
+            <text v-if="row.logged" class="src-tag" :style="('color:' + (row.stale ? theme.skin.danger : theme.skin.textMuted) + ';') + qtFontDual(21, 11)">{{ row.stale ? '凭据已过期' : '已登录' }}</text>
+            <text v-else class="src-tag" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 11)">未登录</text>
           </view>
-          <view v-for="row in accountRows" :key="'acc-' + row.source" class="acc-row" :class="row.last ? 'acc-row-last' : ''" :style="rowBorderStyle">
-            <view class="acc-main">
-              <view class="acc-name-line">
-                <text class="acc-source" :style="('color:' + theme.skin.text + ';') + qtFontDual(27, 15)">{{ row.name }}</text>
-                <text v-if="row.stale" class="acc-stale" :style="('color:' + theme.skin.danger + ';') + qtFontDual(22, 12)">Cookie 已失效，请重新登录</text>
+
+          <view v-if="isCardExpanded(row.id)" class="src-body">
+            <!-- 账号行：已登录给同步歌单+退出；未登录给包声明的登录方式 -->
+            <view v-if="row.logged" class="src-acc" :style="rowBorderStyle">
+              <text class="src-nick" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.nickname }}</text>
+              <qt-button class="acc-btn" label="同步歌单" variant="outline" size="sm" @click="openSync(row.id, row.name)" />
+              <qt-button class="acc-btn" label="退出" variant="ghost" size="sm" @click="logout(row.id, row.name)" />
+            </view>
+            <view v-else-if="row.qr || row.cookie || row.web" class="src-acc" :style="rowBorderStyle">
+              <qt-button v-if="row.qr" class="acc-btn" label="扫码登录" variant="secondary" size="sm" :disabled="qrBusy" @click="startQr(row.id, row.name)" />
+              <qt-button v-if="row.cookie" class="acc-btn" label="导入 Cookie" variant="outline" size="sm" @click="openCookieSheet(row.id, row.name)" />
+              <qt-button v-if="row.web" class="acc-btn" label="网页登录" variant="outline" size="sm" @click="openWebLogin(row.id, row.name)" />
+            </view>
+            <view v-else class="src-acc" :style="rowBorderStyle">
+              <text class="src-nick" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">该源当前数据包不支持账号登录</text>
+            </view>
+
+            <!-- 两面登录态开关（按源；未登录置灰） -->
+            <view class="scope-row" :style="rowBorderStyle" @click="toggleCardScope(row, 'meta')">
+              <view class="scope-main">
+                <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">数据请求使用登录态</text>
+                <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">搜索、歌单、歌词等数据接口；同步歌单也依赖此项</text>
               </view>
-              <text class="acc-nick" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.nickname }}</text>
+              <view class="toggle" :class="layout.isWide ? 'toggle-wide' : ''" :style="'background-color:' + (row.useMeta ? theme.skin.accent : theme.skin.surfaceInset) + ';opacity:' + (row.logged ? '1' : '0.4') + ';'">
+                <view class="toggle-knob" :class="knobClass(row.useMeta)" :style="'background-color:' + (row.useMeta ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
+              </view>
             </view>
-            <qt-button class="acc-btn" label="退出" variant="ghost" size="sm" @click="logout(row.source, row.name)" />
-          </view>
-        </qt-card>
+            <view class="scope-row" :style="rowBorderStyle" @click="toggleCardScope(row, 'play')">
+              <view class="scope-main">
+                <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">播放请求使用登录态</text>
+                <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">在线播放取链（更高音质/会员内容等）；与数据面互不影响</text>
+              </view>
+              <view class="toggle" :class="layout.isWide ? 'toggle-wide' : ''" :style="'background-color:' + (row.usePlay ? theme.skin.accent : theme.skin.surfaceInset) + ';opacity:' + (row.logged ? '1' : '0.4') + ';'">
+                <view class="toggle-knob" :class="knobClass(row.usePlay)" :style="'background-color:' + (row.usePlay ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
+              </view>
+            </view>
 
-        <qt-card class="auth-card auth-card-last" title="添加登录" description="扫码走各平台官方登录接口，二维码由数据包在本机生成；导入 Cookie 需从已登录的浏览器复制。">
-          <view v-if="authRows.length == 0" class="empty">
-            <text class="empty-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ authEmptyText }}</text>
-          </view>
-          <view v-for="row in authRows" :key="'src-' + row.id" class="src-row" :class="row.last ? 'src-row-last' : ''" :style="rowBorderStyle">
-            <view class="acc-main">
-              <text class="acc-source" :style="('color:' + theme.skin.text + ';') + qtFontDual(27, 15)">{{ row.name }}</text>
-              <text class="acc-nick" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.hint }}</text>
+            <!-- 音质行（orphan 残留卡没有档位清单，不渲染） -->
+            <view v-if="!row.orphan" class="scope-row" :style="rowBorderStyle" @click="showQualitySheet(row.id, row.name, 'play')">
+              <view class="scope-main">
+                <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">播放音质</text>
+                <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">播放该源歌曲时的取址音质；播放页音质菜单会同步改这里</text>
+              </view>
+              <text class="scope-value" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.playQualityLabel }}</text>
             </view>
-            <qt-button v-if="row.qr" class="acc-btn" label="扫码登录" variant="secondary" size="sm" :disabled="qrBusy" @click="startQr(row.id, row.name)" />
-            <qt-button v-if="row.cookie" class="acc-btn" label="导入 Cookie" variant="outline" size="sm" @click="openCookieSheet(row.id, row.name)" />
+            <view v-if="!row.orphan" class="scope-row scope-row-last" @click="showQualitySheet(row.id, row.name, 'download')">
+              <view class="scope-main">
+                <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">下载音质</text>
+                <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">下载该源歌曲时的目标音质</text>
+              </view>
+              <text class="scope-value" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.downloadQualityLabel }}</text>
+            </view>
+            <view v-else class="scope-row scope-row-last">
+              <view class="scope-main">
+                <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">音源包已卸载</text>
+                <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">安装该源的音源包后恢复音质档位设置</text>
+              </view>
+            </view>
           </view>
         </qt-card>
       </view>
@@ -93,20 +127,84 @@
         </view>
       </view>
     </view>
+    <!-- 同步歌单弹层（v18）：勾选 = 收藏到本地「我的歌单」，取消勾选已收藏的 = 从本地移除，只改本地不碰平台侧 -->
+    <view v-if="syncVisible" class="sheet-mask" @click="closeSyncSheet">
+      <view class="sheet-card" :class="layout.isWide ? 'sheet-card-wide' : ''" :style="layout.isWide ? sheetCardStyleWide : sheetCardStyle" @click.stop>
+        <text class="sheet-title" :class="layout.isWide ? 'sheet-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(30, 17)">{{ syncName }} · 同步歌单</text>
+        <text class="sheet-desc" :class="layout.isWide ? 'sheet-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">拉取平台侧全部歌单并勾选想要的；取消勾选已收藏的会把它从本地移除，不影响平台侧。</text>
+        <text v-if="syncLoading" class="sheet-desc" :class="layout.isWide ? 'sheet-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">正在获取平台侧歌单…</text>
+        <view v-else-if="syncNeedMetaLogin" class="sync-gate" :class="layout.isWide ? 'sync-gate-wide' : ''" :style="gateBorderStyle">
+          <text class="sync-gate-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">该账户已登录，但「数据请求使用登录态」是关闭的——读取平台侧歌单需要它把凭据交给数据请求。</text>
+          <qt-button class="sync-gate-btn" :label="syncEnabling ? '开启中…' : '开启并重试'" variant="secondary" size="sm" :disabled="syncEnabling" @click="enableMetaAndRetry" />
+        </view>
+        <text v-else-if="syncError.length > 0" class="sheet-error" :class="layout.isWide ? 'sheet-error-wide' : ''" :style="('color:' + theme.skin.danger + ';') + qtFontDual(22, 12)">{{ syncError }}</text>
+        <view v-else-if="syncRows.length == 0" class="sync-empty">
+          <text class="empty-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13)">平台侧没有歌单，或该账号还没建过 / 收藏过歌单。</text>
+        </view>
+        <view v-else class="sync-body">
+          <view class="sync-head" @click="toggleSyncAll">
+            <qt-checkbox :checked="syncAllChecked" size="sm" @change="onSyncAllCheck" />
+            <text class="sync-head-text" :style="('color:' + theme.skin.text + ';') + qtFontDual(24, 13)">全选 · 平台侧 {{ syncRows.length }} 个，已收藏 {{ syncFavoritedCount }} 个</text>
+          </view>
+          <scroll-view class="sync-list" :class="layout.isWide ? 'sync-list-wide' : ''" :show-scrollbar="false">
+            <view v-for="(row, i) in syncRows" :key="'sync-' + row.playlist.id" class="sync-row" :style="rowBorderStyle" @click="toggleSyncOne(i)">
+              <qt-checkbox :checked="syncChecked[i]" size="sm" @change="onSyncCheck(i, $event)" />
+              <image v-if="row.playlist.picUrl.length > 0" class="sync-pic" :class="layout.isWide ? 'sync-pic-wide' : ''" :src="row.playlist.picUrl" mode="aspectFill" />
+              <view v-else class="sync-pic" :class="layout.isWide ? 'sync-pic-wide' : ''" :style="'background-color:' + theme.skin.border + ';'">
+                <text class="sync-pic-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(20, 11)">歌单</text>
+              </view>
+              <text class="sync-name" :style="('color:' + theme.skin.text + ';') + qtFontDual(24, 13)">{{ row.playlist.name }}</text>
+              <text v-if="row.favorited" class="sync-faved" :style="('color:' + theme.skin.accent + ';') + qtFontDual(20, 11)">已收藏</text>
+            </view>
+          </scroll-view>
+        </view>
+        <view class="sheet-btn-row" :class="layout.isWide ? 'sheet-btn-row-wide' : ''">
+          <qt-button class="sheet-btn" label="取消" variant="ghost" size="sm" :disabled="syncBusy" @click="closeSyncSheet" />
+          <qt-button
+            v-if="!syncLoading && !syncNeedMetaLogin && syncError.length == 0 && syncRows.length > 0"
+            class="sheet-btn"
+            :label="syncBusy ? '同步中…' : '应用更改（' + syncChangeCount + '）'"
+            variant="secondary"
+            size="sm"
+            :disabled="syncBusy || syncChangeCount == 0"
+            @click="applySync"
+          />
+        </view>
+      </view>
+    </view>
+    <!-- 按源音质下拉（v12）：选项 = 该源生效档位清单 -->
+    <qt-action-sheet
+      v-model:visible="qualitySheetVisible"
+      :title="qualitySheetTitle"
+      :actions="qualitySheetActions"
+      @select="onQualitySheetSelect"
+    />
   </qt-page-frame>
 </template>
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { onShow, onUnload } from "@dcloudio/uni-app";
+import { onLoad, onShow, onUnload } from "@dcloudio/uni-app";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtCard from "@/uni_modules/qt-ui/components/qt-card/qt-card.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import QtCheckbox from "@/uni_modules/qt-ui/components/qt-checkbox/qt-checkbox.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtShowToast } from "@/services/toast";
 import { qtConfirm } from "@/services/confirm";
 import { useSourceRegistryStore } from "@/stores/source-registry";
+import { usePlayerStore } from "@/stores/player";
+import { useDownloadsStore } from "@/stores/downloads";
+import {
+  sourcePlayQualityOf,
+  sourceDownloadQualityOf,
+  setSourcePlayQuality,
+  setSourceDownloadQuality,
+} from "@/services/source-quality";
 import {
   authQrCreate,
   authQrPoll,
@@ -115,9 +213,21 @@ import {
   saveSourceAuthAccount,
   removeSourceAuthAccount,
   readSourceAuthEntries,
-  readSourceAuthToggles,
+  readSourceAuthTogglesFor,
   setSourceAuthToggle,
+  mergeCredentialExtras,
+  type SourceAuthEntry,
+  type SourceAccountPlaylist,
 } from "@/services/source-auth";
+import {
+  accountSyncPreview,
+  collectAccountPlaylists,
+  uncollectAccountPlaylists,
+  autoSyncMissingAfterLogin,
+  type AccountSyncRow,
+} from "@/services/source-playlist-sync";
+import { isHarmonyOs } from "@/services/app-native";
+import { WEB_LOGIN_DONE_EVENT } from "@/services/source-web-login";
 
 /**
  * 音源账号登录页（v9 数据包契约）：账号列表 + 数据/播放两面登录态开关 +
@@ -132,71 +242,130 @@ const layout = useQtLayout();
 const registry = useSourceRegistryStore();
 
 const refreshTick = ref(0);
-const useMeta = ref(false);
-const usePlay = ref(false);
 /** 校验中判失效的源 id（authCheckUser 返回 null 时加入；重新登录后移除） */
 const staleIds = ref<string[]>([]);
 /** 进页只做一次凭据有效性校验（网络请求，不跟随 onShow 反复打） */
 let didValidate = false;
 
-// ── 已登录账号 ──
-type AccountRow = { source: string; name: string; nickname: string; stale: boolean; last: boolean };
-const accountRows = computed((): AccountRow[] => {
+const player = usePlayerStore();
+const downloads = useDownloadsStore();
+
+/**
+ * 每源一张卡片（对齐 qt-pc 2026-10-25/10-27 版式）：登录、两面登录态开关与
+ * 播放/下载音质全部按源独立；卡片默认折叠，点标题行展开，右上角一键全折/全展。
+ * 卡片清单 = 注册表全部源（无 auth 的源如 migu 也有卡，只是没有登录行）；
+ * 库里还存着凭据但注册表已没有的源补一张「残留卡」（音源包已卸载，只展示
+ * 账号与退出——否则用户只看到一个内部 id 不知道是什么）。
+ */
+type SourceCardRow = {
+  id: string;
+  name: string;
+  orphan: boolean;
+  logged: boolean;
+  stale: boolean;
+  nickname: string;
+  qr: boolean;
+  cookie: boolean;
+  web: boolean;
+  useMeta: boolean;
+  usePlay: boolean;
+  playQualityLabel: string;
+  downloadQualityLabel: string;
+};
+function findEntry(entries: SourceAuthEntry[], source: string): SourceAuthEntry | null {
+  for (let i = 0; i < entries.length; i++) {
+    if (entries[i].source == source) return entries[i];
+  }
+  return null;
+}
+/** 音质档位展示名：优先该源生效清单（官方/包声明）里的名字，找不到用裸值 */
+function qualityLabelOf(id: string, quality: string): string {
+  if (quality.length == 0) return quality;
+  const list = registry.sourceQualities(id);
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].id == quality) return list[i].name;
+  }
+  return quality;
+}
+const sourceCards = computed((): SourceCardRow[] => {
   void refreshTick.value;
   const entries = readSourceAuthEntries();
-  const out: AccountRow[] = [];
-  for (let i = 0; i < entries.length; i++) {
-    const e = entries[i];
-    out.push({
-      source: e.source,
-      name: registry.label(e.source),
-      nickname: e.account.user.nickname,
-      stale: staleIds.value.indexOf(e.source) >= 0,
-      last: i == entries.length - 1,
-    });
-  }
-  return out;
-});
-const hasAccounts = computed((): boolean => {
-  void refreshTick.value;
-  return readSourceAuthEntries().length > 0;
-});
-
-// ── 可登录音源（数据包 auth 能力自述；旧包没有时为空并提示升级）──
-type AuthRow = { id: string; name: string; hint: string; qr: boolean; cookie: boolean; last: boolean };
-const authRows = computed((): AuthRow[] => {
-  void refreshTick.value;
-  const out: AuthRow[] = [];
+  const out: SourceCardRow[] = [];
   const sources = registry.sources;
   for (let i = 0; i < sources.length; i++) {
-    const auth = sources[i].auth;
-    if (auth == null) continue;
-    const qr = auth.methods.indexOf("qrcode") >= 0;
-    const cookie = auth.methods.indexOf("cookie") >= 0;
+    const s = sources[i];
+    const entry = findEntry(entries, s.id);
+    const tg = readSourceAuthTogglesFor(s.id);
+    const auth = s.auth;
     out.push({
-      id: sources[i].id,
-      name: sources[i].name,
-      hint: qr && cookie ? "支持扫码登录与导入 Cookie" : qr ? "支持扫码登录" : "支持导入 Cookie",
-      qr: qr,
-      cookie: cookie,
-      last: false,
+      id: s.id,
+      name: s.name,
+      orphan: false,
+      logged: entry != null,
+      stale: staleIds.value.indexOf(s.id) >= 0,
+      nickname: entry != null ? entry.account.user.nickname : "",
+      qr: auth != null && auth.methods.indexOf("qrcode") >= 0,
+      cookie: auth != null && auth.methods.indexOf("cookie") >= 0,
+      web: auth != null && auth.webLogin != null && !isHarmonyOs(),
+      useMeta: entry != null && tg.useMeta,
+      usePlay: entry != null && tg.usePlay,
+      playQualityLabel: qualityLabelOf(s.id, sourcePlayQualityOf(s.id, player.quality)),
+      downloadQualityLabel: qualityLabelOf(s.id, sourceDownloadQualityOf(s.id, downloads.downloadQuality)),
     });
   }
-  if (out.length > 0) out[out.length - 1].last = true;
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (registry.has(e.source)) continue;
+    const tg = readSourceAuthTogglesFor(e.source);
+    out.push({
+      id: e.source,
+      name: e.source,
+      orphan: true,
+      logged: true,
+      stale: staleIds.value.indexOf(e.source) >= 0,
+      nickname: e.account.user.nickname,
+      qr: false,
+      cookie: false,
+      web: false,
+      useMeta: tg.useMeta,
+      usePlay: tg.usePlay,
+      playQualityLabel: "",
+      downloadQualityLabel: "",
+    });
+  }
   return out;
 });
 const authEmptyText = computed((): string => {
   void refreshTick.value;
   if (!registry.ready) return "注册表尚未就绪：请稍候或到「设置 → 音源包管理」确认已安装数据包。";
-  return "当前数据包没有支持账号登录的音源（需要 2026.10.24 及以上的数据包）。";
+  return "当前数据包没有可用音源，安装数据包后这里会出现各音源的卡片。";
 });
 
-// ── 两面开关（乐观更新 + 失败还原，语义对齐 qt-pc 设置页）──
-// 生效态收进 computed（模板里的 && 不做空值短路，布尔组合放脚本里更稳）
-const metaOn = computed((): boolean => hasAccounts.value && useMeta.value);
-const playOn = computed((): boolean => hasAccounts.value && usePlay.value);
-const metaKnobClass = computed((): string => knobClass(metaOn.value));
-const playKnobClass = computed((): string => knobClass(playOn.value));
+// ── 卡片展开/收起（内存态：重进页面回到默认全折叠，PC 同款）──
+const expandedIds = ref<string[]>([]);
+function isCardExpanded(id: string): boolean {
+  return expandedIds.value.indexOf(id) >= 0;
+}
+function toggleCard(id: string): void {
+  const next = expandedIds.value.slice(0);
+  const idx = next.indexOf(id);
+  if (idx >= 0) next.splice(idx, 1);
+  else next.push(id);
+  expandedIds.value = next;
+}
+const anyCardExpanded = computed((): boolean => expandedIds.value.length > 0);
+function toggleAllCards(): void {
+  if (anyCardExpanded.value) {
+    expandedIds.value = [];
+    return;
+  }
+  const all: string[] = [];
+  const cards = sourceCards.value;
+  for (let i = 0; i < cards.length; i++) all.push(cards[i].id);
+  expandedIds.value = all;
+}
+
+// ── 按源两面登录态开关 ──
 function knobClass(on: boolean): string {
   const wide = layout.isWide;
   if (on && wide) return "toggle-knob-on toggle-knob-on-wide toggle-knob-wide";
@@ -204,28 +373,69 @@ function knobClass(on: boolean): string {
   if (wide) return "toggle-knob-wide";
   return "";
 }
-function toggleMeta(): void {
-  void toggleScope("meta", !useMeta.value);
-}
-function togglePlay(): void {
-  void toggleScope("play", !usePlay.value);
-}
-async function toggleScope(scope: "meta" | "play", next: boolean): Promise<void> {
-  if (!hasAccounts.value) {
-    qtShowToast({ title: "请先在下方添加一个音源登录", icon: "none" });
+function toggleCardScope(row: SourceCardRow, scope: "meta" | "play"): void {
+  if (!row.logged) {
+    qtShowToast({ title: "先登录该音源，再开关登录态", icon: "none" });
     return;
   }
-  if (scope == "meta") useMeta.value = next;
-  else usePlay.value = next;
-  try {
-    await setSourceAuthToggle(scope, next);
-  } catch (e) {
-    // 还原 UI：存储虽已写入，但引擎没吃进去（未就绪/旧包），装载成功钩子
-    // 之后会按存储重放；UI 先回到与引擎一致的状态，避免「看着开了实际没开」
-    if (scope == "meta") useMeta.value = !next;
-    else usePlay.value = !next;
-    qtShowToast({ title: "应用失败：" + errText(e), icon: "none" });
+  const on = scope == "meta" ? !row.useMeta : !row.usePlay;
+  setSourceAuthToggle(row.id, scope, on)
+    .then(() => {
+      refreshFromStorage();
+    })
+    .catch((e) => {
+      qtShowToast({ title: "开关失败：" + errText(e), icon: "none" });
+    });
+}
+
+// ── 按源音质（v12）：下拉弹层，选项 = 该源生效档位清单（官方/包声明）──
+const qualitySheetVisible = ref(false);
+const qualitySheetTitle = ref("");
+const qualitySheetActions = ref<SheetAction[]>([]);
+const qualitySheetIds = ref<string[]>([]);
+const qualitySheetSource = ref("");
+const qualitySheetKind = ref("play");
+function showQualitySheet(id: string, name: string, kind: string): void {
+  const isPlay = kind == "play";
+  const current = isPlay ? sourcePlayQualityOf(id, player.quality) : sourceDownloadQualityOf(id, downloads.downloadQuality);
+  const list = registry.sourceQualities(id);
+  const actions: SheetAction[] = [];
+  const ids: string[] = [];
+  let found = false;
+  for (let i = 0; i < list.length; i++) {
+    const isCurrent = list[i].id == current;
+    if (isCurrent) found = true;
+    actions.push({ name: list[i].name + (isCurrent ? "（当前）" : ""), color: isCurrent ? theme.skin.accent : "" });
+    ids.push(list[i].id);
   }
+  // 落库值不在该源档位清单里（换包/换清单）时保留展示，避免下拉与实际不符（PC 同款）
+  if (!found && current.length > 0) {
+    actions.unshift({ name: qualityLabelOf(id, current) + "（当前）", color: theme.skin.accent });
+    ids.unshift(current);
+  }
+  if (actions.length == 0) {
+    qtShowToast({ title: "该源没有可用音质档位，请先安装/更新音源包", icon: "none" });
+    return;
+  }
+  qualitySheetTitle.value = name + " · " + (isPlay ? "播放音质" : "下载音质");
+  qualitySheetActions.value = actions;
+  qualitySheetIds.value = ids;
+  qualitySheetSource.value = id;
+  qualitySheetKind.value = kind;
+  qualitySheetVisible.value = true;
+}
+function onQualitySheetSelect(_action: SheetAction, index: number): void {
+  const ids = qualitySheetIds.value;
+  const source = qualitySheetSource.value;
+  if (source.length == 0 || index < 0 || index >= ids.length) return;
+  const q = ids[index];
+  const isPlay = qualitySheetKind.value == "play";
+  const ok = isPlay ? setSourcePlayQuality(source, q) : setSourceDownloadQuality(source, q);
+  if (!ok) {
+    qtShowToast({ title: "非法的音质设置", icon: "none" });
+    return;
+  }
+  refreshTick.value++;
 }
 
 // ── 扫码登录 ──
@@ -302,12 +512,21 @@ function pollOnce(): void {
           return;
         }
         const nickname = user.nickname;
-        saveSourceAuthAccount(source, r.cookie, user)
+        // confirmed 时随 credential 下发的副键（bili refresh_token）并入 extras 落库
+        let extrasJson = "";
+        if (r.refreshToken.length > 0) {
+          const extras = new UTSJSONObject();
+          extras.set("refresh_token", r.refreshToken);
+          extrasJson = JSON.stringify(extras);
+        }
+        saveSourceAuthAccount(source, r.cookie, user, extrasJson)
           .then(() => {
             closeQrSheet();
             removeFromStale(source);
             refreshFromStorage();
             qtShowToast({ title: "已登录：" + nickname, icon: "none" });
+            // 登录顺手看一眼平台侧歌单：有本地没有的就提示同步（qrName 不随弹层关闭清空）
+            maybeAutoSync(source, qrName.value);
           })
           .catch((e) => {
             qtShowToast({ title: "保存登录失败：" + errText(e), icon: "none" });
@@ -378,11 +597,13 @@ function submitCookie(): void {
         return;
       }
       const nickname = user.nickname;
-      return saveSourceAuthAccount(source, text, user).then(() => {
+      return saveSourceAuthAccount(source, text, user, "").then(() => {
         closeCookieSheet();
         removeFromStale(source);
         refreshFromStorage();
         qtShowToast({ title: "已导入登录：" + nickname, icon: "none" });
+        // 与扫码登录同款：导入成功后自动提示同步平台侧歌单
+        maybeAutoSync(source, cookieName.value);
       });
     })
     .catch((e) => {
@@ -409,11 +630,205 @@ function logout(source: string, name: string): void {
   });
 }
 
+// ── 同步歌单（v18：平台侧清单 vs 本地「我的歌单」对账）──
+const syncVisible = ref(false);
+const syncLoading = ref(false);
+const syncEnabling = ref(false);
+const syncBusy = ref(false);
+const syncNeedMetaLogin = ref(false);
+const syncError = ref("");
+const syncSource = ref("");
+const syncName = ref("");
+const syncRows = ref<AccountSyncRow[]>([]);
+/** 勾选态，与 syncRows 同序：true = 希望它出现在本地「我的歌单」里 */
+const syncChecked = ref<boolean[]>([]);
+/** 预览请求序号：一键开启重试 / 关闭弹层时丢弃在途应答 */
+let syncLoadSeq = 0;
+
+const syncFavoritedCount = computed((): number => {
+  const rows = syncRows.value;
+  let n = 0;
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].favorited) n += 1;
+  }
+  return n;
+});
+/** 待执行变更数：勾且未收藏（待收藏）+ 未勾且已收藏（待移除） */
+const syncChangeCount = computed((): number => {
+  const rows = syncRows.value;
+  const checked = syncChecked.value;
+  let n = 0;
+  for (let i = 0; i < rows.length && i < checked.length; i++) {
+    if (checked[i] != rows[i].favorited) n += 1;
+  }
+  return n;
+});
+const syncAllChecked = computed((): boolean => {
+  const checked = syncChecked.value;
+  if (checked.length == 0) return false;
+  for (let i = 0; i < checked.length; i++) {
+    if (!checked[i]) return false;
+  }
+  return true;
+});
+
+/** 打开即预览（账号行按钮 / 登录后自动提示都走这里） */
+function openSync(source: string, name: string): void {
+  syncSource.value = source;
+  syncName.value = name;
+  syncVisible.value = true;
+  loadSync();
+}
+function loadSync(): void {
+  const seq = ++syncLoadSeq;
+  syncLoading.value = true;
+  syncError.value = "";
+  syncNeedMetaLogin.value = false;
+  syncRows.value = [];
+  syncChecked.value = [];
+  accountSyncPreview(syncSource.value)
+    .then((p) => {
+      if (seq != syncLoadSeq) return; // 已重发或已关闭，丢弃过期应答
+      syncLoading.value = false;
+      if (p.needMetaLogin) {
+        syncNeedMetaLogin.value = true;
+        return;
+      }
+      if (!p.ok) {
+        syncError.value = p.message.length > 0 ? p.message : "获取平台侧歌单失败，请稍后重试";
+        return;
+      }
+      syncRows.value = p.rows;
+      // 默认全勾（PC 同款）：勾选 = 希望它在本地，已有的自然不变
+      const checked: boolean[] = [];
+      for (let i = 0; i < p.rows.length; i++) checked.push(true);
+      syncChecked.value = checked;
+    })
+    .catch((e) => {
+      if (seq != syncLoadSeq) return;
+      syncLoading.value = false;
+      syncError.value = errText(e);
+    });
+}
+function closeSyncSheet(): void {
+  if (syncBusy.value) return;
+  syncVisible.value = false;
+  syncLoadSeq++; // 在途预览应答自然作废
+  syncRows.value = [];
+  syncChecked.value = [];
+  syncError.value = "";
+  syncNeedMetaLogin.value = false;
+}
+/** needMetaLogin 面板的一键开启：开「数据请求使用登录态」后重试预览 */
+function enableMetaAndRetry(): void {
+  if (syncEnabling.value) return;
+  syncEnabling.value = true;
+  setSourceAuthToggle(syncSource.value, "meta", true)
+    .then(() => {
+      syncEnabling.value = false;
+      refreshFromStorage();
+      loadSync();
+    })
+    .catch((e) => {
+      syncEnabling.value = false;
+      qtShowToast({ title: "开启失败：" + errText(e), icon: "none" });
+    });
+}
+function setSyncCheckedAt(i: number, value: boolean): void {
+  const next = syncChecked.value.slice(0);
+  next[i] = value;
+  syncChecked.value = next;
+}
+/** 整行点击翻转勾选（勾选框本体被 qt-checkbox 内部 @click.stop，不会双触发） */
+function toggleSyncOne(i: number): void {
+  const checked = syncChecked.value;
+  if (i < 0 || i >= checked.length) return;
+  setSyncCheckedAt(i, !checked[i]);
+}
+/** 勾选框自身的 change（$event 是它翻转后的目标态） */
+function onSyncCheck(i: number, value: boolean): void {
+  if (i < 0 || i >= syncChecked.value.length) return;
+  setSyncCheckedAt(i, value);
+}
+function toggleSyncAll(): void {
+  const nextAll = !syncAllChecked.value;
+  const next: boolean[] = [];
+  const rows = syncRows.value;
+  for (let i = 0; i < rows.length; i++) next.push(nextAll);
+  syncChecked.value = next;
+}
+function onSyncAllCheck(value: boolean): void {
+  const next: boolean[] = [];
+  const rows = syncRows.value;
+  for (let i = 0; i < rows.length; i++) next.push(value);
+  syncChecked.value = next;
+}
+/** 应用更改：待收藏 / 待移除两批顺序执行，toast 汇总（部分成功是正常结果） */
+function applySync(): void {
+  if (syncBusy.value) return;
+  const rows = syncRows.value;
+  const checked = syncChecked.value;
+  const toCollect: SourceAccountPlaylist[] = [];
+  const toRemove: SourceAccountPlaylist[] = [];
+  for (let i = 0; i < rows.length && i < checked.length; i++) {
+    if (checked[i] && !rows[i].favorited) toCollect.push(rows[i].playlist);
+    if (!checked[i] && rows[i].favorited) toRemove.push(rows[i].playlist);
+  }
+  if (toCollect.length == 0 && toRemove.length == 0) return;
+  const source = syncSource.value;
+  syncBusy.value = true;
+  const parts: string[] = [];
+  let failed = 0;
+  collectAccountPlaylists(source, toCollect)
+    .then((r) => {
+      failed += r.failed;
+      if (r.changed > 0) parts.push("已收藏 " + r.changed + " 个");
+      return uncollectAccountPlaylists(source, toRemove);
+    })
+    .then((r) => {
+      failed += r.failed;
+      if (r.changed > 0) parts.push("已取消收藏 " + r.changed + " 个");
+      syncBusy.value = false;
+      const summary = parts.length > 0 ? parts.join("，") + "歌单" : "没有变化";
+      if (failed > 0) qtShowToast({ title: summary + "，" + failed + " 个失败可稍后重试", icon: "none" });
+      else qtShowToast({ title: summary, icon: "none" });
+      closeSyncSheet();
+    })
+    .catch((e) => {
+      syncBusy.value = false;
+      qtShowToast({ title: "同步失败：" + errText(e), icon: "none" });
+    });
+}
+/** 登录成功后的自动同步：平台侧有本地没有的歌单 → 直接打开同步弹层。
+ *  预览失败一律静默（自动动作不干扰登录反馈），可从账号行手动重试。 */
+function maybeAutoSync(source: string, name: string): void {
+  autoSyncMissingAfterLogin(source)
+    .then((missing) => {
+      if (missing.length > 0) openSync(source, name);
+    })
+    .catch((_) => {
+      // 静默：登录反馈优先
+    });
+}
+
+// ── 网页登录（v17 契约，Android 先行；鸿蒙原生 Cookie 通道未接，不显示入口）──
+function openWebLogin(source: string, name: string): void {
+  void name;
+  uni.navigateTo({ url: "/pages/web-login/index?source=" + source });
+}
+/** web-login 页登录落库后的回调：触发「登录即自动同步」（与扫码/Cookie 导入同款） */
+function onWebLoginDone(payload: any): void {
+  const source = payload as string;
+  if (source == null || source.length == 0) return;
+  refreshFromStorage();
+  removeFromStale(source);
+  maybeAutoSync(source, registry.label(source));
+}
+
 // ── 对账与校验 ──
 function refreshFromStorage(): void {
-  const toggles = readSourceAuthToggles();
-  useMeta.value = toggles.useMeta;
-  usePlay.value = toggles.usePlay;
+  // v12 起没有全局开关：卡片里的开关/音质都在 sourceCards computed 里按源读取，
+  // 这里只需 bump 重算信号
   refreshTick.value++;
 }
 function removeFromStale(source: string): void {
@@ -424,14 +839,24 @@ function removeFromStale(source: string): void {
     staleIds.value = next;
   }
 }
-/** 进页一次性校验已存凭据：失效的标红提示重登（不自动清除，用户可能只是断网） */
+/** 进页一次性校验已存凭据：失效的标红提示重登（不自动清除，用户可能只是断网）；
+ * 包侧轮换出新 cookie（QQ 短期 musickey 保活）时顺手落库——账号页是移动端
+ * 最常见的校验窗口，这里补一刀等价于手动触发一轮后台保活。 */
 function validateAccounts(): void {
   const entries = readSourceAuthEntries();
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i];
-    authCheckUser(e.source, e.account.cookie)
-      .then((user) => {
-        if (user != null) return;
+    authCheckUser(e.source, e.account.cookie, e.account.extrasJson)
+      .then((r) => {
+        // 包侧轮换出新凭据：连同副键合并落库（引擎内存副本随保存同步注入）
+        if (r.ok && r.credential.length > 0) {
+          const user = r.user != null ? r.user : e.account.user;
+          const extrasJson = mergeCredentialExtras(e.account.extrasJson, r.refreshToken);
+          return saveSourceAuthAccount(e.source, r.credential, user, extrasJson).then(() => {
+            refreshTick.value++;
+          });
+        }
+        if (r.ok && r.user != null) return;
         if (staleIds.value.indexOf(e.source) < 0) {
           const next = staleIds.value.slice(0);
           next.push(e.source);
@@ -458,12 +883,17 @@ onShow(() => {
     validateAccounts();
   }
 });
+onLoad(() => {
+  uni.$on(WEB_LOGIN_DONE_EVENT, onWebLoginDone);
+});
 onUnload(() => {
   stopPolling();
+  uni.$off(WEB_LOGIN_DONE_EVENT, onWebLoginDone);
 });
 
 // ── 样式常量（对齐音源包管理页的弹层口径）──
 const rowBorderStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
+const gateBorderStyle = computed<string>(() => "border-color:" + theme.skin.divider + ";");
 const sheetCardStyle = computed<string>(() => "background-color:" + theme.skin.surfaceStrong + ";border-radius:24rpx;");
 const sheetCardStyleWide = computed<string>(() => "background-color:" + theme.skin.surfaceStrong + ";border-radius:14px;");
 const cookieInputStyle = computed<string>(() => "background-color:" + theme.skin.surfaceInset + ";color:" + theme.skin.text + ";border-radius:14rpx;");
@@ -481,19 +911,71 @@ const cookieInputStyleWide = computed<string>(() => "background-color:" + theme.
 .auth-content-wide {
   padding: 18px 24px 72px;
 }
-/* qt-card 自身不带外边距，这里给卡片间加间距（音源包管理页同款） */
-.auth-card {
-  margin-bottom: 24rpx;
+/* 页头说明 + 全部折叠/展开 */
+.page-head {
+  margin-bottom: 20rpx;
+  flex-direction: row;
+  align-items: flex-start;
 }
-.auth-card-last {
+.page-head-wide {
+  margin-bottom: 12px;
+}
+.page-desc {
+  flex: 1;
+  line-height: 1.5;
+  margin-right: 16rpx;
+}
+.page-desc-wide {
+  margin-right: 12px;
+}
+.head-toggle-all {
+  font-size: 23rpx;
+  padding: 4rpx 10rpx;
+}
+/* 每源卡片（qt-card 不带外边距，这里补卡片间距） */
+.src-card {
+  margin-bottom: 20rpx;
+}
+.src-card-last {
   margin-bottom: 0;
 }
-.card-hint {
-  margin-top: 14rpx;
-  line-height: 1.5;
+.src-head {
+  flex-direction: row;
+  align-items: center;
+  padding: 4rpx 0 18rpx;
 }
-.card-hint-wide {
-  margin-top: 8px;
+.src-name {
+  margin-left: 12rpx;
+  margin-right: 14rpx;
+  font-weight: 600;
+}
+.src-tag {
+  font-size: 21rpx;
+  margin-left: 12rpx;
+}
+.src-body {
+  padding-top: 2rpx;
+}
+.src-acc {
+  flex-direction: row;
+  align-items: center;
+  padding-bottom: 12rpx;
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+}
+.src-nick {
+  flex: 1;
+  font-size: 23rpx;
+}
+.acc-btn {
+  margin-left: 16rpx;
+}
+.scope-value {
+  font-size: 23rpx;
+  margin-left: 16rpx;
+}
+.auth-empty {
+  padding: 16rpx 0;
 }
 
 .scope-row {
@@ -556,51 +1038,6 @@ const cookieInputStyleWide = computed<string>(() => "background-color:" + theme.
 }
 .empty-text {
   line-height: 1.6;
-}
-
-.acc-row {
-  flex-direction: row;
-  align-items: center;
-  padding: 18rpx 0;
-  border-bottom-width: 1px;
-  border-bottom-style: solid;
-}
-.acc-row-last {
-  border-bottom-width: 0;
-}
-.acc-main {
-  flex-direction: column;
-  flex: 1;
-}
-.acc-name-line {
-  flex-direction: row;
-  align-items: center;
-}
-.acc-source {
-  font-size: 27rpx;
-  font-weight: 600;
-}
-.acc-stale {
-  margin-left: 14rpx;
-  font-size: 22rpx;
-}
-.acc-nick {
-  margin-top: 4rpx;
-  font-size: 23rpx;
-}
-.acc-btn {
-  margin-left: 16rpx;
-}
-
-.src-row {
-  flex-direction: row;
-  align-items: center;
-  padding: 18rpx 0;
-  border-bottom-width: 1px;
-  border-bottom-style: solid;
-}
-.src-row-last {
-  border-bottom-width: 0;
 }
 
 /* 弹层（音源包管理页「从链接安装」同款口径） */
@@ -695,5 +1132,81 @@ const cookieInputStyleWide = computed<string>(() => "background-color:" + theme.
 }
 .sheet-btn {
   margin-left: 16rpx;
+}
+
+/* 同步歌单弹层：needMetaLogin 提示面板 / 全选行 + 滚动清单 */
+.sync-gate {
+  margin-top: 22rpx;
+  padding: 20rpx;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 14rpx;
+}
+.sync-gate-wide {
+  margin-top: 12px;
+  padding: 10px;
+  border-radius: 8px;
+}
+.sync-gate-text {
+  line-height: 1.5;
+}
+.sync-gate-btn {
+  margin-top: 16rpx;
+  align-self: flex-start;
+}
+.sync-empty {
+  padding: 20rpx 0 8rpx;
+}
+.sync-body {
+  margin-top: 20rpx;
+}
+.sync-head {
+  flex-direction: row;
+  align-items: center;
+  padding-bottom: 14rpx;
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+}
+.sync-head-text {
+  margin-left: 14rpx;
+  flex: 1;
+}
+.sync-list {
+  height: 440rpx;
+}
+.sync-list-wide {
+  height: 280px;
+}
+.sync-row {
+  flex-direction: row;
+  align-items: center;
+  padding: 14rpx 0;
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+}
+.sync-pic {
+  width: 64rpx;
+  height: 64rpx;
+  border-radius: 10rpx;
+  margin-left: 14rpx;
+  align-items: center;
+  justify-content: center;
+}
+.sync-pic-wide {
+  width: 34px;
+  height: 34px;
+  border-radius: 6px;
+  margin-left: 10px;
+}
+.sync-pic-text {
+  font-size: 20rpx;
+}
+.sync-name {
+  margin-left: 14rpx;
+  margin-right: 12rpx;
+  flex: 1;
+}
+.sync-faved {
+  font-size: 20rpx;
 }
 </style>

@@ -253,7 +253,9 @@ class ThemeStore {
           loaded = true;
         }
       }
-    } catch (_) {}
+    } catch (_) {
+      // 静默：存档读不出/解析失败走 migrateLegacy 迁移兜底
+    }
     if (!loaded) this.migrateLegacy();
     this.syncSystemTheme();
     if (this.persist()) this.clearLegacy();
@@ -385,7 +387,9 @@ class ThemeStore {
           this.applyAppTheme();
         }
       });
-    } catch (_) {}
+    } catch (_) {
+      // 静默：监听注册失败仅丢失系统主题实时跟随，重启后恢复
+    }
   }
 
   applyAppTheme(): void {
@@ -395,7 +399,9 @@ class ThemeStore {
     try {
       uni.setAppTheme({ theme: target as 'auto' | 'light' | 'dark' });
       this.appliedTheme = target;
-    } catch (_) {}
+    } catch (_) {
+      // 静默：设置失败不标记已应用，下次界面变化会重试
+    }
   }
 
   private loadPayload(value: any): void {
@@ -430,14 +436,18 @@ class ThemeStore {
         }
         this.backgroundImage = validOptionalString(parsed.backgroundImage, "").trim();
       }
-    } catch (_) {}
+    } catch (_) {
+      // 静默：字段解析失败保持对应默认值
+    }
   }
 
   private clearLegacy(): void {
     try {
       uni.removeStorageSync(LEGACY_THEME_KEY);
       uni.removeStorageSync(LEGACY_SKIN_KEY);
-    } catch (_) {}
+    } catch (_) {
+      // 静默：旧键清不掉只占两个存储位，不影响新主题体系
+    }
   }
 
   private resolvedBaseSkin(): QtSkin {
@@ -449,7 +459,18 @@ class ThemeStore {
   private resolveSkin(): void {
     const resolved = cloneSkin(this.resolvedBaseSkin());
     resolved.backgroundImage = this.backgroundImage;
-    this.skin = resolved;
+    // 皮肤内容没变时不要替换 this.skin 对象：theme.skin 是全 app 覆盖面最大的
+    // 响应式依赖（几乎所有 :style/:class 都读它的字段），换对象（哪怕内容相同）
+    // 会作废全部 theme.skin.* 绑定并触发一次全量重算。App.uvue 的 onShow 每次
+    // 回前台都会走 syncSystemTheme → resolveSkin，等于「每次回前台全 app 样式
+    // 重算」；更严重的是它会唤醒运行时已销毁页面/组件的泄漏 effect——Android
+    // 蒸汽运行时对已注销的原生实例调 _uni-form beginUpdateBatch，直接抛
+    // `UTS instance N is not registered`（2026-10-30 用户上报的大规模报错，
+    // 崩溃页遍布各页面 = 回前台时正停在哪个页就在哪页炸）。
+    // tabBar 对齐是幂等的单次原生调用，保持每次都跑（与旧行为一致）。
+    if (JSON.stringify(resolved) != JSON.stringify(this.skin)) {
+      this.skin = resolved;
+    }
     this.applyTabBar();
   }
 
@@ -463,7 +484,9 @@ class ThemeStore {
         borderStyle: this.dark ? "black" : "white",
         fail: (_: any) => {},
       } as any);
-    } catch (_) {}
+    } catch (_) {
+      // 静默：原生 tabBar 样式设置失败不影响页面内容渲染
+    }
   }
 
   private persist(): boolean {

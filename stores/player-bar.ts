@@ -1,4 +1,5 @@
 import { reactive } from "vue";
+import { logWarn } from "@/services/logger";
 
 const PLAYER_BAR_VISIBLE_KEY = "qt-player-bar-visible";
 
@@ -165,7 +166,9 @@ class PlayerBarStore {
   private save(): void {
     try {
       uni.setStorageSync(PLAYER_BAR_VISIBLE_KEY, JSON.stringify(this.visible));
-    } catch (_) {}
+    } catch (_) {
+      logWarn("PlayerBar", "播放条展示配置持久化失败（本次已生效，重启后回默认）");
+    }
   }
 
   /** 回到首次运行的默认展示集（设置页「恢复默认展示」用），并落盘 */

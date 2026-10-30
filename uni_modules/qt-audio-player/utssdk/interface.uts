@@ -74,3 +74,22 @@ export type AudioTrackChangedCallback = (mediaId: string, naturalEnd: boolean) =
 /** 系统收藏（红心 ♡）请求回调：通知栏/系统媒体卡片/车机蓝牙的收藏按钮被点击。
  *  mediaId = 目标条目，liked = 客户端想要的新状态（true 收进 / false 移出） */
 export type AudioRatingRequestCallback = (mediaId: string, liked: boolean) => void
+
+/**
+ * 车机蓝牙 AVRCP 歌词下发（仅安卓端；鸿蒙端空实现，见 app-harmony/index.uts）。
+ *
+ * export function audioSetCarLyric(text: string): void
+ *
+ * 把歌词全文写进当前活动条目的媒体元数据 extras（key "android.media.metadata.LYRICS"，
+ * AVRCP 1.3+ 车机读此事实标准 key 显示整首歌词）。原生链路：extras 里的 String 值经
+ * media3 LegacyConversions.putText 进 MediaMetadataCompat 元数据包，再随
+ * MediaSessionCompat.setMetadata 整包下发给 framework 媒体会话 → 车机蓝牙栈。
+ * 通知栏/系统卡片/桌面歌词不读该 key，互不影响。
+ *
+ * @param text 歌词全文（整首 LRC 原文或纯文本皆可，车机自行解析/滚动）；
+ *             空串 = 「本曲无词」，清掉车机上一首残留的歌词。
+ *             与上次下发（同条目 + 队列/单曲未重建）相同时原生内部去重为 no-op。
+ *             播放器未建或当前无活动条目时静默忽略。
+ *
+ * JS 调用时机建议：加载完当前曲歌词后调用一次（含空串情形），切歌后歌词就绪再调。
+ */

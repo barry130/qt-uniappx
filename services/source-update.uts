@@ -62,6 +62,7 @@ import {
   pruneOrphans,
   packDirOf,
   OFFICIAL_PLAY_ID,
+  OFFICIAL_META_ID,
   isOfficialPackId,
   PACK_KIND_META,
   PACK_KIND_PLAY,
@@ -71,7 +72,7 @@ import {
 } from "@/services/source-bundle-fs";
 import { verifyOfficialSignature, splitSignatureBlock } from "@/services/pack-signature";
 import { scanPackText } from "@/services/pack-safety";
-import { describeValue, logErrV, logInfo, logWarn, logWarnV } from "@/services/logger";
+import { logErrV, logInfo, logWarn } from "@/services/logger";
 import {
   ensurePlayPackLoaded,
   unloadPlayPack,
@@ -265,19 +266,6 @@ export async function discoverUpdates(force: boolean): Promise<PackUpdateOffer[]
     // platforms 留空 = 不限平台（与 qt-pc source_install 的准入口径一致）；
     // 显式列出时必须包含本机平台号（鸿蒙 1106 / 安卓 1101）
     const platformOk = release.platforms.length == 0 || containsNum(release.platforms, currentPlatform());
-    // 【临时排查】把服务端返回的 release 判定输入全部打出来：
-    // 只要有一条 false，下面的 if 就会整体跳过 → 前端表现为「已是最新」。
-    logInfo(
-      "SourceUpdate",
-      "manifest release=" + release.sourceVersionCode +
-        " published=" + (release.published ? "true" : "false") +
-        " bad=" + (release.bad ? "true" : "false") +
-        " rollbackTo=" + release.rollbackTo +
-        " platformOk=" + (platformOk ? "true" : "false") +
-        " hostApiOk=" + (release.hostApiVersion <= HOST_API_VERSION ? "true" : "false") +
-        " artifacts=" + release.artifacts.length +
-        " 已装包=" + installed.length
-    );
     if (release.published && !release.bad && release.rollbackTo <= 0 && platformOk && release.hostApiVersion <= HOST_API_VERSION) {
       // play 产物：release 版本号即产物版本（**不是** artifact.version —— 那是后端
       // mergeArtifacts 维护的单文件小计数器，首次上传=1，url 变了才 +1；拿它比
@@ -335,6 +323,66 @@ export async function discoverUpdates(force: boolean): Promise<PackUpdateOffer[]
   const deduped = dedupeOffers(found);
   gOffers = deduped;
   return deduped;
+}
+
+/**
+ * 官方包**首装** offer（播放包半屏直装引导用，2026-10-27）。
+ *
+ * 与发现通道的分工：discoverUpdates 只对已装包发「更新」offer，未装包故意不下发
+ * 首装 offer（见上面「仅对已装包提示更新」注释——安装动作由用户发起）。半屏引导
+ * 是用户主动触发的一次性入口（点歌失败广播 / 首页横幅），这里补齐「未装官方包时
+ * 给一条 currentCode=0 的首装 offer」：只在返回值里给调用方，不登记 gOffers、
+ * 不影响红点与更新提示节流，也不动 lastCheckAt（这不是「检查更新」）。
+ *
+ * 准入口径与发现通道一致：published 且未撤回（bad / rollbackTo>0）、平台白名单、
+ * hostApiVersion。play 版本号取 release.sourceVersionCode（release 版本号即产物
+ * 版本，与 discoverUpdates 同口径；产物头一致性由 applyUpdate 下载后强制校验）。
+ * meta 优先 manifest 直发的 packId/packVersionCode，旧后端未直发时回退产物头
+ * 探测——此时 id 必须是官方 meta 槽（半屏承诺「官方包一键直装」，id 对不上宁可
+ * 不给一键；管理页仍可装第三方包）。版本被拉黑过（上次安装失败回滚）也不再给。
+ *
+ * 拿不到（离线 / 无发布 / 无该产物 / 被拉黑）一律返回 null，调用方自行降级。
+ */
+export async function officialInstallOffer(kind: string): Promise<PackUpdateOffer | null> {
+  await ensureLocalStateRestored();
+  const officialId = kind == PACK_KIND_META ? OFFICIAL_META_ID : OFFICIAL_PLAY_ID;
+  // 已装该官方包：首装无意义（更新走发现通道）
+  if (packById(officialId) != null) return null;
+  const manifest = await fetchManifest();
+  if (manifest == null || manifest.release == null) return null;
+  const release = manifest.release;
+  // platforms 留空 = 不限平台（与 discoverUpdates 同口径）
+  const platformOk = release.platforms.length == 0 || containsNum(release.platforms, currentPlatform());
+  if (!release.published || release.bad || release.rollbackTo > 0 || !platformOk || release.hostApiVersion > HOST_API_VERSION) {
+    return null;
+  }
+  const artifactPath = kind == PACK_KIND_META ? ARTIFACT_META : ARTIFACT_PLAY;
+  for (let i = 0; i < release.artifacts.length; i++) {
+    const a = release.artifacts[i];
+    if (a.path != artifactPath || a.url.length == 0) continue;
+    if (kind == PACK_KIND_PLAY) {
+      // play：release 版本号即产物版本；头一致性由 applyUpdate 兜底
+      const code = release.sourceVersionCode;
+      if (code <= 0 || isPackBadVersion(OFFICIAL_PLAY_ID, code)) continue;
+      return offerOf(PACK_KIND_PLAY, OFFICIAL_PLAY_ID, 0, code,
+        release.sourceVersionName, release.notes, "manifest", a.url);
+    }
+    // meta：优先 manifest 直发，未直发回退产物头探测
+    let remoteId = a.packId;
+    let remoteCode = a.packVersionCode;
+    let remoteName = a.packVersionName.length > 0 ? a.packVersionName : release.sourceVersionName;
+    if (remoteCode <= 0 || remoteId.length == 0) {
+      const remote = await probePackHeader(a.url);
+      if (remote == null || remote.kind != PACK_KIND_META) continue;
+      remoteId = remote.id;
+      remoteCode = remote.versionCode;
+      remoteName = remote.versionName;
+    }
+    if (remoteId != OFFICIAL_META_ID || remoteCode <= 0 || isPackBadVersion(OFFICIAL_META_ID, remoteCode)) continue;
+    return offerOf(PACK_KIND_META, OFFICIAL_META_ID, 0, remoteCode,
+      remoteName, release.notes, "manifest", a.url);
+  }
+  return null;
 }
 
 // ==================== 应用更新（手动确认后） ====================
@@ -915,24 +963,12 @@ export type SourceManifest = {
   release: SourceRelease | null;
 };
 
-// ==================== 【临时排查】响应取证（2026-10-26 加，定位后删除） ====================
+// ==================== manifest 响应解析 ====================
 //
-// 背景：设备上「检测更新」报「响应数据格式异常（HTTP 200）」，但同一 URL 在命令行
-// 拿到的永远是 808 字节合法 JSON。加日志后定位到真因：安卓运行时**忽略 dataType:"text"**，
-// 直接把响应体解析成对象交给 success，`response.data as string` 得到 "[object Object]"，
-// JSON.parse 抛异常 → 被 catch 吞掉 → fetchManifest 返回 null → 前端显示「已是最新」。
-//
-// 修复：bodyOf() 先看运行时类型——对象就直接用，字符串才 parse；不再强依赖 dataType。
-// 排查完成后：可删除 debugBody()/debugBody 调用与 requestJson/fetchManifest 里的 logWarn。
-
-/**
- * 把任意响应体安全转成可读文本并截断（仅日志用）。
- * 走 describeValue：已按类型处理 null / Error / string / 对象，不会把 HTML 压成 `[object Object]`。
- */
-function debugBody(v: any, max: number = 400): string {
-  const text = describeValue(v);
-  return text.length > max ? text.substring(0, max) + "…(共" + text.length + "字)" : text;
-}
+// 背景（2026-10-26 排查结论，保留给后来人）：设备上「检测更新」曾报「响应数据
+// 格式异常（HTTP 200）」——安卓运行时**忽略 dataType:"text"**，直接把响应体解析
+// 成对象交给 success，`response.data as string` 得到 "[object Object]" 后解析
+// 必然失败。所以 bodyOf() 按运行时类型分支：对象直接用，字符串才 parse。
 
 /**
  * 把 uni.request 的 response.data 转成 UTSJSONObject，**不假设它一定是字符串**。
@@ -984,43 +1020,26 @@ function requestJson(
       success: (response) => {
         const status = response.statusCode;
         if (status < 200 || status >= 300) {
-          // 【临时排查】原来这里静默返回，非 2xx 完全不可见（网关/反代错误页）
-          logWarn(
-            "SourceUpdate",
-            "响应非 2xx：status=" + status + " url=" + url + " body=" + debugBody(response.data)
-          );
           resolve(null);
           return;
         }
         try {
           const body = bodyOf(response.data);
           if (body == null) {
-            // 【临时排查】
-            logWarn("SourceUpdate", "响应非 JSON 对象：url=" + url + " body=" + debugBody(response.data));
             resolve(null);
             return;
           }
           const code = body.get("code");
           if (code == null) {
-            // 【临时排查】
-            logWarn("SourceUpdate", "响应缺少 code 字段：url=" + url + " body=" + debugBody(response.data));
             resolve(null);
             return;
           }
           const n = code as number;
-          if (n != 0 && n != 200) {
-            // 【临时排查】业务码非成功也留证据（例如 code=401 未登录、code=500 后端异常）
-            logWarn("SourceUpdate", "响应 code=" + n + "：url=" + url + " body=" + debugBody(response.data));
-          }
           resolve(n == 0 || n == 200 ? body : null);
         } catch (e) {
-          // 格式错误沿用发现/上报的失败语义，不把异常抛出原生回调或记录响应正文。
-          // 【临时排查】例外：本次把原始正文与运行时类型打出来，便于确认平台差异。
-          logWarn(
-            "SourceUpdate",
-            "响应数据格式异常（HTTP " + status + "）url=" + url +
-              " dataType=" + typeof response.data + " body=" + debugBody(response.data)
-          );
+          // 格式错误沿用发现/上报的失败语义：不把异常抛出原生回调，也不把响应
+          // 正文记进日志（正文可能含敏感回显）；异常对象本身不是正文，单独留一条
+          // 便于线上定位。
           logErrV("SourceUpdate", "响应数据格式异常-异常对象", e);
           resolve(null);
         }
@@ -1047,39 +1066,15 @@ export async function fetchManifest(): Promise<SourceManifest | null> {
   if (appCode > 0) {
     path += "&appVersionCode=" + appCode;
   }
-  // 【临时排查】先记录实际发出的 manifest 请求：
-  // 重点看 appVersionCode 是否带上、值是不是 0（取不到版本号时这里会是 0 且不带该参数）
-  const reqUrl = resolveUrl(path);
-  logInfo(
-    "SourceUpdate",
-    "manifest 请求 platform=" + currentPlatform() + " appVersionCode=" + appCode + " url=" + reqUrl
-  );
-  const body = await requestJson(reqUrl, "GET", null);
+  const body = await requestJson(resolveUrl(path), "GET", null);
   if (body == null) {
-    // 【临时排查】具体原因看 requestJson 里紧邻的那条 warn（原始正文已打印）
-    logWarn("SourceUpdate", "manifest 响应为空，原因见上一条 warn");
     return null;
   }
   const data = body.get("data") as UTSJSONObject | null;
   if (data == null) {
-    // 【临时排查】
-    logWarn("SourceUpdate", "manifest 响应缺少 data：body=" + debugBody(body));
     return null;
   }
-  const parsed = manifestFromJson(data);
-  // 【临时排查】release=null 表示服务端判定「没有可用版本」（准入/渠道/平台任一不过都会这样）
-  const rel = parsed.release;
-  if (rel == null) {
-    logWarn("SourceUpdate", "manifest release=null（服务端无可用版本）data=" + debugBody(data));
-  } else {
-    logInfo(
-      "SourceUpdate",
-      "manifest release=" + rel.sourceVersionCode +
-        " channel=" + rel.channel +
-        " artifacts=" + rel.artifacts.length
-    );
-  }
-  return parsed;
+  return manifestFromJson(data);
 }
 
 /** 上报更新结果（manifest 渠道的官方播放包专用；自管渠道没有服务端记录） */
@@ -1332,7 +1327,10 @@ export function offersFromJson(payload: string): PackUpdateOffer[] {
         ),
       );
     }
-  } catch (_) {}
+  } catch (_) {
+    // 检测更新路径：事件 payload 解析失败会让已找到的更新凭空消失（用户停留在旧版还以为最新），记日志排查
+    logWarn("SourceUpdate", "offersFromJson 解析事件 payload 失败，本次更新提示丢弃");
+  }
   return out;
 }
 

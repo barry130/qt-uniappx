@@ -150,7 +150,9 @@ function fsList(dir: string): Promise<LogDirEntry[]> {
             size: size != null ? size : 0,
           } as LogDirEntry);
         }
-      } catch (_) {}
+      } catch (_) {
+        // 静默：目录清单解析中断按已解析条目返回，不影响读日志
+      }
       resolve(out);
     });
   });
@@ -236,7 +238,9 @@ export function setLogDebug(on: boolean): void {
   gDebug = on;
   try {
     uni.setStorageSync(DEBUG_KEY, on ? "1" : "0");
-  } catch (_) {}
+  } catch (_) {
+    // 静默：持久化失败只丢重启后的 debug 开关，内存值已生效
+  }
 }
 
 /** 当前是否记录 debug 级 */
@@ -364,14 +368,16 @@ async function rotateIfNeeded(): Promise<boolean> {
     // 改名失败（比如该份不存在）不算错，继续往前挪
     try {
       await fsRename(backupPath(i), backupPath(i + 1));
-    } catch (_) {}
+    } catch (_) {
+      // 静默：该份不存在等改名失败不阻断轮转，继续往前挪
+    }
   }
   let moved = false;
   try {
     await fsRename(path, backupPath(1));
     moved = true;
   } catch (_) {
-    // 当前文件挪不走（极少见）：不阻断写入，继续往原文件追加，
+    // 静默：当前文件挪不走（极少见）不阻断写入，继续往原文件追加，
     // 结果是这个文件会略超上限，但日志不丢——比丢日志好。
   }
   // 挪走了就是全新的空文件；没挪走说明还在往原文件追加，保留累计值继续往上顶
@@ -573,7 +579,9 @@ export function initLogger(): void {
   try {
     const saved = uni.getStorageSync(DEBUG_KEY) as string | null;
     gDebug = saved == "1";
-  } catch (_) {}
+  } catch (_) {
+    // 静默：读不到存档按 debug 关闭处理，控制台镜像不受影响
+  }
   const path = logPath();
   if (path.length == 0) {
     // 当前平台没有可写目录（H5 / 小程序）：只保留控制台镜像，不报错
@@ -657,7 +665,9 @@ const VIEW_MAX_CHARS = 64 * 1024;
 export async function readLogs(): Promise<string[]> {
   try {
     await gQueue;
-  } catch (_) {}
+  } catch (_) {
+    // 静默：排队中的写任务失败不该挡住读日志，读文件本身
+  }
   const path = logPath();
   if (path.length == 0) return [] as string[];
   let text = await fsReadText(path);

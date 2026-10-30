@@ -15,7 +15,7 @@
     @headerSearchInput="onHeaderSearchInput"
     @headerSearchClose="closeSearch"
   >
-  <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']"
+  <view class="page" :class="layout.isWide ? 'page-wide' : ''"
     ><!-- 每日推荐（2026-10-19 起与歌单详情页 pages/playlist/index.uvue 同一套模板）：
          宽屏「左栏信息 + 右栏歌曲列表」主从双栏、竖屏列表内 hero + 吸顶操作条、
          歌曲行统一 qt-song-row-lite。与歌单详情的两处差异：
@@ -197,11 +197,23 @@
            一个 v-for list-item」两个直接子节点，多塞一个空态 list-item 会编译失败
            （Android 端不检查，但一处模板两端正跑，按更严的约束写） -->
       <list-item v-if="!loading && songs.length == 0" class="empty-item" :class="layout.isWide ? 'empty-item-wide' : ''">
-        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(26, 15)">今日推荐暂时为空</text>
+        <QtEmpty
+          icon="sparkles"
+          title="今日推荐暂时为空"
+          description="今天的每日新歌还没备好，稍后再来，或重新加载试试"
+          action-text="重新加载"
+          action-icon="refresh"
+          @action="load"
+        />
       </list-item>
       <!-- 搜索无结果：与「今日推荐为空」区分开 -->
       <list-item v-if="!loading && filtering && visibleSongs.length == 0" class="empty-item" :class="layout.isWide ? 'empty-item-wide' : ''">
-        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(26, 15)">没有匹配的歌曲</text>
+        <QtEmpty
+          icon="search"
+          title="没有匹配的歌曲"
+          description="换个关键词试试，或清空筛选看全部推荐"
+          :compact="true"
+        />
       </list-item>
     </list-view>
     <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
@@ -259,6 +271,7 @@ import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-act
 import QtSortPanel from "@/uni_modules/qt-ui/components/qt-sort-panel/qt-sort-panel.uvue";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import QtEmpty from "@/uni_modules/qt-ui/components/qt-empty/qt-empty.uvue";
 import QtBatchBar from "@/uni_modules/qt-ui/components/qt-batch-bar/qt-batch-bar.uvue";
 import QtPlaylistPicker from "@/uni_modules/qt-ui/components/qt-playlist-picker/qt-playlist-picker.uvue";
 import { qtSongKey, useBatchSelect } from "@/uni_modules/qt-ui/composables/use-batch-select";
@@ -805,19 +818,18 @@ onUnmounted(() => {
 .search-row { flex-direction: row; align-items: center; padding: 16rpx 32rpx 0; }
 .search-field { flex: 1; min-width: 0; flex-direction: row; align-items: center; padding: 10rpx 18rpx; border-radius: 30rpx; border-width: 1px; border-style: solid; }
 .search-input { flex: 1; min-width: 0; margin-left: 12rpx; font-size: 26rpx; height: 40rpx; }
-.search-ph { color: #9aa1b1; font-size: 26rpx; }
+.search-ph { color: #969dad; font-size: 26rpx; }
 .search-clear { width: 44rpx; height: 44rpx; align-items: center; justify-content: center; flex-shrink: 0; }
-.empty-item { padding: 120rpx 0; justify-content: center; align-items: center; }
-.empty-text { font-size: 26rpx; }
+/* 空态容器只保留对齐，留白交给 QtEmpty（2026-10-29 统一空态口径） */
+.empty-item { padding: 40rpx 0; justify-content: center; align-items: center; }
 
 .song-item-wide { height: 82px; }
 .search-row-wide { padding-top: 10px; padding-left: 24px; padding-right: 24px; }
 .search-field-wide { padding-top: 6px; padding-bottom: 6px; padding-left: 12px; padding-right: 12px; border-radius: 16px; }
 .search-input-wide { margin-left: 8px; font-size: 14px; height: 22px; }
-.search-ph-wide { color: #9aa1b1; font-size: 14px; }
+.search-ph-wide { color: #969dad; font-size: 14px; }
 .search-clear-wide { width: 32px; height: 32px; }
-.empty-item-wide { padding-top: 72px; padding-bottom: 72px; }
-.empty-text-wide { font-size: 15px; }
+.empty-item-wide { padding-top: 26px; padding-bottom: 26px; }
 /* 宽屏左栏操作区：封面下方统一管理播放与批量（对齐 qt-pc 页头），列表顶无操作条 */
 .whero-actions { margin-top: 14px; flex-direction: column; align-self: stretch; }
 .whero-play { height: 44px; border-radius: 22px; flex-direction: row; justify-content: center; align-items: center; }

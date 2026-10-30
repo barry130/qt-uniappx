@@ -29,7 +29,7 @@ function load(): number[] {
       }
     }
   } catch (_) {
-    // 数据损坏时按空处理
+    // 静默：数据损坏时按空处理（全部视为未读）
   }
   cache = [];
   return cache;
@@ -38,7 +38,9 @@ function load(): number[] {
 function persist(): void {
   try {
     uni.setStorageSync(KEY, JSON.stringify(load()));
-  } catch (_) {}
+  } catch (_) {
+    // 静默：已读记录写失败只是丢标记，下次仍能看到该公告
+  }
 }
 
 /** 标记单条已读（加入并持久化，超上限时淘汰最旧） */

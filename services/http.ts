@@ -284,7 +284,9 @@ function handleResponse(
       const msg = errBody.get("msg") as string | null;
       const msgAlt = msg != null ? msg : (errBody.get("message") as string | null);
       if (msgAlt != null && msgAlt.length > 0) serverMsg = msgAlt;
-    } catch (_) {}
+    } catch (_) {
+      // 静默：提不到后端 msg 就走 HTTP 状态码报错兜底
+    }
     reject(new Error(serverMsg.length > 0 ? serverMsg : "HTTP " + response.statusCode));
     return;
   }

@@ -33,8 +33,11 @@ import { installBootGuard, notifyAppForeground, notifyAppBackground } from '@/se
 import { refreshMe } from '@/services/user-cache'
 import { initLogger, flushLogs, logLine, logMsgErr, LOG_ERROR } from '@/services/logger'
 import { qtConfirm } from '@/services/confirm'
+import { enqueueBootModal, BOOT_MODAL_PRIORITY_PLAY_PACK, BOOT_MODAL_PRIORITY_BATTERY, BOOT_MODAL_PRIORITY_PACK_UPDATE } from '@/services/boot-modal-queue'
+import { openPackInstallSheet, PACK_SHEET_UNAVAILABLE } from '@/services/pack-install-sheet'
 // 音源账号登录态注入：import 即注册「meta 装载成功」钩子（服务模块级副作用）
-import { ensureSourceAuthInjected } from '@/services/source-auth'
+// + 凭据轮换/后台保活（启动 20s 首检 + 每次回前台 24h 节流，见 services/source-auth.ts）
+import { ensureSourceAuthInjected, keepaliveSourceAccounts } from '@/services/source-auth'
 
 onLaunch(() => {
   // 三星 One UI 手势导航下 edge-to-edge 窗口会让运行时首屏挂载竞态（S24 Ultra
@@ -92,6 +95,11 @@ onLaunch(() => {
   prewarmSourceEngine()
   // 音源账号登录态对账重灌（引擎未就绪则静默；装载成功钩子会兜底重放）
   ensureSourceAuthInjected().catch(() => {})
+  // 音源账号后台保活首检：延后 20s（等引擎装载 + 首屏渲染稳定再逐源校验/轮换，
+  // QQ 短期 musickey 等凭据靠包侧 refreshCredential 续期，错过窗口就会过期）
+  setTimeout(() => {
+    keepaliveSourceAccounts('启动首检', true)
+  }, 20000)
   // 启动时发现音源包更新（各包自管 updateUrl + astral manifest，4 小时节流）：
   // 只发现不安装——发现到新版后弹「仅提示」的确认框，用户点了「更新」才下载生效
   setTimeout(() => {
@@ -102,12 +110,16 @@ onLaunch(() => {
   installBootGuard()
   // 在线播放需要「播放音源包」（不内置，版权风险由用户自行安装）：
   // 引擎在「要取链但没有生效播放包」时广播该事件（引擎侧 10s 节流），
-  // 这里弹一次引导，去设置页安装——不放下载链接，安装动作都在设置页完成
+  // 这里走半屏直装引导（1 分钟节流 + 启动弹窗队列），详见 showPlayPackMissingGuide
   uni.$on(PLAY_PACK_MISSING_EVENT, showPlayPackMissingGuide)
   // 启动更新发现拿到「可用更新」清单：逐条弹「仅提示」确认框（绝不自动安装），
-  // 用户点「更新」才下载 → 校验 → 替换 → 生效；点「暂不」保留红点进设置页处理
+  // 用户点「更新」才下载 → 校验 → 替换 → 生效；点「暂不」保留红点进设置页处理。
+  // 走启动弹窗队列（优先级最低）：免责声明/首页全屏弹窗退场后才弹，且与电池
+  // 引导/播放包引导串行——qtConfirm 是单槽弹窗，并发调用会把在展弹窗顶掉
   uni.$on(SOURCE_UPDATE_FOUND_EVENT, (payload: string) => {
-    promptPackUpdates(offersFromJson(payload))
+    enqueueBootModal('source-updates', BOOT_MODAL_PRIORITY_PACK_UPDATE, () => {
+      return promptPackUpdates(offersFromJson(payload))
+    })
   })
 })
 
@@ -162,26 +174,44 @@ function currentTopRoute(): string {
       const route = top.route
       if (route != null) return route
     }
-  } catch (_) {}
+  } catch (_) {
+    // 静默：页面栈读不出按空串处理，调用方只用于日志与引导判断
+  }
   return ""
 }
 
-/** 播放包缺失引导的弹窗节流：1 分钟内最多一次（用户点了「去安装」则到设置页处理） */
+/** 播放包缺失引导的弹窗节流：1 分钟内最多一次（引导是同一件事，重复弹只会打扰） */
 let lastPlayPackGuideAt = 0
 
 function showPlayPackMissingGuide(): void {
   const now = Date.now()
   if (now - lastPlayPackGuideAt < 60000) return
   lastPlayPackGuideAt = now
-  qtConfirm({
+  // 走启动弹窗队列（优先级最高——用户刚点歌失败，必须最先解释）：
+  // 免责声明/首页全屏弹窗退场后才弹，且与电池引导/更新提示串行，不再互顶
+  enqueueBootModal('play-pack-missing', BOOT_MODAL_PRIORITY_PLAY_PACK, () => {
+    return runPlayPackGuide()
+  })
+}
+
+/**
+ * 播放包缺失引导本体：优先弹半屏直装（拉官方包首装 offer，一键安装，
+ * 见 services/pack-install-sheet.ts）；拿不到 offer（离线/无发布/版本被拉黑）
+ * 时，退回原来的指路确认框。半屏宿主挂在 qt-page-frame 全站一份
+ * （2026-10-27 由首页挪入，此前的首页路由门控已随之移除）。
+ */
+async function runPlayPackGuide(): Promise<void> {
+  const result = await openPackInstallSheet()
+  // 半屏已承接（装好或用户主动关掉）；unavailable 才需要指路兜底
+  if (result != PACK_SHEET_UNAVAILABLE) return
+  const ok = await qtConfirm({
     title: '未安装播放音源包',
     content: '在线播放需要在 设置 → 音源包管理 安装并启用播放音源包。本地音乐播放不受影响。',
     confirmText: '去安装',
     cancelText: '暂不',
-  }).then((ok) => {
-    if (!ok) return
-    uni.navigateTo({ url: '/pages/source-pack/index' })
   })
+  if (!ok) return
+  uni.navigateTo({ url: '/pages/source-pack/index' })
 }
 
 // 进入前台时发送 show 事件（统计回前台）；已登录时增量拉取收藏变更（多端同步，LIKE_SYNC_DESIGN.md）
@@ -194,6 +224,8 @@ onShow(() => {
   // 回前台恢复窗口尺寸监听（后台期间系统可能改了窗口尺寸，如分屏 / 旋转）
   resumeQtLayoutWatcher(720)
   usePlayerStore().pullChanges().catch(() => {})
+  // 音源账号后台保活（24h 节流；冷启动窗口内跳过，归启动 20s 首检独占）
+  keepaliveSourceAccounts('前台保活', false)
   // 桌面歌词与原生真相（悬浮窗是否真的在显示）对账：后台期间用户可能在通知栏
   // 点过「词」按钮，而 JS 侧回调未必收到，这里补齐，避免窗口开着却没歌词
   desktopLyric.refreshFromNative()
@@ -236,7 +268,9 @@ onError((err: any) => {
     const e = err as Error
     const m = e.message
     if (m != null && m.length > 0) msg = m
-  } catch (_) {}
+  } catch (_) {
+    // 静默：message 读不出走 stringify 兜底
+  }
   if (msg.length == 0) {
     try {
       msg = JSON.stringify(err)
@@ -249,7 +283,9 @@ onError((err: any) => {
     const e2 = err as Error
     const st = e2.stack
     if (st != null) stack = st
-  } catch (_) {}
+  } catch (_) {
+    // 静默：stack 读不出按无堆栈记录
+  }
   let page = ''
   try {
     const pages = getCurrentPages()
@@ -258,7 +294,9 @@ onError((err: any) => {
       const r = top.route
       if (r != null) page = r
     }
-  } catch (_) {}
+  } catch (_) {
+    // 静默：页面栈读不出按未知页面记录
+  }
   // 本地日志留一份：发行包用户报障时，服务端统计未必拿到（离线/未同意），
   // 而文件是「用户能复制出来发给我们」的那一份
   logLine(LOG_ERROR, 'App', '未捕获运行错误 page=' + page + ' msg=' + msg + (stack.length > 0 ? '\n' + stack : ''))
@@ -302,31 +340,37 @@ function checkNotificationPermission(): void {
  *
  * 只提示一次（storage 记住），且启动后延迟 6s——不打断冷启动的官方校验/更新检查。
  * 查询失败时原生侧返回 true（视为已放行），所以不会误报。
+ * 走启动弹窗队列（runStartup 末尾入队）：检查与标记都改到**真正展示时**才做——
+ * 排队期间（免责声明/首页弹窗压着）被杀进程，下次启动还会再给一次机会，
+ * 「只提示一次」指的是用户真的看到过一次。
  */
 const BATTERY_GUIDE_KEY = 'qt-battery-guide-shown'
 
-function guideBatteryOptimization(): void {
+async function guideBatteryOptimization(): Promise<void> {
   if (isIgnoringBatteryOptimizations()) return
   try {
     if (uni.getStorageSync(BATTERY_GUIDE_KEY) == '1') return
-  } catch (_) {}
-  // 标记先写：用户中途杀进程也不该重复打扰（设置页里随时能手动改）
+  } catch (_) {
+    // 静默：引导标记读不到（首次安装/存储异常）按未展示处理
+  }
+  // 标记在展示时写（而不是入队时）：用户还没看到引导就不算「提示过」
   try {
     uni.setStorageSync(BATTERY_GUIDE_KEY, '1')
-  } catch (_) {}
-  qtConfirm({
+  } catch (_) {
+    // 静默：标记写失败时最多多展示一次引导，无功能影响
+  }
+  const ok = await qtConfirm({
     title: '让后台播放更稳定',
     content:
       '检测到本应用未加入电池优化白名单，锁屏或切到后台后系统可能限制网络，导致自动播放下一首失败。\n建议在系统设置中允许后台运行。',
     confirmText: '去设置',
     cancelText: '暂不',
-  }).then((ok) => {
-    if (!ok) return
-    const opened = openBatteryOptimizationSettings()
-    if (!opened) {
-      qtShowToast({ title: '无法打开设置页，请手动在 设置→电池 中放行', icon: 'none' })
-    }
   })
+  if (!ok) return
+  const opened = openBatteryOptimizationSettings()
+  if (!opened) {
+    qtShowToast({ title: '无法打开设置页，请手动在 设置→电池 中放行', icon: 'none' })
+  }
 }
 
 /** 启动主流程（顺序执行） */
@@ -364,9 +408,13 @@ async function runStartup(): Promise<void> {
   //     独立请求而不是复用上面那份列表，是为了让两个功能互不牵连——
   //     公告接口失败不该连带声明不弹，反之亦然。init() 内部自己吞异常。
   useDisclaimerStore().init().catch(() => {})
-  // 4. 后台保活引导：延迟到冷启动流程之后，避免和官方校验/更新弹窗抢焦点
+  // 4. 后台保活引导：延迟到冷启动流程之后，避免和官方校验/更新弹窗抢焦点；
+  //    入队改走启动弹窗队列（优先级居中）：免责声明/首页全屏弹窗退场后才弹，
+  //    与播放包缺失引导（最高）、音源包更新提示（最低）按优先级串行
   setTimeout(() => {
-    guideBatteryOptimization()
+    enqueueBootModal('battery-guide', BOOT_MODAL_PRIORITY_BATTERY, () => {
+      return guideBatteryOptimization()
+    })
   }, 6000)
 }
 </script>

@@ -19,19 +19,19 @@
             <view
               v-for="(chart, chartIndex) in filteredCharts"
               class="rank-card"
-              :class="[layout.isWide ? 'rank-card-wide' : '', themeStore.dark ? 'rank-card-dark' : '']"
-              :style="chartRowStyle(chartIndex)"
+              :class="layout.isWide ? 'rank-card-wide' : ''"
+              :style="chartRowStyle(chartIndex) + rankCardStyle"
               :hover-class="layout.isWide ? 'rank-card-hover' : 'none'"
               @click="openChart(chart)"
             >
               <!-- 卡头：榜单名 + 更新说明（包侧 description 常带「每周四更新」这类话术） -->
               <view class="rank-head">
-                <text class="rank-name" :class="[layout.isWide ? 'rank-name-wide' : '', themeStore.dark ? 'rank-name-dark' : '']" :max-lines="1" :style="qtFontDual(32, 17)">{{ chart.name }}</text>
-                <text class="rank-meta" :class="[layout.isWide ? 'rank-meta-wide' : '', themeStore.dark ? 'rank-meta-dark' : '']" :max-lines="1" :style="qtFontDual(24, 13)">{{ previewMeta(chartIndex) }}</text>
+                <text class="rank-name" :class="layout.isWide ? 'rank-name-wide' : ''" :max-lines="1" :style="rankNameStyle + qtFontDual(32, 17)">{{ chart.name }}</text>
+                <text class="rank-meta" :class="layout.isWide ? 'rank-meta-wide' : ''" :max-lines="1" :style="rankMetaStyle + qtFontDual(24, 13)">{{ previewMeta(chartIndex) }}</text>
               </view>
               <!-- 卡身：左侧封面（点它进榜单详情），右侧前三名（点歌直接播） -->
               <view class="rank-body" :class="layout.isWide ? 'rank-body-wide' : ''">
-                <view class="rank-cover-wrap" :class="layout.isWide ? 'rank-cover-wrap-wide' : ''" @click.stop="openChart(chart)">
+                <view class="rank-cover-wrap" :class="layout.isWide ? 'rank-cover-wrap-wide' : ''" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" @click.stop="openChart(chart)">
                   <image class="rank-cover" :class="layout.isWide ? 'rank-cover-wide' : ''" :src="chart.picUrl" mode="aspectFill" />
                   <view class="rank-play">
                     <QtIcon name="play" :size="layout.isWide ? 16 : 34" color="#ffffff" />
@@ -46,24 +46,24 @@
                     :class="layout.isWide ? 'rank-song-wide' : ''"
                     @click.stop="onPreviewTap(chartIndex, 0)"
                   >
-                    <text class="rank-idx" :class="[layout.isWide ? 'rank-idx-wide' : '', themeStore.dark ? 'rank-idx-dark' : '']" :style="qtFontDual(26, 13)">1</text>
-                    <text class="rank-song-name" :class="[layout.isWide ? 'rank-song-name-wide' : '', themeStore.dark ? 'rank-song-name-dark' : '']" :max-lines="1" :style="qtFontDual(26, 13)">{{ previewSongLine(chartIndex, 0) }}</text>
+                    <text class="rank-idx" :class="layout.isWide ? 'rank-idx-wide' : ''" :style="rankIdxStyle + qtFontDual(26, 13)">1</text>
+                    <text class="rank-song-name" :class="layout.isWide ? 'rank-song-name-wide' : ''" :max-lines="1" :style="rankSongNameStyle + qtFontDual(26, 13)">{{ previewSongLine(chartIndex, 0) }}</text>
                   </view>
                   <view
                     class="rank-song"
                     :class="layout.isWide ? 'rank-song-wide' : ''"
                     @click.stop="onPreviewTap(chartIndex, 1)"
                   >
-                    <text class="rank-idx" :class="[layout.isWide ? 'rank-idx-wide' : '', themeStore.dark ? 'rank-idx-dark' : '']" :style="qtFontDual(26, 13)">2</text>
-                    <text class="rank-song-name" :class="[layout.isWide ? 'rank-song-name-wide' : '', themeStore.dark ? 'rank-song-name-dark' : '']" :max-lines="1" :style="qtFontDual(26, 13)">{{ previewSongLine(chartIndex, 1) }}</text>
+                    <text class="rank-idx" :class="layout.isWide ? 'rank-idx-wide' : ''" :style="rankIdxStyle + qtFontDual(26, 13)">2</text>
+                    <text class="rank-song-name" :class="layout.isWide ? 'rank-song-name-wide' : ''" :max-lines="1" :style="rankSongNameStyle + qtFontDual(26, 13)">{{ previewSongLine(chartIndex, 1) }}</text>
                   </view>
                   <view
                     class="rank-song"
                     :class="layout.isWide ? 'rank-song-wide' : ''"
                     @click.stop="onPreviewTap(chartIndex, 2)"
                   >
-                    <text class="rank-idx" :class="[layout.isWide ? 'rank-idx-wide' : '', themeStore.dark ? 'rank-idx-dark' : '']" :style="qtFontDual(26, 13)">3</text>
-                    <text class="rank-song-name" :class="[layout.isWide ? 'rank-song-name-wide' : '', themeStore.dark ? 'rank-song-name-dark' : '']" :max-lines="1" :style="qtFontDual(26, 13)">{{ previewSongLine(chartIndex, 2) }}</text>
+                    <text class="rank-idx" :class="layout.isWide ? 'rank-idx-wide' : ''" :style="rankIdxStyle + qtFontDual(26, 13)">3</text>
+                    <text class="rank-song-name" :class="layout.isWide ? 'rank-song-name-wide' : ''" :max-lines="1" :style="rankSongNameStyle + qtFontDual(26, 13)">{{ previewSongLine(chartIndex, 2) }}</text>
                   </view>
                 </view>
               </view>
@@ -85,8 +85,16 @@
               <!-- 空态必须同时满足「当前源确实拉过」：切到尚未加载的源时 filteredCharts
                    本来就是空的，只看 !loading 会立刻误报「暂无榜单数据」
                    （用户实测 2026-10-25：从咪咕切到网易云直接空态，等两分钟才出数据） -->
-              <view v-if="!loading && currentSourceLoaded && filteredCharts.length == 0" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
-                <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="qtFontDual(26, 15)">暂无榜单数据</text>
+              <view v-if="!loading && currentSourceLoaded && filteredCharts.length == 0" class="empty">
+                <QtEmpty
+                  icon="chart"
+                  title="暂无榜单数据"
+                  description="这个音源的榜单还没拉到，换一个音源或重新加载试试"
+                  :compact="true"
+                  action-text="重新加载"
+                  action-icon="refresh"
+                  @action="reloadChartsSafely"
+                />
               </view>
             </view>
         <view class="pad" :class="layout.isWide ? 'pad-wide' : ''"></view>
@@ -105,6 +113,7 @@ import { onShow, onLoad } from "@dcloudio/uni-app";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import QtEmpty from "@/uni_modules/qt-ui/components/qt-empty/qt-empty.uvue";
 import { useQtReveal } from "@/uni_modules/qt-ui/composables/use-qt-reveal";
 import { musicApi } from "@/services/music-api";
 import { packsFingerprint, SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
@@ -437,6 +446,13 @@ const skeletonOn = computed<boolean>(() => reveal.revealing.value || (filteredCh
 // 数据到达后骨架层脱离文档流，改由真实行决定高度，两层才能同位叠加
 const skeletonLifted = computed<boolean>(() => filteredCharts.value.length > 0);
 const shining = computed<boolean>(() => skeletonOn.value && !skeletonLifted.value);
+// 榜单卡配色全部走皮肤令牌：换 linen / aurora 等皮肤时卡底、描边、正文一起跟，
+// 不再依赖手写深色覆盖类（原写法与皮肤系统脱钩）。
+const rankCardStyle = computed<string>(() => 'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';');
+const rankNameStyle = computed<string>(() => 'color:' + themeStore.skin.text + ';');
+const rankMetaStyle = computed<string>(() => 'color:' + themeStore.skin.textMuted + ';');
+const rankIdxStyle = computed<string>(() => 'color:' + themeStore.skin.textMuted + ';');
+const rankSongNameStyle = computed<string>(() => 'color:' + themeStore.skin.text + ';');
 function chartRowStyle(index: number): string {
   // 两种模式都必须走内联 width：宽屏 = 网格卡宽，竖屏 = 内容行宽。
   // 不能把 width:100% 放回 .rank-card 类里 —— 本 Vapor 构建下类内 width 会压过
@@ -650,11 +666,37 @@ function openChart(chart: Chart): void {
   });
 }
 
+/**
+ * 带渲染安全配方的整页重拉：先回顶，再整组换数据。
+ *
+ * loadAll 会把 allCharts 整组清空再重填。2026-10-27 排行榜再次白屏：包变更广播
+ * （SOURCE_PACKS_CHANGED_EVENT，音源包安装/更新/切换成功后必发）与 onShow 的
+ * 指纹比对都会在用户**停留在滚动深处**时触发 loadAll——深处整组替换正是本页
+ * 多次白屏的根因（见模板注释与 onChipTap 的配方说明）。切 tab 早已走「回顶 +
+ * 80ms 后换数据」，loadAll 这条路径漏了同样的保护：播放包半屏直装（2026-10-27
+ * 起全局可用）让用户停在榜单页深处就能完成装包，白屏由这条路复现。
+ * 有已渲染内容时先回顶——同步清掉该源的滚动记忆，防止数据回来后 restoreScroll
+ * 又把视口顶回深处——稍候再执行真正的 loadAll；首挂载（无内容）直接拉，不加延迟。
+ */
+function reloadChartsSafely(): void {
+  if (!gridAlive) return;
+  if (filteredCharts.value.length == 0) {
+    loadAll();
+    return;
+  }
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  saveChartScroll(currentSourceId(), 0);
+  gridTimers.push(setTimeout(() => {
+    if (!gridAlive) return;
+    loadAll();
+  }, 120) as number);
+}
+
 /** 音源包变更广播：App 层更新弹窗确认时收不到 onShow，事件实时重拉 */
 function onPacksChanged(): void {
   // 包换了，榜单内容全变：前三名缓存作废并整页重拉
   previewCache = new Map<string, RankPreview>();
-  loadAll();
+  reloadChartsSafely();
 }
 
 onLoad((options: Record<string, string> | null) => {
@@ -692,10 +734,11 @@ watch(
 onShow(() => {
   sourceStore.restore();
   sourceRegistry.ensure();
-  // 空列表 or 音源包态变化（安装/更新/卸载/启停）时重拉，其余停留在原地
+  // 空列表 or 音源包态变化（安装/更新/卸载/启停）时重拉，其余停留在原地；
+  // 重拉必须走安全配方（先回顶再整组换），深处直接整组替换会白屏（2026-10-27）
   if (allCharts.value.length == 0 || loadedPackFp != packsFingerprint()) {
     syncSourceIndex();
-    loadAll();
+    reloadChartsSafely();
   }
 });
 onUnmounted(() => {
@@ -721,27 +764,21 @@ onUnmounted(() => {
    这里保留 width:100% 供竖屏兜底 */
 .chart-grid { width: 100%; padding: 20rpx 24rpx 0; flex-direction: row; flex-wrap: wrap; }
 /* QQ 音乐式榜单卡：卡头标题 + 左封面右前三名 */
-.rank-card { padding: 20rpx 24rpx 24rpx; margin-bottom: 20rpx; background-color: #ffffff; border-width: 1px; border-style: solid; border-color: #e6e8ee; border-radius: 24rpx; }
+.rank-card { padding: 20rpx 24rpx 24rpx; margin-bottom: 20rpx; border-width: 1px; border-style: solid; border-radius: 24rpx; }
 .rank-head { flex-direction: row; align-items: center; justify-content: space-between; }
-.rank-name { color: #1b202b; font-size: 32rpx; font-weight: 600; text-overflow: ellipsis; }
-.rank-meta { margin-left: 16rpx; color: #8b93a2; font-size: 24rpx; text-overflow: ellipsis; flex-shrink: 0; }
+.rank-name { font-size: 32rpx; font-weight: 600; text-overflow: ellipsis; }
+.rank-meta { margin-left: 16rpx; font-size: 24rpx; text-overflow: ellipsis; flex-shrink: 0; }
 .rank-body { margin-top: 20rpx; flex-direction: row; align-items: center; }
-.rank-cover-wrap { width: 148rpx; height: 148rpx; border-radius: 16rpx; overflow: hidden; background-color: #edeff3; flex-shrink: 0; }
+.rank-cover-wrap { width: 148rpx; height: 148rpx; border-radius: 16rpx; overflow: hidden; flex-shrink: 0; }
 .rank-cover { width: 148rpx; height: 148rpx; }
 .rank-play { position: absolute; left: 0; top: 0; right: 0; bottom: 0; align-items: center; justify-content: center; background-color: rgba(0, 0, 0, 0.25); }
 .rank-songs { flex: 1; min-width: 0; margin-left: 24rpx; }
 .rank-song { height: 50rpx; flex-direction: row; align-items: center; }
-.rank-idx { width: 40rpx; color: #8b93a2; font-size: 26rpx; font-weight: 600; }
-.rank-song-name { flex: 1; min-width: 0; color: #1b202b; font-size: 26rpx; text-overflow: ellipsis; }
-.empty { width: 100%; height: 300rpx; align-items: center; justify-content: center; }
-.empty-text { color: #9097a5; font-size: 26rpx; }
+.rank-idx { width: 40rpx; font-size: 26rpx; font-weight: 600; }
+.rank-song-name { flex: 1; min-width: 0; font-size: 26rpx; text-overflow: ellipsis; }
+/* 空态容器只留高度与居中，内容交给 QtEmpty（2026-10-29 统一空态口径） */
+.empty { width: 100%; align-items: center; justify-content: center; }
 .pad { height: 44rpx; }
-
-.rank-card-dark { background-color: #212734; border-color: #2a2f3a; }
-.rank-name-dark { color: #e9ebf0; }
-.rank-meta-dark { color: #9aa2b0; }
-.rank-idx-dark { color: #9aa2b0; }
-.rank-song-name-dark { color: #e9ebf0; }
 
 .chart-grid-wide { padding: 12px 16px 0; }
 .rank-card-wide { padding: 12px 14px 14px; margin-bottom: 12px; margin-right: 12px; border-radius: 14px; }
@@ -759,6 +796,4 @@ onUnmounted(() => {
   background-color: rgba(127, 127, 127, 0.10);
 }
 .pad-wide { height: 22px; }
-.empty-wide { height: 220px; }
-.empty-text-wide { font-size: 15px; }
 </style>

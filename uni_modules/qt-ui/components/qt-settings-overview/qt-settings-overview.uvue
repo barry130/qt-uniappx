@@ -94,13 +94,14 @@ import {
 import type { AiEngineMode } from "@/services/ai-mode";
 import { readProviders, activeProfile, activeModelOf } from "@/services/ai-providers";
 import { useSourceUpdateStore } from "@/stores/source-update";
+import { readSourceAuthEntries } from "@/services/source-auth";
 import { formatFileSize } from "@/services/upgrade";
 import { logBytes, logSupported } from "@/services/logger";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtTopRoute, qtIsSettingsRoute } from "@/uni_modules/qt-ui/composables/qt-page-chrome";
 
 /**
- * 设置总览（8 组 / 11 个入口）。
+ * 设置总览（9 组 / 14 个入口）。
  *
  * 为什么单独抽成组件：宽屏三栏模式下它要同时出现在两个地方 ——
  *   1. `/pages/settings/index` 自己（整页即总览）
@@ -161,11 +162,11 @@ const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.div
  * 是弹音源选择面板、不跳页，因此永远不会高亮。
  */
 const CURRENT_CELL_ROUTES: string[] = [
-  "source", "pack", "play-settings", "player-bar", "download-settings",
+  "source", "pack", "source-auth", "play-settings", "player-bar", "download-settings",
   "theme", "dislikes", "desktop-lyric", "permissions", "logs", "cache", "ai-providers",
 ];
 const CURRENT_CELL_PAGES: string[] = [
-  "", "/pages/source-pack/index", "/pages/play-settings/index", "/pages/player-bar/index",
+  "", "/pages/source-pack/index", "/pages/source-auth/index", "/pages/play-settings/index", "/pages/player-bar/index",
   "/pages/download-settings/index", "/pages/theme/index", "/pages/dislikes/index",
   "/pages/desktop-lyric/index", "/pages/permissions/index", "/pages/logs/index",
   "/pages/cache/index", "/pages/ai-providers/index",
@@ -197,6 +198,8 @@ function cellStyleFor(key: string): string {
 const sourceUpdateStore = useSourceUpdateStore();
 // 桌面歌词（响应式镜像：服务是非响应式单例，模板要靠 ref 刷新）
 const lyricOn = ref(desktopLyric.isEnabled());
+// 音源账号摘要（readSourceAuthEntries 读 storage 非响应式，靠 tick 在 refreshAll 里重算）
+const authTick = ref(0);
 /**
  * 「运行日志」行尾占用。日志大小是异步读出来的，不能写进 computed（会变成 Promise），
  * 只能进页面时读一次存 ref。formatFileSize 对 0 返回空串，所以这里自己兜底。
@@ -237,6 +240,7 @@ const groups = computed((): SettingsGroup[] => [
     id: "pack",
     cells: [
       { key: "pack", icon: "music", color: "#5f9ea0", title: "音源包管理", value: "安装 / 更新 / 启停", dot: sourceUpdateStore.updatePending, go: showSourcePackage },
+      { key: "source-auth", icon: "user", color: "#c9904f", title: "音源账号", value: authSummaryText(), dot: false, go: goSourceAuth },
     ],
   },
   {
@@ -413,6 +417,8 @@ function refreshAll(): void {
   lyricOn.value = desktopLyric.isEnabled();
   // 日志占用同理：在日志页里清过之后返回设置页，行尾数字必须跟着变
   refreshLogSize();
+  // 音源账号：source-auth 页登录/退出后返回，行尾「已登录 N 个音源」重算
+  authTick.value++;
 }
 
 onMounted(() => {
@@ -539,6 +545,19 @@ function pickSource(s: string): void {
 /** 音源包管理已拆成独立页（pages/source-pack/index）：状态/数据包/播放包/更新/安装都在那里 */
 function showSourcePackage(): void {
   goSubpage("/pages/source-pack/index");
+}
+
+// ==================== 音源账号（独立页 pages/source-auth/index，这里只留入口） ====================
+// 原入口在音源包页，2026-10-25 隐藏；2026-10-28 用户要求恢复并改放设置页。
+// 行尾摘要 = 已登录音源数（readSourceAuthEntries 读 storage 非响应式，refreshAll 里 authTick 重算）。
+/** 行尾摘要：登录了几个音源，一眼看出要不要去补登录 */
+function authSummaryText(): string {
+  void authTick.value;
+  const count = readSourceAuthEntries().length;
+  return count > 0 ? "已登录 " + count + " 个音源" : "未登录，点此添加";
+}
+function goSourceAuth(): void {
+  goSubpage("/pages/source-auth/index");
 }
 
 // ==================== 播放设置已整体拆分（独立页 pages/play-settings/index） ====================

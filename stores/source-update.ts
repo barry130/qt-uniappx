@@ -2,6 +2,7 @@ import { reactive } from "vue";
 import { hasSourceUpdateBadge, SOURCE_UPDATE_BADGE_EVENT } from "@/services/source-update";
 import { activePack, activeMetaPack } from "@/services/source-bundle-fs";
 import { PLAY_PACK_MISSING_EVENT } from "@/services/source-engine";
+import { logWarn } from "@/services/logger";
 
 /**
  * 音源包状态的响应式镜像（三件事）：
@@ -46,7 +47,9 @@ try {
   uni.$on(PLAY_PACK_MISSING_EVENT, () => {
     sourceUpdateStore.refresh();
   });
-} catch (_) {}
+} catch (_) {
+  // 静默：监听注册失败仅丢失引导条即时刷新，进入相关页面时会重查兜底
+}
 
 export function useSourceUpdateStore(): SourceUpdateStore {
   return sourceUpdateStore;

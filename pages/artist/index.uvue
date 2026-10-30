@@ -10,7 +10,7 @@
     @headerSearchInput="onHeaderSearchInput"
     @headerSearchClose="closeSearch"
   >
-  <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']"
+  <view class="page" :class="layout.isWide ? 'page-wide' : ''"
     ><!-- 宽屏左栏：歌手信息 + 操作区（竖屏时隐藏，hero 在列表内顶部）。
           模板与 pages/playlist 完全同构（2026-10-22 用户要求「歌单/专辑/排行榜/歌手详情用一套模板」），
           差异只有：歌手页没有收藏钮（只有歌单详情可以收藏），信息行是「歌手热门歌曲」+ 已加载数量。
@@ -185,12 +185,23 @@
       </list-item>
       </sticky-section>
       <list-item v-if="!loading && songs.length == 0" class="empty-item" :class="layout.isWide ? 'empty-item-wide' : ''">
-        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(27, 15)">暂无该歌手的热门歌曲</text>
-        <text class="empty-retry" :class="layout.isWide ? 'empty-retry-wide' : ''" @click="retry" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(26, 14)">重新加载</text>
+        <QtEmpty
+          icon="mic"
+          title="暂无该歌手的热门歌曲"
+          description="可以重新加载，或去搜索页找找这位歌手的其它作品"
+          action-text="重新加载"
+          action-icon="refresh"
+          @action="retry"
+        />
       </list-item>
       <!-- 搜索无结果：与「歌手无作品」区分开，不给重新加载入口 -->
       <list-item v-if="!loading && filtering && visibleSongs.length == 0" class="empty-item" :class="layout.isWide ? 'empty-item-wide' : ''">
-        <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(27, 15)">没有匹配的歌曲</text>
+        <QtEmpty
+          icon="search"
+          title="没有匹配的歌曲"
+          description="换个关键词试试，或清空搜索看全部作品"
+          :compact="true"
+        />
       </list-item>
       <!-- 分页全量拉取的进度行（歌手作品可能几千首，与歌单页「一次拉全」不同，这里必须留）；
            过滤态下不显示：那时的「已加载 N 首」与实际可见条数对不上 -->
@@ -264,6 +275,7 @@ import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet
 import QtSortPanel from "@/uni_modules/qt-ui/components/qt-sort-panel/qt-sort-panel.uvue";
 import QtPlaylistPicker from "@/uni_modules/qt-ui/components/qt-playlist-picker/qt-playlist-picker.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import QtEmpty from "@/uni_modules/qt-ui/components/qt-empty/qt-empty.uvue";
 import QtBatchBar from "@/uni_modules/qt-ui/components/qt-batch-bar/qt-batch-bar.uvue";
 import { qtSongKey, useBatchSelect } from "@/uni_modules/qt-ui/composables/use-batch-select";
 import { useBatchActions } from "@/composables/use-batch-actions";
@@ -849,11 +861,10 @@ function rememberAvatar(key: string, url: string): void {
 .search-row { flex-direction: row; align-items: center; padding: 16rpx 32rpx 0; }
 .search-field { flex: 1; min-width: 0; flex-direction: row; align-items: center; padding: 10rpx 18rpx; border-radius: 30rpx; border-width: 1px; border-style: solid; }
 .search-input { flex: 1; min-width: 0; margin-left: 12rpx; font-size: 26rpx; height: 40rpx; }
-.search-ph { color: #9aa1b1; font-size: 26rpx; }
+.search-ph { color: #969dad; font-size: 26rpx; }
 .search-clear { width: 44rpx; height: 44rpx; align-items: center; justify-content: center; flex-shrink: 0; }
-.empty-item { padding: 140rpx 0; justify-content: center; align-items: center; }
-.empty-text { font-size:27rpx; }
-.empty-retry { margin-top:24rpx; padding:12rpx 32rpx; font-size:26rpx; }
+/* 空态容器只留对齐，留白交给 QtEmpty（2026-10-29 统一空态口径） */
+.empty-item { padding: 40rpx 0; justify-content: center; align-items: center; }
 .foot-item { height:88rpx; justify-content:center; align-items:center; }
 /* 进度行：转圈 + 文案同行（文案不能省，用户要看「条数还在涨」） */
 .foot-item-progress { height:108rpx; flex-direction:row; }
@@ -863,11 +874,9 @@ function rememberAvatar(key: string, url: string): void {
 .search-row-wide { padding-top: 10px; padding-left: 24px; padding-right: 24px; }
 .search-field-wide { padding-top: 6px; padding-bottom: 6px; padding-left: 12px; padding-right: 12px; border-radius: 16px; }
 .search-input-wide { margin-left: 8px; font-size: 14px; height: 22px; }
-.search-ph-wide { color: #9aa1b1; font-size: 14px; }
+.search-ph-wide { color: #969dad; font-size: 14px; }
 .search-clear-wide { width: 32px; height: 32px; }
-.empty-text-wide { font-size: 15px; }
-.empty-item-wide { padding-top:80px; padding-bottom:80px; }
-.empty-retry-wide { margin-top:14px; padding-top:8px; padding-bottom:8px; padding-left:20px; padding-right:20px; font-size:14px; }
+.empty-item-wide { padding-top:26px; padding-bottom:26px; }
 .foot-item-wide { height:52px; }
 .foot-item-progress-wide { height:64px; flex-direction:row; }
 .foot-text-wide { font-size:14px; }

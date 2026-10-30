@@ -111,7 +111,7 @@ export function readProviders(): AiProviderConfig {
         return cfg;
       }
     } catch (e) {
-      // 坏数据当空配置处理
+      // 静默：坏数据当空配置处理，调用方按「未配置 AI」兜底
     }
   }
   return { profiles: [], activeId: "" };

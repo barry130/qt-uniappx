@@ -11,7 +11,18 @@
     <!-- 宽屏 rail 工具入口的就地托管层（详见 qt-wide-workspace.ts），与首页那一份互斥渲染。
          2026-10-25 教训：不能挪到页面根做多根节点 —— 字节码模板渲染器直接
          std::runtime_error 崩溃（unsupported component sharedData source）。 -->
-    <qt-wide-workspace host-route="/pages/profile/index" />
+    <qt-wide-workspace host-route="/pages/profile/index">
+      <!-- 页面槽位（2026-10-27 解耦）：工具页由本宿主页以默认插槽传入
+           （qt-ui 不再 import 业务页面）。单活动 pane：qtPaneOn＝当前托管
+           路由匹配才挂载，切换即换挂 16~300ms，保活方案真机史见
+           composables/qt-wide-workspace.ts 的 qtPaneOn 注释。 -->
+      <view v-if="qtPaneOn('/pages/search/index')" class="qtww-pane"><SearchPage /></view>
+      <view v-if="qtPaneOn('/pages/daily-recommend/index')" class="qtww-pane"><DailyRecommendPage /></view>
+      <view v-if="qtPaneOn('/pages/daily/index')" class="qtww-pane"><DailyPage /></view>
+      <view v-if="qtPaneOn('/pages/playlists/index')" class="qtww-pane"><PlaylistsPage /></view>
+      <view v-if="qtPaneOn('/pages/chart/index')" class="qtww-pane"><ChartPage /></view>
+      <view v-if="qtPaneOn('/pages/settings/index')" class="qtww-pane"><SettingsPage /></view>
+    </qt-wide-workspace>
   </qt-page-frame>
 </template>
 
@@ -21,6 +32,12 @@ import { onShow, onBackPress } from "@dcloudio/uni-app";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtProfileOverview from "@/uni_modules/qt-ui/components/qt-profile-overview/qt-profile-overview.uvue";
 import QtWideWorkspace from "@/uni_modules/qt-ui/components/qt-wide-workspace/qt-wide-workspace.uvue";
+import SearchPage from "@/pages/search/index.uvue";
+import DailyRecommendPage from "@/pages/daily-recommend/index.uvue";
+import DailyPage from "@/pages/daily/index.uvue";
+import PlaylistsPage from "@/pages/playlists/index.uvue";
+import ChartPage from "@/pages/chart/index.uvue";
+import SettingsPage from "@/pages/settings/index.uvue";
 import QtTabBar from "@/uni_modules/qt-ui/components/qt-tab-bar/qt-tab-bar.uvue";
 import { useQtTabBarSync } from "@/uni_modules/qt-ui/composables/use-qt-tab-bar";
 import { useQtLayout, qtStatusBarPx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
@@ -28,7 +45,7 @@ import { qtSplitActive } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { useDownloadsStore } from "@/stores/downloads";
 import { useSourceUpdateStore } from "@/stores/source-update";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
-import { qtCloseWideTool, qtWideWorkspaceRefresh } from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
+import { qtCloseWideTool, qtPaneOn, qtWideWorkspaceRefresh } from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
 import { qtSwitchTab } from "@/uni_modules/qt-ui/composables/qt-nav";
 
 /**
@@ -75,6 +92,15 @@ onBackPress((options: OnBackPressOptions): boolean => {
 </script>
 
 <style>
+/* 宽屏托管覆盖层的 pane（页面槽位解耦后样式随插槽内容落在本页作用域；
+   覆盖层 stage 是 fixed 铺满，pane 四边钉死其上，见 qt-wide-workspace.uvue） */
+.qtww-pane {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+}
 .page {
   flex: 1;
   min-height: 0;

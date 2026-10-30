@@ -3,6 +3,8 @@
  * 负责 access token / refresh token 的存储、刷新和自动续期
  */
 
+import { logWarn } from "@/services/logger";
+
 const ACCESS_TOKEN_KEY = "qt-access-token";
 const REFRESH_TOKEN_KEY = "qt-refresh-token";
 const TOKEN_EXPIRY_KEY = "qt-token-expiry";
@@ -59,7 +61,10 @@ export function clearTokens(): void {
 export function saveUserId(uid: string): void {
   try {
     uni.setStorageSync(USER_ID_KEY, uid);
-  } catch (_) {}
+  } catch (_) {
+    // 登录路径：写不进会让换号检测失灵（收藏缓存可能串号），记日志排查
+    logWarn("Auth", "saveUserId 写入失败（uid=" + uid + "）");
+  }
 }
 
 /** 读取上次登录的用户 id（未登录过返回空串） */

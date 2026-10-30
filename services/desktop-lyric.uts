@@ -24,6 +24,7 @@ import { usePlayerStore } from "@/stores/player";
 import { useLyricOffsetStore } from "@/stores/lyric-offset";
 import { musicApi } from "@/services/music-api";
 import { qtDiag } from "@/services/diag";
+import { logWarn } from "@/services/logger";
 import { parseLrc, activeLyricIndex, parseWordByWordLrc, mergeRomanization } from "@/utils/lrc";
 import type { LyricLine, Song } from "@/types/music";
 // #ifdef APP-ANDROID || APP-HARMONY
@@ -409,7 +410,9 @@ class DesktopLyricService {
   setLocked(locked: boolean): void {
     try {
       uni.setStorageSync(KEY_LOCK, locked ? "1" : "0");
-    } catch (_) {}
+    } catch (_) {
+      logWarn("DesktopLyric", "锁定开关持久化失败（本次已生效，重启后回默认）");
+    }
     // #ifdef APP-ANDROID || APP-HARMONY
     audioLyricSetLocked(locked);
     // #endif
@@ -422,7 +425,9 @@ class DesktopLyricService {
     if (value > FONT_MAX) value = FONT_MAX;
     try {
       uni.setStorageSync(KEY_FONT, value.toString());
-    } catch (_) {}
+    } catch (_) {
+      logWarn("DesktopLyric", "字号持久化失败（本次已生效，重启后回默认）");
+    }
     // #ifdef APP-ANDROID
     let tr = Math.round(value * 0.8);
     if (tr < 5) tr = 5;
@@ -434,7 +439,9 @@ class DesktopLyricService {
   setColor(hex: string): void {
     try {
       uni.setStorageSync(KEY_COLOR, hex);
-    } catch (_) {}
+    } catch (_) {
+      logWarn("DesktopLyric", "颜色持久化失败（本次已生效，重启后回默认）");
+    }
     // #ifdef APP-ANDROID
     if (hex.length >= 7) {
       // 整串 parseInt 超过 Int32 上限会溢出，这里逐通道解析后拼 ARGB（Alpha 置满）。
@@ -458,7 +465,9 @@ class DesktopLyricService {
     if (!(index >= 0 && index <= 3)) return;
     try {
       uni.setStorageSync(KEY_TF, index.toString());
-    } catch (_) {}
+    } catch (_) {
+      logWarn("DesktopLyric", "字体持久化失败（本次已生效，重启后回默认）");
+    }
     // #ifdef APP-ANDROID
     audioLyricSetTypeface(index);
     // #endif
@@ -471,7 +480,9 @@ class DesktopLyricService {
     if (v > WIDTH_MAX) v = WIDTH_MAX;
     try {
       uni.setStorageSync(KEY_WIDTH, v.toString());
-    } catch (_) {}
+    } catch (_) {
+      logWarn("DesktopLyric", "宽度持久化失败（本次已生效，重启后回默认）");
+    }
     // #ifdef APP-ANDROID
     audioLyricSetWidth(v);
     // #endif
@@ -506,7 +517,9 @@ class DesktopLyricService {
   setStrokeEnabled(on: boolean): void {
     try {
       uni.setStorageSync(KEY_STROKE_ON, on ? "1" : "0");
-    } catch (_) {}
+    } catch (_) {
+      logWarn("DesktopLyric", "描边开关持久化失败（本次已生效，重启后回默认）");
+    }
     this.pushStroke();
   }
 
@@ -516,7 +529,9 @@ class DesktopLyricService {
     if (value > STROKE_MAX) value = STROKE_MAX;
     try {
       uni.setStorageSync(KEY_STROKE_W, value.toString());
-    } catch (_) {}
+    } catch (_) {
+      logWarn("DesktopLyric", "描边宽度持久化失败（本次已生效，重启后回默认）");
+    }
     this.pushStroke();
   }
 
@@ -534,7 +549,9 @@ class DesktopLyricService {
   setShadowEnabled(on: boolean): void {
     try {
       uni.setStorageSync(KEY_SHADOW, on ? "1" : "0");
-    } catch (_) {}
+    } catch (_) {
+      logWarn("DesktopLyric", "阴影开关持久化失败（本次已生效，重启后回默认）");
+    }
     // #ifdef APP-ANDROID
     audioLyricSetShadow(on);
     // #endif
@@ -554,7 +571,9 @@ class DesktopLyricService {
     const value = normalizeEnum(v, ["left", "center", "right"], ALIGN_DEFAULT);
     try {
       uni.setStorageSync(KEY_ALIGN, value);
-    } catch (_) {}
+    } catch (_) {
+      logWarn("DesktopLyric", "对齐方式持久化失败（本次已生效，重启后回默认）");
+    }
     // #ifdef APP-ANDROID
     audioLyricSetAlign(value);
     // #endif
@@ -574,7 +593,9 @@ class DesktopLyricService {
     const value = normalizeEnum(v, ["none", "solid"], BG_MODE_DEFAULT);
     try {
       uni.setStorageSync(KEY_BG_MODE, value);
-    } catch (_) {}
+    } catch (_) {
+      logWarn("DesktopLyric", "背景模式持久化失败（本次已生效，重启后回默认）");
+    }
     this.pushBackground();
   }
 
@@ -592,7 +613,9 @@ class DesktopLyricService {
   setBackgroundColor(hex: string): void {
     try {
       uni.setStorageSync(KEY_BG_COLOR, hex);
-    } catch (_) {}
+    } catch (_) {
+      logWarn("DesktopLyric", "背景色持久化失败（本次已生效，重启后回默认）");
+    }
     this.pushBackground();
   }
 
@@ -615,7 +638,9 @@ class DesktopLyricService {
     if (value > 1) value = 1;
     try {
       uni.setStorageSync(KEY_BG_OPACITY, value.toString());
-    } catch (_) {}
+    } catch (_) {
+      logWarn("DesktopLyric", "背景不透明度持久化失败（本次已生效，重启后回默认）");
+    }
     this.pushBackground();
   }
 
@@ -784,35 +809,47 @@ class DesktopLyricService {
     // 本轮的世代号：在途期间用户换歌词来源（notifyLyricChanged 会 ++）就作废本次结果
     const epoch = this.lyricEpoch;
     try {
-      let text = await musicApi.lyrics(current);
-      if (text.length == 0) {
-        // 空结果既可能是真·纯音乐，也可能是接口偶发失败：稍等重试一次再下结论。
-        // 走 retryLyrics（忽略「已问过」标记）；若播放页刚拉到结果，这里会直接命中缓存。
-        await delay(400);
-        text = await musicApi.retryLyrics(current);
-      }
+      // 在播本地文件自带内嵌歌词时直接用它：文件里那份与音频同源、最准，也省掉在线取词
+      // （本地曲目 / 下载歌 / 本地优先命中的在线歌都走这里）
+      const embedded = player.embeddedLyricOf(current);
+      let text = "";
       let translation = "";
-      try {
-        translation = await musicApi.lyricTranslation(current);
-      } catch (_) {
-        translation = "";
-      }
-      // 起手先同步读一次缓存：musicApi.lyrics() 内部可能已把新字段写进缓存，
-      // 晚一步读能多命中一次；读不到就空串，走普通 LRC 路径（老包/中文歌即如此）
-      let wordByWord = musicApi.cachedLyricWordByWord(current);
-      if (wordByWord.length == 0) {
-        try {
-          wordByWord = await musicApi.lyricWordByWord(current);
-        } catch (_) {
-          wordByWord = "";
+      let wordByWord = "";
+      let romanization = "";
+      if (embedded.length > 0) {
+        text = embedded;
+        // 译文/逐字/罗马音都是按「在线源返回」组织的，混进内嵌词只会对不上时间轴，
+        // 有内嵌词时整段跳过（与播放页同口径）
+      } else {
+        text = await musicApi.lyrics(current);
+        if (text.length == 0) {
+          // 空结果既可能是真·纯音乐，也可能是接口偶发失败：稍等重试一次再下结论。
+          // 走 retryLyrics（忽略「已问过」标记）；若播放页刚拉到结果，这里会直接命中缓存。
+          await delay(400);
+          text = await musicApi.retryLyrics(current);
         }
-      }
-      let romanization = musicApi.cachedLyricRomanization(current);
-      if (romanization.length == 0) {
         try {
-          romanization = await musicApi.lyricRomanization(current);
+          translation = await musicApi.lyricTranslation(current);
         } catch (_) {
-          romanization = "";
+          translation = "";
+        }
+        // 起手先同步读一次缓存：musicApi.lyrics() 内部可能已把新字段写进缓存，
+        // 晚一步读能多命中一次；读不到就空串，走普通 LRC 路径（老包/中文歌即如此）
+        wordByWord = musicApi.cachedLyricWordByWord(current);
+        if (wordByWord.length == 0) {
+          try {
+            wordByWord = await musicApi.lyricWordByWord(current);
+          } catch (_) {
+            wordByWord = "";
+          }
+        }
+        romanization = musicApi.cachedLyricRomanization(current);
+        if (romanization.length == 0) {
+          try {
+            romanization = await musicApi.lyricRomanization(current);
+          } catch (_) {
+            romanization = "";
+          }
         }
       }
       // 取词期间切了歌或换了歌词来源：本次结果作废，不能把上一首/上一来源的歌词推给悬浮窗

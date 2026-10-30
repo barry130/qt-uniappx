@@ -20,6 +20,7 @@
 
 import { reactive } from "vue";
 import type { Song } from "@/types/music";
+import { logWarn } from "@/services/logger";
 
 /** 单曲 / 全局偏移上限（毫秒），与 PC 的 MAX_OFFSET_MS 一致 */
 export const LYRIC_OFFSET_MAX_MS = 10000;
@@ -97,7 +98,9 @@ class LyricOffsetStore {
       }
       obj["songs"] = songs;
       uni.setStorageSync(LYRIC_OFFSET_KEY, JSON.stringify(obj));
-    } catch (_) {}
+    } catch (_) {
+      logWarn("LyricOffset", "歌词偏移持久化失败（本次已生效，重启后回默认）");
+    }
   }
 
   /** 某曲目的生效偏移（毫秒）：有按曲目覆盖用覆盖值，否则用全局值 */
@@ -181,7 +184,9 @@ class LyricOffsetStore {
     this.activeKey = "";
     try {
       uni.removeStorageSync(LYRIC_OFFSET_KEY);
-    } catch (_) {}
+    } catch (_) {
+      logWarn("LyricOffset", "清除持久化失败（内存已清空，重启后可能复活，可再次清除）");
+    }
   }
 }
 

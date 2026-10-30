@@ -2,7 +2,7 @@
   <view
     v-if="!layout.isWide"
     class="tab-bar"
-    :style="'background-color:' + theme.skin.tabSurface + ';border-color:' + theme.skin.border + ';'"
+    :style="'background-color:' + theme.skin.tabSurface + ';border-color:' + theme.skin.border + ';bottom:' + bottomPx + 'px;'"
   >
     <view
       v-for="item in tabs"
@@ -35,9 +35,10 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtSwitchTab } from "@/uni_modules/qt-ui/composables/qt-nav";
 import { qtFont } from "@/uni_modules/qt-ui/stores/font-scale";
 
@@ -45,10 +46,12 @@ import { qtFont } from "@/uni_modules/qt-ui/stores/font-scale";
  * 竖屏底部导航：悬浮胶囊（2026-10-19 起从通栏改为悬浮 pill，参照用户给的
  * 悬浮导航设计稿）：左右各一个入口「发现 / 我的」，中间不放发布按钮。
  *
- * 几何契约：离地 24rpx + 高 120rpx（合计 144rpx），总占位写进 use-qt-layout.ts 的
- * QT_TAB_BAR_HEIGHT_RPX，由 qtTabBarHeightPx() 按窗口宽折算——qt-toast-host 的让位、
- * qt-mini-player 悬浮球的初始边距都按它取值，三处必须同源（tools/check-toast.mjs
- * 断言 qtTabBarHeightPx() 被 toast-host 使用、常量等于 144）。
+ * 几何契约：离地 24rpx + 高 120rpx（合计 144rpx）+ 底部安全区（三键导航 /
+ * 虚拟导航条，见 use-qt-layout.ts 的 safeBottomPx），总占位写进 use-qt-layout.ts
+ * 的 QT_TAB_BAR_HEIGHT_RPX，由 qtTabBarHeightPx() 按窗口宽折算并叠加安全区
+ * ——qt-toast-host 的让位、qt-mini-player 悬浮球的初始边距都按它取值，
+ * 三处必须同源（tools/check-toast.mjs 断言 qtTabBarHeightPx() 被 toast-host
+ * 使用、常量等于 144）。
  *
  * 2026-10-20 起这里的尺寸改用 rpx（设计 px × 2）而不是写死 px：本组件只在
  * `!layout.isWide` 的手机档渲染，而手机档整页内容都是 rpx（随窗口宽度线性放大）。
@@ -79,6 +82,15 @@ const tabs: TabItem[] = [
 function active(path: string): boolean {
   return props.current == path;
 }
+
+/**
+ * 离地高度（px）：24rpx 基础离地 + 底部安全区。
+ * 鸿蒙窗口 edge-to-edge，三键导航 / 虚拟导航条直接压在窗口底边 —— 只写 24rpx
+ * 的话非全面屏手机上胶囊正好卡在触控键上（2026-10-29 用户反馈）。Android 侧
+ * App.uvue 的 applyLegacyInsets 已把窗口拉回传统 inset 布局，safeBottomPx 恒 0，
+ * 基础值不变。
+ */
+const bottomPx = computed((): number => qtRpx(24) + layout.safeBottomPx);
 
 function hasDot(path: string): boolean {
   if (props.dots == null) return false;
@@ -114,10 +126,12 @@ function go(path: string): void {
   position: absolute;
   left: 40rpx;
   right: 40rpx;
-  bottom: 24rpx;
-  /* 总占位 = 24rpx 离地 + 120rpx 高 = 144rpx（375dp 基准下 = 72px），与
-     use-qt-layout.ts 的 QT_TAB_BAR_HEIGHT_RPX 保持一致（toast 让位、悬浮球初始边距都按它算） */
+  /* 离地值走内联 style（bottomPx = 24rpx + safeBottomPx）：CSS 写死 24rpx 的
+     话，三键导航设备的虚拟导航条会直接盖住胶囊下半截。 */
   height: 120rpx;
+  /* 总占位 = 24rpx 离地 + 120rpx 高 = 144rpx（375dp 基准下 = 72px），与
+     use-qt-layout.ts 的 QT_TAB_BAR_HEIGHT_RPX 保持一致（toast 让位、悬浮球初始边距都按它算；
+     2026-10-29 起非全面屏再叠加 safeBottomPx，见 use-qt-layout.ts） */
   flex-direction: row;
   align-items: center;
   border-radius: 60rpx;

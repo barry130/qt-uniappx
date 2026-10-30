@@ -27,7 +27,7 @@ function readMap(): ScrollMap {
       if (v != null && v > 0) map.set(k, v);
     }
   } catch (e) {
-    // 存储损坏就当作没有记忆，不影响页面
+    // 静默：存储损坏就当作没有记忆，不影响页面
   }
   return map;
 }
@@ -39,7 +39,7 @@ function writeMap(map: ScrollMap): void {
     for (let i = 0; i < ids.length; i++) obj[ids[i]] = map.get(ids[i]) ?? 0;
     uni.setStorageSync(CHART_SCROLL_KEY, JSON.stringify(obj));
   } catch (e) {
-    // 写失败只是丢记忆，不报错
+    // 静默：写失败只是丢滚动记忆，不报错
   }
 }
 

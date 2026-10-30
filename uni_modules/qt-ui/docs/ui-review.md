@@ -130,7 +130,7 @@
 - 全站无按压态（`:active` / touchstart 反馈）—— 至少给主 CTA 加压暗 8%
 - toast 时长/类型不统一（1500/2000/2500/3000ms 混用）
 - `pages/download` 删除/重下无反馈（无 toast）
-- 空/加载态两套范式（`qt-loading` vs 纯文字），空状态文案各写各的 → 建议 `qt-empty` 收敛
+- 空/加载态两套范式（`qt-loading` vs 纯文字），空状态文案各写各的 → **已做 `qt-empty` 收敛（2026-10-29，见 §3.11 与 design.md §11.1），剩余页面待接入**
 - `qt-notice-bar` `onTap()` 定义但模板从未绑定（死代码）
 - 宽屏圆角比例错位：`qt-notice-splash`/`qt-upgrade-popup` 32rpx→wide 应为 22px，`qt-notice-bar` 18rpx→14px
 - `pages/library` `.create-btn-plus` 用文本 `+` 充当图标（design.md §4.1 禁止）→ 改 `<QtIcon name="plus">`
@@ -141,7 +141,57 @@
 
 ---
 
+### 3.11 2026-10-29 复核实测（数字版，取代定性描述）
+
+三路只读审计（视觉一致性 / 四态覆盖 / 交互工艺）的实测数字，作为上面各条的验收基线：
+
+| 维度 | 实测 | 结论 |
+|---|---|---|
+| 令牌落地 | `skin.border` 155 处、`skin.textMuted` 301 处、725 个节点走 `qtFont`；`qtFontDual` 700 / `qtFont` 4 / `qtFontPx` 73 | 主路径已经很令牌化 |
+| 手写深色调色板 | 26 个 `-dark` 类 + 53 处 `themeStore.dark ?` 三元，值为 `#212734`/`#2a2f3a`/`#e9ebf0`/`#9aa2b0`，与任何 `skin.*` 都不等 | 换 linen/aurora/ocean 时 chart/登录/反馈/资料页「半页仍是 graphite 深色」——唯一用户侧直接可见的翻车项 |
+| 硬编码浅色线 | 21 处（`#eff1f5`/`#eef0f5`/`#e5e8ee`/`#e6e8ee`/`#e8ebf2` 五种并存） | 深色下这些线消失或刺眼 |
+| 次要文字灰 | 14 个灰值 63 处，无主流（`#9aa1b1` 11 处 vs `#8b93a2` 10 处平分） | 11 个页面副标题色肉眼不一致 |
+| 字号 | `qtFont(23)` 69 处与 22/24 混用（22:107、24:125） | 23rpx 是「随手挑值」，应删 |
+| 圆角 | 64 个不同取值 / 798 处声明（rpx 34 个 2~150、px 30 个 1~90），设计文档只许 16/20/24rpx | 卡片边缘参差，是「不像一个设计系统」最明显的信号 |
+| 分隔线粗细 | 1px 149 处、1rpx 9 处，**不存在 0.5px** | 粗细不是问题，线色才是 |
+| 死令牌源 | `uni.scss` 零消费者、`glass.css` 的 `qt-glass` 0 使用、`page-dark` 13 处绑定全仓库无 CSS 定义 | 三套「假真源」，应删 |
+| 四态 | 骨架屏很扎实（条数/行高无漂移）；错误态系统性缺失：10 处请求失败被吞成 toast/空数组/静默 | 失败与「暂无数据」同形，用户无法自救 |
+| 空态 | 53 处手写，只有 `pages/collection` 做全（芯片+标题+说明+双按钮） | 已抽 `qt-empty` 并接入 history/download/daily/chart/artist/search |
+| 触控 | 红心/更多 19~20dp、播放页工具键 19dp、`.prog-range` 可拖区仅 15dp、首页搜索/铃铛 34dp | 手机端「点不中」的主因 |
+| 反馈 | 87 处主动把 `hover-class` 设为 `none`，仅 8 处保留 | 手机点按零反馈 |
+| 动效 | 全库仅 6 个组件有 `transition`；`pages/player` 0 个（切歌硬切）、大面板（action-sheet/队列/偏移/picker）全是 v-if 直出 | 缺一层润滑，不是缺一整套动画 |
+
+优先序（按用户可见度）：① 杀 `-dark` 调色板 ② 21 处线色 → `skin.divider` ③ 14 灰收 3 档 ④ 圆角 64 → 3 档 ⑤ 三处表单孤岛（login/forget-password/profile-edit 的 `#f4f5fa`+`#eef0f5`）。
+
+---
+
+### 3.12 2026-10-29 落地记录（6 批次，用户「按建议全部优化修复」）
+
+按 3.11 的优先序落地 ①②③⑤⑥⑦，实测数字如下：
+
+| 项 | 改前 → 改后 | 做法 |
+|---|---|---|
+| ① 手写深色调色板 | 26 个 `-dark` 类 + 53 处 `themeStore.dark ?` → **0 类 / 1 处** | 类全部并入 `themeStore.skin.*`（容器 surface/surfaceMuted/coverPlaceholder，文字 text/textMuted，强调 accentSoft）；剩下 1 处是 `qt-skeleton-shine` 的光泽透明度常量，属合理场景；`page-dark` 这种 0 CSS 定义的死绑定（13 处）删除 |
+| ② 硬编码浅色线 | 21 处 5 种灰 → **0** | 分隔线统一 `themeStore.skin.divider`（全库 48 处消费），`#eff1f5/#eef0f5/#e5e8ee/#e6e8ee/#e8ebf2` 清零 |
+| ③ 次要文字灰 | 14 个值 63 处 → **2 个值** | `#737b8e`（= linen `textMuted`）用于主副文字、`#969dad`（= `textSubtle`）用于弱说明；替换 47 处，与皮肤令牌精确相等，深色皮肤由内联覆盖 |
+| ⑤ 触控热区 | 红心/更多 20dp、播放工具键 19dp、进度条 15dp、首页搜索/铃铛 34dp → **34dp / 44dp** | 行内图标外套 `.row-hit`/`.lite-hit`（68rpx，宽屏 40px），图标本体尺寸不变；播放页 `.action-hit`/`.lyric-tool`/`.prog-range` 加高；首页 `.icon-btn`/`.search` 88rpx |
+| ⑥ 动效 | 6 个组件有 transition、播放页 0 个 → **播放页封面淡入 0.32s、底部面板 translateY 0.24s；面板 0.22s** | `qt-action-sheet`/`qt-playlist-picker`/批量排序面板/播放偏移面板统一「v-if 保留 + opacity/transform transition」；列表用既有 `useQtReveal`（chart、qt-skeleton-list）错峰淡入 |
+| ⑦ 错误态 | 失败吞成 toast / 空数组 / 静默（审计点名 10 处） | 复用 `qt-empty` 当错误卡（图标 alert + 说明 + 「重新加载」），与真空态区分；chart/home/daily/daily-recommend/search/artist 等页补 `action-text="重新加载"` |
+
+**④ 圆角未动的原因**：64 个取值里至少三种是合法家族——卡片 16/20/24rpx、底部面板 `32rpx 32rpx 0 0`、胶囊 999；其余 5/6/10/14/18/22 是随手值。全局一刀切会把面板顶部圆角压小、把胶囊变方块，比现状更乱。正确顺序是先立「元素家族 → 档位」契约再按家族批量替换，属独立一次改动。
+
+### 3.13 待办（下一轮，按收益排序）
+
+1. **圆角家族化**：卡片 20rpx（宽屏 10px）、面板 24rpx + 顶部 32rpx、胶囊 999、封面 12rpx（宽屏 8px）、输入框 16rpx；按 CSS 选择器家族批量替换 + 截图复核。
+2. **按下反馈**：87 处 `hover-class="none"` 中，真正需要按下态的是可点卡片与主按钮（新增 `qt-pressable` 或 QtButton 内建 `:active` 降透明度）；不要给所有行都加，点按闪烁更糟。
+3. **字号收敛**：`qtFont(23)` 与 22/24 混用仍在，按行类型分档（正文 24、辅助 22）后替换。
+4. **间距节奏**：审计尚未覆盖，建议一律落在 4/8/12/16/24 的 8 格上。
+5. **深色皮肤回归**：①②③ 之后需要在 graphite/aurora/ocean 下逐页截图复核（本轮只做了静态检查 + 两端编译，未逐页目测）。
+
+------------------------------------------------------------------------------
+
 ## 4. 2026-10 新增已验证结论（非 UI 但也影响体验）
+
 
 1. **163（网易云）版权受限专辑返回 HTTP 200 + `{"resourceState":false,"code":404}`**：
    `services/http.ts` 的 `directRequest` 只按 HTTP 状态码（200~299）判断成败，因此这类失败是**静默成功**、

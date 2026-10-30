@@ -473,7 +473,7 @@ function ensureSession(): void {
 				try {
 					session.setLaunchAbility(agent)
 				} catch (e) {
-					// 非致命：仅影响「点通知回应用」
+					// 静默：仅影响「点通知回应用」这一增强项
 				}
 			})
 			try {
@@ -708,7 +708,7 @@ function pushSessionQueue(session: avSession.AVSession): void {
 		// 只有真的推成功才记签名：失败时留着空串，下次还有机会重试
 		gQueueSignature = sig
 	} catch (e) {
-		// 队列信息是增强项，失败不影响播放与基本播控
+		// 静默：队列信息是增强项，失败不影响播放与基本播控
 	}
 }
 
@@ -757,6 +757,7 @@ function loadCoverIntoSession(session: avSession.AVSession, url: string, assetId
 				try {
 					req.destroy()
 				} catch (eDestroy) {
+					// 静默：请求可能已自行结束，失败不拦后面的封面处理
 				}
 				if (err != null && err.code != 0) {
 					// 失败时允许以后重试（网络抖动不该让这首曲子永远没封面）
@@ -790,6 +791,7 @@ function loadCoverIntoSession(session: avSession.AVSession, url: string, assetId
 						src.release((eRelease: BusinessError) => {
 						})
 					} catch (eRelease) {
+						// 静默：封面流释放失败不影响已解码的位图使用
 					}
 					if (e != null && e.code != 0) {
 						releaseCoverSlot(assetId)
@@ -900,12 +902,12 @@ function releaseSession(): void {
 	try {
 		session.deactivate()
 	} catch (e) {
-		// 忽略
+		// 静默：失活失败不影响下次会话创建
 	}
 	try {
 		session.destroy()
 	} catch (e) {
-		// 忽略
+		// 静默：销毁失败不影响下次会话创建
 	}
 	// 桌面歌词窗是**会话的附属物**：会话没了窗就没了（与安卓端不同——那边是我们自绘的
 	// 悬浮窗，停播后仍留在屏幕上）。所以这里复位「已 enable」，下次建会话必须重新 enable。
@@ -1233,7 +1235,7 @@ function onStateChange(player: media.AVPlayer, state: media.AVPlayerState): void
 		try {
 			player.setVolume(gDucked ? gUserVolume * DUCK_VOLUME : gUserVolume)
 		} catch (e) {
-			// 忽略：音量设置失败不影响播放
+			// 静默：音量设置失败不影响播放
 		}
 		applySpeed(player)
 		// 续播定位：AVPlayer 只能 seek 到 [0, duration)，越界会失败，故先夹紧
@@ -1350,7 +1352,7 @@ function applySpeed(player: media.AVPlayer): void {
 	try {
 		player.setSpeed(nearestSpeed(gPlaybackSpeed))
 	} catch (e) {
-		// 个别设备不支持变速：静默降级为 1.0
+		// 静默：个别设备不支持变速，降级为 1.0
 	}
 }
 
@@ -1432,7 +1434,7 @@ function onAudioInterrupt(info: audio.InterruptEvent): void {
 				try {
 					p.pause()
 				} catch (e) {
-					// 忽略
+					// 静默：暂停失败播放器已异常，重播时重建
 				}
 			}
 			gIntendPlay = false
@@ -1459,7 +1461,7 @@ function applyVolumeToPlayer(): void {
 	try {
 		p.setVolume(gDucked ? gUserVolume * DUCK_VOLUME : gUserVolume)
 	} catch (e) {
-		// 忽略
+		// 静默：音量设置失败不影响播放
 	}
 }
 
@@ -1614,10 +1616,12 @@ export function audioPlay(): void {
 		try {
 			p.stop()
 		} catch (eStop) {
+			// 静默：停止失败同样走下面的释放兜底
 		}
 		try {
 			p.release()
 		} catch (eRelease) {
+			// 静默：释放失败对象交给 GC，下次播放重建
 		}
 		gPlayer = null
 		gPlayerCreating = false
@@ -1725,12 +1729,12 @@ export function audioStop(): void {
 		try {
 			p.stop()
 		} catch (e) {
-			// 忽略：可能本就不在可停止状态
+			// 静默：可能本就不在可停止状态，继续释放即可
 		}
 		try {
 			p.release()
 		} catch (e) {
-			// 忽略
+			// 静默：释放失败对象交给 GC，下次播放重建
 		}
 		gPlayer = null
 	}
@@ -2154,3 +2158,29 @@ export function audioOnSetRating(callback: AudioRatingRequestCallback | null): v
 export function audioSetLiked(mediaId: string, liked: boolean): void {
 }
 export function audioMonotonicTime(): number { return systemDateTime.getUptime(systemDateTime.TimeType.STARTUP, false) }
+
+// ==================== 车机蓝牙 AVRCP 歌词 ====================
+// Harmony AVSession 无歌词标准通道，留空实现。
+// AVMetadata 的 lyric / singleLyricText 是系统桌面歌词的数据源（audioLyricSetLrc /
+// audioLyricUpdate 已覆盖），没有面向 AVRCP 车机的整首歌词独立通道；此处保留与
+// 安卓端完全一致的签名，让 services/audio-player.uts 的跨端调用不需要再分平台。
+// 仍须追加在文件**最末尾**（methodId 顺序，同上文 audioLyricSetLrc 的说明）。
+export function audioSetCarLyric(text: string): void {
+}
+
+// ==================== 音频输出 / 解码方式 / 音量增强（鸿蒙留空实现） ====================
+// 鸿蒙 AVPlayer 不暴露 RenderersFactory 与 AudioEffect 会话级效果器：浮点输出、
+// 解码器偏好、LoudnessEnhancer 都没有等价能力（同上文 EQ 的说明）。保留与安卓端
+// 完全一致的签名，让 services/audio-player.uts 的跨端调用不需要再分平台分支。
+// 仍须追加在文件**最末尾**（methodId 顺序，同上文 audioSetCarLyric 的说明）。
+export function audioSetFloatOutput(on: boolean): void {
+}
+
+export function audioSetPreferSoftwareDecoder(on: boolean): void {
+}
+
+export function audioSetEnhanceEnabled(on: boolean): void {
+}
+
+export function audioSetEnhanceGain(gainMb: number): void {
+}

@@ -7,9 +7,10 @@ import { saveToPublicMedia, ensurePublicDirPermission, deleteMediaByPath, embedA
 import type { EmbedTagsOptions } from "@/uni_modules/qt-app-native";
 import { restoreCustomDir } from "@/services/app-native";
 import type { Song } from "@/types/music";
-import { logErrV } from "@/services/logger";
+import { logErrV, logWarn } from "@/services/logger";
 import { qtDiag, qtDiagDebug } from "@/services/diag";
 import { qtShowToast } from "@/services/toast";
+import { setSourceDownloadQuality, sourceDownloadQualityOf } from "@/services/source-quality";
 
 const DOWNLOAD_KEY = "qt-downloads";
 /** 未完成任务队列（pending/failed）的持久化键：重启后恢复队列（2026-10 用户反馈“退出重启后未完成任务全部丢失”） */
@@ -199,12 +200,16 @@ function describeNetError(e: any): string {
     try {
       const j = JSON.stringify(e);
       if (j != null && j.length > 0 && j != "{}") raw = j;
-    } catch (_) {}
+    } catch (_) {
+      // 静默：stringify 也炸就走 toString 兜底
+    }
   }
   if (raw.length == 0) {
     try {
       raw = e != null ? e.toString() : "";
-    } catch (_) {}
+    } catch (_) {
+      // 静默：toString 也炸就按原文走通用网络错误文案
+    }
   }
   const text = raw.toLowerCase();
   if (raw.indexOf("超时") >= 0 || text.indexOf("timeout") >= 0 || text.indexOf("timed out") >= 0)
@@ -254,11 +259,15 @@ function isRangeNotSatisfiable(e: any): boolean {
   try {
     const text = e.toString();
     if (text != null && text.indexOf("416") >= 0) return true;
-  } catch (_) {}
+  } catch (_) {
+    // 静默：toString 炸就走 stringify 探测
+  }
   try {
     const j = JSON.stringify(e);
     if (j != null && j.indexOf("416") >= 0) return true;
-  } catch (_) {}
+  } catch (_) {
+    // 静默：两条探测都炸按非 416 处理，走常规重试
+  }
   return false;
 }
 /** 下载文件名格式（uni 存储键）：artist=歌手-歌名（默认），song=歌名-歌手 */
@@ -454,37 +463,53 @@ class DownloadsStore {
     try {
       const dq = uni.getStorageSync(DOWNLOAD_QUALITY_KEY) as string;
       if (dq != null && dq.length > 0) this.downloadQuality = dq;
-    } catch (_) {}
+    } catch (_) {
+      // 静默：读不到存档按默认值处理
+    }
     try {
       const df = uni.getStorageSync(DOWNLOAD_NAME_FORMAT_KEY) as string;
       if (df == "song" || df == "artist") this.downloadNameFormat = df;
-    } catch (_) {}
+    } catch (_) {
+      // 静默：读不到存档按默认值处理
+    }
     try {
       const dc = uni.getStorageSync(DOWNLOAD_CONCURRENCY_KEY) as string;
       if (dc != null && dc.length > 0) {
         const n = parseInt(dc);
         if (n >= DOWNLOAD_CONCURRENCY_MIN && n <= DOWNLOAD_CONCURRENCY_MAX) this.concurrency = n;
       }
-    } catch (_) {}
+    } catch (_) {
+      // 静默：读不到存档按默认值处理
+    }
     try {
       this.downloadCover = uni.getStorageSync(DOWNLOAD_COVER_KEY) == "1";
-    } catch (_) {}
+    } catch (_) {
+      // 静默：读不到存档按默认值处理
+    }
     try {
       this.downloadLyric = uni.getStorageSync(DOWNLOAD_LYRIC_KEY) == "1";
-    } catch (_) {}
+    } catch (_) {
+      // 静默：读不到存档按默认值处理
+    }
     try {
       // 只有显式存过 "sidecar" 才是文件模式，其余（含老用户无此键）一律内嵌
       const sm = uni.getStorageSync(DOWNLOAD_STORAGE_MODE_KEY) as string;
       this.storageMode = sm == "sidecar" ? "sidecar" : "embed";
-    } catch (_) {}
+    } catch (_) {
+      // 静默：读不到存档按默认值处理
+    }
     try {
       // 只有显式存过 "0" 才算关，没这个键（老用户）保持默认开
       this.deleteFileOnRemove = uni.getStorageSync(DOWNLOAD_DELETE_FILE_KEY) != "0";
-    } catch (_) {}
+    } catch (_) {
+      // 静默：读不到存档按默认值处理
+    }
     try {
       const dd = uni.getStorageSync(DOWNLOAD_DIR_KEY) as string;
       if (dd != null && dd.length > 0) this.customDir = dd;
-    } catch (_) {}
+    } catch (_) {
+      // 静默：读不到存档按默认值处理
+    }
     // 鸿蒙：自定义目录存的是**目录 URI**（picker + persistPermission 的产物），
     // 原生变量不跨进程，必须把 URI 喂回去并让原生侧 activatePermission 激活，
     // 否则每次重启后往公共目录写都会失败（Android 存的是真实路径，此调用是空实现）。
@@ -547,7 +572,9 @@ class DownloadsStore {
     try {
       if (next.length > 0) uni.setStorageSync(DOWNLOAD_DIR_KEY, next);
       else uni.removeStorageSync(DOWNLOAD_DIR_KEY);
-    } catch (_) {}
+    } catch (_) {
+      logWarn("Downloads", "自定义目录持久化失败（本次已生效，重启后回默认）");
+    }
     restoreCustomDir(next);
   }
 
@@ -563,7 +590,28 @@ class DownloadsStore {
     this.downloadQuality = q;
     try {
       uni.setStorageSync(DOWNLOAD_QUALITY_KEY, q);
-    } catch (_) {}
+    } catch (_) {
+      logWarn("Downloads", "下载音质持久化失败（本次已生效，重启后回默认）");
+    }
+  }
+
+  /**
+   * 某首歌实际使用的下载音质（2026-10-28 平台独立，对齐 PC）：该源存过独立
+   * 下载档位用之，否则回落全局默认 this.downloadQuality（设置页写入）。
+   * 下载取址/扩展名推断统一走这里——同一批任务里跨源的歌各用各的档。
+   */
+  effDownloadQualityOf(song: Song): string {
+    if (song == null) return this.downloadQuality;
+    return sourceDownloadQualityOf(song.platform, this.downloadQuality);
+  }
+
+  /**
+   * 写某平台的独立下载档位（账号页每源卡片/下载弹层用；返回 false = 形状
+   * 非法由调用方提示）。全局默认不在这里动——设置页的「下载音质」仍是
+   * 没存过独立档位的源的回落值。
+   */
+  setSourceDownloadQualityFor(source: string, q: string): boolean {
+    return setSourceDownloadQuality(source, q);
   }
 
   setDownloadNameFormat(fmt: string): void {
@@ -571,7 +619,9 @@ class DownloadsStore {
     this.downloadNameFormat = fmt;
     try {
       uni.setStorageSync(DOWNLOAD_NAME_FORMAT_KEY, fmt);
-    } catch (_) {}
+    } catch (_) {
+      logWarn("Downloads", "命名格式持久化失败（本次已生效，重启后回默认）");
+    }
   }
 
   /**
@@ -585,7 +635,9 @@ class DownloadsStore {
     this.concurrency = n;
     try {
       uni.setStorageSync(DOWNLOAD_CONCURRENCY_KEY, n.toString());
-    } catch (_) {}
+    } catch (_) {
+      logWarn("Downloads", "同时下载数持久化失败（本次已生效，重启后回默认）");
+    }
     // 调大后立刻补发排队中的任务
     this.pump();
   }
@@ -603,7 +655,9 @@ class DownloadsStore {
         arr.push(songToJson(item.song) + "||" + item.path + "||" + item.size);
       }
       uni.setStorageSync(DOWNLOAD_KEY, JSON.stringify(arr));
-    } catch (_) {}
+    } catch (_) {
+      logWarn("Downloads", "下载列表持久化失败（本次已生效，重启后丢失）");
+    }
   }
 
   isDownloaded(song: Song): boolean {
@@ -831,9 +885,10 @@ class DownloadsStore {
     try {
       let url = task.song.url;
       // 歌曲上带的地址可能已过期（平台链接带时效签名），过期/为空就重新取址再下载。
-      // 重新取址时把默认音质钳到该源声明可用的档位（v5 契约，如 B 站无真
-      // 无损、想要 flac 会自动落到 320），不支持的档位不再发无效请求。
-      const wanted = musicApi.clampQualityFor(task.song.platform, this.downloadQuality);
+      // 重新取址时把实际档位（平台独立 → 全局默认回落）钳到该源声明可用的档位
+      // （v5 契约，如 B 站无真无损、想要 flac 会自动落到 320），不支持的档位
+      // 不再发无效请求。
+      const wanted = musicApi.clampQualityFor(task.song.platform, this.effDownloadQualityOf(task.song));
       // 只认 http(s)：歌曲上的 url 可能是本地落盘路径（这首歌从「已下载」列表
       // 播放过，播放器把文件路径写回了 song.url），而 isPlayUrlStale 对非网络
       // 地址一律返回 false（对播放是对的，对下载是错的），所以必须自己判一次，
@@ -916,7 +971,9 @@ class DownloadsStore {
         qtDiagDebug("[Download] 成品与断点同路径，跳过清残留 " + task.song.platform + ":" + task.song.id);
         try {
           uni.getFileSystemManager().unlinkSync(plainPath(tempPath) + ".meta");
-        } catch (_) {}
+        } catch (_) {
+          // 静默：meta 残留清不掉只多占一个小文件，不影响成品
+        }
       }
       const song = task.song;
       // 文件大小：先问磁盘（权威，MediaStore 落盘后的真实字节数），
@@ -1052,7 +1109,9 @@ class DownloadsStore {
     if (this.speedTimer == 0) return;
     try {
       clearInterval(this.speedTimer);
-    } catch (_) {}
+    } catch (_) {
+      // 静默：clear 失败也无妨，紧接着置 0 不再触发
+    }
     this.speedTimer = 0;
     this.lastTickAt = 0;
   }
@@ -1163,7 +1222,9 @@ class DownloadsStore {
       const measured = musicApi.actualQualityOf(song, quality);
       if (measured.length > 0) return isLosslessQuality(measured) ? ".flac" : ".mp3";
     }
-    if (isLosslessQuality(this.downloadQuality)) return ".flac";
+    // 实测档位缺失时的设置推断也按平台独立取（该源存过独立下载档位用之）
+    if (song != null && isLosslessQuality(this.effDownloadQualityOf(song))) return ".flac";
+    if (song == null && isLosslessQuality(this.downloadQuality)) return ".flac";
     return ".mp3";
   }
 
@@ -1366,7 +1427,9 @@ class DownloadsStore {
         arr.push(text);
       }
       uni.setStorageSync(DOWNLOAD_TASKS_KEY, JSON.stringify(arr));
-    } catch (_) {}
+    } catch (_) {
+      logWarn("Downloads", "任务队列持久化失败（重启后未完成任务不恢复）");
+    }
   }
 
   /**
@@ -1422,7 +1485,9 @@ class DownloadsStore {
       // 恢复后**不 pump**：退出 App（含杀后台）就该停着，等用户点「全部继续」。
       this.tasks = [...this.tasks, ...restored];
       this.saveTasks();
-    } catch (_) {}
+    } catch (_) {
+      // 静默：任务队列读不出按无未完成任务处理，已下载列表不受影响
+    }
   }
 
   /**
@@ -1445,7 +1510,7 @@ class DownloadsStore {
               task.abortHandle = null;
             }
           } catch (_) {
-            // abort 空实现/异常都按标记丢弃兜底
+            // 静默：abort 空实现/异常都按标记丢弃兜底
           }
         }
         task.status = "paused";
@@ -1499,7 +1564,9 @@ class DownloadsStore {
             handle.abort();
             task.abortHandle = null;
           }
-        } catch (_) {}
+        } catch (_) {
+          // 静默：abort 空实现/异常都按标记丢弃兜底
+        }
         task.status = "paused";
         task.error = "";
         this.resetSpeed(task);
@@ -1563,7 +1630,9 @@ class DownloadsStore {
       const size = this.partSizeOf(partPath);
       if (size < 0 || size > total) return 0;
       return total;
-    } catch (_) {}
+    } catch (_) {
+      // 静默：断点元信息读不出按无断点处理，该任务从头下
+    }
     return 0;
   }
 
@@ -1572,7 +1641,9 @@ class DownloadsStore {
     try {
       const stats = uni.getFileSystemManager().statSync(partPath, false);
       return stats != null && stats.length == 1;
-    } catch (_) {}
+    } catch (_) {
+      // 静默：stat 异常按文件不存在处理
+    }
     return false;
   }
 
@@ -1581,7 +1652,9 @@ class DownloadsStore {
     try {
       const stats = uni.getFileSystemManager().statSync(partPath, false);
       if (stats != null && stats.length == 1) return stats[0].stats.size;
-    } catch (_) {}
+    } catch (_) {
+      // 静默：stat 异常按 0 字节处理，续传从头下
+    }
     return 0;
   }
 
@@ -1627,12 +1700,16 @@ class DownloadsStore {
     const metaPath = partPath + ".meta";
     try {
       fs.unlinkSync(partPath);
-    } catch (_) {}
+    } catch (_) {
+      // 静默：同步删失败有复查+异步补刀+诊断日志兜底
+    }
     // 复查放在删 .meta 之后：两步都不依赖顺序，但复查只盯 .part（占空间的是它）
     if (!this.partExists(partPath)) {
       try {
         fs.unlinkSync(metaPath);
-      } catch (_) {}
+      } catch (_) {
+        // 静默：meta 是小文件，删不掉不影响清理结果
+      }
       return;
     }
     qtDiag("[Download] 续传残留同步删除失败，改异步重试 " + song.platform + ":" + song.id);
@@ -1648,10 +1725,14 @@ class DownloadsStore {
             " 路径=" + partPath + " 原因=" + why);
         },
       });
-    } catch (_) {}
+    } catch (_) {
+      // 静默：异步接口自身抛异常时残留由下次启动清扫兜底
+    }
     try {
       fs.unlinkSync(metaPath);
-    } catch (_) {}
+    } catch (_) {
+      // 静默：meta 是小文件，删不掉不影响清理结果
+    }
   }
 
   /**
@@ -1663,7 +1744,9 @@ class DownloadsStore {
   private deleteSidecars(audioPath: string): void {
     try {
       deleteMediaByPath(sidecarPathsOf(audioPath));
-    } catch (_) {}
+    } catch (_) {
+      // 静默：删不掉不算失败（可能没下过或在公共目录不可见），见上注
+    }
   }
 
   /**
@@ -1691,7 +1774,9 @@ class DownloadsStore {
         const target = dir + "/" + name;
         try {
           uni.getFileSystemManager().unlinkSync(target);
-        } catch (_) {}
+        } catch (_) {
+          // 静默：同步删失败有复查+异步补刀+诊断日志兜底
+        }
         if (!this.partExists(target)) continue;
         qtDiag("[Download] 清扫残留同步失败，改异步重试 " + name);
         try {
@@ -1705,9 +1790,13 @@ class DownloadsStore {
               qtDiag("[Download] 清扫残留仍失败 " + name + " 原因=" + why);
             },
           });
-        } catch (_) {}
+        } catch (_) {
+          // 静默：异步接口抛异常时残留由下次启动清扫兜底
+        }
       }
-    } catch (_) {}
+    } catch (_) {
+      // 静默：清扫是尽力而为的启动任务，失败由下次启动再扫兜底
+    }
   }
 
   /**
@@ -1779,7 +1868,9 @@ class DownloadsStore {
               done(t);
               try {
                 dt.abort();
-              } catch (_) {}
+              } catch (_) {
+                // 静默：abort 抛异常只浪费一次探测请求，结果已交付
+              }
             }
           });
         }
@@ -1844,7 +1935,9 @@ class DownloadsStore {
           if (task.cancelled || task.runId != myRun) {
             try {
               dt.abort();
-            } catch (_) {}
+            } catch (_) {
+              // 静默：旧代次 abort 失败会随下次进度回调再试
+            }
             return;
           }
           const chunkBytes = end - start + 1;
@@ -1877,37 +1970,49 @@ class DownloadsStore {
     const metaPath = partPath + ".meta";
     try {
       fs.mkdirSync(dir, true);
-    } catch (_) {}
+    } catch (_) {
+      // 静默：目录多半已存在；真建不了由后续写文件失败暴露
+    }
     let partSize = 0;
     let metaOk = false;
     try {
       const meta = parseJsonToUtso(fs.readFileSync(metaPath, "utf-8") as string);
       const mTotal = meta.get("total") as number | null;
       if (mTotal != null && mTotal == total) metaOk = true;
-    } catch (_) {}
+    } catch (_) {
+      // 静默：断点元信息读不出按无断点处理，从头续传
+    }
     if (metaOk) partSize = this.partSizeOf(partPath);
     if (!metaOk || partSize > total) {
       // 新文件 / 换过音源 / 异常残留：清掉重来
       try {
         fs.unlinkSync(partPath);
-      } catch (_) {}
+      } catch (_) {
+        // 静默：删不掉也会被下面的新建覆盖截断
+      }
       try {
         fs.unlinkSync(metaPath);
-      } catch (_) {}
+      } catch (_) {
+        // 静默：旧 meta 删不掉会被下方新 meta 覆盖
+      }
       partSize = 0;
     }
     if (partSize == 0) {
       // 建空 .part：appendFileSync 只能往已有文件里追加
       try {
         fs.writeFileSync(partPath, new ArrayBuffer(0));
-      } catch (_) {}
+      } catch (_) {
+        // 静默：建失败由追加分块时报「分块写入失败」可见
+      }
     }
     try {
       const meta = new UTSJSONObject();
       meta.set("url", url);
       meta.set("total", total);
       fs.writeFileSync(metaPath, JSON.stringify(meta));
-    } catch (_) {}
+    } catch (_) {
+      // 静默：meta 写不上仅损失断点（下次从头下），不影响本次
+    }
     // 继续时先把断点百分比刷回界面
     this.noteBytes(task, partSize, total);
     this.setProgress(task, (partSize * 100) / total);
@@ -1931,10 +2036,14 @@ class DownloadsStore {
             " 断点=" + partSize + " 记的总长=" + total + " → 丢弃残留重新探测");
           try {
             fs.unlinkSync(partPath);
-          } catch (_) {}
+          } catch (_) {
+            // 静默：删不掉时重新探测后按无断点覆盖重写
+          }
           try {
             fs.unlinkSync(metaPath);
-          } catch (_) {}
+          } catch (_) {
+            // 静默：旧 meta 删不掉会被重下后的新 meta 覆盖
+          }
           throw new Error("续传范围失效（416：链接换了文件，已重新开始）");
         }
         throw e;
@@ -1942,17 +2051,23 @@ class DownloadsStore {
       if (task.cancelled || task.runId != myRun) {
         try {
           fs.unlinkSync(plainPath(chunk.temp));
-        } catch (_) {}
+        } catch (_) {
+          // 静默：删不掉仅残留少量缓存，不影响下载结果
+        }
         return null;
       }
       if (chunk.whole) {
         // 服务器不认 Range：这块临时文件就是完整成品，丢掉 .part 直接用
         try {
           fs.unlinkSync(partPath);
-        } catch (_) {}
+        } catch (_) {
+          // 静默：.part 已弃用（临时文件即成品），残留由启动清扫兜底
+        }
         try {
           fs.unlinkSync(metaPath);
-        } catch (_) {}
+        } catch (_) {
+          // 静默：meta 已弃用，残留由启动清扫兜底
+        }
         return chunk.temp;
       }
       const chunkPath = plainPath(chunk.temp);
@@ -1960,7 +2075,9 @@ class DownloadsStore {
       const wrote = await this.appendChunkToPart(chunkPath, partPath);
       try {
         fs.unlinkSync(chunkPath);
-      } catch (_) {}
+      } catch (_) {
+        // 静默：临时块删不掉仅残留少量缓存，不影响成品
+      }
       if (wrote <= 0) throw new Error("分块写入失败");
       partSize = partSize + wrote;
       // 逐块日志原来按 info 落盘：一个 33MB 的 flac 就是 16 行，每行都要过脱敏 +
@@ -2016,28 +2133,36 @@ class DownloadsStore {
     this.downloadCover = on;
     try {
       uni.setStorageSync(DOWNLOAD_COVER_KEY, on ? "1" : "0");
-    } catch (_) {}
+    } catch (_) {
+      logWarn("Downloads", "同时下载封面开关持久化失败（本次已生效，重启后回默认）");
+    }
   }
 
   setDownloadLyric(on: boolean): void {
     this.downloadLyric = on;
     try {
       uni.setStorageSync(DOWNLOAD_LYRIC_KEY, on ? "1" : "0");
-    } catch (_) {}
+    } catch (_) {
+      logWarn("Downloads", "同时下载歌词开关持久化失败（本次已生效，重启后回默认）");
+    }
   }
 
   setStorageMode(mode: string): void {
     this.storageMode = mode == "sidecar" ? "sidecar" : "embed";
     try {
       uni.setStorageSync(DOWNLOAD_STORAGE_MODE_KEY, this.storageMode);
-    } catch (_) {}
+    } catch (_) {
+      logWarn("Downloads", "存储方式持久化失败（本次已生效，重启后回默认）");
+    }
   }
 
   setDeleteFileOnRemove(on: boolean): void {
     this.deleteFileOnRemove = on;
     try {
       uni.setStorageSync(DOWNLOAD_DELETE_FILE_KEY, on ? "1" : "0");
-    } catch (_) {}
+    } catch (_) {
+      logWarn("Downloads", "移除时删文件开关持久化失败（本次已生效，重启后回默认）");
+    }
   }
 
   /**
@@ -2122,7 +2247,9 @@ class DownloadsStore {
     }
     try {
       fs.unlinkSync(temp);
-    } catch (_) {}
+    } catch (_) {
+      // 静默：歌词临时文件删不掉仅残留少量缓存
+    }
   }
 
   /**

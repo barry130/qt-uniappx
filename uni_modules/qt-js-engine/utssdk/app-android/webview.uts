@@ -334,7 +334,7 @@ function v8Sleep(ms: number): void {
 	try {
 		new CountDownLatch(1).await(ms.toLong(), TimeUnit.MILLISECONDS)
 	} catch (e) {
-		// 中断即返回
+		// 静默：中断即返回（计时到/中断同样视为睡醒）
 	}
 }
 
@@ -610,7 +610,7 @@ export function v8Version(): string {
 			}
 		}
 	} catch (e) {
-		// 落到下面的兜底
+		// 静默：取不到包名版本就落到下面的兜底
 	}
 	// 不做 UA 兜底：`WebView.getDefaultUserAgent(ctx)` 是静态方法，UTS 解析不到
 	// （Unresolved reference），而 WebSettings.getUserAgentString() 又只能在主线程读。
@@ -666,7 +666,7 @@ export function v8Start(): string {
 				try {
 					wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
 				} catch (e) {
-					// 个别 ROM 不支持，忽略
+					// 静默：个别 ROM 不支持，渲染进程按系统默认优先级
 				}
 			}
 			gWebView = wv
@@ -689,7 +689,7 @@ export function v8Start(): string {
 		try {
 			latch.await(V8_PAGE_TIMEOUT_MS.toLong(), TimeUnit.MILLISECONDS)
 		} catch (e) {
-			// 中断
+			// 静默：中断即不再等待，页面完成与否由后续状态判定
 		}
 	}
 	if (createError.length > 0) {
@@ -720,7 +720,7 @@ export function v8Start(): string {
 		try {
 			WebView.setWebContentsDebuggingEnabled(true)
 		} catch (e) {
-			// 忽略
+			// 静默：调试开关失败仅影响 chrome://inspect 调试
 		}
 	}
 	return ''
@@ -740,7 +740,7 @@ export function v8Stop(): void {
 		try {
 			done.await(V8_STOP_TIMEOUT_MS.toLong(), TimeUnit.MILLISECONDS)
 		} catch (e) {
-			// 中断
+			// 静默：中断即继续销毁流程，销毁已在主线程排队
 		}
 	}
 	gPageReady = false
@@ -807,7 +807,7 @@ export function v8EvalSync(code: string): string {
 	try {
 		ok = slot.latch.await(V8_EVAL_TIMEOUT_MS.toLong(), TimeUnit.MILLISECONDS)
 	} catch (e) {
-		// 中断
+		// 静默：中断按超时处理，走 timeout 兜底
 	}
 	gPendingSlot = null
 	if (!ok) {
@@ -829,7 +829,7 @@ function v8EvalRaw(code: string): void {
 	try {
 		slot.latch.await(V8_EVAL_TIMEOUT_MS.toLong(), TimeUnit.MILLISECONDS)
 	} catch (e) {
-		// 中断
+		// 静默：中断按超时处理，走 timeout 兜底
 	}
 }
 

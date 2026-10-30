@@ -7,10 +7,16 @@ import { audioPlayer } from "@/services/audio-player";
 import { desktopLyric } from "@/services/desktop-lyric";
 import { exitApp } from "@/services/app-native";
 import { isContentFailError, musicApi } from "@/services/music-api";
+import { findSubstituteSong, localFileFor, localFirstEnabled } from "@/services/local-first";
 import type { AudioPlaylistItem } from "@/uni_modules/qt-audio-player";
 import type { LocalAudioItem } from "@/uni_modules/qt-app-native";
+import { readEmbeddedTags } from "@/uni_modules/qt-app-native";
+import type { EmbeddedReadResult } from "@/uni_modules/qt-app-native";
 import { likeBatch, fetchChanges, fetchAllLikes } from "@/services/like";
 import { parseJsonToUtso } from "@/services/http";
+import { songToJson, songFromJson, playlistToJson, playlistFromJson } from "@/stores/persist-codec";
+import { LikeSyncEngine } from "@/services/like-sync";
+import { generateGlobalPid } from "@/services/global-pid";
 import type { Song, Playlist, LikeChange, PendingLikeOp } from "@/types/music";
 import { getAccessToken } from "@/services/auth";
 import { DEFAULT_PLAYLIST_COVER_ASSET } from "@/services/media";
@@ -22,6 +28,7 @@ import { findCrossSourceDup, collectDupMessage, type CollectDupConflict } from "
 import { qtShowToast } from "@/services/toast";
 import { qtConfirm } from "@/services/confirm";
 import { qtShowActionSheet } from "@/services/action-sheet";
+import { setSourcePlayQuality, sourcePlayQualityOf } from "@/services/source-quality";
 
 const LIKED_KEY = "qt-liked-songs";
 const HISTORY_KEY = "qt-history-songs";
@@ -32,11 +39,6 @@ const PLAYLIST_KEY = "qt-saved-playlists";
 const LOCAL_PLAYLIST_KEY = "qt-local-playlists";
 /** 默认收藏歌单 id（通知栏/车机 ♡ 的收藏目标）：空 = 未显式设置，按「第一个自建歌单」解析 */
 const DEFAULT_FAV_KEY = "qt-default-fav-playlist";
-/** 收藏同步游标（LIKE_SYNC_DESIGN.md：多端增量拉取 since） */
-const LIKE_CURSOR_KEY = "qt-like-cursor";
-/** 待推送收藏操作队列（断网时暂存，联网后按序重放） */
-const LIKE_OPS_KEY = "qt-like-pending-ops";
-/** 收藏批量推送的单批上限（与后端 /like/batch 的 200 对齐，qt-stat 分片同款先例） */
 const LIKE_BATCH_LIMIT = 200;
 /** 切歌时等待播放地址解析的上限（毫秒）：多音源回退链最坏几十秒，超时按失败处理。
  *
@@ -76,156 +78,6 @@ const RECOVERY_PROBE_LIMIT = 8;
 const PLAY_START_GRACE_MS = 3000;
 
 
-/**
- * 生成全局唯一 pid（UUID v4 形态，36 字符，满足后端 ≤64 约束）。
- * 本地歌单用它作为多端同步的唯一键：不能用平台自己的歌单号（多端含义不同），
- * 也不能用「时间戳 + 短随机」（多设备同时建歌单会撞车）。
- */
-function generateGlobalPid(): string {
-  const hex = "0123456789abcdef";
-  let out = "";
-  for (let i = 0; i < 32; i++) {
-    out += hex.charAt(Math.floor(Math.random() * 16));
-  }
-  // 版本号 4 + 变体位，拼成 8-4-4-4-12 的标准形态
-  const variant = "89ab".charAt(Math.floor(Math.random() * 4));
-  return (
-    out.substring(0, 8) +
-    "-" +
-    out.substring(8, 12) +
-    "-4" +
-    out.substring(13, 16) +
-    "-" +
-    variant +
-    out.substring(17, 20) +
-    "-" +
-    out.substring(20, 32)
-  );
-}
-
-function songToJson(song: Song): string {
-  const obj = new UTSJSONObject();
-  obj.set("id", song.id);
-  obj.set("name", song.name);
-  obj.set("singer", song.singer);
-  obj.set("album", song.album);
-  obj.set("picUrl", song.picUrl);
-  obj.set("platform", song.platform);
-  if (song.url != null && song.url.length > 0) obj.set("url", song.url);
-  if (song.duration != null && song.duration > 0)
-    obj.set("duration", song.duration);
-  if (song.musicId != null && song.musicId.length > 0)
-    obj.set("musicId", song.musicId);
-  if (song.likeSeq != null && song.likeSeq > 0) obj.set("likeSeq", song.likeSeq);
-  if (song.pids != null && song.pids.length > 0) {
-    const pids: string[] = [];
-    for (let i = 0; i < song.pids.length; i++) pids.push(song.pids[i]);
-    obj.set("pids", pids);
-  }
-  return JSON.stringify(obj);
-}
-
-function songFromJson(text: string): Song | null {
-  if (text.length == 0) return null;
-  try {
-    const obj = parseJsonToUtso(text);
-    const id = obj.get("id") as string | null;
-    if (id == null || id.length == 0) return null;
-    const name = obj.get("name") as string | null;
-    const singer = obj.get("singer") as string | null;
-    const album = obj.get("album") as string | null;
-    const picUrl = obj.get("picUrl") as string | null;
-    const platform = obj.get("platform") as string | null;
-    const url = obj.get("url") as string | null;
-    const duration = obj.get("duration") as number | null;
-    const musicId = obj.get("musicId") as string | null;
-    const likeSeq = obj.get("likeSeq") as number | null;
-    const pidsRaw = obj.get("pids") as string[] | null;
-    let pids: string[] | undefined;
-    if (pidsRaw != null && pidsRaw.length > 0) {
-      pids = [];
-      for (let i = 0; i < pidsRaw.length; i++) {
-        const one = pidsRaw[i] as string;
-        if (one != null && one.length > 0) pids.push(one);
-      }
-      if (pids.length == 0) pids = undefined;
-    }
-    return {
-      id,
-      name: name != null ? name : "",
-      singer: singer != null ? singer : "",
-      album: album != null ? album : "",
-      picUrl: picUrl != null ? picUrl : "",
-      platform: platform != null ? platform : "",
-      url: url != null ? url : "",
-      duration: duration != null ? duration : 0,
-      musicId: musicId != null && musicId.length > 0 ? musicId : undefined,
-      likeSeq: likeSeq != null && likeSeq > 0 ? likeSeq : undefined,
-      pids,
-    };
-  } catch (_) {
-    return null;
-  }
-}
-
-function playlistToJson(playlist: Playlist): string {
-  const obj = new UTSJSONObject();
-  obj.set("id", playlist.id);
-  obj.set("name", playlist.name);
-  obj.set("picUrl", playlist.picUrl);
-  obj.set("playCount", playlist.playCount);
-  obj.set("platform", playlist.platform);
-  obj.set("description", playlist.description != null ? playlist.description : "");
-  if (playlist.likeSeq != null && playlist.likeSeq > 0) obj.set("likeSeq", playlist.likeSeq);
-  if (playlist.pid != null && playlist.pid.length > 0) obj.set("pid", playlist.pid);
-  if (playlist.tracks && playlist.tracks.length > 0) {
-    const trackJson: string[] = [];
-    for (let i = 0; i < playlist.tracks.length; i++) {
-      trackJson.push(songToJson(playlist.tracks[i]));
-    }
-    obj.set("tracks", trackJson);
-  }
-  return JSON.stringify(obj);
-}
-
-function playlistFromJson(text: string): Playlist | null {
-  if (text.length == 0) return null;
-  try {
-    const obj = parseJsonToUtso(text);
-    const id = obj.get("id") as string | null;
-    if (id == null || id.length == 0) return null;
-    const name = obj.get("name") as string | null;
-    const picUrl = obj.get("picUrl") as string | null;
-    const playCount = obj.get("playCount") as string | null;
-    const platform = obj.get("platform") as string | null;
-    const descRaw = obj.get("description") as string | null;
-    const tracksRaw = obj.get("tracks") as string[] | null;
-    let tracks: Song[] | undefined;
-    if (tracksRaw != null && tracksRaw.length > 0) {
-      tracks = [];
-      for (let i = 0; i < tracksRaw.length; i++) {
-        const song = songFromJson(tracksRaw[i] as string);
-        if (song != null) tracks.push(song);
-      }
-    }
-    const likeSeqRaw = obj.get("likeSeq") as number | null;
-    const pid = obj.get("pid") as string | null;
-    return {
-      id,
-      name: name != null ? name : "",
-      picUrl: picUrl != null ? picUrl : "",
-      playCount: playCount != null ? playCount : "0",
-      platform: platform != null ? platform : "",
-      description: descRaw != null && descRaw.length > 0 ? descRaw : null,
-      tracks,
-      likeSeq: likeSeqRaw != null && likeSeqRaw > 0 ? likeSeqRaw : undefined,
-      pid: pid != null && pid.length > 0 ? pid : undefined,
-    };
-  } catch (_) {
-    return null;
-  }
-}
-
 class PlayerStore {
   current: Song | null = null;
   queue: Song[] = [];
@@ -247,6 +99,22 @@ class PlayerStore {
   /** 已因链接失效重取过地址的歌曲（platform:id）与重取时刻，避免「失败→重取」死循环 */
   private urlRetryKey = "";
   private urlRetryAt = 0;
+  /** 本地优先：mediaId -> 已交付原生层的本地文件地址（「当前播放地址」展示与
+   *  失败降级判定用；本地文件 prepare 失败时把它拉黑，重取走在线取链） */
+  private localFirstUsed = new Map<string, string>();
+  /** 本地优先已拉黑过的 mediaId（本地文件起播失败，本会话内不再用它顶在线歌） */
+  private localFirstFailed = new Map<string, boolean>();
+  /** 当前歌曲**在播本地文件**的内嵌封面（空串=文件里没有封面；key 不匹配自动作废，
+   *  防止切歌瞬间旧图串到新歌上）。内嵌优先于在线封面，见 coverOf */
+  embeddedCover = "";
+  embeddedCoverKey = "";
+  /** 当前歌曲**在播本地文件**的内嵌歌词（空串=文件里没有词，调用方退回在线取词） */
+  embeddedLyric = "";
+  embeddedLyricKey = "";
+  /** 本地歌替身链已替过的歌（platform:id）与时刻，口径对齐 urlRetryKey：
+   *  同一首一分钟内只替一次，防止「替身也失效→再替→再失效」无限拉锯 */
+  private substituteKey = "";
+  private substituteAt = 0;
   /** 「提前结束」自愈已重试过的歌曲（platform:id）：流被截断/缓存内容异常时
    *  media3 会把条目当成正常播完并无缝切下一首（全程无错误事件）。每首只
    *  自愈重试一次，防止试听片段类内容反复拉回原地；重放仍提前结束就放行衔接 */
@@ -266,9 +134,10 @@ class PlayerStore {
    * 任何改动这三张表的地方（整体赋值 / push / splice / 原地改 pids|likeSeq|picUrl）
    * 都必须把对应标记置 true。
    */
-  private likedDirty = true;
-  private playlistsDirty = true;
-  private localPlaylistsDirty = true;
+  /** @internal 收藏同步引擎（services/like-sync.ts）跨文件读写；页面勿动 */
+  likedDirty = true;
+  playlistsDirty = true;
+  localPlaylistsDirty = true;
   /** 进度时钟：播放期间每 100ms 直接向播放器要一次真实进度（见 startProgressClock） */
   private progressTimer: number | null = null;
   /** 上一次进度时钟 tick 的时刻（真实位置读不到时按墙钟外推用） */
@@ -319,6 +188,11 @@ class PlayerStore {
   private resolveInFlightMid = "";
   /** media3 时间线里的条目顺序（mediaId 列表）：时间线下标 ≠ 展示队列下标，定位用 */
   private timelineIds: string[] = [];
+  /** 「下一首播放」在随机模式下锁定的曲目 mediaId（空 = 没锁，2026-10-30）。
+      随机模式的播放顺序是洗好的乱序时间线，队列里插到当前曲后面并不等于接下来
+      真会播它（原生按时间线顺序衔接）。所以锁一个 mediaId：pushTimeline 洗牌后
+      把它固定排到当前曲之后，手动「下一首」也优先走它，真起播就消费清零。 */
+  private lockedNextMid = "";
   /** 无缝播放预热记账：上一次预热的 mediaId 与时间戳（避免同一首反复取链） */
   private preloadMid = "";
   private preloadAt = 0;
@@ -350,12 +224,6 @@ class PlayerStore {
   /** ended 与 natural trackChanged 只允许一个入口结算；两个标记分别覆盖两种到达顺序。 */
   private skipNextNativeTransitionAt = 0;
   private skipNextEndedAt = 0;
-  /** 收藏同步游标（服务器 updated_seq 最大值，LIKE_SYNC_DESIGN.md D3） */
-  private likeCursor = 0;
-  /** 待推送收藏操作队列（断网暂存，联网后按序重放） */
-  private pendingOps: PendingLikeOp[] = [];
-  /** 收藏同步进行中标记（防止 flush 与 pull 并发交错） */
-  private likeSyncBusy = false;
 
   /** 记录一次权威进度（原生回调、seek、切歌），同时重置外推基准 */
   private markProgress(value: number): void {
@@ -539,7 +407,9 @@ class PlayerStore {
         this.progress = est;
         // 外推同样要喂桌面歌词：否则真实位置读不到时只有浮窗冻住（用户反馈的「两处都不跟随」）
         if (this.desktopLyricHook != null) this.desktopLyricHook(est);
-      } catch (_) {}
+      } catch (_) {
+        // 静默：进度外推失败时保持上一帧显示值，进度条轻微滞后优于打断播放
+      }
     }, 100) as number;
   }
 
@@ -734,32 +604,68 @@ class PlayerStore {
         }
         return;
       }
-      this.fetchUrlWithTimeout(song, URL_FETCH_BUDGET_MS)
-        .then((res: { url: string; stalled: boolean }) => {
-          // 记下本次失败性质，handlePlaybackError 据此区分「网络慢」与「没地址」
-          this.stalledMap.set(mediaId, res.stalled);
-          if (this.resolveInFlightMid == mediaId) this.resolveInFlightMid = "";
-          if (res.url.length > 0) {
-            // 留一份展示副本（管理端「当前播放地址」用，见 resolvedUrlMap），
-            // 并把当前播放曲的 url 字段回填：展示入口读 current.url 时才不是空
-            this.resolvedUrlMap.set(mediaId, res.url);
-            const cur = this.current;
-            if (cur != null && cur.platform + ":" + cur.id == mediaId) {
-              cur.url = res.url;
+      // 在线歌的在线取链（本地优先未命中/被拉黑/开关关时走）：
+      const fetchOnline = (): void => {
+        this.fetchUrlWithTimeout(song, URL_FETCH_BUDGET_MS)
+          .then((res: { url: string; stalled: boolean }) => {
+            // 记下本次失败性质，handlePlaybackError 据此区分「网络慢」与「没地址」
+            this.stalledMap.set(mediaId, res.stalled);
+            if (this.resolveInFlightMid == mediaId) this.resolveInFlightMid = "";
+            if (res.url.length > 0) {
+              // 留一份展示副本（管理端「当前播放地址」用，见 resolvedUrlMap），
+              // 并把当前播放曲的 url 字段回填：展示入口读 current.url 时才不是空
+              this.resolvedUrlMap.set(mediaId, res.url);
+              const cur = this.current;
+              if (cur != null && cur.platform + ":" + cur.id == mediaId) {
+                cur.url = res.url;
+              }
+              // 取链慢时 playRequestedAt 可能已过期：这里以「交地址给底层」为新起点
+              // 重置宽限，否则解析完到 prepared 之间那段仍会被误判成真暂停
+              if (this.playing) this.playRequestedAt = Date.now();
+              audioPlayer.resolveDone(mediaId, res.url);
+            } else {
+              audioPlayer.resolveFail(mediaId);
             }
-            // 取链慢时 playRequestedAt 可能已过期：这里以「交地址给底层」为新起点
-            // 重置宽限，否则解析完到 prepared 之间那段仍会被误判成真暂停
-            if (this.playing) this.playRequestedAt = Date.now();
-            audioPlayer.resolveDone(mediaId, res.url);
-          } else {
+          })
+          .catch(() => {
+            if (this.resolveInFlightMid == mediaId) this.resolveInFlightMid = "";
+            this.stalledMap.set(mediaId, true);
             audioPlayer.resolveFail(mediaId);
-          }
-        })
-        .catch(() => {
-          if (this.resolveInFlightMid == mediaId) this.resolveInFlightMid = "";
-          this.stalledMap.set(mediaId, true);
-          audioPlayer.resolveFail(mediaId);
-        });
+          });
+      };
+      // 在线歌：本地优先（DESIGN §7.13）——先全本地查一遍（下载账本身份级 +
+      // 本地曲库元数据级），命中直接交本地文件，跳过全部取链；查不到走原取链。
+      // 上次用本地文件起播失败过的（localFirstFailed）不再顶，直接在线取链。
+      if (localFirstEnabled() && !this.localFirstFailed.has(mediaId)) {
+        localFileFor(song)
+          .then((localUrl: string | null) => {
+            if (localUrl != null && localUrl.length > 0) {
+              if (this.resolveInFlightMid == mediaId) this.resolveInFlightMid = "";
+              this.stalledMap.set(mediaId, false);
+              // 展示副本同口径：管理端「当前播放地址」看得到本地文件路径
+              this.resolvedUrlMap.set(mediaId, localUrl);
+              const cur = this.current;
+              if (cur != null && cur.platform + ":" + cur.id == mediaId) {
+                cur.url = localUrl;
+              }
+              this.localFirstUsed.set(mediaId, localUrl);
+              // 这一刻 song.url 还是在线流地址，syncSongExtras 读不到文件标签区：
+              // 拿到真实文件路径后补读内嵌封面/歌词，才能做到「内嵌优先于在线」
+              this.syncLocalFileMedia(song, localUrl);
+              if (this.playing) this.playRequestedAt = Date.now();
+              audioPlayer.resolveDone(mediaId, localUrl);
+              return;
+            }
+            fetchOnline();
+          })
+          .catch(() => {
+            // 本地查询自身异常（存储损坏等）：不当播放失败，直接走在线取链
+            if (this.resolveInFlightMid == mediaId) this.resolveInFlightMid = "";
+            fetchOnline();
+          });
+      } else {
+        fetchOnline();
+      }
     });
     // 原生自动衔接下一首（时间线顺序）/媒体键切歌后对账：换 current、记历史、
     // 刷新歌词与封面。睡眠定时「当前歌播完停止」也在这里落地 —— 懒解析窗口里
@@ -796,10 +702,38 @@ class PlayerStore {
     this.persist();
   }
 
+  /**
+   * 某首歌实际使用的播放音质（2026-10-28 平台独立，对齐 PC 的
+   * effective_quality_for）：该源存过独立播放档位用之，否则回落全局默认
+   * this.quality（设置页写入）。所有取链点（懒解析/预热/地址作废重取）统一
+   * 走这里——按歌取，同一队列里跨源的歌各用各的档。
+   */
+  effQualityOf(song: Song): string {
+    if (song == null) return this.quality;
+    return sourcePlayQualityOf(song.platform, this.quality);
+  }
+
+  /**
+   * 播放页音质菜单选择落地（平台独立）：写入当前曲所属平台的独立播放档位。
+   * 返回 false = 形状非法（调用方提示）。全局默认不在这里动——设置页的
+   * 「播放音质」仍是没存过独立档位的源的回落值。
+   */
+  setSourceQuality(q: string): boolean {
+    const cur = this.current;
+    if (cur == null) return false;
+    return setSourcePlayQuality(cur.platform, q);
+  }
+
   /** 播放模式切换后立即同步循环模式给 media3（否则要等下一次推时间线才生效：
       播放中把顺序切成单曲循环，当前这首播完就该重头而不是进下一首） */
   syncRepeatMode(): void {
     audioPlayer.setRepeatMode(this.mode == "single" ? 1 : 2);
+    // 「下一首播放」锁在单曲循环下必须走得过去：REPEAT_ONE 是原地重播，永远到不了
+    // 插进来的那首，所以锁定期间临时放开成列表环绕，播到后由 onNativeTrackChanged
+    // 收回（2026-10-30）
+    if (this.mode == "single" && this.lockedNextMid.length > 0) {
+      audioPlayer.setRepeatMode(2);
+    }
   }
 
   setSleep(minutes: number): void {
@@ -890,69 +824,12 @@ class PlayerStore {
         arr.push(playlistToJson(this.savedPlaylists[index]));
       uni.setStorageSync(PLAYLIST_KEY, JSON.stringify(arr));
       this.playlistsDirty = false;
-    } catch (_) {}
+    } catch (_) {
+      // 静默：歌单落盘失败（存储满/IO 异常）时保留脏标记，下次变更窗口重试
+    }
   }
 
   /** 读取收藏同步游标与待推送队列（LIKE_SYNC_DESIGN.md §5.4） */
-  private loadLikeSync(): void {
-    try {
-      const cursorRaw = uni.getStorageSync(LIKE_CURSOR_KEY) as string;
-      const cursor = cursorRaw.length > 0 ? parseFloat(cursorRaw) ?? 0 : 0;
-      this.likeCursor = cursor > 0 ? cursor : 0;
-    } catch (_) {
-      this.likeCursor = 0;
-    }
-    try {
-      const raw = uni.getStorageSync(LIKE_OPS_KEY) as string;
-      if (raw.length == 0) {
-        this.pendingOps = [];
-        return;
-      }
-      const arr = JSON.parse(raw) as string[];
-      const ops: PendingLikeOp[] = [];
-      for (let i = 0; i < arr.length; i++) {
-        try {
-          const obj = parseJsonToUtso(arr[i] as string);
-          const type = obj.get("type") as string | null;
-          const action = obj.get("action") as string | null;
-          const dataJson = obj.get("dataJson") as string | null;
-          if (
-            dataJson != null && dataJson.length > 0 &&
-            (type == "song" || type == "playlist") &&
-            (action == "add" || action == "remove")
-          ) {
-            ops.push({
-              type: type as "song" | "playlist",
-              action: action as "add" | "remove",
-              dataJson,
-            });
-          }
-        } catch (_) {}
-      }
-      this.pendingOps = ops;
-    } catch (_) {
-      this.pendingOps = [];
-    }
-  }
-
-  private saveLikeSync(): void {
-    try {
-      uni.setStorageSync(LIKE_CURSOR_KEY, this.likeCursor.toString());
-    } catch (_) {}
-    try {
-      const arr: string[] = [];
-      for (let i = 0; i < this.pendingOps.length; i++) {
-        const op = this.pendingOps[i];
-        const obj = new UTSJSONObject();
-        obj.set("type", op.type);
-        obj.set("action", op.action);
-        obj.set("dataJson", op.dataJson);
-        arr.push(JSON.stringify(obj));
-      }
-      uni.setStorageSync(LIKE_OPS_KEY, JSON.stringify(arr));
-    } catch (_) {}
-  }
-
   private loadLocalPlaylistList(): Playlist[] {
     try {
       const raw = uni.getStorageSync(LOCAL_PLAYLIST_KEY) as string;
@@ -976,7 +853,9 @@ class PlayerStore {
         arr.push(playlistToJson(this.localPlaylists[index]));
       uni.setStorageSync(LOCAL_PLAYLIST_KEY, JSON.stringify(arr));
       this.localPlaylistsDirty = false;
-    } catch (_) {}
+    } catch (_) {
+      // 静默：本地歌单落盘失败时保留脏标记，下次落盘窗口重试
+    }
   }
 
   private loadState(): void {
@@ -992,6 +871,10 @@ class PlayerStore {
       if (mode != null && mode.length > 0) this.mode = mode;
       const quality = obj.get("quality") as string | null;
       if (quality != null && quality.length > 0) this.quality = quality;
+      // 随机模式「下一首播放」的锁定（2026-10-30）：重启后队列还在，锁也得跟着活，
+      // 否则杀进程回来「下一首」会变回随机
+      const lockedNext = obj.get("lockedNext") as string | null;
+      if (lockedNext != null && lockedNext.length > 0) this.lockedNextMid = lockedNext;
       const counts = obj.get("playCounts") as UTSJSONObject | null;
       if (counts != null) {
         const keys = UTSJSONObject.keys(counts);
@@ -1037,8 +920,12 @@ class PlayerStore {
             }
           }
         }
-      } catch (_) {}
-    } catch (_) {}
+      } catch (_) {
+        // 静默：轻量进度键缺失或损坏时退回全量态里的进度
+      }
+    } catch (_) {
+      // 静默：全量播放状态损坏时按默认状态启动，不阻断进 App
+    }
   }
 
   /** 轻量进度持久化：几十字节的当前曲+进度，进度时钟专用（见 PROGRESS_KEY） */
@@ -1051,7 +938,9 @@ class PlayerStore {
       obj.set("progress", this.progress);
       obj.set("duration", this.duration);
       uni.setStorageSync(PROGRESS_KEY, JSON.stringify(obj));
-    } catch (_) {}
+    } catch (_) {
+      // 静默：轻量进度写失败只影响崩溃恢复精度，下一个时钟周期会重写
+    }
   }
 
   private saveState(): void {
@@ -1067,8 +956,12 @@ class PlayerStore {
       obj.set("queue", queueJson);
       obj.set("progress", this.progress);
       obj.set("duration", this.duration);
+      // 随机模式「下一首播放」的锁定随播放态一起落盘（2026-10-30）
+      if (this.lockedNextMid.length > 0) obj.set("lockedNext", this.lockedNextMid);
       uni.setStorageSync(STATE_KEY, JSON.stringify(obj));
-    } catch (_) {}
+    } catch (_) {
+      // 静默：全量态写失败时下次 persist 再试，播放不受影响
+    }
   }
 
   // ==================== 桌面歌词 ====================
@@ -1091,11 +984,22 @@ class PlayerStore {
     if (this.likedDirty && this.saveSongList(LIKED_KEY, this.likedSongs)) {
       this.likedDirty = false;
     }
+
     this.saveSongList(HISTORY_KEY, this.history);
     if (this.playlistsDirty) this.savePlaylistList();
     if (this.localPlaylistsDirty) this.saveLocalPlaylistList();
     this.saveState();
     useListenStatsStore().flush();
+  }
+
+  /** @internal 供 LikeSyncEngine 落盘收藏总表/歌单表（等同 persist 热路径） */
+  persistNow(): void {
+    this.persist();
+  }
+
+  /** @internal 供 LikeSyncEngine 全量落盘本地歌单表 */
+  saveLocalPlaylistsNow(): void {
+    this.saveLocalPlaylistList();
   }
 
   async play(song: Song, queue: Song[] = [], restorePosition = false, auto = false): Promise<void> {
@@ -1117,6 +1021,10 @@ class PlayerStore {
     const prev = this.current;
     const switched =
       prev == null || prev.id != song.id || prev.platform != song.platform;
+    // 「下一首播放」是一次性指示：真换歌就作废（播到了算完成，被手动切走算过期），
+    // 与 qt-pc 的 Queue::commit_index 同口径 —— 不清的话旧锁可能在后来的某次
+    // 「下一首」上凑巧复活，把用户没指定过的歌顶上来（2026-10-30）
+    if (switched) this.lockedNextMid = "";
     if (switched || !restorePosition) this.listenSession.start(this.mediaIdOf(song));
     // 同一首重播（点列表里正在播的歌/队列环绕/切回旧歌）：底层时间线当前条目就是
     // 这首歌时 seek(0)+resume 即可（不重复记历史/播放次数）。不能盲目 seek+resume ——
@@ -1167,10 +1075,8 @@ class PlayerStore {
     this.persist();
     // 桌面歌词跟随切歌重新拉词
     desktopLyric.notifySongChanged();
-    // 本地歌单里的歌可能缺封面（如服务器同步过来的收藏），播放时异步查询并回填
-    if (song.picUrl == null || song.picUrl.length == 0) {
-      this.backfillCover(song);
-    }
+    // 封面兜底 + 车机蓝牙歌词同步（⑧/⑩ 批次接线点，详见 syncSongExtras）
+    this.syncSongExtras(song);
     // 无缝播放：刚起播就顺手把下一首的地址取好 + 整首预取（默认开启，见 audio-player.uts GAPLESS_KEY）
     this.preloadNextUrl();
   }
@@ -1215,8 +1121,29 @@ class PlayerStore {
     if (song.platform == "local") return;
     this.preloadMid = nextMid;
     this.preloadAt = Date.now();
-    // 命中 urlCache 时 playUrl 内部直接返回，不会重复走网络
-    musicApi.playUrl(song, this.quality).catch((_e: any) => {});
+    // 本地优先预热（DESIGN §7.13）：下一首能在本地找到就直接预热本地文件，
+    // 跳过在线取链预热（playUrl 预热取回来也是白费——resolve 回调根本不会用它）
+    if (localFirstEnabled() && !this.localFirstFailed.has(nextMid)) {
+      localFileFor(song)
+        .then((localUrl: string | null) => {
+          if (localUrl != null && localUrl.length > 0) {
+            audioPlayer.preloadTrack(localUrl);
+            return;
+          }
+          this.warmNextOnlineUrl(song);
+        })
+        .catch(() => {
+          this.warmNextOnlineUrl(song);
+        });
+      return;
+    }
+    this.warmNextOnlineUrl(song);
+  }
+
+  /** 在线取链预热（playUrl 预热 + 整首占位预取）：本地优先未命中时走这里 */
+  private warmNextOnlineUrl(song: Song): void {
+    // 命中 urlCache 时 playUrl 内部直接返回，不会重复走网络（音质按平台独立取）
+    musicApi.playUrl(song, this.effQualityOf(song)).catch((_e: any) => {});
     // 整首预取：用与时间线条目完全相同的占位地址（= 磁盘缓存 key），原生读完整首
     // 落盘；已缓存的歌这条链路只会从缓存读（开销≈0），本地歌原生侧自动忽略
     audioPlayer.preloadTrack(this.buildTimelineItem(song).uri);
@@ -1235,7 +1162,48 @@ class PlayerStore {
     if (song == null) return "";
     if (song.url != null && song.url.length > 0) return song.url;
     const v = this.resolvedUrlMap.get(this.mediaIdOf(song));
+    if (v != null) return v;
+    // 本地优先命中：在线歌播的是磁盘文件、没有在线地址——把命中的本地文件
+    // 路径当「最近一次地址」返回，管理端面板才能显示真实在播的路径
+    return this.localFirstPathOf(song);
+  }
+
+  /**
+   * 这首歌**这次实际播放的本地文件**（本地优先命中项，管理端「当前播放地址」用）。
+   * 空串 = 这次不是本地优先命中（本地曲目不算：那种 platform 就是 "local"，
+   * 地址即 song.url 自身）。
+   *
+   * 为什么要单独暴露：本地优先命中时在线歌的 platform 还是原平台（kg/qq…），
+   * 但音频层播的是磁盘文件、根本没有在线地址——面板只读 resolvedUrlOf 会
+   * 把「本地文件路径」当成在线地址展示，还会挂着上一条在线曲目的线路名。
+   */
+  localFirstPathOf(song: Song): string {
+    if (song == null) return "";
+    const v = this.localFirstUsed.get(this.mediaIdOf(song));
     return v != null ? v : "";
+  }
+
+  /**
+   * 当前歌曲的**显示封面**：在播本地文件有内嵌封面就用它，否则用曲目自带封面。
+   * 播放页/播放条/迷你条统一走这里 —— 本地文件（含本地优先命中的在线歌）判断口径
+   * 与 syncSongExtras 一致，不能只看 platform=="local"。
+   */
+  coverOf(song: Song): string {
+    if (song == null) return "";
+    if (this.embeddedCover.length > 0 && this.embeddedCoverKey == this.mediaIdOf(song)) {
+      return this.embeddedCover;
+    }
+    return song.picUrl;
+  }
+
+  /**
+   * 当前歌曲**在播本地文件的内嵌歌词**（空串=文件里没有词，调用方退回在线取词）。
+   * 只有一首歌的量：播放页/桌面歌词都在渲染「当前曲」，不需要按歌缓存整张表。
+   */
+  embeddedLyricOf(song: Song): string {
+    if (song == null) return "";
+    if (this.embeddedLyricKey == this.mediaIdOf(song)) return this.embeddedLyric;
+    return "";
   }
 
   /** 按 mediaId 找歌：先看当前曲，再查播放队列（懒解析回调只可能要这两处的歌） */
@@ -1270,8 +1238,8 @@ class PlayerStore {
     const mid = this.mediaIdOf(s);
     // 本地歌直接推真实 content:// 地址：DefaultDataSource 按 scheme 路由到
     // ContentDataSource，不经过懒解析层也不进音频缓存（避免把本地文件再拷一份）。
-    // 在线歌用懒解析占位符：q 仅调试用，实际音质由 resolve 回调取 this.quality 决定，
-    // 换音质后尚未加载的条目自动用新档
+    // 在线歌用懒解析占位符：q 仅调试用，实际音质由 resolve 回调经 effQualityOf
+    // 按歌的平台现取（平台独立档位 + 全局默认回落），换音质后尚未加载的条目自动用新档
     const item: AudioPlaylistItem = {
       mediaId: mid,
       uri:
@@ -1280,7 +1248,7 @@ class PlayerStore {
           : "qt-resolve://song/?mid=" +
             encodeURIComponent(mid) +
             "&q=" +
-            this.quality,
+            this.effQualityOf(s),
       title: s.name,
       artist: s.singer,
       album: s.album,
@@ -1346,6 +1314,24 @@ class PlayerStore {
         const tmp = order[0];
         order[0] = order[at];
         order[at] = tmp;
+      }
+      // 「下一首播放」锁定：洗牌会把锁定的那首甩到序列任意位置，原生衔接就不听
+      // 指挥了——这里把它固定换到当前曲之后（下标 1），随机模式下「下一首」才真的
+      // 是用户点的那首（2026-10-30 用户反馈）
+      if (this.lockedNextMid.length > 0 && order.length > 1) {
+        let lockAt = -1;
+        for (let i = 1; i < order.length; i++) {
+          const s = source[order[i]];
+          if (s != null && this.mediaIdOf(s) == this.lockedNextMid) {
+            lockAt = i;
+            break;
+          }
+        }
+        if (lockAt > 1) {
+          const keep = order[1];
+          order[1] = order[lockAt];
+          order[lockAt] = keep;
+        }
       }
       startIndex = 0;
     }
@@ -1415,6 +1401,7 @@ class PlayerStore {
       expected = kept;
     }
     if (expected.length == 0) return;
+    this.placeLockedNextAfterCurrent(expected);
     this.timelineIds = [];
     const items: AudioPlaylistItem[] = [];
     for (let i = 0; i < expected.length; i++) {
@@ -1427,6 +1414,38 @@ class PlayerStore {
     // 重推的条目带的是「未收藏」样式（buildTimelineItem 不算收藏态，见其注释），
     // 当前曲的红心必须重算回写，否则编辑一次队列图标就凭空变空
     this.refreshNativeRating();
+  }
+
+  /**
+   * 「下一首播放」锁定的那首必须紧挨当前曲之后（时间线重排的收口点）。
+   *
+   * 随机的播放顺序是洗好的乱序序列，原生按序列衔接；只把歌插进队列，它落到序列
+   * 哪一格就听天由命了。单曲循环则是原生 REPEAT_ONE 原地重播，压根走不到下一项。
+   * 队列编辑、屏蔽规则变化、重新推时间线都会重排序列，所以统一在这里把锁定的条目
+   * 挪到当前曲后一位（2026-10-30 用户反馈「随机播放时点了下一首播放，实际播的
+   * 不是它」）。
+   */
+  private placeLockedNextAfterCurrent(expected: Song[]): void {
+    if (this.lockedNextMid.length == 0) return;
+    if (this.mode == "sequence") return;
+    const cur = this.current;
+    if (cur == null) return;
+    const curMid = this.mediaIdOf(cur);
+    let curAt = -1;
+    let lockAt = -1;
+    for (let i = 0; i < expected.length; i++) {
+      const s = expected[i];
+      if (s == null) continue;
+      const mid = this.mediaIdOf(s);
+      if (mid == curMid) curAt = i;
+      else if (mid == this.lockedNextMid) lockAt = i;
+    }
+    if (curAt < 0 || lockAt < 0 || lockAt == curAt + 1) return;
+    const locked = expected[lockAt];
+    expected.splice(lockAt, 1);
+    // 摘掉的那位在当前曲之前时，当前曲下标要前移一格（splice 之后才准）
+    const at = lockAt < curAt ? curAt - 1 : curAt;
+    expected.splice(at + 1, 0, locked);
   }
 
   /**
@@ -1453,7 +1472,7 @@ class PlayerStore {
         resolve({ url: "", stalled: true });
       }, ms) as number;
       musicApi
-        .playUrl(song, this.quality)
+        .playUrl(song, this.effQualityOf(song))
         .then((url: string) => {
           if (settled) return;
           settled = true;
@@ -1494,43 +1513,150 @@ class PlayerStore {
    * 播放时缺封面则查询并回填：写入 current / queue / 所属本地歌单，并持久化。
    * 不阻塞播放，封面取到后再刷新 UI。
    */
+  /** 封面回填：写 Song 本体/当前歌/队列/所在歌单 + 收藏表脏标记 + 落盘（网络回填与本地内嵌封面共用路径） */
+  private applyCover(song: Song, cover: string): void {
+    if (cover.length == 0) return;
+    song.picUrl = cover;
+    // 响应式对象（current / queue）赋值会触发播放页/列表刷新
+    const cur = this.current;
+    if (cur != null && cur.id == song.id && cur.platform == song.platform) {
+      cur.picUrl = cover;
+    }
+    for (let i = 0; i < this.queue.length; i++) {
+      const q = this.queue[i];
+      if (q.id == song.id && q.platform == song.platform) {
+        q.picUrl = cover;
+        break;
+      }
+    }
+    // 同步回本地歌单，让歌单列表里的封面也补上
+    const containing = this.getPlaylistsContainingSong(song);
+    for (let i = 0; i < containing.length; i++) {
+      const pl = containing[i];
+      if (pl.tracks) {
+        for (let j = 0; j < pl.tracks.length; j++) {
+          const t = pl.tracks[j];
+          if (t.id == song.id && t.platform == song.platform) {
+            t.picUrl = cover;
+          }
+        }
+      }
+    }
+    // song 可能是收藏总表里那条记录本身，封面回填后同样要落盘；
+    // 这条路径每首歌至多走一次（首次播放且缺封面），多写一次的代价可忽略
+    this.likedDirty = true;
+    this.persist();
+  }
+
   private backfillCover(song: Song): void {
     musicApi
       .songCover(song)
       .then((cover: string) => {
-        if (cover == null || cover.length == 0) return;
-        song.picUrl = cover;
-        // 响应式对象（current / queue）赋值会触发播放页/列表刷新
-        const cur = this.current;
-        if (cur != null && cur.id == song.id && cur.platform == song.platform) {
-          cur.picUrl = cover;
-        }
-        for (let i = 0; i < this.queue.length; i++) {
-          const q = this.queue[i];
-          if (q.id == song.id && q.platform == song.platform) {
-            q.picUrl = cover;
-            break;
-          }
-        }
-        // 同步回本地歌单，让歌单列表里的封面也补上
-        const containing = this.getPlaylistsContainingSong(song);
-        for (let i = 0; i < containing.length; i++) {
-          const pl = containing[i];
-          if (pl.tracks) {
-            for (let j = 0; j < pl.tracks.length; j++) {
-              const t = pl.tracks[j];
-              if (t.id == song.id && t.platform == song.platform) {
-                t.picUrl = cover;
-              }
-            }
-          }
-        }
-        // song 可能是收藏总表里那条记录本身，封面回填后同样要落盘；
-        // 这条路径每首歌至多走一次（首次播放且缺封面），多写一次的代价可忽略
-        this.likedDirty = true;
-        this.persist();
+        if (cover != null && cover.length > 0) this.applyCover(song, cover);
       })
       .catch(() => {});
+  }
+
+  /**
+   * 本地优先命中（在线歌播磁盘文件）后补读内嵌标签。为什么不在 syncSongExtras 里做：
+   * 那一刻 song.url 还是在线流地址（本地地址是取链回调里异步回写的），读不到标签区。
+   * 内嵌封面/歌词只登记「显示用」（coverOf / embeddedLyricOf），不写回 song.picUrl。
+   */
+  private syncLocalFileMedia(song: Song, fileUrl: string): void {
+    const cur = this.current;
+    if (cur == null || cur.platform + ":" + cur.id != this.mediaIdOf(song)) return;
+    let embedded: EmbeddedReadResult | null = null;
+    try {
+      embedded = readEmbeddedTags(fileUrl);
+    } catch (e) {
+      embedded = null;
+    }
+    if (embedded == null) return;
+    const mediaId = this.mediaIdOf(song);
+    if (embedded.coverPath.length > 0) {
+      this.embeddedCover = embedded.coverPath;
+      this.embeddedCoverKey = mediaId;
+    }
+    if (embedded.lrcText.length > 0) {
+      this.embeddedLyric = embedded.lrcText;
+      this.embeddedLyricKey = mediaId;
+      // 词源换成本地文件里那份：作废已装载的在线词并重拉（歌曲 key 没变，
+      // notifySongChanged 会被 loadedKey 短路，必须用这个入口）
+      desktopLyric.notifyLyricChanged();
+    }
+    // 车机蓝牙歌词也换成本地文件里那份（在线歌走本地文件时同样适用）
+    audioPlayer.setCarLyric(embedded.lrcText);
+  }
+
+  /**
+   * 切歌后的原生附加同步（⑧/⑩ 批次接线点，两个起播路径共用）：
+   * ① 内嵌优先 —— 在播本地文件（本地曲目 / 下载歌 / 本地优先命中的在线歌）自带
+   *    封面与歌词时，登记到 embeddedCover/embeddedLyric，播放页与桌面歌词先用它，
+   *    没有内嵌才走在线；
+   * ② 封面兜底 —— 缺网络封面时：本地歌曲优先读文件内嵌封面（下载写入侧已在
+   *    APIC/PICTURE 落盘），读不到再走网络回填（服务器同步来的收藏等场景）；
+   * ③ 车机蓝牙歌词（AVRCP "android.media.metadata.LYRICS"）—— 本地歌曲用内嵌
+   *    歌词（无词清空）；在线歌曲等取址预取（musicApi.playUrl → prefetchLyric）
+   *    落地后异步补推，预取与 lyrics() 共用同一份缓存/inflight，不会重复请求。
+   */
+  private syncSongExtras(song: Song): void {
+    let embedded: EmbeddedReadResult | null = null;
+    // 内嵌读取只对本地文件有意义（在线歌曲 url 是流地址，没有标签区可读）。
+    // 「本地文件」的判定不能只看 platform=="local"：已下载歌曲离线播放时，播放器
+    // 会把落盘路径写回 song.url，而 platform 仍是 qq/netease（downloads.ts 的
+    // isRemoteUrl 同款判定），漏了它们会让下载歌在车机上丢歌词/丢内嵌封面。
+    const songUrl = song.url;
+    const isLocalFile =
+      songUrl != null &&
+      songUrl.length > 0 &&
+      songUrl.toLowerCase().indexOf("http://") != 0 &&
+      songUrl.toLowerCase().indexOf("https://") != 0;
+    if (isLocalFile) {
+      try {
+        embedded = readEmbeddedTags(songUrl);
+      } catch (e) {
+        // 读不到内嵌标签按「无内嵌」处理：封面走网络兜底、歌词清空
+        embedded = null;
+      }
+    }
+    // 切歌先清空内嵌状态：宁可这一拍先显示在线封面，也不能让上一首的内嵌串过来
+    this.embeddedCover = "";
+    this.embeddedCoverKey = "";
+    this.embeddedLyric = "";
+    this.embeddedLyricKey = "";
+    if (embedded != null) {
+      // 内嵌优先（文件里自带的那份最准，也省掉同一首歌的在线请求）；
+      // 只登记「显示用」，不写回 song.picUrl —— 那会被收藏同步带上服务端（like-sync.ts:121）
+      const mediaId = this.mediaIdOf(song);
+      if (embedded.coverPath.length > 0) {
+        this.embeddedCover = embedded.coverPath;
+        this.embeddedCoverKey = mediaId;
+      }
+      if (embedded.lrcText.length > 0) {
+        this.embeddedLyric = embedded.lrcText;
+        this.embeddedLyricKey = mediaId;
+        // 本函数在 desktopLyric.notifySongChanged() 之后才跑到：那一次拉词看到的是
+        // 「还没有内嵌词」的旧状态，这里补一次「词源变了」的重拉
+        desktopLyric.notifyLyricChanged();
+      }
+    }
+    if (song.picUrl == null || song.picUrl.length == 0) {
+      if (embedded != null && embedded.coverPath.length > 0) {
+        this.applyCover(song, embedded.coverPath);
+      } else {
+        this.backfillCover(song);
+      }
+    }
+    if (isLocalFile) {
+      audioPlayer.setCarLyric(embedded != null ? embedded.lrcText : "");
+    } else {
+      musicApi
+        .lyrics(song)
+        .then((text: string) => {
+          audioPlayer.setCarLyric(text);
+        })
+        .catch(() => {});
+    }
   }
 
   recordPlay(song: Song): void {
@@ -1643,6 +1769,8 @@ class PlayerStore {
     this.playRequestedAt = 0;
     this.resolveInFlightMid = "";
     this.timelineIds = [];
+    // 清空播放态 → 「下一首播放」的锁也没有意义了（2026-10-30）
+    this.lockedNextMid = "";
     this.markProgress(0);
     this.duration = 0;
     audioPlayer.stop();
@@ -1697,7 +1825,9 @@ class PlayerStore {
       this.exitAfterSleep();
       return;
     }
-    if (this.mode == "single" && auto) {
+    // 单曲循环但用户指定了「下一首播放」时不进这段原地重播（2026-10-30）：
+    // 锁要抢在 repeat-one 前面，见下面的锁定分支
+    if (this.mode == "single" && auto && this.lockedNextMid.length == 0) {
       this.listenSession.start(this.mediaIdOf(this.current!));
       // 单曲循环且播完自动重播：走 store 的 seek（同步写进度 + 冻结窗口），
       // 否则原生位置回跳到 0 会被「小幅倒退」过滤吞掉，进度条会一直停在末尾。
@@ -1717,6 +1847,16 @@ class PlayerStore {
     // 时间线走），这段只管「下一首」按钮；全被屏蔽时退回当前曲（play 同曲
     // 分支重播，绝不空转）
     const dislikes = useDislikesStore();
+    // 「下一首播放」优先于任何模式：随机不该掷骰、单曲循环也先播它一次 ——
+    // 用户显式指定的顺序压过模式规则（2026-10-30 用户反馈随机模式不生效）
+    if (this.lockedNextMid.length > 0) {
+      const locked = this.findSongByMediaId(this.lockedNextMid);
+      this.lockedNextMid = "";
+      if (locked != null && !dislikes.isDisliked(locked)) {
+        this.play(locked, [], false, auto);
+        return;
+      }
+    }
     if (this.mode == "random") {
       if (this.queue.length == 1) index = 0;
       else if (dislikes.hasRules()) {
@@ -1770,6 +1910,17 @@ class PlayerStore {
     const song = this.findSongByMediaId(mediaId);
     if (song == null) return;
     const cur = this.current;
+    // 「下一首播放」一次性指示：真换歌就收（顺着时间线衔接到锁定的那首 = 完成，
+    // 被别的路径带到别处 = 过期）。同曲事件（重定位/单曲重播）必须放行，否则一次
+    // seek 就把锁冲掉了。单曲循环为走到它临时放开过循环，播到后按模式收回（2026-10-30）
+    if (this.lockedNextMid.length > 0) {
+      const switchedTo =
+        cur == null || cur.id != song.id || cur.platform != song.platform;
+      if (switchedTo) {
+        if (this.lockedNextMid == mediaId && this.mode == "single") this.syncRepeatMode();
+        this.lockedNextMid = "";
+      }
+    }
     const suppressNaturalFinish = naturalEnd && this.skipNextNativeTransitionAt > 0 && Date.now() - this.skipNextNativeTransitionAt < 2000;
     if (suppressNaturalFinish) this.skipNextNativeTransitionAt = 0;
     // 同曲事件（单曲循环/环绕重启条目）不做簿记；但若这轮是「自然播到头」而
@@ -1836,9 +1987,7 @@ class PlayerStore {
     // 这里按「是否在默认收藏歌单里」逐首校正 —— 只算当前这一首（O(收藏总表)），
     // 不在 pushTimeline 里逐条算（那会把入队变成 O(队列×收藏总表)）
     this.refreshNativeRating();
-    if (song.picUrl == null || song.picUrl.length == 0) {
-      this.backfillCover(song);
-    }
+    this.syncSongExtras(song);
     if (this.sleepStopAfterCurrent) {
       this.sleepStopAfterCurrent = false;
       this.exitAfterSleep();
@@ -1909,6 +2058,14 @@ class PlayerStore {
     }
     if (song != null && song.platform != "local") {
       const key = song.platform + ":" + song.id;
+      // 本地优先交付的文件起播失败（文件损坏/被系统清理）：拉黑这份本地文件，
+      // 本会话内不再用它顶在线歌，然后落回标准「重取在线地址并重放」路径
+      // （拉黑后 resolve 回调自动走在线取链）
+      if (this.localFirstUsed.has(key)) {
+        this.localFirstUsed.delete(key);
+        this.localFirstFailed.set(key, true);
+        logMsg("[QT Player] 本地优先文件播放失败，已拉黑并回退在线取链：" + key);
+      }
       // 同一首歌只重取一次；换歌或超过一分钟后重新允许，覆盖长时间播放后再次失效的情况
       const expired = Date.now() - this.urlRetryAt > 60 * 1000;
       if (this.urlRetryKey != key || expired) {
@@ -1918,9 +2075,58 @@ class PlayerStore {
         return;
       }
     }
+    // 本地歌文件丢失/损坏：替身链——在线搜索同名歌找时长最接近的接着播，
+    // 找不到才跳下一首（口径对齐 urlRetry：同一首一分钟内只替一次）
+    if (song != null && song.platform == "local") {
+      const skey = song.platform + ":" + song.id;
+      const sexpired = Date.now() - this.substituteAt > 60 * 1000;
+      if (this.substituteKey != skey || sexpired) {
+        this.substituteKey = skey;
+        this.substituteAt = Date.now();
+        this.substituteLocalSong(song);
+        return;
+      }
+    }
     // 该曲已重取过仍失败：统一进失败处理（自动下一首标识开着就切下一首，
     // 连续 5 首失败熔断+通知栏提示，防止死歌队列无限空转）
     this.skipAfterFailure();
+  }
+
+  /**
+   * 本地歌替身链（DESIGN §7.13）：文件丢失/损坏时在线搜索同名歌，
+   * 时长最接近的当替身接着播；队列里坏条目原位换成替身。找不到/搜索失败
+   * 则跳下一首（与 PC 端 arm1 同口径）。
+   */
+  private substituteLocalSong(song: Song): void {
+    findSubstituteSong(song)
+      .then((sub: Song | null) => {
+        if (sub == null) {
+          logMsg("[QT Player] 本地歌替身链未找到替身，跳下一首：" + song.name);
+          this.skipAfterFailure();
+          return;
+        }
+        logMsg(
+          "[QT Player] 本地歌替身：" +
+            song.name +
+            " -> " +
+            sub.platform +
+            ":" +
+            sub.id
+        );
+        // 队列里把坏条目原位换成替身（保持位置），然后接着播替身
+        for (let i = 0; i < this.queue.length; i++) {
+          const s = this.queue[i];
+          if (s != null && s.platform == song.platform && s.id == song.id) {
+            this.queue[i] = sub;
+            break;
+          }
+        }
+        this.play(sub);
+      })
+      .catch((_e: any) => {
+        logMsg("[QT Player] 本地歌替身链搜索失败，跳下一首：" + song.name);
+        this.skipAfterFailure();
+      });
   }
 
   /** 本曲上次取链失败是否只是环境问题（弱网/引擎卡） */
@@ -2088,7 +2294,7 @@ class PlayerStore {
       "[QT Player] 播放地址可能已失效，重新获取：" + song.platform + ":" + song.id
     );
     // 先作废该歌曲的地址缓存，否则重解析时 playUrl 会把刚失败的同一条 URL 再返回一次
-    musicApi.invalidatePlayUrl(song, this.quality);
+    musicApi.invalidatePlayUrl(song, this.effQualityOf(song));
     // 重推时间线重新定位：条目加载那一刻再次触发懒解析（缓存已作废 → 拿新地址）。
     // 取链限时在 resolve 桥内（超时 → resolveFail → 原生 Error 回到这里再走跳歌）；
     // 不能只 seekTo 当前条目 —— 出错后播放器停在 IDLE，不重推时间线不会重新加载
@@ -2176,7 +2382,9 @@ class PlayerStore {
     try {
       const t = audioPlayer.currentTime();
       if (t >= 0) this.markProgress(t);
-    } catch (_) {}
+    } catch (_) {
+      // 静默：底层播放器尚未就绪时读进度失败，保持现有外推值即可
+    }
   }
 
   currentIndex(): number {
@@ -2187,17 +2395,78 @@ class PlayerStore {
     );
   }
 
+  /**
+   * 「下一首播放」= 插队到当前曲之后，**不打断正在播的歌**。
+   *
+   * 旧实现末尾 `this.play(song)` 会立刻切歌，用户反馈「点下一首播放，正在听的被打断」。
+   * 现在只改队列 + 无损重推原生时间线（同 addToQueue）：当前曲继续播，
+   * 播完自动衔接到插进来的这首。
+   *
+   * 随机模式的时间线是既有的乱序序列，只改队列的话 syncTimeline 会把它追加到队尾，
+   * 「下一首」就不是它了——所以同时把 mediaId 插到时间线里当前曲之后。
+   */
   playNext(song: Song): void {
-    const index = this.currentIndex();
-    const next: Song[] = [];
-    const pos = index >= 0 ? index + 1 : this.queue.length;
-    for (let i = 0; i < this.queue.length; i++) {
-      if (i == pos) next.push(song);
-      next.push(this.queue[i]);
+    // 不喜欢列表：与 addToQueue 同口径——被屏蔽的歌不进队列。syncTimeline 的
+    // 过滤也会把它从原生时间线剔掉，不拦就是「队列里有、播不到」的错位。
+    if (useDislikesStore().isDisliked(song)) {
+      qtShowToast({ title: "该歌曲已屏蔽", icon: "none" });
+      return;
     }
-    if (pos >= this.queue.length) next.push(song);
+    const current = this.current;
+    // 还没有任何在播曲（冷启动/空闲）：没有「下一首」可言，直接开始播
+    if (current == null) {
+      this.queue = [...this.queue, song];
+      this.play(song);
+      return;
+    }
+    const mid = this.mediaIdOf(song);
+    const curMid = this.mediaIdOf(current);
+    if (mid == curMid) {
+      qtShowToast({ title: "这首歌正在播放", icon: "none" });
+      return;
+    }
+    // 队列里已有同一首：先摘掉旧条目，再插到当前曲之后（不留重复行）
+    const next: Song[] = [];
+    for (let i = 0; i < this.queue.length; i++) {
+      const item = this.queue[i];
+      if (item != null && item.platform + ":" + item.id == mid) continue;
+      next.push(item);
+    }
+    // 插队位置 = 当前曲在队列里的下一位；当前曲不在队列（异常态）就放队首
+    let pos = 0;
+    for (let i = 0; i < next.length; i++) {
+      if (next[i].platform + ":" + next[i].id == curMid) {
+        pos = i + 1;
+        break;
+      }
+    }
+    next.splice(pos, 0, song);
     this.queue = next;
-    this.play(song);
+    // 落锁：随机模式的顺序来自乱序时间线，单曲循环模式下原生在 REPEAT_ONE 里原地
+    // 重播 —— 两者都不会自动播到插进来的这首。锁住后由 pushTimeline/syncTimeline
+    // 把它排到当前曲之后，单曲循环还会临时放开循环让原生能走过去（见 playNext 尾部）
+    this.lockedNextMid = mid;
+    if (this.mode == "random") {
+      const ti = this.timelineIndexOf(current);
+      if (ti >= 0) {
+        // 旧时间线里可能已有同一首（队列去重了，时间线没有）：先剔除再插，
+        // 否则同一个 mediaId 会在原生时间线里出现两次
+        const ids: string[] = [];
+        for (let i = 0; i < this.timelineIds.length; i++) {
+          if (this.timelineIds[i] != mid) ids.push(this.timelineIds[i]);
+          if (i == ti) ids.push(mid);
+        }
+        this.timelineIds = ids;
+      }
+    }
+    // 无损重推原生时间线（同 addToQueue）：当前曲不打断，下一首按新顺序衔接
+    this.syncTimeline();
+    // 单曲循环：原生是 REPEAT_ONE 原地重播，不会走到插进来的这首，所以插队期间临时
+    // 放开成列表环绕，让它能顺着时间线走过去；锁被消费时再按模式收回（见
+    // onNativeTrackChanged 里的 syncRepeatMode 调用）
+    if (this.mode == "single") audioPlayer.setRepeatMode(2);
+    this.persist();
+    qtShowToast({ title: "已设为下一首播放", icon: "none" });
   }
 
   addToQueue(song: Song): void {
@@ -2376,7 +2645,7 @@ class PlayerStore {
    * 成员归属一并摘除（不回推，服务端删歌单时已级联清了 (sid,pid) 行）。
    * LWW：本地条目 seq 比变更大说明本地更新（重命名后还没推上去），不动。
    */
-  private removeLocalPlaylistEverywhere(pid: string, seq: number): void {
+  removeLocalPlaylistEverywhere(pid: string, seq: number): void {
     let touched = false;
     // localPlaylists：本机创建的（按 pid 匹配）
     for (let i = this.localPlaylists.length - 1; i >= 0; i--) {
@@ -2419,7 +2688,7 @@ class PlayerStore {
    * 删除歌单时清理本地成员歌曲（不上送，服务器在删歌单时一并清 (sid,pid) 记录）：
    * 摘掉该歌单 pid 归属，pids 清空的歌整条从收藏总表移除并落盘。
    */
-  private removeSongsOfPlaylistLocal(removed: Playlist): void {
+  removeSongsOfPlaylistLocal(removed: Playlist): void {
     const pid = removed.pid != null && removed.pid.length > 0 ? removed.pid! : removed.id;
     if (pid.length == 0) return;
     let touched = false;
@@ -2668,7 +2937,7 @@ class PlayerStore {
   }
 
   /** 给这首歌加上某个 pid（本地登记，返回是否真的新增） */
-  private addPidToSong(song: Song, pid: string): boolean {
+  addPidToSong(song: Song, pid: string): boolean {
     if (pid.length == 0) return false;
     if (song.pids == null) song.pids = [];
     for (let i = 0; i < song.pids.length; i++) {
@@ -2682,7 +2951,7 @@ class PlayerStore {
   }
 
   /** 从这首歌移除某个 pid（本地登记，返回是否真的删掉了） */
-  private removePidFromSong(song: Song, pid: string): boolean {
+  removePidFromSong(song: Song, pid: string): boolean {
     if (pid.length == 0 || song.pids == null) return false;
     const next: string[] = [];
     let removed = false;
@@ -2699,7 +2968,7 @@ class PlayerStore {
   }
 
   /** 在指定列表里按 id + platform 找歌（用于合并服务器返回的同歌多条记录） */
-  private findCollectedSongInList(
+  findCollectedSongInList(
     list: Song[],
     id: string,
     platform: string
@@ -2712,7 +2981,7 @@ class PlayerStore {
   }
 
   /** 在收藏总表里按 id + platform 找到这首歌（总表里一首歌只有一条记录） */
-  private findCollectedSongById(id: string, platform: string): number {
+  findCollectedSongById(id: string, platform: string): number {
     return this.findCollectedSongInList(this.likedSongs, id, platform);
   }
 
@@ -2794,7 +3063,7 @@ class PlayerStore {
    * 的记录不再重复收下 —— 否则「我的收藏歌单」会出两张卡、profile 计数多 1
    * （collectiblePlaylists 虽按 pid 去重，但展示层是 localPlaylists + savedPlaylists 拼接）。
    */
-  private isLocallyOwnedPlaylist(pid: string, platform: string): boolean {
+  isLocallyOwnedPlaylist(pid: string, platform: string): boolean {
     if (pid.length == 0) return false;
     for (let i = 0; i < this.localPlaylists.length; i++) {
       const lp = this.localPlaylists[i];
@@ -2893,854 +3162,63 @@ class PlayerStore {
 
   // ==================== 收藏同步（LIKE_SYNC_DESIGN.md §5） ====================
 
-  /**
-   * 单曲收藏 payload：只携带服务器需要的字段（不含 url 等本地字段）。
-   * pid 为可选归属：收藏到哪个本地歌单就带上谁的 pid，为空表示不归属任何歌单。
-   * 普通对象直出不建 UTSJSONObject：导入几百首时逐首建原生实例纯属浪费，
-   * 还会放大 bytecode 运行时的实例注册表压力（曾触发「UTS instance is not registered」）。
-   */
-  private likeSongPayloadJson(song: Song, pid?: string): string {
-    const obj: any = {
-      sid: song.id,
-      platform: song.platform,
-      name: song.name,
-      singer: song.singer,
-      album: song.album,
-    };
-    if (song.musicId != null && song.musicId.length > 0) obj["hash"] = song.musicId;
-    if (pid != null && pid.length > 0) obj["pid"] = pid;
-    // 封面一并入 payload：在线收藏和离线重放共用，断网期间入队的收藏恢复后仍能带图
-    if (song.picUrl != null && song.picUrl.length > 0) obj["picUrl"] = song.picUrl;
-    return JSON.stringify(obj);
+  // ===== 收藏同步转发层：实现在 services/like-sync.ts（LikeSyncEngine）。
+  // 方法名/签名与抽出前完全一致，页面与其余 store 不感知搬迁；调用点零改动。 =====
+
+  private loadLikeSync(): void {
+    likeSync().load();
   }
 
-  /** 歌单收藏 payload（pid 兜底：自建歌单缺 pid 时生成并写回本地缓存） */
-  private likePlaylistPayloadJson(playlist: Playlist): string {
-    // 歌单的 pid 就是它的全局唯一键，本地歌单用生成的 pid，其余沿用平台歌单号
-    const pid = this.ensurePlaylistPid(playlist);
-    const obj: any = {
-      pid: pid,
-      platform: playlist.platform,
-      name: playlist.name,
-    };
-    if (playlist.picUrl != null && playlist.picUrl.length > 0) obj["picUrl"] = playlist.picUrl;
-    return JSON.stringify(obj);
-  }
-
-  /** 本地变更入队并尝试推送（断网暂存，联网后自动补推） */
-  private enqueueLikeOp(op: PendingLikeOp): void {
-    this.pendingOps.push(op);
-    this.saveLikeSync();
-    this.flushPendingOps().catch(() => {});
+  private saveLikeSync(): void {
+    likeSync().save();
   }
 
   /** 推送积压的收藏操作（对外入口，防止与增量拉取并发交错） */
   async flushPendingOps(): Promise<void> {
-    const token = getAccessToken();
-    if (!token) return;
-    if (this.likeSyncBusy) return;
-    this.likeSyncBusy = true;
-    try {
-      await this.doFlushPendingOps();
-    } finally {
-      this.likeSyncBusy = false;
-    }
+    await likeSync().flushPendingOps();
   }
 
-  /**
-   * 推送这首歌在某个歌单下的收藏状态。
-   *
-   * 一首歌可以同时属于多个歌单，每个歌单在服务器上各有一条记录，
-   * 所以 add 和 remove **都要带 pid** —— 后端按 (sid, pid) 定位，
-   * 从某个歌单移除时才不会误删同一首歌在其他歌单里的记录。
-   */
-  private pushSongPid(song: Song, pid: string, action: "add" | "remove"): void {
-    if (pid.length == 0) return;
-    this.enqueueLikeOp({
-      type: "song",
-      action,
-      dataJson: this.likeSongPayloadJson(song, pid),
-    });
-  }
-
-  private hasPendingLikeOp(type: string, id: string, platform: string): boolean {
-    for (let i = 0; i < this.pendingOps.length; i++) {
-      const op = this.pendingOps[i];
-      if (op.type != type) continue;
-      try {
-        const obj = parseJsonToUtso(op.dataJson);
-        const oid = obj.get(type == "song" ? "sid" : "pid") as string | null;
-        const pl = obj.get("platform") as string | null;
-        if (oid != null && oid == id && pl != null && pl == platform) return true;
-      } catch (_) {}
-    }
-    return false;
-  }
-
-  /**
-   * 按序批量推送积压操作（/like/batch，单批上限 LIKE_BATCH_LIMIT）。
-   * 整批原子：成功整批出队并盖 seq，失败整批原样留在队首保序重放（断网不丢，
-   * upsert 幂等保证重放无害）；无效操作（本地歌无平台等）直接丢弃，
-   * 与旧单条路径 seq=0 视同成功的语义一致。
-   */
-  private async doFlushPendingOps(): Promise<void> {
-    while (this.pendingOps.length > 0) {
-      // 预扫队首组装一批：无效 op 记下标（成功失败都要剔除），有效 op 进批。
-      // 组批过程中不改动队列，失败时整批原样保留
-      const batch: PendingLikeOp[] = [];
-      const bodies: string[] = [];
-      const invalidIdx: number[] = [];
-      let scan = 0;
-      while (scan < this.pendingOps.length && batch.length < LIKE_BATCH_LIMIT) {
-        const op = this.pendingOps[scan];
-        if (op != null) {
-          const bodyJson = this.buildLikeOpBodyJson(op);
-          if (bodyJson != null) {
-            batch.push(op);
-            bodies.push(bodyJson);
-            scan++;
-            continue;
-          }
-          logMsg("[Player] 收藏批量推送丢弃无效操作 type=" + op.type + " action=" + op.action);
-        }
-        invalidIdx.push(scan);
-        scan++;
-      }
-      // 无效 op 从后往前剔除（不影响前面的下标），并落盘
-      for (let i = invalidIdx.length - 1; i >= 0; i--) {
-        this.pendingOps.splice(invalidIdx[i], 1);
-      }
-      if (invalidIdx.length > 0) this.saveLikeSync();
-      if (batch.length == 0) continue;
-      let seq = 0;
-      try {
-        seq = await likeBatch(bodies);
-        logMsg("[Player] 收藏批量推送成功 " + batch.length + " 条 seq=" + seq);
-      } catch (e) {
-        logMsg("[Player] 收藏批量推送失败 " + batch.length + " 条 err=" + (e != null ? e.toString() : "unknown"));
-        return;
-      }
-      // 成功：整批出队并盖章。本批占用连续 seq 区段，统一盖整批最大 seq
-      // 不会误判 LWW（其他端这期间的变更 seq 必然更大）
-      for (let i = 0; i < batch.length; i++) {
-        const idx = this.pendingOps.indexOf(batch[i]);
-        if (idx >= 0) this.pendingOps.splice(idx, 1);
-      }
-      for (let i = 0; i < batch.length; i++) {
-        const op = batch[i];
-        if (op.action == "add") {
-          if (op.type == "song") this.markSongLikedSeq(op.dataJson, seq);
-          else this.markPlaylistLikedSeq(op.dataJson, seq);
-        }
-      }
-      if (seq > this.likeCursor) this.likeCursor = seq;
-      this.saveLikeSync();
-    }
-  }
-
-  /**
-   * 把一条待推送操作序列化成 /like/batch 的操作体 JSON 文本；无法上送返回 null
-   * （如本地歌曲无 platform，由调用方丢弃）。字段映射与旧单条路径完全一致：
-   * pid 兜底解析（存量队列缺 pid 时按收藏记录反查，必要时生成并写回本地）。
-   * 封面不做逐条补查——批量路径不为封面再发 N 次网络请求，
-   * payload 里已有的封面原样上送，缺封面的记录靠服务端 backfill 兜底。
-   *
-   * 全程普通 JS 对象（JSON.parse 直出、下标读写），不建 UTSJSONObject：
-   * bytecode 运行时里 UTSJSONObject 是原生注册实例，一次导入几百首时
-   * 整批建实例曾触发原生注册丢失（「UTS instance is not registered」）。
-   */
-  private buildLikeOpBodyJson(op: PendingLikeOp): string | null {
-    const obj = JSON.parse(op.dataJson) as any;
-    const body: any = { type: op.type, action: op.action };
-    if (op.type == "song") {
-      const sid = obj["sid"] as string | null;
-      const songPlatform = obj["platform"] as string | null;
-      // 本地歌与无平台信息的歌都无法在服务器建模（本地歌 platform 非空，
-      // 是 "local"：推上云端后其他设备既无文件也无对应音源，取链必败），
-      // 返回 null 由调用方丢弃
-      if (sid == null || sid.length == 0 || songPlatform == null || songPlatform.length == 0) {
-        return null;
-      }
-      if (songPlatform == "local") {
-        return null;
-      }
-      body["sid"] = sid;
-      body["platform"] = songPlatform;
-      const name = obj["name"] as string | null;
-      if (name != null && name.length > 0) body["name"] = name;
-      const singer = obj["singer"] as string | null;
-      if (singer != null && singer.length > 0) body["singer"] = singer;
-      const album = obj["album"] as string | null;
-      if (album != null && album.length > 0) body["album"] = album;
-      const hash = obj["hash"] as string | null;
-      if (hash != null && hash.length > 0) body["hash"] = hash;
-      // 归属歌单 pid 兜底：payload 没带 pid 时（旧版本入队/存量数据），
-      // 按这首歌的 pids 找到对应歌单并取（必要时生成）它的 pid
-      let songPid = obj["pid"] as string | null;
-      if (songPid == null || songPid.length == 0) {
-        const resolved = this.resolveSongPidFallback(sid, songPlatform);
-        if (resolved.length > 0) songPid = resolved;
-      }
-      if (songPid != null && songPid.length > 0 && songPid.length <= 64) {
-        body["pid"] = songPid;
-      }
-      // 封面仅 add 且非空时上送（remove 没有图片语义，空值不上送避免覆盖云端已有图）
-      if (op.action == "add") {
-        const picUrl = obj["picUrl"] as string | null;
-        if (picUrl != null && picUrl.length > 0) body["picUrl"] = picUrl;
-      }
-      return JSON.stringify(body);
-    }
-    const pid = obj["pid"] as string | null;
-    const playlistPlatform = obj["platform"] as string | null;
-    if (playlistPlatform == null || playlistPlatform.length == 0) {
-      return null;
-    }
-    // 歌单 pid 兜底：仍为空（两端都空的异常数据）时生成一个，
-    // 保证服务器按 pid upsert 的全局唯一键永远有值
-    let finalPid = pid != null ? pid : "";
-    if (finalPid.length == 0) {
-      finalPid = generateGlobalPid();
-      logMsg("[Player] 歌单批量推送 pid 缺失，已生成 " + finalPid);
-    }
-    body["pid"] = finalPid;
-    body["platform"] = playlistPlatform;
-    const name = obj["name"] as string | null;
-    if (name != null && name.length > 0) body["name"] = name;
-    if (op.action == "add") {
-      const picUrl = obj["picUrl"] as string | null;
-      if (picUrl != null && picUrl.length > 0) body["picUrl"] = picUrl;
-    }
-    return JSON.stringify(body);
-  }
-
-  /** 在收藏总表里按 sid + platform 找本地歌曲条目，找不到返回 null */
-  private findLikedSongEntry(sid: string, platform: string): Song | null {
-    for (let i = 0; i < this.likedSongs.length; i++) {
-      const s = this.likedSongs[i];
-      if (s != null && s.id == sid && s.platform == platform) return s;
-    }
-    return null;
-  }
-
-  /**
-   * 歌曲推送的 pid 兜底：按收藏记录里的 pids 找到对应歌单，
-   * 取它的 pid（自建歌单 pid 为空则生成并写回本地缓存）。
-   * 生成的新 pid 会同步登记进这首歌的 pids（写回本地缓存）。
-   * 找不到任何对应歌单时返回空串（按无归属推送）。
-   */
-  private resolveSongPidFallback(sid: string, platform: string): string {
-    const entry = this.findLikedSongEntry(sid, platform);
-    if (entry == null || entry.pids == null) return "";
-    for (let i = 0; i < entry.pids!.length; i++) {
-      const pl = this.findPlaylistByPidOrId(entry.pids![i]);
-      if (pl == null) continue;
-      const pid = this.ensurePlaylistPid(pl);
-      if (pid.length == 0) continue;
-      if (pid != entry.pids![i]) {
-        // 歌单 pid 是新生成的：把歌曲的归属引用也换成新 pid 并落盘
-        this.addPidToSong(entry, pid);
-        this.persist();
-      }
-      return pid;
-    }
-    return "";
-  }
-
-  /** 按 pid 或 id 在自建歌单与收藏歌单里找歌单，找不到返回 null */
-  private findPlaylistByPidOrId(key: string): Playlist | null {
-    if (key.length == 0) return null;
-    for (let i = 0; i < this.localPlaylists.length; i++) {
-      const lp = this.localPlaylists[i];
-      if (lp == null) continue;
-      if (lp.id == key || (lp.pid != null && lp.pid == key)) return lp;
-    }
-    for (let i = 0; i < this.savedPlaylists.length; i++) {
-      const pl = this.savedPlaylists[i];
-      if (pl == null) continue;
-      if (pl.id == key || (pl.pid != null && pl.pid == key)) return pl;
-    }
-    return null;
-  }
-
-  /**
-   * 歌单 pid 兜底：返回用于上送的 pid。自建歌单（localPlaylists 里）pid 为空时
-   * 生成全局唯一 pid 并写回本地缓存；在线歌单沿用平台歌单号（id），
-   * 同步回来的自建歌单 id 即 pid，不能另造，否则多端对不上。
-   */
-  private ensurePlaylistPid(pl: Playlist): string {
-    if (pl.pid != null && pl.pid.length > 0) return pl.pid!;
-    for (let i = 0; i < this.localPlaylists.length; i++) {
-      const lp = this.localPlaylists[i];
-      if (lp != null && lp.id == pl.id) {
-        lp.pid = generateGlobalPid();
-        this.saveLocalPlaylistList();
-        logMsg("[Player] 自建歌单 pid 缺失，已生成并写回本地 " + pl.name + " → " + lp.pid!);
-        return lp.pid!;
-      }
-    }
-    return pl.id;
-  }
-
-  /** 推送成功后把服务器 seq 回写到本地条目（后续增量比较用） */
-  private markSongLikedSeq(dataJson: string, seq: number): void {
-    try {
-      const obj = parseJsonToUtso(dataJson);
-      const sid = obj.get("sid") as string | null;
-      const platform = obj.get("platform") as string | null;
-      if (sid == null || platform == null) return;
-      for (let i = 0; i < this.likedSongs.length; i++) {
-        const song = this.likedSongs[i];
-        if (song.id == sid && song.platform == platform) {
-          song.likeSeq = seq;
-          // 推送成功后回写 seq：这里没有跟着 persist()，靠脏标记留给下一次落盘
-          this.likedDirty = true;
-          return;
-        }
-      }
-    } catch (_) {}
-  }
-
-  private markPlaylistLikedSeq(dataJson: string, seq: number): void {
-    try {
-      const obj = parseJsonToUtso(dataJson);
-      const pid = obj.get("pid") as string | null;
-      const platform = obj.get("platform") as string | null;
-      if (pid == null || platform == null) return;
-      for (let i = 0; i < this.savedPlaylists.length; i++) {
-        const pl = this.savedPlaylists[i];
-        if (pl.id == pid && pl.platform == platform) {
-          pl.likeSeq = seq;
-          this.playlistsDirty = true;
-          return;
-        }
-      }
-      // 本地自建歌单也记 likeSeq（按 pid 匹配），否则每次启动补推都会重复上送
-      for (let i = 0; i < this.localPlaylists.length; i++) {
-        const pl = this.localPlaylists[i];
-        if (pl != null && pl.pid == pid && pl.platform == platform) {
-          pl.likeSeq = seq;
-          this.saveLocalPlaylistList();
-          return;
-        }
-      }
-    } catch (_) {}
-  }
-
-  /**
-   * 增量拉取多端收藏变更（D3）：先推送本地积压操作，再按游标拉取并应用。
-   * 游标为 0（首次登录/游标丢失）时转全量分页拉取。
-   */
   async pullChanges(): Promise<void> {
-    const token = getAccessToken();
-    if (!token) return;
-    if (this.likeSyncBusy) return;
-    this.likeSyncBusy = true;
-    try {
-      // 「要不要全量拉取」必须在推送之前定下来：doFlushPendingOps 推成功后会把游标
-      // 推到服务器新分配的 seq，若在推送后再判 likeCursor <= 0 就永远不成立，
-      // 首次登录时账号里已有的云端收藏会被整批跳过（增量只取 seq 更大的变更），
-      // 而且之后每次启动游标都 > 0，再也补不回来。
-      const needFullPull = this.likeCursor <= 0;
-      await this.doFlushPendingOps();
-      if (needFullPull) {
-        await this.doFullPull();
-        return;
-      }
-      let guard = 0;
-      while (guard++ < 50) {
-        const res = await fetchChanges(this.likeCursor);
-        if (res == null) break;
-        // 服务器 maxSeq 比本地游标还小说明数据库被重建过（seq 重新从 1 计）：
-        // 旧游标已失效，对齐到新库，否则后续增量拉取会永远落在新库 maxSeq 之后
-        if (res.maxSeq < this.likeCursor) {
-          logMsg("[Player] 检测到服务器收藏版本号倒退（数据库可能被重建），游标对齐 " + this.likeCursor + " → " + res.maxSeq);
-          this.likeCursor = res.maxSeq;
-          this.saveLikeSync();
-          break;
-        }
-        if (res.changes.length == 0) {
-          if (res.maxSeq > this.likeCursor) this.likeCursor = res.maxSeq;
-          break;
-        }
-        let maxApplied = this.likeCursor;
-        for (let i = 0; i < res.changes.length; i++) {
-          const change = res.changes[i];
-          if (change.updatedSeq > maxApplied) maxApplied = change.updatedSeq;
-          this.applyLikeChange(change);
-        }
-        this.likeCursor = maxApplied;
-        this.saveLikeSync();
-        this.persist();
-      }
-    } catch (e) {
-      logMsg("[Player] 收藏增量同步失败", e);
-    } finally {
-      this.likeSyncBusy = false;
-    }
+    await likeSync().pullChanges();
   }
 
-  /** 单条变更应用（D4 last-write-wins：updated_seq 大者胜出） */
-  private applyLikeChange(change: LikeChange): void {
-    if (change.type == "song") this.applySongChange(change);
-    else this.applyPlaylistChange(change);
-  }
-
-  /**
-   * 应用一条歌曲变更到收藏总表（**不推送**，否则「拉下来 → 又推上去」会无限回环）。
-   *
-   * 变更里的 pid 定位的是「这首歌在哪个歌单里的那一条记录」，
-   * 所以新增/更新时把 pid 并入该歌曲的 pids，删除时只摘掉这一个 pid ——
-   * 摘完还有其他 pid 说明它还在别的歌单里，整条记录要留着。
-   */
-  private applySongChange(change: LikeChange): void {
-    const idx = this.findCollectedSongById(change.id, change.platform);
-    if (change.deleted) {
-      if (idx < 0) return;
-      const entry = this.likedSongs[idx];
-      const localSeq = entry.likeSeq != null ? entry.likeSeq! : 0;
-      if (localSeq > change.updatedSeq) return;
-      // 只摘变更里指定的那一个 pid
-      if (change.pid != null && change.pid.length > 0) {
-        this.removePidFromSong(entry, change.pid);
-        if (entry.pids != null && entry.pids.length > 0) {
-          entry.likeSeq = change.updatedSeq;
-          this.likedDirty = true;
-          this.persist();
-          return;
-        }
-      }
-      const next: Song[] = [];
-      for (let i = 0; i < this.likedSongs.length; i++) {
-        if (i != idx) next.push(this.likedSongs[i]);
-      }
-      this.likedSongs = next;
-      this.likedDirty = true;
-      this.persist();
-      return;
-    }
-    if (idx >= 0) {
-      const entry = this.likedSongs[idx];
-      const localSeq = entry.likeSeq != null ? entry.likeSeq! : 0;
-      if (localSeq > change.updatedSeq) return;
-      entry.name = change.name;
-      entry.singer = change.singer;
-      entry.album = change.album;
-      if (change.hash.length > 0 && change.hash.toLowerCase() != "nohash") entry.musicId = change.hash;
-      // 封面「非空覆盖、空值保留」：空图变更不清掉本地已有封面
-      if (change.picUrl != null && change.picUrl.length > 0) entry.picUrl = change.picUrl;
-      if (change.pid != null && change.pid.length > 0) this.addPidToSong(entry, change.pid);
-      entry.likeSeq = change.updatedSeq;
-      this.likedDirty = true;
-      this.persist();
-      return;
-    }
-    // 本地不存在的新收藏（另一台设备加的）
-    if (this.hasPendingLikeOp("song", change.id, change.platform)) return;
-    const song: Song = {
-      id: change.id,
-      name: change.name,
-      singer: change.singer,
-      album: change.album,
-      picUrl: change.picUrl != null && change.picUrl.length > 0 ? change.picUrl : "",
-      platform: change.platform,
-      likeSeq: change.updatedSeq,
-    };
-    if (change.pid != null && change.pid.length > 0) song.pids = [change.pid];
-    if (change.hash.length > 0 && change.hash.toLowerCase() != "nohash") song.musicId = change.hash;
-    this.likedSongs.push(song);
-    this.likedDirty = true;
-    this.persist();
-  }
-
-  private applyPlaylistChange(change: LikeChange): void {
-    // platform=local 的删除是「自建歌单被删」（本机或他端操作）：
-    // 本机建的在 localPlaylists、他端建的在 savedPlaylists，两处都查、
-    // 摘成员归属并落盘，否则歌单以幽灵形态残留、下次对账还会把它复活
-    if (change.deleted && change.platform === 'local') {
-      const pid = change.pid != null && change.pid.length > 0 ? change.pid! : change.id;
-      if (pid.length > 0) {
-        this.removeLocalPlaylistEverywhere(pid, change.updatedSeq);
-      }
-      return;
-    }
-    let idx = -1;
-    for (let i = 0; i < this.savedPlaylists.length; i++) {
-      const pl = this.savedPlaylists[i];
-      if (pl.id == change.id && pl.platform == change.platform) {
-        idx = i;
-        break;
-      }
-    }
-    if (change.deleted) {
-      if (idx < 0) return;
-      const localSeq = this.savedPlaylists[idx].likeSeq != null ? this.savedPlaylists[idx].likeSeq! : 0;
-      if (localSeq > change.updatedSeq) return;
-      const next: Playlist[] = [];
-      for (let i = 0; i < this.savedPlaylists.length; i++) {
-        if (i != idx) next.push(this.savedPlaylists[i]);
-      }
-      this.savedPlaylists = next;
-      // 这里刻意不 persist()（增量拉取的循环外统一落盘），只置脏；
-      // 若调用方中途异常退出，脏标记会留给下一次 persist() 兜底
-      this.playlistsDirty = true;
-      return;
-    }
-    if (idx >= 0) {
-      const local = this.savedPlaylists[idx];
-      const localSeq = local.likeSeq != null ? local.likeSeq! : 0;
-      if (localSeq > change.updatedSeq) return;
-      // 补 pid：增量路径下歌单可能只有 id，pid 缺失会导致收藏时匹配不上
-      if (change.pid != null && change.pid.length > 0) local.pid = change.pid;
-      else if (local.pid == null || local.pid.length == 0) local.pid = change.id;
-      local.name = change.name;
-      if (change.picUrl.length > 0) local.picUrl = change.picUrl;
-      local.likeSeq = change.updatedSeq;
-      this.savedPlaylists[idx] = local;
-      this.playlistsDirty = true;
-      return;
-    }
-    // 本机自建歌单：服务器的这条变更只回写元数据，不再另建一条 savedPlaylists 记录 ——
-    // 展示层是 localPlaylists + savedPlaylists 直接拼接，重复收下会出两张卡、计数多 1
-    const incomingPid = change.pid != null && change.pid.length > 0 ? change.pid! : change.id;
-    if (this.isLocallyOwnedPlaylist(incomingPid, change.platform)) {
-      for (let i = 0; i < this.localPlaylists.length; i++) {
-        const lp = this.localPlaylists[i];
-        const lpid = lp.pid != null && lp.pid.length > 0 ? lp.pid! : lp.id;
-        if (lpid != incomingPid || lp.platform != change.platform) continue;
-        const localSeq = lp.likeSeq != null ? lp.likeSeq! : 0;
-        if (localSeq > change.updatedSeq) return;
-        if (change.name.length > 0) lp.name = change.name;
-        if (change.picUrl.length > 0) lp.picUrl = change.picUrl;
-        lp.likeSeq = change.updatedSeq;
-        this.saveLocalPlaylistList();
-        return;
-      }
-    }
-    if (this.hasPendingLikeOp("playlist", change.id, change.platform)) return;
-    this.savedPlaylists.push({
-      id: change.id,
-      name: change.name,
-      picUrl: change.picUrl,
-      playCount: "",
-      platform: change.platform,
-      description: null,
-      likeSeq: change.updatedSeq,
-      pid: incomingPid,
-    });
-    this.playlistsDirty = true;
-  }
-
-  /** 全量分页拉取（首次登录 / 游标丢失兜底，LIKE_SYNC_DESIGN.md §2.4/§5.6） */
-  private async doFullPull(): Promise<void> {
-    const serverSongs: Song[] = [];
-    const serverPlaylists: Playlist[] = [];
-    let maxSeq = 0;
-    let page = 1;
-    while (page <= 100) {
-      const res = await fetchAllLikes(page, 500);
-      if (res == null) break;
-      for (let i = 0; i < res.songs.length; i++) serverSongs.push(res.songs[i]);
-      for (let i = 0; i < res.playlists.length; i++) serverPlaylists.push(res.playlists[i]);
-      if (res.maxSeq > maxSeq) maxSeq = res.maxSeq;
-      if (res.songs.length == 0 && res.playlists.length == 0) break;
-      page++;
-    }
-    // 一首歌属于多个歌单时，服务器会返回多条（同 sid、不同 pid），
-    // 先按 id + platform 合并成一条，把各个 pid 收进 pids 数组
-    const collapsedSongs: Song[] = [];
-    for (let i = 0; i < serverSongs.length; i++) {
-      const s = serverSongs[i];
-      const hit = this.findCollectedSongInList(collapsedSongs, s.id, s.platform);
-      if (hit < 0) {
-        collapsedSongs.push(s);
-        continue;
-      }
-      const target = collapsedSongs[hit];
-      if (s.pids != null) {
-        for (let k = 0; k < s.pids.length; k++) this.addPidToSong(target, s.pids[k]);
-      }
-      // 同歌多 pid 的多行里可能只有一行带封面，合并时优先保留非空图片
-      if ((target.picUrl == null || target.picUrl.length == 0) && s.picUrl.length > 0) {
-        target.picUrl = s.picUrl;
-      }
-      const sSeq = s.likeSeq != null ? s.likeSeq! : 0;
-      const tSeq = target.likeSeq != null ? target.likeSeq! : 0;
-      if (sSeq > tSeq) target.likeSeq = sSeq;
-    }
-    // 以服务器为准重建；本地「有待推送操作」或「seq 更新」的条目保留（LWW）
-    const mergedSongs: Song[] = [];
-    for (let i = 0; i < collapsedSongs.length; i++) mergedSongs.push(collapsedSongs[i]);
-    for (let i = 0; i < this.likedSongs.length; i++) {
-      const local = this.likedSongs[i];
-      let serverSeq = 0;
-      let foundIdx = -1;
-      for (let j = 0; j < mergedSongs.length; j++) {
-        const s = mergedSongs[j];
-        const sSeq = s.likeSeq != null ? s.likeSeq! : 0;
-        if (s.id == local.id && s.platform == local.platform) {
-          foundIdx = j;
-          serverSeq = sSeq;
-          break;
-        }
-      }
-      const localSeq = local.likeSeq != null ? local.likeSeq! : 0;
-      if (this.hasPendingLikeOp("song", local.id, local.platform) || localSeq > serverSeq) {
-        if (foundIdx >= 0) mergedSongs[foundIdx] = local;
-        else mergedSongs.push(local);
-      }
-    }
-    this.likedSongs = mergedSongs;
-    this.likedDirty = true;
-    const mergedPlaylists: Playlist[] = [];
-    for (let i = 0; i < serverPlaylists.length; i++) {
-      const pl = serverPlaylists[i];
-      // 本机自建、已推送上去的歌单在本地以 localPlaylists 里的原条目为准，
-      // 服务器那份不重复收下（否则「我的收藏歌单」出两张卡、计数多 1）
-      const pid = pl.pid != null && pl.pid.length > 0 ? pl.pid! : pl.id;
-      if (this.isLocallyOwnedPlaylist(pid, pl.platform)) continue;
-      mergedPlaylists.push(pl);
-    }
-    for (let i = 0; i < this.savedPlaylists.length; i++) {
-      const local = this.savedPlaylists[i];
-      // 历史版本的全量拉取可能已把本机自建歌单写进 savedPlaylists，与 localPlaylists
-      // 形成重复条目；这里一并剔除，避免下面按「本地 seq 更新」的规则又把它加回来
-      const localPid = local.pid != null && local.pid.length > 0 ? local.pid! : local.id;
-      if (this.isLocallyOwnedPlaylist(localPid, local.platform)) continue;
-      let serverSeq = 0;
-      let foundIdx = -1;
-      for (let j = 0; j < mergedPlaylists.length; j++) {
-        const pl = mergedPlaylists[j];
-        const plSeq = pl.likeSeq != null ? pl.likeSeq! : 0;
-        if (pl.id == local.id && pl.platform == local.platform) {
-          foundIdx = j;
-          serverSeq = plSeq;
-          break;
-        }
-      }
-      const localSeq = local.likeSeq != null ? local.likeSeq! : 0;
-      if (this.hasPendingLikeOp("playlist", local.id, local.platform) || localSeq > serverSeq) {
-        if (foundIdx >= 0) mergedPlaylists[foundIdx] = local;
-        else mergedPlaylists.push(local);
-      }
-    }
-    this.savedPlaylists = mergedPlaylists;
-    this.playlistsDirty = true;
-    if (maxSeq > this.likeCursor) this.likeCursor = maxSeq;
-    this.saveLikeSync();
-    this.persist();
-  }
-
-  /** 从服务器加载收藏列表（登录/启动触发）：按游标增量拉取，游标缺失转全量分页 */
   async syncLikedFromServer(): Promise<void> {
-    const token = getAccessToken();
-    if (!token) return;
-    // 先把数据库里缺失的本地歌单元数据补上（历史版本新建歌单不上送，
-    // 这里按 likeSeq 判断补推一次；服务器按 pid upsert 幂等）
-    this.backfillLocalPlaylistsSync();
-    await this.pullChanges();
+    await likeSync().syncLikedFromServer();
   }
 
-  /**
-   * 登录后的收藏同步：登录页不再 await 它（全量拉取可能好几秒，卡在登录页
-   * 体感很差），后台跑；超过 600ms 还没完成才弹全局加载框提示，完成后收回——
-   * 快网下一闪而过的加载框反而是噪音。失败静默（登录跳转不受影响）。
-   *
-   * 加载框走 services/ui-loading.uts 的安全包装：框架 uni-showLoading 绑定
-   * 「调用时的前台页面」，对已销毁页面调 show/hide 会抛内部空指针
-   * （NativeLoading.updateUI index.kt:84）。这里延后 700ms 起跑，让登录跳转
-   * （500ms）先完成，是第二道保险；第一道是包装层的判活 + 令牌。
-   */
   async syncLikedFromServerInBackground(): Promise<void> {
-    await new Promise<void>((r) => setTimeout(r, 700) as number);
-    let token = 0;
-    let shown = false;
-    const showTimer = setTimeout(() => {
-      token = beginLoading("正在同步收藏");
-      shown = token > 0;
-    }, 600) as number;
-    try {
-      await this.syncLikedFromServer();
-    } catch (_) {
-      // 忽略同步失败（与旧登录流程同语义）
-    } finally {
-      clearTimeout(showTimer);
-      if (shown) finishLoading(token);
-    }
+    await likeSync().syncLikedFromServerInBackground();
   }
 
-  /**
-   * 本地自建歌单元数据补推：只推「从未成功同步过（无 likeSeq）且当前不在待推送队列」的歌单。
-   * 推送成功后 markPlaylistLikedSeq 会把 seq 记回本地歌单，之后不再重复。
-   */
-  private backfillLocalPlaylistsSync(): void {
-    for (let i = 0; i < this.localPlaylists.length; i++) {
-      const pl = this.localPlaylists[i];
-      if (pl == null) continue;
-      if (pl.likeSeq != null && pl.likeSeq! > 0) continue;
-      const pid = pl.pid != null && pl.pid.length > 0 ? pl.pid! : pl.id;
-      if (this.hasPendingLikeOp("playlist", pid, pl.platform)) continue;
-      this.enqueueLikeOp({ type: "playlist", action: "add", dataJson: this.likePlaylistPayloadJson(pl) });
-    }
-  }
-
-  /**
-   * 启动时收藏同步：先增量拉取（把其他端先发生的删除/修改落到本地，避免下面的
-   * 补推把已删除的收藏"复活"），再与服务器做一次存在性对账补推。
-   */
   async syncLikesOnLaunch(): Promise<void> {
-    await this.syncLikedFromServer();
-    const count = await this.reconcileLikesWithServer();
-    if (count > 0) logMsg('[Player] 启动对账补推收藏 ' + count + ' 项');
-  }
-
-  /**
-   * 启动对账：全量拉取服务器收藏，本地有而服务器没有的条目补推（存在性 diff）。
-   *
-   * 背景：likeSeq 是「该条在服务器上的版本号」，客户端据此判断已同步；服务器
-   * 整库重建后 seq 重新从 1 计、或只删了部分数据（seq 不倒退），版本号对比都
-   * 发现不了缺失。这里只按「服务器是否存在」判断，不比较版本号，两类场景都能
-   * 自愈。增量拉取先行，所以其他端删除的收藏本地已移除，不会被误补。
-   * 歌曲按 sid+platform 整档判断（不按 pid 行级判断，避免补出重复归属行）。
-   * 服务器按 sid/pid upsert，重复执行幂等。返回补推条数。
-   */
-  private async reconcileLikesWithServer(): Promise<number> {
-    const token = getAccessToken();
-    if (!token) return 0;
-    const serverPlaylistKeys: string[] = [];
-    const serverSongKeys: string[] = [];
-    let page = 1;
-    while (page <= 100) {
-      const res = await fetchAllLikes(page, 500);
-      if (res == null) break;
-      for (let i = 0; i < res.playlists.length; i++) {
-        const pl = res.playlists[i];
-        const pid = pl.pid != null && pl.pid.length > 0 ? pl.pid! : pl.id;
-        serverPlaylistKeys.push(pl.platform + "|" + pid);
-      }
-      for (let i = 0; i < res.songs.length; i++) {
-        const s = res.songs[i];
-        serverSongKeys.push(s.platform + "|" + s.id);
-      }
-      if (res.songs.length == 0 && res.playlists.length == 0) break;
-      page++;
-    }
-    let count = 0;
-    let removedCount = 0;
-    // 歌单按「云端确认点」（likeSeq，推送成功时由服务器分配回写）三分
-    //（机制 B，见 LIKE_SYNC_DESIGN.md §5）：likeSeq = 0 从未上送 → 补推；
-    // 有 likeSeq 而云端集合没有 → 他端已删 → 本地跟随移除，否则本机建、
-    // 他端删的歌单会被对账无条件补推，云端复活后全端又收回来
-    // 歌单补推/跟随删：收藏的在线歌单 + 本地自建，一个歌单一条记录（按 pid upsert）
-    for (let i = this.savedPlaylists.length - 1; i >= 0; i--) {
-      const pl = this.savedPlaylists[i];
-      if (pl == null) continue;
-      const pid = pl.pid != null && pl.pid.length > 0 ? pl.pid! : pl.id;
-      if (serverPlaylistKeys.indexOf(pl.platform + "|" + pid) >= 0) continue;
-      if (this.hasPendingLikeOp("playlist", pid, pl.platform)) continue;
-      const localSeq = pl.likeSeq != null ? pl.likeSeq! : 0;
-      if (localSeq > 0) {
-        // 云端确认过、现在没了 → 他端取消收藏/删除，本地跟随
-        removedCount++;
-        this.savedPlaylists.splice(i, 1);
-        this.playlistsDirty = true;
-        if (pl.platform === 'local') this.removeSongsOfPlaylistLocal(pl);
-        continue;
-      }
-      this.enqueueLikeOp({ type: "playlist", action: "add", dataJson: this.likePlaylistPayloadJson(pl) });
-      count++;
-    }
-    for (let i = this.localPlaylists.length - 1; i >= 0; i--) {
-      const pl = this.localPlaylists[i];
-      if (pl == null) continue;
-      const pid = pl.pid != null && pl.pid.length > 0 ? pl.pid! : pl.id;
-      if (serverPlaylistKeys.indexOf(pl.platform + "|" + pid) >= 0) continue;
-      if (this.hasPendingLikeOp("playlist", pid, pl.platform)) continue;
-      const localSeq = pl.likeSeq != null ? pl.likeSeq! : 0;
-      if (localSeq > 0) {
-        removedCount++;
-        this.localPlaylists.splice(i, 1);
-        this.removeSongsOfPlaylistLocal(pl);
-        continue;
-      }
-      this.enqueueLikeOp({ type: "playlist", action: "add", dataJson: this.likePlaylistPayloadJson(pl) });
-      count++;
-    }
-    if (removedCount > 0) {
-      this.saveLocalPlaylistList();
-      this.persist();
-      logMsg("[Player] 对账跟随云端移除歌单 " + removedCount + " 个");
-    }
-    // 歌曲补推：同一首歌属于 N 个歌单就推 N 条（服务器按 sid+pid 建模），无 pid 推一条默认归属
-    for (let i = 0; i < this.likedSongs.length; i++) {
-      const song = this.likedSongs[i];
-      if (song == null || song.id.length == 0) continue;
-      if (song.platform.length == 0) continue;
-      if (serverSongKeys.indexOf(song.platform + "|" + song.id) >= 0) continue;
-      if (this.hasPendingLikeOp("song", song.id, song.platform)) continue;
-      const pids = song.pids != null && song.pids.length > 0 ? song.pids! : [""];
-      for (let j = 0; j < pids.length; j++) {
-        const opPid = pids[j] as string;
-        // 主归属歌单刚被跟随删除的，成员行云端已级联软删，
-        // 再补推会把刚删的歌单连歌一起复活
-        if (opPid.length > 0 && !this.playlistExistsLocally(opPid)) continue;
-        this.enqueueLikeOp({
-          type: "song",
-          action: "add",
-          dataJson: this.likeSongPayloadJson(song, opPid),
-        });
-        count++;
-      }
-    }
-    if (count > 0 || removedCount > 0) {
-      this.persist();
-      await this.flushPendingOps();
-    }
-    return count;
-  }
-
-  /** 该 pid 的歌单本地是否还存在（两个存储都查；对账歌曲补推的准入检查） */
-  private playlistExistsLocally(pid: string): boolean {
-    for (let i = 0; i < this.localPlaylists.length; i++) {
-      const lp = this.localPlaylists[i];
-      if (lp == null) continue;
-      const lpid = lp.pid != null && lp.pid.length > 0 ? lp.pid! : lp.id;
-      if (lpid == pid) return true;
-    }
-    for (let i = 0; i < this.savedPlaylists.length; i++) {
-      const sp = this.savedPlaylists[i];
-      if (sp == null) continue;
-      const spid = sp.pid != null && sp.pid.length > 0 ? sp.pid! : sp.id;
-      if (spid == pid) return true;
-    }
-    return false;
+    await likeSync().syncLikesOnLaunch();
   }
 
   /** 退出登录时重置收藏同步状态：清空游标与待推送队列，避免串到下一个账号 */
   resetLikeSync(): void {
-    this.likeCursor = 0;
-    this.pendingOps = [];
-    this.saveLikeSync();
+    likeSync().resetLikeSync();
   }
 
-  /**
-   * 切换账号时清空本地收藏缓存（账号归属标记检测到换号时调用）。
-   * 服务器是数据源，A 的数据留在 A 的服务器账号里；新账号登录后
-   * syncLikedFromServer 游标为 0 会自动全量拉取本账号数据恢复本地。
-   * 不动播放历史、下载等设备级数据。
-   */
+  /** 切换账号时清空本地收藏缓存（服务器是数据源，新账号全量拉取自动恢复）。 */
   clearLocalLikeData(): void {
-    this.likedSongs = [];
-    this.savedPlaylists = [];
-    this.localPlaylists = [];
-    this.likedDirty = true;
-    this.playlistsDirty = true;
-    this.localPlaylistsDirty = true;
-    this.persist();
-    this.resetLikeSync();
-    logMsg("[Player] 检测到切换账号，已清空本地收藏缓存");
+    likeSync().clearLocalLikeData();
   }
 
+  private enqueueLikeOp(op: PendingLikeOp): void {
+    likeSync().enqueueLikeOp(op);
+  }
+
+  private pushSongPid(song: Song, pid: string, action: "add" | "remove"): void {
+    likeSync().pushSongPid(song, pid, action);
+  }
+
+  private likeSongPayloadJson(song: Song, pid?: string): string {
+    return likeSync().likeSongPayloadJson(song, pid);
+  }
+
+  private likePlaylistPayloadJson(playlist: Playlist): string {
+    return likeSync().likePlaylistPayloadJson(playlist);
+  }
   /** 是否至少有一个自建歌单（决定收藏入口能不能弹选择） */
   canPickPlaylist(): boolean {
     return this.collectiblePlaylists().length > 0;
@@ -4068,7 +3546,7 @@ class PlayerStore {
         }
       }
     } catch (_) {
-      // 存档损坏或旧基座返回异常值时，在线歌曲仍可正常播放。
+      // 静默：存档损坏或旧基座返回异常值时，在线歌曲仍可正常播放。
     }
     let requested = Math.floor(startIndex);
     if (!Number.isFinite(requested) || requested < 0) requested = 0;
@@ -4091,6 +3569,14 @@ class PlayerStore {
     if (selectedIndex < 0) selectedIndex = playable.length - 1;
     await this.play(playable[selectedIndex], playable, false, false);
   }
+}
+
+/** 收藏同步引擎单例。必须是模块级变量：做成类字段会被 vue reactive 深代理，
+ * host 也必须传 reactive 后的 player 代理（而非裸实例），否则引擎写数组不触发视图。 */
+let likeSyncEngine: LikeSyncEngine | null = null;
+function likeSync(): LikeSyncEngine {
+  if (likeSyncEngine == null) likeSyncEngine = new LikeSyncEngine(player);
+  return likeSyncEngine as LikeSyncEngine;
 }
 
 const player = reactive(new PlayerStore()) as PlayerStore;

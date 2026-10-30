@@ -315,3 +315,40 @@ export type EmbedTagsOptions = {
  * fileIo.readSync/writeSync(ArrayBuffer)。
  */
 export type EmbedAudioTags = (audioTempPath: string, opts: EmbedTagsOptions) => Promise<string>;
+
+/**
+ * 内嵌标签的读取结果（读取层出参，与 EmbedAudioTags 写入侧对偶）：
+ *   - coverPath：封面缓存文件绝对路径；空串 = 文件里没有封面（调用方回退侧车图）；
+ *     同一次会话内重复读取会复用/覆盖同一缓存文件，旧缓存由本模块负责删除；
+ *   - lrcText：LRC 歌词原文（含时间轴）；空串 = 文件里没有歌词。
+ */
+export type EmbeddedReadResult = {
+	coverPath: string;
+	lrcText: string;
+};
+
+/**
+ * 读取本地音频文件头部的内嵌标签（ID3v2.2/2.3/2.4 封面+歌词 / FLAC PICTURE+VORBIS_COMMENT）。
+ *
+ * 与写入侧（EmbedAudioTags）对偶：只读文件前 1MiB（封面与歌词固定写在标签区，
+ * 位于音频数据之前），无封面/歌词或格式不识别时返回 null，调用方回退在线/侧车数据。
+ * 失败绝不抛异常；coverPath 指向的缓存文件由本模块管理（重复读取自动覆盖）。
+ *
+ * 实现注意：标签解析逻辑在 utssdk/read-embed.uts（纯字节层，与 embed-bytes.uts
+ * 写出侧 round-trip，可进 node 自测）；Android 端经 Base64 桥读字节，
+ * 鸿蒙端 fileIo.readSync。
+ */
+export type ReadEmbeddedTags = (filePath: string) => EmbeddedReadResult | null;
+
+/**
+ * 读取系统 WebView Cookie 库中一批 URL 的 Cookie（网页登录 v17 契约的捕获通道）。
+ *
+ * 返回逐 URL 拼好的 "name=value; name2=v2" 串数组（空结果的 URL 被过滤掉）。
+ * Android 走主线程 CookieManager.getCookie（可读 httpOnly 登录态 Cookie）；
+ * iOS/鸿蒙暂未实现（恒返回空数组），宿主按「本轮未捕获到」处理。
+ *
+ * 为什么做成 Promise：CookieManager.getInstance() 首次初始化要求线程有
+ * Looper，UTS 插件函数跑在 JS 逻辑线程（无 Looper 会抛「Can't create
+ * handler」），所以统一 post 到主线程读完后回值。
+ */
+export type GetWebCookies = (urls: string[]) => Promise<string[]>;

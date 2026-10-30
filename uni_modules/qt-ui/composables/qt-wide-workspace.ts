@@ -26,23 +26,22 @@
  *
  * 2026-10-19 用户实测反馈（v-if 分支互换版）：不再有起始窗白帧，但每次点 rail 工具
  * 入口都会「频闪」—— 旧工具页整棵树（rail/底栏/内容）先被拆掉，新工具页建好之前
- * 的一两帧会露出覆盖层纯背景，且每次重挂载都重跑加载（骨架屏又来一遍）。所以工具页
- * 改为**保活**：每个工具页只在首次打开时创建一次，之后切换/关闭只动 `visibility`
- * （App 平台 `visibility: hidden` 不绘制、不响应交互但仍参与布局，Android 3.9+
- * 支持，`docs/css/visibility.md`；官方多子页保活建议正是这个写法，
- * `docs/collocation/pagesjson.md`；`v-show` 在 Android(Vapor) 不支持，
- * `docs/vue/built-in.md` 平台差异表标 x）。收益：切换 = 同帧改一个 CSS 属性，
- * 无重建闪动；滚动位置/输入/已加载数据全部保留，第二次进入瞬时恢复。
- * 代价：每个用过的工具页常驻内存（宽屏目标设备可接受）；页面作为组件保活后，
- * 它们的 onShow 会挂在宿主页上、随宿主页一起触发 —— 各页加载都是幂等 ensureLoad，
- * 只有多余请求、没有正确性问题。
+ * 的一两帧会露出覆盖层纯背景，且每次重挂载都重跑加载（骨架屏又来一遍）。曾试过
+ * 「visibility 互切保活」（隐藏不卸载、官方多子页建议写法），真机 Vapor 上接连
+ * 翻车：隐藏 pane 漏画、切出的 pane 整块不渲染、关闭后宿主重挂失败、RecycleList
+ * 在 hidden pane 上 onScrollStart SIGSEGV。2026-10-25 定稿为**单活动 pane**：
+ * 覆盖层根 `v-if="ws.route.length>0"`，每个工具页 `v-if="paneOn(route)"` ——
+ * 只有当前托管路由那一份挂载，切换即换挂（16~300ms、骨架屏重跑、滚动/输入不再
+ * 保留），换来状态机绝对简单。页面作为组件挂载后，它们的 onShow 会挂在宿主页
+ * 上、随宿主页一起触发 —— 各页加载都是幂等 ensureLoad，只有多余请求、没有
+ * 正确性问题。
  *
  * 语义边界：
  *   - 只有两个 tab 根页能当宿主（它们常驻 tab 根 Activity，且自带 qt-page-frame）；
  *   - 窄屏、深链、以及栈顶不是宿主页时（例如从设置子页里点工具入口），qtOpenWideTool
  *     返回 false，调用方按原样走原生 navigateTo（见 qt-nav.ts）；
  *   - back 键先关托管（宿主页的 onBackPress 里调 qtCloseWideTool）。关闭/切 tab
- *     只是「藏」：已创建的工具页组件树保活在原地，下次打开瞬时恢复。
+ *     即卸载该 pane：下次打开重挂（16~300ms，各页幂等 ensureLoad 保证正确性）。
  */
 import { reactive, ref } from "vue";
 import { qtTopRoute } from "./qt-page-chrome";
@@ -105,6 +104,19 @@ export function qtWideToolActive(): boolean {
 }
 
 /**
+ * 该工具页是否正在托管（单活动 pane：route 匹配才挂载，切换即换挂 16~300ms）。
+ * 2026-10-27 从 qt-wide-workspace.uvue 移出（页面槽位解耦）：宿主页在插槽内容里
+ * 用它写 pane 的 v-if。单活动 pane 的真机史：旧「多 pane 常驻 + visibility 互切」
+ * 保活方案接连翻车 —— 隐藏 pane 漏画（设置栏叠在排行榜左边）、切出的 pane 整块
+ * 不渲染、关闭后宿主重挂失败白屏无响应、RecycleList 在多份存活列表间滚动
+ * SIGSEGV；渲染器对「已存在节点改 visibility」不可靠、对「新挂节点」一直可靠，
+ * 故只挂当前工具页，代价是每次切换重建一页。
+ */
+export function qtPaneOn(route: string): boolean {
+  return state.route == route;
+}
+
+/**
  * 现在能不能就地托管：宽屏 + 栈顶就是宿主 tab 页。
  *
  * 用**栈顶页**判定而不是「有没有宿主注册过」：从工具页里再跳出去的普通页面（歌曲页、
@@ -119,9 +131,9 @@ export function qtWideHostReady(): boolean {
  * 打开/切换被托管的工具页。
  * 返回 false ＝ 当前环境不支持就地托管，调用方继续走原生导航。
  *
- * 重复点当前工具也要走完：序号 +1 是覆盖层「把工具页收进保活清单」的触发器，
- * 只比路由值相等就提前返回的话，换过 tab 之后同一个工具在新宿主上会点不动
- * （新宿主的覆盖层还没创建过这份工具页，而路由值没变、什么都不会发生）。
+ * 重复点当前工具也要走完：不按「路由相同」提前返回 —— openSeq 每次递增，让重复
+ * 点击也产生一次状态变更（旧保活版靠它把工具页收进新宿主的创建清单；单活动
+ * pane 的 paneOn 只看路由、重复点击无感，序号保留给需要区分打开次序的调用方）。
  */
 export function qtOpenWideTool(url: string): boolean {
   if (!qtIsWideToolRoute(url)) return false;
@@ -132,7 +144,7 @@ export function qtOpenWideTool(url: string): boolean {
 }
 
 /**
- * 关掉被托管的工具页（只关显示，不拆已创建的组件树 —— 保活见 qt-wide-workspace.uvue）。
+ * 关掉被托管的工具页（单活动 pane：关闭即卸载该 pane，重开重挂 —— 见 qt-wide-workspace.uvue）。
  * 返回是否真的有关掉东西 —— 宿主页的 onBackPress 用它决定这次返回键要不要吞掉。
  */
 export function qtCloseWideTool(): boolean {

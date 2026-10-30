@@ -15,7 +15,7 @@ function readAppBaseInfo(): any | null {
     const info = uni.getAppBaseInfo() as any;
     if (info != null) return info;
   } catch (_) {
-    // 降级为“未知”
+    // 静默：降级为“未知”（返回 null，调用方按 0/空串处理）
   }
   return null;
 }

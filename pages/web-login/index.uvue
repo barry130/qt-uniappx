@@ -1,0 +1,278 @@
+<template>
+  <qt-page-frame width-kind="flow" :max-width="720">
+    <view class="wl-shell">
+      <view class="wl-head">
+        <text class="wl-name" :style="('color:' + theme.skin.text + ';') + qtFontDual(34, 19)">{{ sourceName }}</text>
+        <text
+          class="wl-status"
+          :max-lines="3"
+          :style="('color:' + statusColor + ';') + qtFontDual(23, 13)"
+        >{{ statusText }}</text>
+        <qt-button
+          v-if="phase == 'timeout'"
+          class="wl-retry"
+          label="重新加载"
+          variant="outline"
+          size="sm"
+          @click="retry"
+        />
+      </view>
+      <web-view v-if="webUrl.length > 0" class="wl-web" :src="webUrl" @error="onWebError" />
+    </view>
+  </qt-page-frame>
+</template>
+
+<script setup lang="ts">
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtShowToast } from "@/services/toast";
+import { logErrV } from "@/services/logger";
+import { useSourceRegistryStore } from "@/stores/source-registry";
+import { isHarmonyOs, getWebCookies } from "@/services/app-native";
+import { authImportCookie, saveSourceAuthAccount, type SourceAuthUser } from "@/services/source-auth";
+import { mergeCookies, markerHit, captureUrlsOf, WEB_LOGIN_DONE_EVENT } from "@/services/source-web-login";
+import type { RegistryWebLogin } from "@/services/music-api";
+
+/**
+ * 音源账号网页登录（v17 契约 auth.webLogin，Android 先行；PC 对应实现
+ * qt-pc/src/lib/source-web-login.ts）：打开官方登录页（web-view），每 1.5s 读
+ * 一次系统 WebView Cookie（原生 getWebCookies），命中「能证明已登录」的
+ * 标记（qm_keyst / MUSIC_U / SESSDATA …）后走 authImportCookie 校验，成功
+ * 即 saveSourceAuthAccount 落库、广播 WEB_LOGIN_DONE_EVENT（payload=源 id）
+ * 并返回——账号页听到广播触发「登录即自动同步」。180 秒未成功转超时态，
+ * 用户在网页完成登录后点「重新加载」续测（WebView 不重开，轮询重启）。
+ *
+ * 校验失败不放弃：Cookie 还在系统库里，用户在网页把账号状态弄对之后，
+ * 下一轮命中会再导入一次（PC runWebLoginFlow 同语义）。
+ */
+const theme = useThemeStore();
+const registry = useSourceRegistryStore();
+
+const sourceId = ref("");
+const sourceName = ref("");
+const webUrl = ref("");
+/** loading：启动中 / polling：轮询中 / timeout：到期限 / done：成功收摊 */
+const phase = ref("loading");
+const remainSec = ref(180);
+/** 轮询期内读到过非空 Cookie（超时文案分流用） */
+const capturedSeen = ref(false);
+/** 命中过登录标记但校验未通过（超时文案分流用） */
+const markerSeen = ref(false);
+
+let webLogin: RegistryWebLogin | null = null;
+let captureUrls: string[] = [];
+let deadlineAt = 0;
+let pollTimer: number | null = null;
+/** 校验失败只提示一次（PC failNotified 同款） */
+let failNotified = false;
+/** 上一轮 authImportCookie 未返回时不叠加打（避免每 1.5s 一串校验请求） */
+let importing = false;
+
+/** 与 source-auth 页同一组常量（PC：1500ms / 180s） */
+const WEB_LOGIN_TIMEOUT_MS = 180000;
+const WEB_LOGIN_INTERVAL_MS = 1500;
+
+const statusColor = computed((): string => {
+  if (phase.value == "done") return theme.skin.accent;
+  if (phase.value == "timeout") return theme.skin.danger;
+  return theme.skin.textMuted;
+});
+
+const statusText = computed((): string => {
+  if (phase.value == "loading") return "正在打开官方登录页…";
+  if (phase.value == "done") return "登录成功，正在返回…";
+  if (phase.value == "timeout") {
+    if (markerSeen.value) return "已捕获官方登录 Cookie，但账号校验未通过。请在网页确认账号状态后点「重新加载」";
+    if (capturedSeen.value) return "已读取到部分 Cookie，但还没捕获到登录凭据。请先在网页完成登录，再点「重新加载」";
+    return "长时间未捕获到登录 Cookie。请先在网页完成登录，再点「重新加载」";
+  }
+  const m = Math.floor(remainSec.value / 60);
+  const s = remainSec.value % 60;
+  const wl = webLogin;
+  const note = wl != null && wl.note.length > 0 ? "；" + wl.note : "";
+  return "在官方页面完成登录后会自动完成（剩余 " + m + ":" + (s < 10 ? "0" + s : "" + s) + "）" + note;
+});
+
+function errText(e: any | null): string {
+  const message = e instanceof Error ? e.message : String(e);
+  return message.length > 120 ? message.slice(0, 120) : message;
+}
+
+/** 从注册表找当前源的网页登录契约；找到即填充全部流程变量，返回 false=不可用 */
+function startFromRegistry(): boolean {
+  const sources = registry.sources;
+  for (let i = 0; i < sources.length; i++) {
+    const s = sources[i];
+    if (s.id != sourceId.value) continue;
+    const auth = s.auth;
+    if (auth == null) return false;
+    const wl = auth.webLogin;
+    if (wl == null || wl.url.length == 0) return false;
+    webLogin = wl;
+    webUrl.value = wl.url;
+    sourceName.value = s.name.length > 0 ? s.name : registry.label(s.id);
+    captureUrls = captureUrlsOf(wl, auth.domains);
+    return true;
+  }
+  return false;
+}
+
+function stopPolling(): void {
+  if (pollTimer != null) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function failBack(message: string): void {
+  stopPolling();
+  phase.value = "timeout";
+  capturedSeen.value = false;
+  markerSeen.value = false;
+  webUrl.value = "";
+  qtShowToast({ title: message, icon: "none" });
+  setTimeout(() => {
+    uni.navigateBack({});
+  }, 350);
+}
+
+function beginPolling(): void {
+  phase.value = "polling";
+  capturedSeen.value = false;
+  markerSeen.value = false;
+  failNotified = false;
+  deadlineAt = Date.now() + WEB_LOGIN_TIMEOUT_MS;
+  stopPolling();
+  pollTimer = setInterval(tick, WEB_LOGIN_INTERVAL_MS);
+  tick();
+}
+
+/** 一轮检测：读 Cookie → 拼「name=value; …」头 → 命中标记即导入校验 */
+function tick(): void {
+  if (phase.value != "polling") return;
+  const now = Date.now();
+  if (now >= deadlineAt) {
+    stopPolling();
+    phase.value = "timeout";
+    return;
+  }
+  remainSec.value = Math.floor((deadlineAt - now) / 1000);
+  if (importing) return;
+  const wl = webLogin;
+  if (wl == null) return;
+  getWebCookies(captureUrls).then((chunks: string[]) => {
+    if (phase.value != "polling") return;
+    const cookie = mergeCookies(chunks);
+    if (cookie.length > 0) capturedSeen.value = true;
+    if (!markerHit(cookie, wl.cookieMarkers)) return;
+    importing = true;
+    authImportCookie(sourceId.value, cookie)
+      .then((user: SourceAuthUser | null) => {
+        importing = false;
+        if (phase.value != "polling") return;
+        if (user != null) {
+          finishLogin(cookie, user);
+          return;
+        }
+        // 校验未过：继续轮询（PC 同语义），用户把账号状态弄对后下一轮自动重试
+        markerSeen.value = true;
+        if (!failNotified) {
+          failNotified = true;
+          qtShowToast({ title: "已捕获官方登录 Cookie，但校验未通过，请确认账号状态", icon: "none" });
+        }
+      })
+      .catch((e) => {
+        importing = false;
+        logErrV("WebLogin", "authImportCookie", e);
+      });
+  });
+}
+
+/** 校验通过：落库 → 广播 → 返回账号页（账号页监听广播触发登录即自动同步） */
+function finishLogin(cookie: string, user: SourceAuthUser): void {
+  phase.value = "done";
+  stopPolling();
+  saveSourceAuthAccount(sourceId.value, cookie, user, "")
+    .then(() => {
+      uni.$emit(WEB_LOGIN_DONE_EVENT, sourceId.value);
+      const vipText = user.vipLabel.length > 0 ? user.vipLabel : (user.vip ? "会员" : "非会员");
+      const who = user.nickname.length > 0 ? user.nickname : sourceName.value;
+      qtShowToast({ title: "已登录" + who + "（" + vipText + "）", icon: "none" });
+      setTimeout(() => {
+        uni.navigateBack({});
+      }, 400);
+    })
+    .catch((e) => {
+      // 落库失败不放弃：回到轮询，Cookie 仍在系统库里，下一轮重新导入
+      phase.value = "polling";
+      logErrV("WebLogin", "saveSourceAuthAccount", e);
+      qtShowToast({ title: "保存登录失败：" + errText(e), icon: "none" });
+    });
+}
+
+/** 超时后续测：WebView 不重开（用户可能已填到一半），只重启轮询与时钟 */
+function retry(): void {
+  if (webUrl.value.length == 0) return;
+  beginPolling();
+}
+
+function onWebError(e: any): void {
+  logErrV("WebLogin", "webview", e);
+}
+
+onLoad((options: Record<string, string> | null) => {
+  if (options != null) {
+    const raw = options["source"];
+    if (raw != null) sourceId.value = raw;
+  }
+  if (sourceId.value.length == 0) {
+    failBack("缺少音源参数");
+    return;
+  }
+  if (startFromRegistry()) {
+    beginPolling();
+    return;
+  }
+  // 按钮只在契约存在时才显示，正常不会走到这里；注册表偶发未就绪时等一次 ensure
+  registry
+    .ensure()
+    .then(() => {
+      if (startFromRegistry()) beginPolling();
+      else failBack("该音源暂不支持网页登录");
+    })
+    .catch((e) => {
+      failBack("打开失败：" + errText(e));
+    });
+});
+
+onUnload(() => {
+  stopPolling();
+});
+</script>
+
+<style lang="css" scoped>
+.wl-shell {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  flex-direction: column;
+}
+.wl-head {
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 24rpx 32rpx 16rpx 32rpx;
+}
+.wl-status {
+  margin-top: 8rpx;
+}
+.wl-retry {
+  margin-top: 16rpx;
+}
+.wl-web {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+}
+</style>

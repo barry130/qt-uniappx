@@ -55,9 +55,10 @@ uni_modules/
     ├── docs/
     │   ├── design.md               # 本文档：设计系统
     │   └── ui-review.md            # UI 审查红线 / 整改进度 / 剩余问题（活文档）
-    └── components/                 # 单文件、单目录，共 39 个组件
+    └── components/                 # 单文件、单目录，共 41 个组件
         ├── qt-page-frame/          # 页面外壳：rail / chrome / toast / player bar / 设置与我的三栏
         ├── qt-card/  qt-button/  qt-icon/  qt-loading/  qt-checkbox/
+        ├── qt-empty/               # 空态 / 列表为空 / 错误占位（见 §11.1）
         ├── qt-action-sheet/  qt-segmented/  qt-source-switcher/  qt-tab-bar/
         ├── qt-side-nav/            # 宽屏左侧 rail（替代原生 tabbar）
         ├── qt-mini-player/         # 悬浮播放球（几乎全站可见）
@@ -253,7 +254,10 @@ qt-button-label-sm
 - 设置子页的三栏：rail | 原设置总览 | 子页内容。中栏复用 `qt-settings-overview`，不是另一份精简菜单。
 - 我的页族的三栏（2026-10-19 起，与设置族同一套机制）：rail | 「我的」总览 | 子页内容。中栏复用 `qt-profile-overview`（从「我的」页抽出的真实总览，含用户卡/五宫格/功能分组与实时数据），当前项高亮；「设置」cell 属设置族，仍走 `navigateTo` 进另一套三栏，不做 redirectTo 就地替换。总览里的音乐助手 cell 按权限显隐（`canUseMusicAssistant`，`services/music-api.ts`）：账号权限里没有 `user:ai:music:use`（超管 `*:*:*` / 前缀通配 `user:ai:*` 等价）或未登录时整个入口不显示，而不是点进去才看到「无权限」——判定与 qt-pc 侧边栏同一个权限码（后端 `/api/v1/app/ai/agents` 已按它过滤，无码账号拉到的就是空列表）；AI 页自身的空态/错误展示保留为第二道守卫。竖屏/中等宽度的 `pages/user` 账户组也有同一个入口（2026-10-24 起，「听歌统计」下方，`sparkles` 图标 + 同一 `canUseMusicAssistant` 门禁，隐藏时统计行补回 `cell-no-border`），AI 页本体是 `pages/ai-assistant/index.uvue` + `composables/use-ai-chat.ts` + `services/ai.ts` + `types/ai.ts`（与 qt-pc 的 useAiChat/lib/ai 同一套后端口径：短轮询事件、提交前自搜候选，无本地算法）。
 - **设置总览新增 AI 分组（2026-10-24，qt-pc 设置页 AiSection 的移动端形态）**：`qt-settings-overview` 在「桌面歌词」组后新增 `ai` 组两行——「AI 模式」（值 = `AI_MODE_LABEL_*`，弹 action-sheet 三选一：纯规则/本地模型/服务端 AI，**服务端仅 `isQtAdmin()` 可见**，非管理员任何路径都存不进 server；选中后 toast 该档说明）与「接口配置」（值 = 生效供应商名 + 生效模型，或 未配置/未选生效档）。模式直接读写同步真源 `ai-mode.ts` 的 `readAiMode/saveAiMode`（存储键 `dailyRecommend.mode`，音乐助手与每日推荐全局共用）。**推荐口味行已按用户要求删除**（口味只在每日推荐页内切换）。「接口配置」进入新页 `pages/ai-providers/index.uvue`（qt-pc AiProvidersDialog 的移动端形态：供应商卡片列表 + 底部弹层编辑器——名称/接口地址/协议 action-sheet（openai/openai-responses/anthropic/gemini）/模型手填或「拉取列表」/密钥（明文只存本机，列表与占位只显 `maskKey` 掩码，编辑留空 = 保留旧值）/证书校验开关/测试连接（一条「你好」走全链路，回显 HTTP 状态 + 耗时 + 回复片段）），数据面在 `services/ai-providers.ts`（键 `qt-ai-providers`；`aiLocalChat` 按协议构造请求并解析回复，`listModels` 网关不支持时可手填模型）。`daily-recommend.ts` 的 `askModelForPicks` 已接真实 `aiLocalChat`（两轮温度 0.4/0.2 + JSON 纠正重试，失败仍自动退回规则推荐）。分组两列切分由 `qtSplitByHeight` 自动重算。
+- **音源账号入口移到设置总览（2026-10-28）**：「音源账号」行加入 `qt-settings-overview` 的 `pack` 组（「音源包管理」下方），值 = `已登录 N 个音源 / 未登录，点此添加`（`readSourceAuthEntries().length`，storage 非响应式，`refreshAll` 里 `authTick` 递增触发重算），点击 `goSubpage("/pages/source-auth/index")`。`/pages/source-auth/index` 同时注册进 `QT_ROUTES`/`QT_TITLES`（窄屏标题「音源账号」）与 `QT_SETTINGS_ROUTES`（宽屏三栏：rail | 设置总览（当前项高亮，`CURRENT_CELL_ROUTES` 加 `source-auth`）| 账号页内容），从其它设置子页中栏点入走 `redirectTo` 就地换右栏。原音源包页的入口残留（注释块 + `authSummary`/`openSourceAuth` + `readSourceAuthEntries` import）已删除；该页 2026-10-25 隐藏入口时留的恢复注释随之失效。账号页本体与 `pages/web-login/index`（网页登录）未改动。
 - **每日推荐页（2026-10-24，qt-pc DailyRecommendPage 全量对齐）**：`pages/daily-recommend/index.uvue`（与「每日新歌」`pages/daily` 是两个页面——后者是新歌流，前者是个性化推荐）。服务层 `services/daily-recommend.ts`（约 2840 行，qt-pc `src/lib/daily-recommend.ts` 的移植）+ `services/recommend-rank.ts` / `recommend-dimensions.ts` / `music-style.ts` / `recommend-types.ts` / `recommend-text.ts` / `ai-mode.ts` / `ai-server-picks.ts` 六件套；偏好数据源全走本地：收听统计 `stores/listen-stats`（effectiveCount 降序取 topTracks、聚合歌手）、收藏 `player.likedSongs`、本地歌单成员经 `pids` 反查、在线收藏歌单走 `musicApi.playlist` 详情、播放历史 `player.history`。模式三档**全局**（rule/local/server，真源 `ai-mode.ts`，每日推荐与音乐助手共用），页面上的「AI 模式设置」弹窗即写它；`server` 选项仅 `isQtAdmin()` 可见（qt-pc 同款门禁）。缓存按 `日期+模式+口味` 命中（`dailyRecommend.cache`，版本号 DAILY_RULE_VERSION），换一批同日合并 keys 供 7 天跨天去重。口味三档（心动/常听/探索）与冷启动风格种子（`dailyRecommend.seeds`，冷启动时展示平台分类 chips 让用户勾选）同 qt-pc。页面 UI 复用详情页骨架（qt-page-frame width-kind=detail + 宽屏左栏 whero + 窄屏 hero + list-view），行是自定义 `rc-row`（序号/封面/名称/`歌手 · 推荐理由`副行/更多），批量操作与排序走既有 useBatchSelect/useBatchActions。注意服务层导出多为 **async**（loadTodayResult/clearTodayResult/readMode/generateDailyRecommend），页面侧等待后再用；模式高亮等同步场景直接用 `ai-mode.ts` 的 readAiMode/saveAiMode。
+
+- **全站 UI 统一轮（2026-10-29，用户「按建议全部优化修复」）**：可复用的三条硬规矩写进本文——① **颜色只用皮肤令牌**：模板/CSS 里不再出现手写深色调色板（`-dark` 类 26 个已清零）与手写浅色分隔线（21 处清零），分隔线走 `themeStore.skin.divider`、次要文字只用 `skin.textMuted`（`#737b8e`）/`skin.textSubtle`（`#969dad`）两个值；`page-dark` 这类零 CSS 定义的死绑定一并删除，`themeStore.dark ?` 只允许出现在「颜色常量按明暗取值」的真实场景（现仅 `qt-skeleton-shine` 一处）。② **触控热区 ≥44dp**：纯图标按钮一律外套命中块而非放大图标——行内操作用 `qt-song-row`/`qt-song-row-lite` 的 `.row-hit`/`.lite-hit`（68rpx / 宽屏 40px），播放页工具键用 `.action-hit`/`.lyric-tool`，进度条 `.prog-range` 加高到可拖，首页搜索/铃铛 88rpx。③ **状态与动效分层**：空态与错误态统一用 `qt-empty`（错误态传 `icon="alert"` + `action-text="重新加载"`，与真空态文案分开）；进入动效统一 `uni_modules/qt-ui/composables/use-qt-reveal.ts`（列表错峰淡入，320ms/60ms，带兜底闸门），面板用「v-if 保留 + opacity/transform transition」而非直出直收（`qt-action-sheet` 0.22s、播放页底部面板 translateY 0.24s、封面淡入 0.32s），动效只碰 opacity/transform（Vapor 下位移需乘 pixelRatio）。**圆角家族化**（卡片 20rpx / 面板顶部 32rpx / 胶囊 999 / 封面 12rpx）列为下一轮独立改动，本轮未动，详见 `uni_modules/qt-ui/docs/ui-review.md` §3.12–3.13。
 
 API：
 
@@ -393,7 +397,7 @@ rail │ 设置总览 / 我的总览（400px，当前项高亮） │ 子页内�
 **宽屏导航 rail（`qt-side-nav`）**：
 
 - `qt-side-nav` 只由 `qt-page-frame` 挂载；业务页面不得自行 import。rail 恒为状态栏让位，菜单区在 `qsn-scroll`（`scroll-view`，`flex:1`）内滚动，避免矮横屏里末尾「设置」不可达。
-- 仅 `medium` 使用 64px 图标 rail；`wide` 与 `desktop` 使用 96px「图标+小字」紧凑 rail（2026-10-25 起，对齐网易云 Pad）。工具入口（搜索/每日推荐/歌单广场/排行榜/设置）在宽屏下由 `qtRailNavigate()` **就地托管**进当前 tab 页（§6.18：不新建 Activity、不往页面栈里堆页面），栈顶不是宿主页时先 `navigateBack` 回宿主再托管，深链兜底才 `navigateTo`（不传 `animationType`，走默认动画）；窄屏保留系统整页导航。发现/我的切 tab 统一走 `qtSwitchTab()`（鸿蒙 `reLaunch`，见下条），该 API 不接受 `animationType`，不要给它加动画参数；切 tab 前先 `qtCloseWideTool()` 把托管工具页藏起来（已创建的工具页保活，重开瞬时恢复）。
+- 仅 `medium` 使用 64px 图标 rail；`wide` 与 `desktop` 使用 96px「图标+小字」紧凑 rail（2026-10-25 起，对齐网易云 Pad）。工具入口（搜索/每日推荐/歌单广场/排行榜/设置）在宽屏下由 `qtRailNavigate()` **就地托管**进当前 tab 页（§6.18：不新建 Activity、不往页面栈里堆页面），栈顶不是宿主页时先 `navigateBack` 回宿主再托管，深链兜底才 `navigateTo`（不传 `animationType`，走默认动画）；窄屏保留系统整页导航。发现/我的切 tab 统一走 `qtSwitchTab()`（鸿蒙 `reLaunch`，见下条），该 API 不接受 `animationType`，不要给它加动画参数；切 tab 前先 `qtCloseWideTool()` 把托管工具页藏起来（托管层是单活动 pane：关闭即卸载，重开走各页幂等 ensureLoad）。
 - 全部 39 页使用 `navigationStyle: "custom"`。宽屏由 frame 省去顶部标题并留出状态栏空间；窄屏 frame 画功能性返回与标题，避免二级页失去返回路径。业务页面不再计算 rail padding。
 - `qt-mini-player` 仅在非宽屏显示；宽屏统一由 `qt-player-bar` 占据 rail 右侧的常驻 64px 底栏。**全站共用一份实例状态（2026-10-24 改造，用户要求「全部页面共用一个悬浮播放器，页面返回或者进入页面不应该出现闪烁」）**：悬浮球的位置/展开/吸附侧/渲染尺寸/唱片旋转角全部收敛到 `uni_modules/qt-ui/services/mini-player-singleton.ts` 这一个模块级 store（`miniFabX/miniFabY/miniExpanded/miniEdgeSide/miniEdgeAnimating/miniRenderWidth/miniRenderHeight/miniRotateDeg` + `ensureMiniPositioned/miniSnapToNearestEdge/miniExpandFromFab/miniCollapse/onMiniWindowResize` 等 action），组件改为无状态消费者；挂载点收敛到 `qt-page-frame`（`<qt-mini-player v-if="!fullWidth" />`，全站 39 页一处生效），**业务页面一律不得再自行挂 `qt-mini-player`**（2026-10-24 起已从 10 个页面摘除）。废弃了旧的「显示权交接」协议（registerMiniPlayer/refreshMiniPlayerRoute/栈顶路由轮询）——每次 navigateTo/back 都要做一次球的消失→出现交接，交接空洞正是闪烁根源；现在被盖住的页面窗口本来就在下层、它的球不可见，转场期间新旧两页的球像素级一致地跟着页面动画运动，视觉上是同一个球；第 2 个页面起也没有「窗口尺寸不稳→重试定位」的初始化窗口期（定位状态全站共享，只有首个实例做 `ensureMiniPositioned()` 的 50ms×40 重试）。唱片旋转是全站共享的单 rAF（组件 mount 引用计数 + playing 标志驱动），换页后旋转角度连续。**注意 `position: fixed` 元素在鸿蒙上不会随页面栈被裁剪**——排查时别把下层页面残留的 fixed 层误判成当前页组件（2026-10-19 就误把榜单里「当前播放行」的大圆封面当成悬浮球查了半天）。
 - **鸿蒙上 fixed 宿主里的 fixed 子节点收不到触摸，子级必须改 `absolute`**（2026-10-19 真机实测定稿，用户报「点击悬浮球无反应」）。现象：悬浮球看得见、`uitest dumpLayout` 里节点 `clickable=true`、z-index 998 也在最上层，但点它完全没反应，同一坐标下方的榜单行反而被点开（事件穿透）。根因：`.mini-player-host` 是 `position: fixed`，子级 `.fab-right` 也写 `position: fixed`——鸿蒙（uni-app x）在这种「fixed 套 fixed」下命中测试失效。**解法**：宿主保持 `fixed` 并按 `left/top` 定位，子级改 `position: absolute; left: 0; top: 0`，铺满宿主即可。**关键坑**：改 absolute 后子级的 `left/top` 必须固定为 `0`——若仍沿用宿主那套屏幕坐标（本组件原先把 `fabX/fabY` 内联到 `containerStyle`），就会在宿主偏移之上再偏移一次，球被推到屏幕外，`dumpLayout` 里该节点 `clickable` 会从 true 变 false。所以 `containerStyle` 现在只输出尺寸与圆角，位置完全由 `hostStyle` 负责，两者不要都写坐标。同一红线适用于任何「fixed 容器 + fixed 子级」的组合（`qt-playlist-picker` 的 mask/panel、`qt-action-sheet`、`qt-upgrade-popup`、`qt-notice-splash` 等），改样式时先按这条自检。
@@ -983,7 +987,7 @@ type Props = {
 真实行改为 `.song-item-wide { height: 82px }`（缩进完全交给 `qt-song-row-lite` 的 `.lite-row-wide` 24px），
 `.row-item-wide` / `.sk-item-wide` 一并删除，`pages/playlist` 与 `pages/artist` 两页现在逐项同值。
 
-### 6.18 宽屏工具页就地托管与保活（2026-10 新增 `qt-wide-workspace`）
+### 6.18 宽屏工具页就地托管（2026-10 新增 `qt-wide-workspace`，同月改单活动 pane）
 
 宽屏 rail 的五个工具入口（搜索/每日推荐/歌单广场/排行榜/设置）不再「导航到页面」，而是把目标页作为**组件**挂进当前 tab 页（官方 page-as-component，HBuilderX 4.71+，`docs/page.md`、`docs/adapt.md`）。
 
@@ -992,11 +996,14 @@ type Props = {
 **机制**（状态在 `composables/qt-wide-workspace.ts`，渲染层是 `components/qt-wide-workspace/qt-wide-workspace.uvue`）：
 
 - 状态只有 `route`（当前托管的工具路由）与 `openSeq`（每次打开都递增的序号）。`qtOpenWideTool(url)` 在「宽屏 + 栈顶是宿主 tab 页」时写状态并返回 true；`qtCloseWideTool()` 清路由（返回是否真的关了东西）。宿主只有发现/我的两个 tab 根页——覆盖层由它们各挂一份、传 `host-route` 互斥，栈顶是谁谁那份可见。
+- **页面槽位（2026-10-27 解耦）**：覆盖层组件不 import 任何 pages/* 工具页——六个工具页由两个宿主 tab 根页以默认插槽传入（每份 `v-if="qtPaneOn(route)"`，谓词从 composables/qt-wide-workspace.ts 导出；`.qtww-pane` 样式随插槽内容落在宿主页作用域）。qt-ui 从此对业务页面零反向依赖；新增工具页 = composables 的 `QT_WIDE_TOOL_ROUTES` + 两个宿主页各加一行 import 和一个 pane。
 - `qt-nav.ts` 的 `qtRailNavigate()` 三层降级：① 栈顶就是宿主，直接托管；② 栈里有宿主但栈顶不是它（歌曲页/歌单页/设置子页里点 rail），先 `navigateBack(delta, "none")` 一次退回已画好的宿主窗口、成功后再托管；③ 深链直达子页（栈里没有宿主），才 `navigateTo`（宽屏同样 `none`）。
 - 宿主页 `onBackPress` 先 `qtCloseWideTool()`：返回键先收掉托管工具页，再走原逻辑（发现页的双击退出）。切 tab（`qtRailSwitchTab`）同样先关托管。
 - 托管中的工具页是 page-as-component 形态，`getCurrentPages()` 读到的是宿主路由：`qt-page-frame` 在 setup 阶段读一次托管状态固化成 `hostedRoute` 常量（只有「托管中 + 栈顶是宿主」那一刻创建的框架层才认领工具路由），rail 高亮、设置三栏、宽度档位由此恢复正确。
 
 **保活（2026-10-19 定稿）**：第一版用 `v-if` 分支互换实现「切换」，真机反馈「每点必频闪」——旧工具页整棵树（含 rail/底栏/内容）先被拆掉，新页建好前的一两帧露出覆盖层纯背景，且每次重挂载都重跑加载（骨架屏又来一遍）。改为**每个工具页只在首次打开时创建一次，之后切换/关闭只动 `visibility: hidden`**：App 平台不绘制、不响应交互但仍占布局（Android 3.9+ 支持，`docs/css/visibility.md`），官方多子页保活建议正是这个写法（`docs/collocation/pagesjson.md`）；`v-show` 在 Android(Vapor) 本身就不支持。收益：切换＝同帧改一个 CSS 属性，无重建闪动；滚动位置、输入内容、已加载数据全部保留，第二次打开瞬时恢复。代价：用过的工具页常驻内存（宽屏目标设备可接受）；页面作为组件保活后其 `onShow` 挂在宿主页上、随宿主页一起触发，但各页加载都是幂等 ensureLoad，只有多余请求、没有正确性问题。
+
+**更正（2026-10-25）：本段 visibility 互切方案已废弃，改为「单活动 pane」。** 互切在真机 Vapor 上有四类翻车：隐藏 pane 漏画（设置栏叠在排行榜左边）、切出的 pane 整块不渲染（榜单 tab 行下面全空）、关闭后宿主重挂失败（我的页白屏点击全无响应）、RecycleList 在 hidden pane 上 onScrollStart SIGSEGV。现实现：覆盖层根 `v-if="ws.route.length>0"`，每个 pane `v-if="paneOn(route)"`——只有当前托管路由那一份挂载，切换即换挂。代价：每次切换重挂 16~300ms、骨架屏重跑、滚动位置与输入内容不再保留；换来状态机绝对简单。
 
 **边界**：窄屏、深链、栈顶不是宿主页时 `qtOpenWideTool` 返回 false，调用方回落原生导航（行为与旧版一致）；设置总览中栏点子页仍走 `uni.navigateTo`（宽屏起新 Activity，保留原行为——起始窗问题超出了 rail 入口的范围）；宽屏失效（转竖屏）时组件监听 `isWide` 自动 `qtCloseWideTool()`，防止宿主页返回键被白吞一次。
 
@@ -1300,7 +1307,7 @@ backdrop-filter
 
 **它只加在宽屏、不加竖屏**：竖屏 `.lyric-tools-row` 是 `justify-content:flex-end` 的单行（`padding:0 24rpx`，无换行），原本就最多三个药丸（偏移 / 恢复自动 / 搜索歌词），其中「偏移」文案会随偏移值变长；在 375dp 上再塞第四个会在 `lyricPicked` 为真时横向溢出，右侧药丸没有 `flex-shrink` 兜底。竖屏仍走「我的 - 设置 - 桌面歌词」，这是手机上的常规位置；Parity 缺口本身只存在于平板。
 
-**侧栏工具补全（`qt-side-nav.uvue`）** —— 宽屏此前**进不去「每日推荐」**：`/pages/daily-recommend/index` 的唯一入口是首页竖屏 `v-if="!layout.isWide"` 里的快捷药丸。现在 `ALL_TOOLS` 增加「每日推荐」（`sparkles` 图标，置于搜索与每日新歌之间），**不做能力门控** —— 它的候选来自历史/收藏 + 全源，规则模式恒有结果，不像每日新歌/歌单/榜单那样依赖源能力。同时 `qt-wide-workspace.ts` 的 `QT_WIDE_TOOL_ROUTES` 与 `qt-wide-workspace.uvue` 的 pane 列表都要加，否则宽屏会被 `qtRailNavigate` 甩到新 Activity（白闪）。
+**侧栏工具补全（`qt-side-nav.uvue`）** —— 宽屏此前**进不去「每日推荐」**：`/pages/daily-recommend/index` 的唯一入口是首页竖屏 `v-if="!layout.isWide"` 里的快捷药丸。现在 `ALL_TOOLS` 增加「每日推荐」（`sparkles` 图标，置于搜索与每日新歌之间），**不做能力门控** —— 它的候选来自历史/收藏 + 全源，规则模式恒有结果，不像每日新歌/歌单/榜单那样依赖源能力。同时 `qt-wide-workspace.ts` 的 `QT_WIDE_TOOL_ROUTES` 与两个宿主 tab 根页（`pages/home/index.uvue` / `pages/profile/index.uvue`）插槽里的 pane 列表都要加（2026-10-27 槽位解耦后 pane 列表定义在宿主页），否则宽屏会被 `qtRailNavigate` 甩到新 Activity（白闪）。
 
 **详情页左栏自适应（artist / playlist / daily / daily-recommend）** —— 原来 `.wide-left` 写死 272px（daily-recommend 296px），900dp 平板按 `detail` 档回落后右栏只剩 316px，中等横屏只有 260px，单行放不下封面 + 标题 + 时长 + 更多。现在：
 
@@ -1320,9 +1327,27 @@ wideCoverSize  = wideAsideWidth - 卡片 padding/border（artist/playlist/daily 
 
 ## 11. 演进方向
 
-组件清单以 §3 为准（20 个组件已实现）。后续演进按优先级：
+组件清单以 §3 为准（21 个组件已实现，2026-10-29 新增 `qt-empty`）。后续演进按优先级：
 
 - **表单组件**：`qt-input`、`qt-switch` 等，收敛登录/注册/反馈表单的裸 `<input>`；
 - **弹层收敛**：统一 `scrim` 遮罩 token（action-sheet / notice-splash / upgrade-popup 三处遮罩不透明度目前不一致）；
 - **主题生态**：用户导入 JSON 皮肤、皮肤预览/导出、壁纸裁剪与本地缓存、动态 accent 计算；
-- **打磨**：按压态反馈、`qt-empty` 空状态组件、toast 统一（详见 `docs/ui-review.md` §3.10）。
+- **打磨**：按压态反馈、toast 统一（详见 `docs/ui-review.md` §3.10）。
+
+### 11.1 `qt-empty` 空状态组件（2026-10-29）
+
+`pages/collection` 那一版空态（`accentSoft` 圆角芯片 + 内联图标 + 标题 + 一行说明 + 一主一次两颗药丸按钮）原本是全仓唯一做全的，其余 50 余处手写空态大半只有一行灰字、没有任何下一步动作。现在它被抽成组件 `uni_modules/qt-ui/components/qt-empty/qt-empty.uvue`：
+
+```html
+<QtEmpty icon="download" title="还没有下载任何歌曲"
+         description="在歌曲、歌单或专辑里点下载，任务会出现在这里"
+         ghost-text="新建歌单" ghost-icon="folder"
+         action-text="去发现音乐" action-icon="compass"
+         @ghost="..." @action="..." />
+```
+
+- props：`icon` / `title` / `description` / `action-text` / `action-icon` / `ghost-text` / `ghost-icon` / `compact`，文案与跳转全由宿主决定，组件不做业务判断；
+- 尺寸与 `pages/collection` 原版逐项对齐（芯片 144rpx / 宽屏 96px、圆角 44rpx / 30px、标题 32rpx / 20px、药丸 80rpx / 52px），浅色深色皮肤都取令牌（芯片底 `accentSoft`、图标 `accent`、主按钮 `accent`+`onAccent`、次按钮 `surfaceMuted`+`border`）；
+- `compact` 用于嵌在小节/卡片内的空态（下载页分档为空、榜单空态、搜索无结果），把 140rpx 的大留白收到 48rpx；
+- 已接入：`pages/history`、`pages/download`、`pages/daily`、`pages/chart`、`pages/artist`、`pages/search`。宿主容器原来给空态的大 padding 同步收掉，避免与组件自带留白叠加。
+

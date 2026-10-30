@@ -22,6 +22,7 @@ import Context from "android.content.Context";
 import FileInputStream from "java.io.FileInputStream";
 import FileOutputStream from "java.io.FileOutputStream";
 import OutputStream from "java.io.OutputStream";
+import InputStream from "java.io.InputStream";
 
 import Cursor from "android.database.Cursor";
 import WindowCompat from "androidx.core.view.WindowCompat";
@@ -31,9 +32,14 @@ import OpenableColumns from "android.provider.OpenableColumns";
 import PackageManager from "android.content.pm.PackageManager";
 import DocumentsContract from "android.provider.DocumentsContract";
 import Base64 from "android.util.Base64";
+import Handler from "android.os.Handler";
+import Looper from "android.os.Looper";
+import Runnable from "java.lang.Runnable";
+import CookieManager from "android.webkit.CookieManager";
 import Arrays from "java.util.Arrays";
-import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, IsIgnoringBatteryOptimizations, OpenBatteryOptimizationSettings, OpenAutoStartSettings, OpenAppDetailsSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteMediaByPath, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, PickFileResult, PickJsFile, PickDirectoryResult, PickDirectory, SetCustomDirUri, PermissionState, QueryPermissionStates, OpenPermissionSettings, EmbedTagsOptions, EmbedAudioTags } from "../interface.uts";
+import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, IsIgnoringBatteryOptimizations, OpenBatteryOptimizationSettings, OpenAutoStartSettings, OpenAppDetailsSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteMediaByPath, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, PickFileResult, PickJsFile, PickDirectoryResult, PickDirectory, SetCustomDirUri, PermissionState, QueryPermissionStates, OpenPermissionSettings, EmbedTagsOptions, EmbedAudioTags, EmbeddedReadResult, ReadEmbeddedTags, GetWebCookies } from "../interface.uts";
 import { EmbedTagsData, Mp3Plan, FlacPlan, planMp3, planFlac, base64Encode, base64Decode } from "../embed-bytes.uts";
+import { EmbeddedRead, readMp3Embedded, readFlacEmbedded } from "../read-embed.uts";
 
 /**
  * 强制窗口回归传统布局模式（decorFitsSystemWindows = true）。
@@ -271,7 +277,7 @@ export const openAutoStartSettings: OpenAutoStartSettings = function (): boolean
       console.log("[AppNative] openAutoStartSettings hit " + t[0] + "/" + t[1]);
       return true;
     } catch (e) {
-      // 该 ROM 没这个 Activity（或改名了）：继续试下一个
+      // 静默：该 ROM 没这个 Activity（或改名了），继续试下一个
     }
   }
   // 全部落空：退应用详情页，至少让用户能进「权限」
@@ -368,6 +374,33 @@ function stripExt(fileName: string): string {
 	return fileName.substring(0, dot);
 }
 
+/**
+ * 文件名（不含扩展名）降级解析，对齐 qt-pc `local::parse_file_stem`：
+ * 按 `" - "` 切**一次**——第 0 段作歌手，其余整体作标题；没有分隔符则
+ * 整段作标题、歌手留空。返回 `[歌手, 标题]`。
+ *
+ * 为什么要和 PC 用同一条规则：同一份 `周杰伦 - 晴天.mp3`，PC 侧标签缺失时
+ * 得到 歌手=周杰伦 / 标题=晴天；安卓若只信 MediaStore 的 TITLE（无标签
+ * 文件它就是文件名本身），会得到 歌手="" / 标题="周杰伦 - 晴天" —— 本地
+ * 优先匹配两端结果完全不同（PC 命中、安卓走在线取链）。
+ *
+ * 这里的顺序只是**展示用的主读法**：`晴天 - 周杰伦.mp3` 这种「歌名 - 歌手」
+ * 的存量文件同样常见，从字符串本身分不出来。匹配层（`services/local-first.ts`
+ * 的 `metaMatchesEither`）会把这一对交换后再试一次，解析这里不需要二选一。
+ */
+function parseFileStem(stem: string): string[] {
+	const sep = stem.indexOf(" - ");
+	if (sep < 0) {
+		const only: string[] = ["", stem.trim()];
+		return only;
+	}
+	const out: string[] = [
+		stem.substring(0, sep).trim(),
+		stem.substring(sep + 3).trim()
+	];
+	return out;
+}
+
 /** 扩展名 -> MIME，未知扩展名统一按通用二进制处理 */
 function mimeOf(ext: string): string {
 	if (ext == "apk") return "application/vnd.android.package-archive";
@@ -457,8 +490,8 @@ function saveLegacy(source: File, dirType: string, displayName: string, mime: st
 	try {
 		copyStream(input, output);
 	} finally {
-		try { input.close(); } catch (e1) {}
-		try { output.close(); } catch (e2) {}
+		try { input.close(); } catch (e1) { /* 静默：关流失败不影响复制结果 */ }
+		try { output.close(); } catch (e2) { /* 静默：关流失败不影响复制结果 */ }
 	}
 
 	// 通知媒体库，让文件管理器能扫描到（同样交给扫描器解析标签，见 saveAbsolute 的说明）
@@ -519,7 +552,7 @@ function saveScoped(source: File, dirType: string, displayName: string, mime: st
 
 	const output = resolver.openOutputStream(itemUri!);
 	if (output == null) {
-		try { resolver.delete(itemUri!, null, null); } catch (e1) {}
+		try { resolver.delete(itemUri!, null, null); } catch (e1) { /* 静默：清刚插入的空条目失败无妨，该 URI 本就无效 */ }
 		console.log("[MediaStore] openOutputStream 返回 null");
 		return "";
 	}
@@ -528,8 +561,8 @@ function saveScoped(source: File, dirType: string, displayName: string, mime: st
 	try {
 		copyStream(input, output!);
 	} finally {
-		try { input.close(); } catch (e2) {}
-		try { output!.close(); } catch (e3) {}
+		try { input.close(); } catch (e2) { /* 静默：关流失败不影响拷贝结果 */ }
+		try { output!.close(); } catch (e3) { /* 静默：关流失败不影响拷贝结果 */ }
 	}
 
 	const done = new ContentValues();
@@ -605,8 +638,8 @@ function saveAbsolute(source: File, dirPath: string, displayName: string, mime: 
 	try {
 		copyStream(input, output);
 	} finally {
-		try { input.close(); } catch (e1) {}
-		try { output.close(); } catch (e2) {}
+		try { input.close(); } catch (e1) { /* 静默：关流失败不影响复制结果 */ }
+		try { output.close(); } catch (e2) { /* 静默：关流失败不影响复制结果 */ }
 	}
 
 	// 通知媒体库（音频才有意义；封面/歌词登记失败无所谓，不影响文件本身）。
@@ -770,17 +803,29 @@ function doScanAudio(): LocalAudioItem[] {
 			// is_music 只作为附加信息带出去（-1 = 媒体库没有该列或为 NULL，即「未知」），
 			// 不参与过滤：我们自己的下载记录就是 NULL，不能当成「非歌曲」。
 			const isMusic = idxIsMusic >= 0 && !cursor.isNull(idxIsMusic) ? cursor.getInt(idxIsMusic) : -1;
-			// TITLE 可能为空（手工插入或没标签的行），退回文件名并去掉扩展名；
+			// 标题/歌手：标签有就用标签，缺哪一个才用文件名解析补 —— 与 PC 端
+			// `local::build_row` 的逐字段回落同一口径（不是「标签整体失败才降级」）。
 			// 时长也可能为 NULL/0，那种行仍然列出来，只是时长显示为 0。
-			let title = titleRaw;
-			if (title.length == 0) title = stripExt(nameRaw);
+			const stem = stripExt(nameRaw);
+			const stemParts = parseFileStem(stem);
+			const stemSinger = stemParts[0];
+			const stemTitle = stemParts[1];
+			const artist = artistRaw == "<unknown>" ? "" : artistRaw.trim();
+			// 无标签文件的 TITLE 就是文件名本身（MediaStore 的行为）：这种「伪标签」
+			// 按文件名派生处理，否则标题会带着「歌手 - 」前缀，跟 PC 的标题对不上。
+			const titleFromStem = titleRaw.length == 0 || titleRaw.trim() == stem;
+			let title = titleFromStem ? stemTitle : titleRaw;
+			if (title.length == 0) title = stemTitle;
 			if (title.length == 0) continue;
+			const singer = artist.length > 0 ? artist : stemSinger;
 			const item: LocalAudioItem = {
 				id: "local_" + id.toString(),
 				title: title,
-				singer: artistRaw == "<unknown>" ? "" : artistRaw,
+				singer: singer,
 				album: album,
-				duration: Math.floor(Math.max(durationMs, 0) / 1000),
+				// 不取整：PC 侧时长是 f64 秒（symphonia 报的 269.808…），这里
+				// floor 会让同一首歌两端最多差近 1 秒，3 秒护栏被无谓吃掉
+				duration: Math.max(durationMs, 0) / 1000,
 				uri: "content://media/external/audio/media/" + id.toString(),
 				path: path,
 				size: sizeBytes,
@@ -853,8 +898,7 @@ export const deleteLocalMedia: DeleteLocalMedia = (items: LocalAudioItem[]): Del
 				const rows = context.getContentResolver().delete(Uri.parse(it.uri), null, null);
 				if (rows > 0) removed = true;
 			} catch (e) {
-				// 第三方公共媒体：分区存储下无写/删权限（RecoverableSecurityException），
-				// 忽略此处，靠第 2 步 File.delete（需「所有文件访问」权限）
+				// 静默：第三方公共媒体分区存储无删除权限，靠第 2 步 File.delete
 			}
 		}
 		// 2) 按绝对路径删文件：已开通「所有文件访问」时第三方文件也能删
@@ -1039,7 +1083,7 @@ export const pickJsFile: PickJsFile = function (onResult: (result: PickFileResul
 					}
 					if (cursor != null) cursor.close();
 				} catch (e) {
-					// 读取显示名失败时由下面的后缀校验拒绝。
+					// 静默：读显示名失败由下面后缀校验兜底拒绝
 				}
 				if (!name.toLowerCase().endsWith(".js") || name.length <= 3) {
 					cb({ ok: false, name: name, content: "", message: "请选择 .js 格式的音源文件" } as PickFileResult);
@@ -1235,7 +1279,7 @@ export const openPermissionSettings: OpenPermissionSettings = function (id: stri
 			activity.startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
 			return true;
 		} catch (e) {
-			// 不认该入口：继续往下试
+			// 静默：该 ROM 不认此入口，继续往下试
 		}
 	}
 	if (id == "android.permission.SYSTEM_ALERT_WINDOW") {
@@ -1243,7 +1287,7 @@ export const openPermissionSettings: OpenPermissionSettings = function (id: stri
 			activity.startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, pkgUri));
 			return true;
 		} catch (e) {
-			// 继续往下试
+			// 静默：该 ROM 不认此入口，继续往下试
 		}
 	}
 	if (id == "android.permission.REQUEST_INSTALL_PACKAGES" && Build.VERSION.SDK_INT >= 26) {
@@ -1251,7 +1295,7 @@ export const openPermissionSettings: OpenPermissionSettings = function (id: stri
 			activity.startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, pkgUri));
 			return true;
 		} catch (e) {
-			// 继续往下试
+			// 静默：该 ROM 不认此入口，继续往下试
 		}
 	}
 	// 通知：与 openNotificationSettings 同口径，先试本应用通知页
@@ -1262,7 +1306,7 @@ export const openPermissionSettings: OpenPermissionSettings = function (id: stri
 			activity.startActivity(intent);
 			return true;
 		} catch (e) {
-			// 继续往下试
+			// 静默：该 ROM 不认此入口，落到应用详情页兜底
 		}
 	}
 
@@ -1668,8 +1712,196 @@ function embedAudioTagsSync(audioTempPath: string, opts: EmbedTagsOptions): stri
 		if (copyReal.length > 0) {
 			try {
 				new File(copyReal).delete();
-			} catch (e2) {}
+			} catch (e2) {
+				// 静默：清理残留副本失败只占一个临时文件位
+			}
 		}
 		return audioTempPath;
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 内嵌标签「读取侧」（与上方写入侧对偶；解析逻辑在 ../read-embed.uts 纯字节层）
+// ---------------------------------------------------------------------------
+
+/** 上一次写出的封面缓存文件绝对路径：重复读取先删它，避免 cache 目录堆积 */
+let lastCoverCachePath = "";
+
+/** 封面缓存自增序号：与 Date.now() 一起构成唯一文件名，防同毫秒覆盖 */
+let coverCacheSeq = 0;
+
+/** 封面字节 → cache 目录缓存文件，返回绝对路径（失败返回空串，调用方按无封面走） */
+function writeCoverCache(bytes: Uint8Array, mime: string): string {
+	try {
+		if (lastCoverCachePath.length > 0) {
+			try {
+				new File(lastCoverCachePath).delete();
+			} catch (e1) {
+				// 静默：旧封面缓存删除失败不阻塞新缓存写出
+			}
+			lastCoverCachePath = "";
+		}
+		const ctx = UTSAndroid.getAppContext();
+		if (ctx == null) return "";
+		const cacheDir = ctx.getCacheDir();
+		if (cacheDir == null) return "";
+		const ext = mime.indexOf("png") >= 0 ? "png" : "jpg";
+		coverCacheSeq++;
+		const path = cacheDir.getAbsolutePath() + "/qt-embed-cover-" + Date.now() + "-" + coverCacheSeq + "." + ext;
+		const output = new FileOutputStream(path);
+		try {
+			writeBytes(output, bytes);
+		} finally {
+			output.close();
+		}
+		lastCoverCachePath = path;
+		return path;
+	} catch (e) {
+		console.log("[AppNative] writeCoverCache 失败: " + (e != null ? e.toString() : "unknown"));
+		return "";
+	}
+}
+
+/**
+ * content:// URI → 前 maxLen 字节。MediaStore 扫出来的本地歌曲只有 content:// URI
+ * （Android 10+ 分区存储没有直接文件路径），读内嵌标签必须走 ContentResolver 流。
+ * 分片读法与 readFileBytes 同构（ByteArray → Base64 桥 → Uint8Array），失败返回 null。
+ */
+function readPrefixFromContent(uriText: string, maxLen: number): Uint8Array | null {
+	try {
+		const ctx = UTSAndroid.getAppContext();
+		if (ctx == null) return null;
+		const resolver = ctx.getContentResolver();
+		if (resolver == null) return null;
+		const input: InputStream | null = resolver.openInputStream(Uri.parse(uriText));
+		if (input == null) return null;
+		try {
+			const CHUNK = 65536;
+			const bufSize = maxLen < CHUNK ? maxLen : CHUNK;
+			const buffer = new ByteArray(bufSize.toInt());
+			const parts: Array<Uint8Array> = [];
+			let total = 0;
+			for (;;) {
+				const n = input.read(buffer);
+				if (n <= 0) break;
+				const encoded = n == bufSize
+					? Base64.encodeToString(buffer, Base64.NO_WRAP)
+					: Base64.encodeToString(Arrays.copyOfRange(buffer, 0, n), Base64.NO_WRAP);
+				const piece = base64Decode(encoded);
+				if (piece.length == 0) {
+					console.log("[AppNative] readPrefixFromContent 分片解码失败 uri=" + uriText + " offset=" + total + " n=" + n);
+					return null;
+				}
+				parts.push(piece);
+				total += piece.length;
+				if (total >= maxLen) break;
+			}
+			if (total == 0) return null;
+			const out = new Uint8Array(total);
+			let p = 0;
+			for (let i = 0; i < parts.length; i++) {
+				const part = parts[i];
+				for (let j = 0; j < part.length; j++) {
+					out[p] = part[j];
+					p++;
+				}
+			}
+			return out;
+		} finally {
+			input.close();
+		}
+	} catch (e) {
+		console.log("[AppNative] readPrefixFromContent 失败: " + (e != null ? e.toString() : "unknown"));
+		return null;
+	}
+}
+
+function readEmbeddedTagsSync(filePath: string): EmbeddedReadResult | null {
+	if (filePath.length == 0) return null;
+	try {
+		// 封面与歌词固定写在文件头的标签区（写入侧 planMp3/planFlac 的产物），
+		// 1MiB 前缀必然覆盖（大 APIC 场景由字节层「截断降级」处理：歌词照出、封面置空）
+		let prefix: Uint8Array | null = null;
+		if (filePath.indexOf("content://") == 0) {
+			prefix = readPrefixFromContent(filePath, 1024 * 1024);
+		} else {
+			const realPath = resolveRealPath(filePath);
+			const file = new File(realPath);
+			if (!file.exists()) return null;
+			if (file.length().toInt() < 32) return null;
+			prefix = readFileBytes(realPath, 1024 * 1024);
+		}
+		if (prefix == null) return null;
+		let read: EmbeddedRead | null = readMp3Embedded(prefix);
+		if (read == null) read = readFlacEmbedded(prefix);
+		if (read == null) return null;
+		let coverPath = "";
+		const cover = read.coverBytes;
+		if (cover != null) {
+			coverPath = writeCoverCache(cover, read.coverMime);
+		}
+		const result: EmbeddedReadResult = { coverPath: coverPath, lrcText: read.lrcText };
+		return result;
+	} catch (e) {
+		console.log("[AppNative] readEmbeddedTags 失败: " + (e != null ? e.toString() : "unknown"));
+		return null;
+	}
+}
+
+/**
+ * 读取本地音频文件头部的内嵌标签（契约见 interface.uts 的 ReadEmbeddedTags）。
+ * mp3 → ID3v2 封面+歌词；flac → PICTURE+VORBIS_COMMENT；其余格式/无标签 → null。
+ */
+export const readEmbeddedTags: ReadEmbeddedTags = function (filePath: string): EmbeddedReadResult | null {
+	return readEmbeddedTagsSync(filePath);
+};
+
+// ==================== WebView Cookie 读取（网页登录 v17） ====================
+
+/** 主线程 Handler（CookieManager.getInstance() 需要有 Looper 的线程） */
+let gWebCookieHandler: Handler | null = null;
+function webCookieHandler(): Handler {
+	const h = gWebCookieHandler;
+	if (h != null) return h;
+	const created = new Handler(Looper.getMainLooper());
+	gWebCookieHandler = created;
+	return created;
+}
+
+/** 把「逐 URL 读 Cookie 后回值」做成 Runnable（qt-js-engine webview.uts 的 V8MainTask 同款） */
+class WebCookieTask implements Runnable {
+	private urls: string[];
+	private resolve: (value: string[]) => void;
+
+	constructor(urls: string[], resolve: (value: string[]) => void) {
+		this.urls = urls;
+		this.resolve = resolve;
+	}
+
+	override run(): void {
+		const out: string[] = [];
+		try {
+			const cm = CookieManager.getInstance();
+			for (let i = 0; i < this.urls.length; i++) {
+				const c = cm.getCookie(this.urls[i]);
+				if (c != null && c.length > 0) out.push(c);
+			}
+		} catch (e) {
+			// CookieManager 初始化失败：按「本轮没读到」处理，调用方下一轮轮询再试
+			console.log("[AppNative] getWebCookies 失败: " + (e != null ? e.toString() : "unknown"));
+		}
+		this.resolve(out);
+	}
+}
+
+/**
+ * 读取系统 WebView Cookie 库中一批 URL 的 Cookie（契约见 interface.uts 的 GetWebCookies）。
+ * 统一 post 到主线程执行：CookieManager.getInstance() 首次初始化在无 Looper 的线程
+ * 会抛「Can't create handler inside thread that has not called Looper.prepare()」，
+ * 而 UTS 插件函数跑在 JS 逻辑线程，不能假设它有 Looper。
+ */
+export const getWebCookies: GetWebCookies = function (urls: string[]): Promise<string[]> {
+	return new Promise<string[]>((resolve: (value: string[]) => void, _reject: (err: any) => void) => {
+		webCookieHandler().post(new WebCookieTask(urls, resolve));
+	});
+};

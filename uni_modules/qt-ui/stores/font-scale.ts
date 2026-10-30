@@ -18,6 +18,7 @@
  */
 import { reactive } from "vue";
 import { qtIsWide } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { logWarn } from "@/services/logger";
 
 const FONT_SCALE_KEY = "qt-ui-font-scale";
 
@@ -89,7 +90,9 @@ class FontScaleStore {
   private persist(): void {
     try {
       uni.setStorageSync(FONT_SCALE_KEY, this.tier);
-    } catch (_) {}
+    } catch (_) {
+      logWarn("FontScale", "字号档位持久化失败（本次已生效，重启后回默认）");
+    }
   }
 }
 

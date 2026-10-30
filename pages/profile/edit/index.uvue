@@ -1,7 +1,7 @@
 <template>
   <qt-page-frame width-kind="form">
-  <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']">
-    <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
+  <view class="page" :class="layout.isWide ? 'page-wide' : ''">
+    <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="cardStyle">
       <!-- 头像：点击图片放大预览（不展示文字）；放大视图左「保存图片」右「更换图片」 -->
       <view class="avatar-row" :class="layout.isWide ? 'avatar-row-wide' : ''">
         <view class="avatar" :class="layout.isWide ? 'avatar-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @click="openPreview">
@@ -15,11 +15,13 @@
       </view>
 
       <!-- 昵称 -->
-      <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+      <view class="field-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
           :value="nickname"
           @input="onNicknameInput"
           class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
+          :style="inputStyle"
+          :placeholder-style="'color:' + themeStore.skin.placeholder + ';'"
           placeholder="昵称"
           :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
           :maxlength="30"
@@ -27,11 +29,13 @@
       </view>
 
       <!-- 邮箱 -->
-      <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+      <view class="field-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
           :value="email"
           @input="onEmailInput"
           class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
+          :style="inputStyle"
+          :placeholder-style="'color:' + themeStore.skin.placeholder + ';'"
           placeholder="邮箱"
           :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
           :maxlength="50"
@@ -39,18 +43,20 @@
       </view>
 
       <!-- 新密码（可选） -->
-      <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+      <view class="field-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
           :value="password"
           @input="onPasswordInput"
           class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
+          :style="inputStyle"
+          :placeholder-style="'color:' + themeStore.skin.placeholder + ';'"
           :type="pwVisible ? 'text' : 'password'"
           placeholder="新密码（留空则不修改）"
           :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
           :maxlength="18"
         />
         <view class="eye" :class="layout.isWide ? 'eye-wide' : ''" @click="pwVisible = !pwVisible">
-          <QtIcon :name="pwVisible ? 'eye' : 'eye-off'" :size="layout.isWide ? 22 : 40" color="#6b7385" />
+          <QtIcon :name="pwVisible ? 'eye' : 'eye-off'" :size="layout.isWide ? 22 : 40" :color="themeStore.skin.iconMuted" />
         </view>
       </view>
 
@@ -76,7 +82,7 @@
           <image :src="displayAvatar" class="avatar-preview-img" mode="aspectFit" @error="onAvatarError" />
           <view class="avatar-preview-actions" :class="layout.isWide ? 'avatar-preview-actions-wide' : ''">
             <view class="avatar-preview-btn avatar-preview-btn-save" :class="layout.isWide ? 'avatar-preview-btn-wide' : ''" @click="saveImage">
-              <text class="avatar-preview-btn-text avatar-preview-btn-text-dark" :class="layout.isWide ? 'avatar-preview-btn-text-wide' : ''" :style="qtFontDual(30, 16)">保存图片</text>
+              <text class="avatar-preview-btn-text avatar-preview-btn-text-save" :class="layout.isWide ? 'avatar-preview-btn-text-wide' : ''" :style="qtFontDual(30, 16)">保存图片</text>
             </view>
             <view class="avatar-preview-btn avatar-preview-btn-change" :class="layout.isWide ? 'avatar-preview-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @click="onChangeImage">
               <text class="avatar-preview-btn-text avatar-preview-btn-text-light" :class="layout.isWide ? 'avatar-preview-btn-text-wide' : ''" :style="qtFontDual(30, 16)">更换图片</text>
@@ -107,6 +113,12 @@ import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const themeStore = useThemeStore();
 const layout = useQtLayout();
+// 皮肤令牌：卡片底 / 输入行底与描边 / 输入文字。
+// 这些原先由手写的深色覆盖类写死成 graphite 色值，换 linen/aurora 等皮肤时不跟着变；
+// 本仓库没有 CSS 变量，只能内联输出 skin 令牌。
+const cardStyle = computed((): string => "background-color:" + themeStore.skin.surface + ";");
+const fieldStyle = computed((): string => "background-color:" + themeStore.skin.surfaceMuted + ";border-color:" + themeStore.skin.border + ";");
+const inputStyle = computed((): string => "color:" + themeStore.skin.text + ";");
 const nickname = ref("");
 const email = ref("");
 const password = ref("");
@@ -344,11 +356,7 @@ onUnmounted(() => {
 
 .card {
   padding: 44rpx 36rpx 40rpx;
-  background-color: rgba(255, 255, 255, 0.92);
   border-radius: 32rpx;
-}
-.card-dark {
-  background-color: rgba(255, 255, 255, 0.08);
 }
 .avatar-row {
   align-items: center;
@@ -428,7 +436,8 @@ onUnmounted(() => {
   font-size: 30rpx;
   font-weight: 600;
 }
-.avatar-preview-btn-text-dark {
+/* 白底按钮上的深色文字：预览遮罩恒为黑底、保存按钮恒为白底，两种皮肤都成立，故不随皮肤令牌变化 */
+.avatar-preview-btn-text-save {
   color: #191d26;
 }
 .avatar-preview-btn-text-light {
@@ -440,23 +449,15 @@ onUnmounted(() => {
   height: 100rpx;
   margin-top: 26rpx;
   padding: 0 28rpx;
-  background-color: #f4f5fa;
   border-width: 1px; border-style: solid;
-  border-color: #eef0f5;
   border-radius: 22rpx;
-}
-.field-row-dark {
-  background-color: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.1);
 }
 .field-input {
   flex: 1;
   height: 100rpx;
-  color: #191d26;
   font-size: 28rpx;
 }
 .field-ph {
-  color: #6b7385;
   font-size: 28rpx;
 }
 .eye {

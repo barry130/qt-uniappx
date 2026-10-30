@@ -26,14 +26,6 @@
                 </view>
               </scroll-view>
             </view>
-            <view class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showDownloadQuality">
-              <QtIcon class="cell-icon cell-icon-wide" name="download" :size="36" color="#6d8fd6" />
-              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">下载默认音质</text>
-              <view class="cell-right">
-                <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ downloadQualityText() }}</text>
-                <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
-              </view>
-            </view>
             <view class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showDownloadNameFormat">
               <QtIcon class="cell-icon cell-icon-wide" name="type" :size="36" color="#6d8fd6" />
               <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">下载文件名格式</text>
@@ -116,14 +108,6 @@
               <text class="directory-value" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">{{ defaultDirHint }}</text>
             </view>
           </scroll-view>
-        </view>
-        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showDownloadQuality">
-          <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="download" :size="36" color="#6d8fd6" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">下载默认音质</text>
-          <view class="cell-right">
-            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ downloadQualityText() }}</text>
-            <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
-          </view>
         </view>
         <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showDownloadNameFormat">
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="type" :size="36" color="#6d8fd6" />
@@ -216,9 +200,8 @@ import { qtConfirm } from "@/services/confirm";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { useQtTwoColumn } from "@/uni_modules/qt-ui/composables/use-qt-columns";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { computed, ref, onMounted, onUnmounted } from "vue";
+import { computed, ref } from "vue";
 import { onShow } from "@dcloudio/uni-app";
-import { SOURCE_AUTH_CHANGED_EVENT } from "@/services/source-auth";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
@@ -229,14 +212,10 @@ import {
   DOWNLOAD_CONCURRENCY_WARN_ABOVE,
   DOWNLOAD_DIR_HINT,
 } from "@/stores/downloads";
-import { useSourceStore } from "@/stores/source";
-import { useSourceRegistryStore } from "@/stores/source-registry";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { pickDirectory, queryPermissionStates, openPermissionSettings, isHarmonyOs } from "@/services/app-native";
 
 const downloads = useDownloadsStore();
-const sourceStore = useSourceStore();
-const registry = useSourceRegistryStore();
 /** 宽屏两列（≥1280）：布局档位、列宽与两列容器留白全部来自公共口径 */
 const { layout, twoColumn, colStyle, colsStyle } = useQtTwoColumn();
 const theme = useThemeStore();
@@ -260,39 +239,6 @@ function onSheetSelect(_action: SheetAction, index: number): void {
   const cb = sheetSelect;
   sheetSelect = null;
   if (cb) cb(index);
-}
-
-// 音质档位来自数据包注册表，并按**当前选中的音源**收敛（v5 契约：包侧声明了
-// 该源可用档位，如 B 站无真无损就不展示 flac；未声明 = 全部档位）
-// v10：播放面登录态生效时整体切官方档位清单——登录态不进响应式系统（uni storage
-// 同步读），用 loginTick 进依赖 + SOURCE_AUTH_CHANGED_EVENT 触发重算。
-const loginTick = ref(0);
-const qualityOptions = computed<{ value: string; name: string }[]>(() => {
-  loginTick.value;
-  return registry.sourceQualities(sourceStore.current).map((q) => ({ value: q.id, name: q.name }));
-});
-function onLoginChanged(): void {
-  loginTick.value++;
-}
-function qualityLabel(q: string): string {
-  return registry.qualityLabel(q);
-}
-function downloadQualityText(): string {
-  return qualityLabel(downloads.downloadQuality);
-}
-function showDownloadQuality(): void {
-  const opts = qualityOptions.value;
-  if (opts.length == 0) {
-    qtShowToast({ title: "请先在 设置→音源包管理 安装数据包", icon: "none" });
-    return;
-  }
-  openSheet("下载默认音质", opts.map((opt) => ({
-    name: opt.name,
-    color: opt.value == downloads.downloadQuality ? theme.skin.accent : undefined,
-  })), (index) => {
-    downloads.setDownloadQuality(opts[index].value);
-    qtShowToast({ title: "下载音质：" + opts[index].name, icon: "none" });
-  });
 }
 
 const nameFormatOptions: { value: string; name: string }[] = [
@@ -461,15 +407,6 @@ function restoreDefaultDir(): void {
 
 onShow(() => {
   downloads.restore();
-  sourceStore.restore();
-  registry.ensure();
-});
-
-onMounted(() => {
-  uni.$on(SOURCE_AUTH_CHANGED_EVENT, onLoginChanged);
-});
-onUnmounted(() => {
-  uni.$off(SOURCE_AUTH_CHANGED_EVENT, onLoginChanged);
 });
 </script>
 

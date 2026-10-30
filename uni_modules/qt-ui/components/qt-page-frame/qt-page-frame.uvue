@@ -221,6 +221,10 @@
     <qt-confirm-host />
     <!-- 应用内底部操作表：替代 uni.showActionSheet（原生弹窗不跟字号缩放、不跟深色主题） -->
     <qt-action-sheet-host />
+    <!-- 播放包半屏直装：qt-confirm-host 同配方，读 services/pack-install-sheet.ts
+         的全局状态渲染。挂在框架层全站一份（2026-10-27 由首页挪入，App.uvue 缺失
+         引导的路由门控随之移除：任何页面点歌缺包都能就地半屏直装）。 -->
+    <qt-pack-install-sheet />
     <!-- 首次启动免责声明：正文与读秒都由后台下发（判定见 stores/disclaimer.ts）。
          挂在 slot 之后 = 同一 z-index 时压过页面自己的全屏弹窗（开屏公告 / 升级弹窗），
          首启时三个浮层可能同时排队，声明必须是最后看到的那一层。 -->
@@ -268,6 +272,7 @@ import { useDisclaimerStore } from "@/stores/disclaimer";
 import QtToastHost from "@/uni_modules/qt-ui/components/qt-toast-host/qt-toast-host.uvue";
 import QtConfirmHost from "@/uni_modules/qt-ui/components/qt-confirm-host/qt-confirm-host.uvue";
 import QtActionSheetHost from "@/uni_modules/qt-ui/components/qt-action-sheet-host/qt-action-sheet-host.uvue";
+import QtPackInstallSheet from "@/uni_modules/qt-ui/components/qt-pack-install-sheet/qt-pack-install-sheet.uvue";
 import QtFirstRunDisclaimer from "@/uni_modules/qt-ui/components/qt-first-run-disclaimer/qt-first-run-disclaimer.uvue";
 import QtSideNav from "@/uni_modules/qt-ui/components/qt-side-nav/qt-side-nav.uvue";
 import QtPlayerBar from "@/uni_modules/qt-ui/components/qt-player-bar/qt-player-bar.uvue";
@@ -383,8 +388,8 @@ const kind = computed((): string => props.widthKind != null && props.widthKind.l
  * 创建出来的框架层（也就是覆盖层里那一份）才认领工具路由：
  *   - 宿主页自己的框架层早在托管开始前就创建了 → 空串，行为完全不变；
  *   - 从工具页里再跳出去的普通页面（歌曲页、歌单页……）栈顶不是宿主页 → 空串，正确；
- *   - 覆盖层里每个工具页只在首次打开时创建一次，各自认领自己的路由；保活机制下
- *     切换工具不再重建组件（见 qt-wide-workspace.uvue），认领结果持续有效。
+ *   - 覆盖层里每个工具页挂载时（单活动 pane，切换即换挂）各自认领自己的路由
+ *     （见 qt-wide-workspace.uvue）；同一次托管期间认领结果持续有效。
  */
 const hostedRoute = (qtWideToolActive() && qtIsWideToolHost(qtTopRoute())) ? qtWideToolRoute() : "";
 // 托管内容两段式挂载的第二拍（见模板处注释）。只在托管态起步为 false。
@@ -440,7 +445,9 @@ const currentRoute = computed((): string => {
       const r = pages[pages.length - 1].route;
       if (r != null) return "/" + r;
     }
-  } catch (_) {}
+  } catch (_) {
+    // 静默：页面栈不可用时按无宿主路由处理（返回空串走兜底样式）
+  }
   return "";
 });
 
@@ -732,6 +739,14 @@ const chipRowStyle = computed((): string => {
   return "width:" + chipRowAvailPx.value + "px;height:" + chipRowRpx.value + "rpx;";
 });
 let chipMeasureTimer = 0;
+/**
+ * 框架层存活标记。药丸行测量同样是「测量 → 失败 → 延时重测」的链式回调：
+ * 只清 chipMeasureTimer 拦不住已经 exec() 出去的 selector 查询，那个回调落地时
+ * 组件可能已卸载，回调里再排一次 timer 就会对已注销的页面实例继续调框架 API
+ * （真机表现为 [uts] UTS instance N is not registered，栈来自定时器）。
+ * 卸载后置 false，查询回调与重测排期统一短路。
+ */
+let frameAlive = false;
 
 /** 单个 tab 的估算宽度（px）：按当前生效字号算（见 chipEstWidthAt），
  *  仅作实测前的初值，真实内容宽由 measureChipRow() 实测后覆盖 */
@@ -754,10 +769,13 @@ function onChipRowScroll(e: any): void {
 
 /** 量出药丸行真实宽度（scroll-view 的显式 px 宽）+ 内行真实内容宽，随后把选中 tab 滚到行中央 */
 function measureChipRow(attempt: number): void {
+  if (!frameAlive) return;
   if (headerChips.value.length == 0) return;
   let rowLeft = -1;
   const query = uni.createSelectorQuery();
   query.select(".qt-page-frame-chip-row").boundingClientRect((rect: UniNodeInfo | null) => {
+    // 查询在途期间组件可能已卸载：此后再排重测就是对已回收的页面实例调框架 API
+    if (!frameAlive) return;
     if (rect != null && rect.width > 0) {
       chipRowWidth.value = rect.width;
       rowLeft = Number(rect.left);
@@ -765,7 +783,11 @@ function measureChipRow(attempt: number): void {
       return;
     }
     if (attempt < 3) {
-      chipMeasureTimer = setTimeout(() => { measureChipRow(attempt + 1); }, 150) as unknown as number;
+      chipMeasureTimer = setTimeout(() => {
+        chipMeasureTimer = 0;
+        if (!frameAlive) return;
+        measureChipRow(attempt + 1);
+      }, 150) as unknown as number;
     } else {
       // 查询不可用时也保留正的可用宽；不能退回 0 再依赖同一个零宽节点自测。
       chipRowWidth.value = chipRowAvailPx.value;
@@ -781,6 +803,7 @@ function measureChipRow(attempt: number): void {
   // tab 的位置都算小一个 scrollLeft，居中越滚越偏（实测表现为选中第一项时左边被
   // 裁掉半个 tab）。chipLeftNow 是 @scroll 里记的当前偏移，正好用来还原。
   query.selectAll(".qt-page-frame-barchip").boundingClientRect((rects: UniNodeInfo[]) => {
+    if (!frameAlive) return;
     if (rowLeft < 0 || rects.length == 0) return;
     const offset = chipLeftNow;
     const lefts: number[] = [];
@@ -872,11 +895,21 @@ function centerChipIndex(index: number, rowWidthPx: number = 0): void {
 }
 
 onMounted(() => {
-  chipMeasureTimer = setTimeout(() => { measureChipRow(0); }, 200) as unknown as number;
+  frameAlive = true;
+  chipMeasureTimer = setTimeout(() => {
+    chipMeasureTimer = 0;
+    if (!frameAlive) return;
+    measureChipRow(0);
+  }, 200) as unknown as number;
 });
 watch(() => props.headerChipActives, () => {
+  if (!frameAlive) return;
   if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
-  chipMeasureTimer = setTimeout(() => { measureChipRow(0); }, 120) as unknown as number;
+  chipMeasureTimer = setTimeout(() => {
+    chipMeasureTimer = 0;
+    if (!frameAlive) return;
+    measureChipRow(0);
+  }, 120) as unknown as number;
 }, { deep: true });
 // 标签集变化（包列表换源/换字体档）也要重测 + 重新居中
 watch(headerChips, () => {
@@ -884,23 +917,38 @@ watch(headerChips, () => {
   chipFontMeasuredRpx.value = 0;
   chipContentMeasured.value = 0;
   chipLefts.value = [];
+  if (!frameAlive) return;
   if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
-  chipMeasureTimer = setTimeout(() => { measureChipRow(0); }, 200) as unknown as number;
+  chipMeasureTimer = setTimeout(() => {
+    chipMeasureTimer = 0;
+    if (!frameAlive) return;
+    measureChipRow(0);
+  }, 200) as unknown as number;
 });
 // 字号档变化（预测降档 / 实测兜底降档 / 全局字号档切换）后重测，直到放得下
 watch(chipFontRpx, () => {
   chipContentMeasured.value = 0;
   chipLefts.value = [];
+  if (!frameAlive) return;
   if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
-  chipMeasureTimer = setTimeout(() => { measureChipRow(0); }, 120) as unknown as number;
+  chipMeasureTimer = setTimeout(() => {
+    chipMeasureTimer = 0;
+    if (!frameAlive) return;
+    measureChipRow(0);
+  }, 120) as unknown as number;
 });
 // 全局字号档变了，实测兜底结论作废（预测值会随 fontScale 自动重算）
 watch(() => fontScale.scale, () => {
   chipFontMeasuredRpx.value = 0;
   chipContentMeasured.value = 0;
   chipLefts.value = [];
+  if (!frameAlive) return;
   if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
-  chipMeasureTimer = setTimeout(() => { measureChipRow(0); }, 200) as unknown as number;
+  chipMeasureTimer = setTimeout(() => {
+    chipMeasureTimer = 0;
+    if (!frameAlive) return;
+    measureChipRow(0);
+  }, 200) as unknown as number;
 });
 // 旋转/分屏后行宽变了，重测 + 重新居中（预测值也跟着 windowWidth 重算）
 watch(() => layout.windowWidth, () => {
@@ -908,8 +956,13 @@ watch(() => layout.windowWidth, () => {
   chipFontMeasuredRpx.value = 0;
   chipContentMeasured.value = 0;
   chipLefts.value = [];
+  if (!frameAlive) return;
   if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
-  chipMeasureTimer = setTimeout(() => { measureChipRow(0); }, 300) as unknown as number;
+  chipMeasureTimer = setTimeout(() => {
+    chipMeasureTimer = 0;
+    if (!frameAlive) return;
+    measureChipRow(0);
+  }, 300) as unknown as number;
 });
 
 /**
@@ -942,7 +995,14 @@ const contentStyle = computed((): string => {
   // scroll-view / list-view 变矮，滚动内容自然停在底栏上方，不会出现「最后一行被底栏盖住」。
   // 不给滚动内容加 padding 的另一个原因：页面里已有 .foot-space 一类尾部占位，
   // 两处都加会叠出一条空白带。
-  const bottom = reservePlayerBar.value ? "padding-bottom:" + QT_PLAYER_BAR_HEIGHT_PX + "px;" : "";
+  // 窄屏底部安全区（三键导航 / 虚拟导航条，2026-10-29 非全面屏用户反馈）：同理把内容
+  // 容器收短，全站滚动内容停在导航条上沿。悬浮 TabBar / toast / 悬浮球是绝对定位、
+  // 锚到本容器 border box 底边（= 窗口底边），不受 padding 影响，各自用 safeBottomPx
+  // 让位；页面自己的底部 padding（.portrait-home 140rpx / .body 220rpx）是相对滚动
+  // 容器底边的，收短后与 TabBar 的相对几何自动保持不变。宽屏不叠（桌面/平板极少
+  // 三键导航，宽屏底部由常驻播放栏管理）。
+  const bottom = (reservePlayerBar.value ? "padding-bottom:" + QT_PLAYER_BAR_HEIGHT_PX + "px;" : "")
+    + (!layout.isWide && layout.safeBottomPx > 0 ? "padding-bottom:" + layout.safeBottomPx + "px;" : "");
   if (!framed.value) return bottom;
   const width = contentWidthPx.value;
   // 内容列居中在「rail 右侧的可用区」，不是居中在整个窗口（否则窄内容列会压到 rail 上）。
@@ -1022,8 +1082,12 @@ onMounted((): void => {
   syncPaneCap();
 });
 onUnmounted((): void => {
+  frameAlive = false;
   qtClearContentWidthCap(paneCapToken.value);
-  if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
+  if (chipMeasureTimer != 0) {
+    clearTimeout(chipMeasureTimer);
+    chipMeasureTimer = 0;
+  }
 });
 watch([showSplit, paneWidthPx], (): void => {
   syncPaneCap();
@@ -1170,7 +1234,7 @@ const snavStyle = computed((): string => {
   font-size: 27rpx;
 }
 .qt-page-frame-search-ph {
-  color: #9aa1b1;
+  color: #969dad;
   font-size: 27rpx;
 }
 .qt-page-frame-search-clear {

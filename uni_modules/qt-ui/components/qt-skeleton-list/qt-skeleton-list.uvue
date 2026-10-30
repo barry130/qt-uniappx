@@ -256,21 +256,17 @@ function rowStyle(index: number): string {
   return qtRevealFadeStyle(index >= props.revealed, extra);
 }
 
-// 底色跟随皮肤：行内 style 由 store 拼，明暗两套不用各写一份 class
+// 底色跟随皮肤：行内 style 由 store 拼，皮肤令牌集中一处，换肤即时生效
 const coverSurface = computed((): string => "background-color:" + themeStore.skin.coverPlaceholder + ";");
-const lineSurface = computed((): string => "background-color:" + (themeStore.dark ? "rgba(255,255,255,0.16)" : "rgba(25,29,38,0.18)") + ";");
-/** 半透明卡片底色：通知行与反馈卡片同一套（对齐 .n-item / .fb-item 的明暗两版） */
-const noticeSurface = computed((): string => themeStore.dark
-  ? "background-color:rgba(255,255,255,0.08);border-color:rgba(255,255,255,0.12);"
-  : "background-color:rgba(255,255,255,0.62);border-color:rgba(255,255,255,0.6);");
+const lineSurface = computed((): string => "background-color:" + themeStore.skin.surfaceMuted + ";");
+/** 卡片底 + 描边：通知行与反馈卡片同一套（对齐 .n-item / .fb-item） */
+const noticeSurface = computed((): string => "background-color:" + themeStore.skin.surface + ";border-color:" + themeStore.skin.border + ";");
 const cardSurface = computed((): string => {
   const k = kindValue.value;
-  if (k == "card") return "background-color:" + themeStore.skin.surface + ";border-color:" + themeStore.skin.border + ";";
-  if (k == "chart") return "background-color:" + (themeStore.dark ? "#212734" : "#f6f7f9") + ";";
-  // rank：对齐 pages/chart 的 .rank-card 明暗两版（白卡描边 / 深卡描边）
-  if (k == "rank") return themeStore.dark
-    ? "background-color:#212734;border-color:#2a2f3a;"
-    : "background-color:#ffffff;border-color:#e6e8ee;";
+  // card / rank：卡片底取 surface，描边取 border（.qt-skl-mrow-card / .qt-skl-rk 都带 1px solid）
+  if (k == "card" || k == "rank") return "background-color:" + themeStore.skin.surface + ";border-color:" + themeStore.skin.border + ";";
+  // chart：.qt-skl-mrow-chart 没有描边，只给底色
+  if (k == "chart") return "background-color:" + themeStore.skin.surface + ";";
   if (k == "feedback") return noticeSurface.value;
   // row：只有一条分隔线，与首页 .song-row（下）/ .wide-chart-row（上）一致，两个色都给出
   if (k == "row") return "border-bottom-color:" + themeStore.skin.divider + ";border-top-color:" + themeStore.skin.divider + ";";

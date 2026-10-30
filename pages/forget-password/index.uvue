@@ -1,19 +1,21 @@
 <template>
   <qt-page-frame width-kind="form">
-  <view class="page" :class="[themeStore.dark ? 'page-dark' : '', layout.isWide ? 'page-wide' : '']">
+  <view class="page" :class="layout.isWide ? 'page-wide' : ''">
     <view class="head" :class="layout.isWide ? 'head-wide' : ''">
       <image class="logo-img" :class="layout.isWide ? 'logo-img-wide' : ''" src="/static/icon/xxxhdpi.png" mode="aspectFill" />
-      <text class="head-title" :class="layout.isWide ? 'head-title-wide' : ''" :style="qtFontDual(34, 20)">重置密码</text>
-      <text class="head-sub" :class="layout.isWide ? 'head-sub-wide' : ''" :style="qtFontDual(24, 13)">通过邮箱验证码找回您的账号密码</text>
+      <text class="head-title" :class="layout.isWide ? 'head-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(34, 20)">重置密码</text>
+      <text class="head-sub" :class="layout.isWide ? 'head-sub-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13)">通过邮箱验证码找回您的账号密码</text>
     </view>
 
-    <view class="card" :class="[themeStore.dark ? 'card-dark' : '', layout.isWide ? 'card-wide' : '']">
+    <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="cardStyle">
       <!-- 邮箱 -->
-      <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+      <view class="field-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
           :value="email"
           @input="onEmailInput"
           class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
+          :style="inputStyle"
+          :placeholder-style="'color:' + themeStore.skin.placeholder + ';'"
           placeholder="请输入注册邮箱"
           :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
           :maxlength="50"
@@ -21,49 +23,55 @@
       </view>
 
       <!-- 验证码 + 获取验证码按钮 -->
-      <view class="field-row code-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+      <view class="field-row code-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
           :value="code"
           @input="onCodeInput"
           class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
+          :style="inputStyle"
+          :placeholder-style="'color:' + themeStore.skin.placeholder + ';'"
           placeholder="邮箱验证码"
           :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
           :maxlength="6"
         />
-        <view class="code-btn" :class="[layout.isWide ? 'code-btn-wide' : '', sending || countdown > 0 ? 'code-btn-disabled' : '']" :style="sending || countdown > 0 ? '' : 'background-color:' + themeStore.skin.accentSoft + ';'" @click="sendCode">
+        <view class="code-btn" :class="layout.isWide ? 'code-btn-wide' : ''" :style="'border-left-color:' + themeStore.skin.border + ';' + (sending || countdown > 0 ? 'background-color:' + themeStore.skin.surfaceMuted + ';' : 'background-color:' + themeStore.skin.accentSoft + ';')" @click="sendCode">
           <text class="code-btn-text" :class="layout.isWide ? 'code-btn-text-wide' : ''" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(25, 13)">{{ countdown > 0 ? countdown + 's' : '获取验证码' }}</text>
         </view>
       </view>
 
       <!-- 新密码 -->
-      <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+      <view class="field-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
           :value="password"
           @input="onPasswordInput"
           class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
+          :style="inputStyle"
+          :placeholder-style="'color:' + themeStore.skin.placeholder + ';'"
           :type="pwVisible ? 'text' : 'password'"
           placeholder="设置新密码"
           :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
           :maxlength="18"
         />
         <view class="eye" :class="layout.isWide ? 'eye-wide' : ''" @click="pwVisible = !pwVisible">
-          <QtIcon :name="pwVisible ? 'eye' : 'eye-off'" :size="layout.isWide ? 22 : 40" color="#6b7385" />
+          <QtIcon :name="pwVisible ? 'eye' : 'eye-off'" :size="layout.isWide ? 22 : 40" :color="themeStore.skin.iconMuted" />
         </view>
       </view>
 
       <!-- 确认新密码 -->
-      <view class="field-row" :class="[themeStore.dark ? 'field-row-dark' : '', layout.isWide ? 'field-row-wide' : '']">
+      <view class="field-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
           :value="confirmPw"
           @input="onConfirmInput"
           class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
+          :style="inputStyle"
+          :placeholder-style="'color:' + themeStore.skin.placeholder + ';'"
           :type="confirmVisible ? 'text' : 'password'"
           placeholder="确认新密码"
           :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
           :maxlength="18"
         />
         <view class="eye" :class="layout.isWide ? 'eye-wide' : ''" @click="confirmVisible = !confirmVisible">
-          <QtIcon :name="confirmVisible ? 'eye' : 'eye-off'" :size="layout.isWide ? 22 : 40" color="#6b7385" />
+          <QtIcon :name="confirmVisible ? 'eye' : 'eye-off'" :size="layout.isWide ? 22 : 40" :color="themeStore.skin.iconMuted" />
         </view>
       </view>
 
@@ -92,6 +100,12 @@ import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const themeStore = useThemeStore();
 const layout = useQtLayout();
+// 皮肤令牌：卡片底 / 输入行底与描边 / 输入文字。
+// 这些原先由手写的深色覆盖类写死成 graphite 色值，换 linen/aurora 等皮肤时不跟着变；
+// 本仓库没有 CSS 变量，只能内联输出 skin 令牌。
+const cardStyle = computed((): string => "background-color:" + themeStore.skin.surface + ";");
+const fieldStyle = computed((): string => "background-color:" + themeStore.skin.surfaceMuted + ";border-color:" + themeStore.skin.border + ";");
+const inputStyle = computed((): string => "color:" + themeStore.skin.text + ";");
 const email = ref("");
 const code = ref("");
 const password = ref("");
@@ -232,23 +246,17 @@ onBeforeUnmount(() => {
 }
 .head-title {
   margin-top: 24rpx;
-  color: #191d26;
   font-size: 34rpx;
   font-weight: 700;
 }
 .head-sub {
   margin-top: 12rpx;
-  color: #6b7385;
   font-size: 24rpx;
 }
 .card {
   margin-top: 56rpx;
   padding: 44rpx 36rpx 40rpx;
-  background-color: rgba(255, 255, 255, 0.92);
   border-radius: 32rpx;
-}
-.card-dark {
-  background-color: rgba(255, 255, 255, 0.08);
 }
 .field-row {
   flex-direction: row;
@@ -256,23 +264,15 @@ onBeforeUnmount(() => {
   height: 100rpx;
   margin-top: 26rpx;
   padding: 0 28rpx;
-  background-color: #f4f5fa;
   border-width: 1px; border-style: solid;
-  border-color: #eef0f5;
   border-radius: 22rpx;
-}
-.field-row-dark {
-  background-color: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.1);
 }
 .field-input {
   flex: 1;
   height: 100rpx;
-  color: #191d26;
   font-size: 28rpx;
 }
 .field-ph {
-  color: #6b7385;
   font-size: 28rpx;
 }
 .code-row {
@@ -285,11 +285,7 @@ onBeforeUnmount(() => {
   justify-content: center;
   align-items: center;
   border-left-width: 1px; border-left-style: solid;
-  border-left-color: #f5d2d2;
   border-radius: 0 22rpx 22rpx 0;
-}
-.code-btn-disabled {
-  background-color: #f0f1f5;
 }
 .code-btn-text {
   font-size: 25rpx;

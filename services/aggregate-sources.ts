@@ -57,6 +57,6 @@ export function saveAggregateSources(sources: string[]): void {
   try {
     uni.setStorageSync(AGGREGATE_SOURCES_KEY, next == null ? "" : JSON.stringify(next));
   } catch (_) {
-    // 存不进去时保持静默：本次会话内调用方已拿到返回值，重启后回到「全部音源」
+    // 静默：存不进去时本次会话内调用方已拿到返回值，重启后回到「全部音源」
   }
 }

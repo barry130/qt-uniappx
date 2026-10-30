@@ -34,6 +34,15 @@ export type QtLayoutState = {
   isDesktop: boolean;
   /** 矮屏：windowHeight < 520 */
   isShort: boolean;
+  /**
+   * 底部安全区高度（px）：三键导航 / 虚拟导航条遮住窗口底边的部分。
+   * 鸿蒙窗口默认 edge-to-edge，导航条直接压在应用内容上（Android 侧
+   * App.uvue 的 applyLegacyInsets 已把窗口拉回传统 inset 布局，该值恒 0）。
+   * 悬浮 TabBar / toast 让位 / 悬浮球初始边距 / 页面滚动内容底 padding
+   * 都要把它叠上去，否则非全面屏手机上底部元素与触控键重叠。
+   * 读自 uni.getWindowInfo().safeAreaInsets.bottom，refreshQtLayout 时刷新。
+   */
+  safeBottomPx: number;
   /** 每发生一次真实尺寸变化自增；给「必须重建列表」的宿主做 key 用 */
   sizeEpoch: number;
 };
@@ -47,6 +56,7 @@ const layout = reactive<QtLayoutState>({
   sizeClass: "compact",
   isDesktop: false,
   isShort: false,
+  safeBottomPx: 0,
   sizeEpoch: 0,
 });
 
@@ -125,8 +135,23 @@ export function refreshQtLayout(breakpoint: number = QT_BREAKPOINT_DEFAULT): voi
   layout.sizeClass = sizeClassOf(layout.windowWidth);
   layout.isDesktop = layout.sizeClass == "desktop";
   layout.isShort = layout.windowHeight < QT_BREAKPOINT_SHORT;
+  // 底部安全区：三键导航 / 鸿蒙虚拟导航条的高度。放 refreshQtLayout 而不是
+  // 挂载时读一次就完事，因为用户可以在系统设置里切换「三键导航 ↔ 手势导航」，
+  // 窗口尺寸不变（不触发上面的 changed），但安全区变了。
+  layout.safeBottomPx = readSafeBottom();
   if (changed) layout.sizeEpoch = layout.sizeEpoch + 1;
   initialized = true;
+}
+
+function readSafeBottom(): number {
+  try {
+    const info = uni.getWindowInfo();
+    const insets = info.safeAreaInsets;
+    if (insets != null && insets.bottom > 0) return Math.round(insets.bottom);
+    return 0;
+  } catch (_) {
+    return 0;
+  }
 }
 
 function startWindowWatcher(breakpoint: number): void {
@@ -228,7 +253,9 @@ export function qtRpx(n: number): number {
   let win = 375;
   try {
     win = uni.getWindowInfo().windowWidth;
-  } catch (_) {}
+  } catch (_) {
+    // 静默：窗口信息读不出按 375 基准宽换算
+  }
   return n * (win / 750);
 }
 
@@ -273,7 +300,9 @@ export function qtRailWidth(): number {
 
 /**
  * 底部悬浮 TabBar 的「总占位」：离地 24rpx + 高 120rpx = **144rpx**，与
- * `qt-tab-bar.uvue` 同源。
+ * `qt-tab-bar.uvue` 同源；三键导航 / 虚拟导航条设备再叠加底部安全区
+ * （layout.safeBottomPx，见 QtLayoutState 注释），否则按 144rpx 让位的
+ * 浮层（toast / 悬浮球）在非全面屏手机上仍然压在触控键后面。
  *
  * 2026-10-20 修：原来是写死的 `72`（px，375dp 基准下的设计值）。但 TabBar 与整页
  * 手机档内容一样会随窗口宽度放大（见 qt-tab-bar 注释），常量写死 px 就只在 375dp
@@ -289,7 +318,7 @@ export function qtRailWidth(): number {
 export const QT_TAB_BAR_HEIGHT_RPX = 144;
 
 export function qtTabBarHeightPx(): number {
-  return qtRpx(QT_TAB_BAR_HEIGHT_RPX);
+  return qtRpx(QT_TAB_BAR_HEIGHT_RPX) + layout.safeBottomPx;
 }
 
 /**

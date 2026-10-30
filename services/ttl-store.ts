@@ -68,7 +68,7 @@ export function ttlWrite(key: string, value: any): void {
   try {
     uni.setStorageSync(PREFIX + key, Date.now().toString() + "|" + JSON.stringify(value));
   } catch (_) {
-    // 忽略：容量满/IO 异常等
+    // 静默：容量满/IO 异常等，缓存写失败不影响主流程
   }
 }
 
@@ -101,7 +101,7 @@ export function ttlClearAll(): number {
       }
     }
   } catch (_) {
-    // 忽略：能清多少清多少
+    // 静默：能清多少清多少
   }
   return n;
 }

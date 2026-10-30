@@ -166,7 +166,7 @@ export async function askServerForPicks(request: ServerPickRequest): Promise<Ser
     try {
       await deleteConversation(created.id);
     } catch (e) {
-      // 删不掉就算了，别把正主的失败盖掉
+      // 静默：删不掉就算了，别把正主的失败盖掉
     }
   }
 }

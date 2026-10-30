@@ -520,7 +520,7 @@ class StopTask implements Runnable {
 			try {
 				t.quitSafely()
 			} catch (e) {
-				// 线程已在退出中，忽略
+				// 静默：线程已在退出中，无需重复通知
 			}
 		}
 		deliverVoid(this.callback, error.length == 0, error)
@@ -780,7 +780,7 @@ function expireWaiters(): void {
 		try {
 			evalString(exprDropOp(w.opId))
 		} catch (e) {
-			// 引擎已在异常状态，忽略
+			// 静默：引擎已在异常状态，丢 op 指令本来也无结果可写
 		}
 		deliverEval(w.callback, false, '', 'timeout')
 	}
@@ -1120,7 +1120,9 @@ class HttpTask implements Runnable {
 			if (conn != null) {
 				try {
 					conn!.disconnect()
-				} catch (e2) {}
+				} catch (e2) {
+					// 静默：连接已失效，由 JVM keep-alive 池自回收
+				}
 			}
 		} finally {
 			// 成功时不 disconnect：连接自动归还 JVM keep-alive 池，同宿主的后续请求
@@ -1154,7 +1156,9 @@ export const start: QtJsStart = function (options: QtJsStartOptions, callback: Q
 		// 音乐平台接口全部有 v4，进程内直接偏好 v4（须在任何请求前设置，幂等）。
 		try {
 			System.setProperty('java.net.preferIPv4Stack', 'true')
-		} catch (e) {}
+		} catch (e) {
+			// 静默：个别 ROM 禁改系统属性，维持默认网络栈选择
+		}
 		if (gHandler == null) {
 			const t = new HandlerThread(ENGINE_THREAD_NAME)
 			t.start()
@@ -1498,7 +1502,7 @@ function assetPrefixes(): string[] {
 			}
 		}
 	} catch (e) {
-		// 列不出 apps 就只试裸路径
+		// 静默：列不出 apps 就只试裸路径
 	}
 	out.push('')
 	return out
@@ -1514,7 +1518,7 @@ function openAsset(path: string): InputStream | null {
 		try {
 			return assets.open(prefixes[i] + path)
 		} catch (e) {
-			// 这个前缀下没有，试下一个
+			// 静默：这个前缀下没有，试下一个
 		}
 	}
 	return null

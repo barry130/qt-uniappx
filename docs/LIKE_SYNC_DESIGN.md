@@ -1,6 +1,9 @@
 # 收藏（喜欢）与多端同步实现逻辑
 
-> 代码入口：`stores/player.ts`（编排与本地缓存）、`services/like.ts`（接口层）、`services/music-api.ts`（封面兜底查询）。
+> 代码入口：`stores/player.ts`（业务编排与本地缓存，同步机制以同名转发层暴露）、
+> `services/like-sync.ts`（同步引擎 LikeSyncEngine：pendingOps 断网重放、游标增量拉取、
+> 全量对账与 LWW 合并，自 player.ts 原样抽出，行为零变化）、
+> `services/like.ts`（接口层）、`services/music-api.ts`（封面兜底查询）。
 > 后端接口：`/api/v1/app/user/like/**`（astral-plugin-qt）。
 
 ## 1. 数据模型

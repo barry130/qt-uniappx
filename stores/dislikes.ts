@@ -15,6 +15,7 @@
  */
 import { reactive } from "vue";
 import type { Song } from "@/types/music";
+import { logWarn } from "@/services/logger";
 import {
   normalizeKey,
   singerTokensOf,
@@ -83,7 +84,9 @@ class DislikesStore {
   private save(): void {
     try {
       uni.setStorageSync(DISLIKES_KEY, JSON.stringify(this.rules));
-    } catch (_) {}
+    } catch (_) {
+      logWarn("Dislikes", "屏蔽规则持久化失败（本次已生效，重启后丢失）");
+    }
   }
 
   private emitChanged(): void {
@@ -96,7 +99,9 @@ class DislikesStore {
     this.nextId = 1;
     try {
       uni.removeStorageSync(DISLIKES_KEY);
-    } catch (_) {}
+    } catch (_) {
+      logWarn("Dislikes", "清除持久化失败（内存已清空，重启后可能复活，可再次清除）");
+    }
   }
 
   hasRules(): boolean {

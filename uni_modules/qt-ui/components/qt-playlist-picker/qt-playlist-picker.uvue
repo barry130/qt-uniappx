@@ -1,6 +1,7 @@
 <template>
   <view v-if="visible" class="picker-mask" @click="close">
     <view
+      ref="panelRef"
       class="picker-panel"
       :style="panelStyle"
       @click.stop
@@ -98,6 +99,7 @@ const emit = defineEmits<{
 }>();
 
 const layout = useQtLayout();
+const panelRef = ref<UniElement | null>(null);
 const selectedPlaylistIds = ref<string[]>([...props.selectedIds]);
 /** 批量模式下的新建歌单名称（面板内输入行 —— uni.showModal 的 editable 输入框在 App 端不渲染） */
 const newName = ref<string>('');
@@ -127,7 +129,17 @@ function measureMask(): void {
 }
 
 watch(() => props.visible, (v: boolean) => {
-  if (v) nextTick(() => measureMask());
+  if (v) {
+    nextTick(() => measureMask());
+    // 面板是 v-if 挂载，没有 CSS 过渡的起手帧，所以用 UniElement.animate() 补一次
+    // 淡入（只做 opacity：animate 关键帧里的 "Npx" 是物理像素，位移要额外乘
+    // pixelRatio，见 qt-skeleton-shine 的注释，纯透明最省心）。
+    nextTick(() => {
+      const el = panelRef.value;
+      if (el == null) return;
+      el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 180, easing: "ease-out" });
+    });
+  }
 });
 
 /**
@@ -261,7 +273,7 @@ function close() {
 .picker-header-sub {
   margin-left: 16rpx;
   font-size: 24rpx;
-  color: #6b7385;
+  color: #737b8e;
 }
 .picker-header-sub-wide {
   margin-left: 8px;
@@ -380,7 +392,7 @@ function close() {
   margin-left: 24rpx;
   border-radius: 34rpx;
   background: #f2f3f5;
-  color: #596173;
+  color: #737b8e;
   font-size: 28rpx;
   line-height: 68rpx;
   border: none;

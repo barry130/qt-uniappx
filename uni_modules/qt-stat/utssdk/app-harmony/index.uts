@@ -109,11 +109,15 @@ function ensureDeviceId(): string {
 	try {
 		const saved = uni.getStorageSync(DEVICE_ID_KEY) as string
 		if (saved != null && saved.length > 0) return saved
-	} catch (_) {}
+	} catch (_) {
+		// 静默：读不出旧 ID 就生成新 ID，仅丢失历史归因
+	}
 	const id = genUuid()
 	try {
 		uni.setStorageSync(DEVICE_ID_KEY, id)
-	} catch (_) {}
+	} catch (_) {
+		// 静默：ID 存不进 storage 本次会话仍可用，重启再生成
+	}
 	return id
 }
 
@@ -123,7 +127,9 @@ function readAppVersion(): string {
 		const info = uni.getAppBaseInfo()
 		const v = info.appVersion
 		if (v != null) return v
-	} catch (_) {}
+	} catch (_) {
+		// 静默：版本读不出按空串处理，事件里该字段缺省
+	}
 	return ''
 }
 
@@ -142,7 +148,9 @@ function persistQueue(): void {
 			return
 		}
 		uni.setStorageSync(QUEUE_KEY, JSON.stringify(queue))
-	} catch (_) {}
+	} catch (_) {
+		// 静默：队列存不进 storage，崩溃时丢这批未上报事件
+	}
 }
 
 /** 冷启动恢复持久化队列（恢复到队首，保证事件时间顺序） */
@@ -166,7 +174,9 @@ function restoreQueue(): void {
 		capQueue()
 		uni.removeStorageSync(QUEUE_KEY)
 		log('restore queue ' + queue.length)
-	} catch (_) {}
+	} catch (_) {
+		// 静默：队列解析失败放弃恢复，按空队列重新积累
+	}
 }
 
 // ==================== 事件封装 ====================
@@ -207,7 +217,9 @@ function buildEvent(
 			if (s != null && s.length <= EXTRA_MAX_LEN) {
 				ev.set('extra', extra)
 			}
-		} catch (_) {}
+		} catch (_) {
+			// 静默：extra 序列化失败按无附加字段上报
+		}
 	}
 	return ev
 }
@@ -220,7 +232,9 @@ function enqueue(ev: UTSJSONObject): void {
 		if (queue.length >= maxBatchSize) {
 			flushInternal((_ok: boolean) => {})
 		}
-	} catch (_) {}
+	} catch (_) {
+		// 静默：单条事件入队/触发失败直接丢弃，不影响主流程
+	}
 }
 
 // ==================== 上报 ====================
@@ -278,7 +292,9 @@ function sendNext(done: (ok: boolean) => void): void {
 			sending = false
 			try {
 				uni.removeStorageSync(QUEUE_KEY)
-			} catch (_) {}
+			} catch (_) {
+				// 静默：清键失败下次清队时会再清
+			}
 			log('flush done')
 			done(true)
 			return
@@ -304,7 +320,9 @@ function sendNext(done: (ok: boolean) => void): void {
 					try {
 						consecutiveFailures = 0
 						queue = queue.slice(batch.length)
-					} catch (_) {}
+					} catch (_) {
+						// 静默：出队失败最不少清一批，下轮 flush 会重试
+					}
 					sendNext(done)
 					return
 				}
@@ -329,7 +347,9 @@ function onSendFailure(batch: any[], done: (ok: boolean) => void): void {
 			consecutiveFailures = 0
 			persistQueue()
 		}
-	} catch (_) {}
+	} catch (_) {
+		// 静默：失败计数异常不影响 sending 复位与回调
+	}
 	sending = false
 	done(false)
 }
@@ -351,7 +371,9 @@ function startTimer(): void {
 			if (queue.length > 0) {
 				flushInternal((_ok: boolean) => {})
 			}
-		} catch (_) {}
+		} catch (_) {
+			// 静默：定时 flush 抛异常不影响下一轮调度
+		}
 	}, batchIntervalMs) as number
 }
 
@@ -383,7 +405,9 @@ export function initQtStat(options: QtStatOptions): void {
 			const osV = device.osVersion
 			if (osN != null && osV != null) osName = osN + ' ' + osV
 			else if (osN != null) osName = osN
-		} catch (_) {}
+		} catch (_) {
+			// 静默：设备信息读不到按缺省处理，事件少两个可选字段
+		}
 		restoreQueue()
 		startTimer()
 		log('init ok url=' + ingestUrl + ' deviceId=' + deviceId + ' ut=' + utName + ' appVersion=' + appVersionName + ' queue=' + queue.length)
@@ -415,7 +439,9 @@ export function qtTrack(evt: string, page: string = '', extra: UTSJSONObject | n
 		if (evt == 'hide') {
 			persistQueue()
 		}
-	} catch (_) {}
+	} catch (_) {
+		// 静默：埋点失败绝不影响业务主流程
+	}
 }
 
 /** 页面访问上报（页面 onShow 里调用，一次展示 = 1 PV） */
@@ -424,7 +450,9 @@ export function qtTrackPage(page: string): void {
 		if (!initialized) return
 		if (page.length == 0) return
 		enqueue(buildEvent('page', page, 0, '', '', '', null))
-	} catch (_) {}
+	} catch (_) {
+		// 静默：PV 埋点失败不影响页面展示
+	}
 }
 
 /**
@@ -439,7 +467,9 @@ export function qtTrackError(errorType: string, message: string, stack: string =
 		let st = stack
 		if (st.length > STACK_MAX_LEN) st = st.substring(0, STACK_MAX_LEN)
 		enqueue(buildEvent('error', page, 0, errorType, msg, st, null))
-	} catch (_) {}
+	} catch (_) {
+		// 静默：错误埋点自身失败无处可报，只丢一条事件
+	}
 }
 
 /**
@@ -456,7 +486,9 @@ export function qtStatFlush(): Promise<boolean> {
 				try {
 					queue.push(buildEvent('hide', '', duration, '', '', '', null))
 					capQueue()
-				} catch (_) {}
+				} catch (_) {
+					// 静默：补 hide 事件失败仍继续持久化与上报
+				}
 			}
 			persistQueue()
 			flushInternal((ok: boolean) => {

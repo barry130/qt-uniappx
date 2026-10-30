@@ -38,14 +38,18 @@ export function setCachedMe(res: UTSJSONObject): void {
   memoryMe = res;
   try {
     uni.setStorageSync(ME_CACHE_KEY, JSON.stringify(res));
-  } catch (_) {}
+  } catch (_) {
+    // 静默：内存缓存已生效，只丢跨启动缓存，下次刷新即恢复
+  }
 }
 
 export function clearCachedMe(): void {
   memoryMe = null;
   try {
     uni.removeStorageSync(ME_CACHE_KEY);
-  } catch (_) {}
+  } catch (_) {
+    // 静默：删不掉只留陈旧缓存，重新登录刷新会覆盖
+  }
 }
 
 /** 联网拉一次 /me 并写缓存。未登录直接返回 null；失败不抛，返回 null 由调用方兜底 */

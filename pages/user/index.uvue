@@ -250,11 +250,13 @@ async function doLogout() {
   // 断网期间的待推送操作先尽力补推（此时仍带原账号身份），避免退出后队列被清导致丢操作
   try {
     await usePlayerStore().flushPendingOps();
-  } catch (_) {}
+  } catch (_) {
+    // 静默：补推失败由下次启动对账兜底，不拦退出流程
+  }
   try {
     await accountApi.logout();
   } catch (_) {
-    // 忽略登出接口错误，本地清理照常执行
+    // 静默：登出接口报错不拦本地清理，令牌一样会被清掉
   } finally {
     clearTokens();
     clearCachedMe();

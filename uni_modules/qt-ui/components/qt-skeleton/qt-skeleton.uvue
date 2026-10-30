@@ -7,10 +7,10 @@
   组件 class 的 border-radius / background-color 并不可靠。所以宽高与圆角一律
   由 props 拼成行内 style，页面只负责给出数值。
 
-  ── 为什么不用 theme 的 skin token 拼行内背景色 ─────────────────────────────
-  根节点一旦自己绑 :style，调用方再传 :style 时是否合并取决于运行时的 fallthrough
-  实现，会把「灰底」丢掉的赌注压在这上面不值得。底色改用扁平 class（明暗各一套），
-  行内 style 只承载宽高圆角，两边互不干扰。
+  ── 为什么底色走行内 style ────────────────────────────────────────────────
+  皮肤令牌只存在于 JS 侧的 themeStore.skin（没有 CSS 变量），换皮肤要立刻生效就
+  只能拼进行内 style；宽高圆角本来也在行内，一起拼进同一条 style 串，互不干扰。
+  封面/圆形取 coverPlaceholder，文字行/内容块取 surfaceMuted。
 
   用法：
     <QtSkeleton tone="cover" :width="cardWidth + 'px'" :height="cardWidth + 'px'" />
@@ -40,9 +40,9 @@ const theme = useThemeStore();
 const layout = useQtLayout();
 
 const rootClass = computed((): string => {
-  // Vapor 不支持复合选择器，明暗两套底色各用一个扁平 class
+  // 底色已移进行内 style（跟皮肤令牌），class 只负责按 tone 区分圆角
   const t = props.tone != null ? props.tone! : "block";
-  return "qt-skeleton-" + t + (theme.dark ? " qt-skeleton-" + t + "-dark" : "");
+  return "qt-skeleton-" + t;
 });
 
 /**
@@ -60,7 +60,9 @@ function defaultRadiusPx(tone: string): string {
 }
 
 const boxStyle = computed((): string => {
-  let style = "";
+  // 占位底色跟皮肤：封面/圆形取 coverPlaceholder，文字行/内容块取 surfaceMuted
+  const t = props.tone != null ? props.tone! : "block";
+  let style = "background-color:" + (t == "cover" || t == "circle" ? theme.skin.coverPlaceholder : theme.skin.surfaceMuted) + ";";
   if (props.width != null && props.width!.length > 0) style += "width:" + props.width! + ";";
   if (props.height != null && props.height!.length > 0) style += "height:" + props.height! + ";";
   if (props.radius != null && props.radius!.length > 0) style += "border-radius:" + props.radius! + ";";
@@ -70,40 +72,20 @@ const boxStyle = computed((): string => {
 </script>
 
 <style>
-/* 底色与 stores/theme.ts 的 coverPlaceholder / surfaceMuted 对齐；改动需同步 */
+/* 底色由模板里的行内 style 给出（coverPlaceholder / surfaceMuted），这里只留圆角 */
 .qt-skeleton {
   flex-shrink: 0;
 }
 .qt-skeleton-cover {
-  background-color: #e5e7ec;
-  border-radius: 16rpx;
-}
-.qt-skeleton-cover-dark {
-  background-color: #292e3b;
   border-radius: 16rpx;
 }
 .qt-skeleton-line {
-  background-color: rgba(25, 29, 38, 0.08);
-  border-radius: 8rpx;
-}
-.qt-skeleton-line-dark {
-  background-color: rgba(255, 255, 255, 0.1);
   border-radius: 8rpx;
 }
 .qt-skeleton-block {
-  background-color: rgba(25, 29, 38, 0.08);
-  border-radius: 12rpx;
-}
-.qt-skeleton-block-dark {
-  background-color: rgba(255, 255, 255, 0.1);
   border-radius: 12rpx;
 }
 .qt-skeleton-circle {
-  background-color: #e5e7ec;
-  border-radius: 50%;
-}
-.qt-skeleton-circle-dark {
-  background-color: #292e3b;
   border-radius: 50%;
 }
 </style>

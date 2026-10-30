@@ -62,7 +62,7 @@ export function qtSwitchTab(url: string): void {
  *
  * 宽屏下三个层次依次尝试，目标都是「别让 Android 新建 Activity」：
  *   1. 就地托管（qt-wide-workspace）：栈顶就是宿主 tab 页时同窗口换内容 —— 既没有
- *      起始窗白帧，也不往页面栈里堆页面；用过的工具页保活，切换/重开瞬时恢复；
+ *      起始窗白帧，也不往页面栈里堆页面；单活动 pane，切换即换挂（16~300ms）；
  *   2. 栈里有宿主页但栈顶不是它（歌曲页 / 歌单页 / 设置子页……）：先一次 `navigateBack`
  *      退回已经画好的宿主窗口（没有起始窗），成功后再就地托管；
  *   3. 连宿主页都没有（深链直达子页）：只能 `navigateTo`，同样用 `none` ——
@@ -91,7 +91,9 @@ function qtStackRouteIndex(url: string): number {
     for (let i = pages.length - 1; i >= 0; i--) {
       if (qtStackRouteAt(i) == url) return i;
     }
-  } catch (_) {}
+  } catch (_) {
+    // 静默：页面栈读不出按未挂载处理，调用方走常规导航
+  }
   return -1;
 }
 
