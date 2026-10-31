@@ -38,7 +38,7 @@
 import { computed } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtSwitchTab } from "@/uni_modules/qt-ui/composables/qt-nav";
 import { qtFont } from "@/uni_modules/qt-ui/stores/font-scale";
 
@@ -46,12 +46,12 @@ import { qtFont } from "@/uni_modules/qt-ui/stores/font-scale";
  * 竖屏底部导航：悬浮胶囊（2026-10-19 起从通栏改为悬浮 pill，参照用户给的
  * 悬浮导航设计稿）：左右各一个入口「发现 / 我的」，中间不放发布按钮。
  *
- * 几何契约：离地 24rpx + 高 120rpx（合计 144rpx）+ 底部安全区（三键导航 /
+ * 几何契约：离地 64rpx + 高 120rpx（合计 184rpx）+ 底部安全区（三键导航 /
  * 虚拟导航条，见 use-qt-layout.ts 的 safeBottomPx），总占位写进 use-qt-layout.ts
  * 的 QT_TAB_BAR_HEIGHT_RPX，由 qtTabBarHeightPx() 按窗口宽折算并叠加安全区
  * ——qt-toast-host 的让位、qt-mini-player 悬浮球的初始边距都按它取值，
  * 三处必须同源（tools/check-toast.mjs 断言 qtTabBarHeightPx() 被 toast-host
- * 使用、常量等于 144）。
+ * 使用、常量等于 184）。
  *
  * 2026-10-20 起这里的尺寸改用 rpx（设计 px × 2）而不是写死 px：本组件只在
  * `!layout.isWide` 的手机档渲染，而手机档整页内容都是 rpx（随窗口宽度线性放大）。
@@ -84,13 +84,43 @@ function active(path: string): boolean {
 }
 
 /**
- * 离地高度（px）：24rpx 基础离地 + 底部安全区。
- * 鸿蒙窗口 edge-to-edge，三键导航 / 虚拟导航条直接压在窗口底边 —— 只写 24rpx
- * 的话非全面屏手机上胶囊正好卡在触控键上（2026-10-29 用户反馈）。Android 侧
- * App.uvue 的 applyLegacyInsets 已把窗口拉回传统 inset 布局，safeBottomPx 恒 0，
- * 基础值不变。
+ * 离地高度（px）。两种形态，用户 2026-10-31 真机定稿：
+ *
+ * 1. **有系统导航栏（三键导航）**：qt-page-frame 的 padding-bottom 已经把内容
+ *    容器整体抬到导航条上沿，绝对定位子节点锚的就是这个收短后的容器底边（安卓
+ *    真机实测：容器 1440x3011、胶囊 76,2577-1364,2807）。所以三键机离地量必须
+ *    收成 0 = 胶囊直接贴着导航条；再叠 64rpx 就会「太高」（用户 2026-10-31 实拍
+ *    反馈：全面屏那档刚好、三键这档偏高）。
+ *
+ * 2. **全面屏手势 / 没有导航栏**：系统遮挡区=0（实测 raw=0、容器=全屏 3168），
+ *    容器等于没被抬，离地量就纯粹是 TAB_BOTTOM_RPX。用户三轮口径：24rpx
+ *    （≈2.4mm）贴底、100rpx（≈10mm）有点高，中间取 64rpx（≈6.7mm）用户确认
+ *    「全面屏高度合适」。⚠️ 调这个值步子要大：24→40 只差 1.6mm 肉眼几乎无感。
+ *
+ * ⚠️ 历史的坑别再踩第二遍：2026-10-31 曾判定「按 safeBottomPx 做分支会翻车、
+ * 手势档瞬时 inset>0 会把离地吃掉」，于是改成固定值——那是误判。真凶是 qtRpx()
+ * 冷启动读到 windowWidth=0（日志 win=0x742）算出 0，computed 又永不重算，导致
+ * 怎么调 rpx 都渲染成 bottom:0。分支逻辑本身是对的，见下面的 reactive 写法。
  */
-const bottomPx = computed((): number => qtRpx(24) + layout.safeBottomPx);
+const TAB_BOTTOM_RPX = 64;
+
+/**
+ * ⚠️ 这里必须依赖响应式的 layout.windowWidth，不能只靠 qtRpx()（它内部直读
+ * uni.getWindowInfo()，非响应式）。vivo V2505A 实锤：冷启动首帧 getWindowInfo()
+ * 返回 win=0x742（宽=0），qtRpx(64) 算出 0，而 computed 若只依赖 isWide（手机上
+ * 恒 false）→ 宽度纠正后永不重算，bottom 永久 0 = 胶囊贴屏底。2026-10-31 用户
+ * 连续三轮调 24/40/64rpx 全「没有任何效果」就是它（dumpsys：胶囊底边恰为屏高
+ * 3168）。读一次 win 建立依赖，refreshQtLayout 把窗口宽改成 384 后本值必然重算出
+ * 64rpx 真值。
+ */
+const bottomPx = computed((): number => {
+  const win = layout.windowWidth;
+  // 宽屏走常驻播放栏的几何，不吃手机档的导航条让位
+  // 三键导航：容器已被 padding 抬到导航条上沿 → 离地 0（贴导航条）
+  // 手势全屏：容器未被抬 → 固定 64rpx 离地
+  const rpx = layout.isWide ? 24 : (layout.safeBottomPx > 0 ? 0 : TAB_BOTTOM_RPX);
+  return rpx * (win / 750);
+});
 
 function hasDot(path: string): boolean {
   if (props.dots == null) return false;
@@ -126,10 +156,11 @@ function go(path: string): void {
   position: absolute;
   left: 40rpx;
   right: 40rpx;
-  /* 离地值走内联 style（bottomPx = 24rpx + safeBottomPx）：CSS 写死 24rpx 的
-     话，三键导航设备的虚拟导航条会直接盖住胶囊下半截。 */
+  /* 离地值走内联 style（bottomPx = 固定 64rpx）：容器由 page-frame 的
+     padding-bottom 让到系统遮挡区上沿，所以三键机的虚拟导航条不会盖住胶囊
+     下半截；手势机则纯粹是这 64rpx 的离地量。 */
   height: 120rpx;
-  /* 总占位 = 24rpx 离地 + 120rpx 高 = 144rpx（375dp 基准下 = 72px），与
+  /* 总占位 = 64rpx 离地 + 120rpx 高 = 184rpx（375dp 基准下 = 92px），与
      use-qt-layout.ts 的 QT_TAB_BAR_HEIGHT_RPX 保持一致（toast 让位、悬浮球初始边距都按它算；
      2026-10-29 起非全面屏再叠加 safeBottomPx，见 use-qt-layout.ts） */
   flex-direction: row;

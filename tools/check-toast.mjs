@@ -125,7 +125,7 @@ require(frame, /<qt-action-sheet-host\s*\/>/, "qt-page-frame 里没有挂 qt-act
 require(frame, /<qt-pack-install-sheet\s*\/>/, "qt-page-frame 里没有挂 qt-pack-install-sheet", FRAME);
 
 const layout = read(LAYOUT);
-require(layout, /QT_TAB_BAR_HEIGHT_RPX\s*=\s*144/, "TabBar 总占位常量丢失（qt-toast-host 依赖它）", LAYOUT);
+require(layout, /QT_TAB_BAR_HEIGHT_RPX\s*=\s*184/, "TabBar 总占位常量丢失（qt-toast-host 依赖它）", LAYOUT);
 
 // 6) 操作表出口与宿主（同 confirm：全局一个宿主，service 兑现 Promise）
 const sheetEntry = read(SHEET_ENTRY);

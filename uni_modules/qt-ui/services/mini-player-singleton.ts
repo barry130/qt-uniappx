@@ -56,11 +56,16 @@ const MINI_HEIGHT_RPX = 112;
 const MINI_WIDTH_WIDE_PX = 360;
 const MINI_HEIGHT_WIDE_PX = 56;
 const FAB_WIDE_PX = 72;
-/** 默认边距（rpx）：底部让开悬浮 TabBar 的占位（qtTabBarHeightPx = 144rpx 同源） */
+/** 默认左边距（rpx） */
 const LEFT_MARGIN_RPX = 28;
-const BOTTOM_MARGIN_RPX = 190;
-/** 位置持久化 key；格式 "x,y,窗口高" */
+/**
+ * 位置持久化 key；格式 "v2,x,y,窗口高"。
+ * 前面的版本段是给「默认落点改版」留的开关：2026-10-31 默认落点从贴底改成
+ * 屏幕高度 1/3 处，老存档（无版本段）一律忽略，否则用户升级后还是会看到旧落点。
+ */
 const POS_KEY = "qt-mini-player-fab";
+/** 存档格式版本段（见 POS_KEY 注释）：改了默认落点就 +1，让老存档失效 */
+const POS_VERSION = "v2";
 
 const layout = qtLayout();
 
@@ -173,7 +178,12 @@ export function ensureMiniPositioned(): void {
   }
   if (winW <= 0 || winH <= 0) return;
   let x = qtRpx(LEFT_MARGIN_RPX);
-  let y = winH - (layout.isWide ? 96 : qtRpx(BOTTOM_MARGIN_RPX) + layout.safeBottomPx) - miniFabPx.value;
+  // 默认落点（2026-10-31 用户定稿：球太高不行、贴底也不行）——窄屏让**球心**落在
+  // 屏幕高度 1/3 处（从屏幕底边往上量）。原来的贴底落点（qtRpx(190)+safeBottom）
+  // 会和悬浮 TabBar / 导航条挤在一起，用户反馈「现在太低了」。
+  let y = layout.isWide
+    ? winH - 96 - miniFabPx.value
+    : winH - Math.round(winH / 3) - Math.round(miniFabPx.value / 2);
   if (layout.isWide) {
     // 宽屏左侧有导航 rail（wide/desktop 208px，medium 64px），默认落在 rail 右侧
     x = qtRailWidth() + 16;
@@ -182,12 +192,13 @@ export function ensureMiniPositioned(): void {
     const saved = uni.getStorageSync(POS_KEY) as string;
     if (saved.length > 0) {
       const parts = saved.split(",");
-      // 只认三段格式 "x,y,窗口高"：第三段判断坐标是否在同一窗口高度下记录。
-      // 两段是旧格式，可能躺着按半高窗口算出的坏坐标，一律忽略、回默认位置。
-      if (parts.length == 3) {
-        const sx = parseFloat(parts[0]);
-        const sy = parseFloat(parts[1]);
-        const sh = parseFloat(parts[2]);
+      // 只认四段新格式 "v2,x,y,窗口高"：首段是版本（见 POS_VERSION），第三段判断
+      // 坐标是否在同一窗口高度下记录。三段的旧存档是「贴底」时代的落点，一律忽略，
+      // 回新默认位置。
+      if (parts.length == 4 && parts[0] == POS_VERSION) {
+        const sx = parseFloat(parts[1]);
+        const sy = parseFloat(parts[2]);
+        const sh = parseFloat(parts[3]);
         if (!isNaN(sx) && !isNaN(sy) && !isNaN(sh) && Math.abs(sh - winH) <= 8) {
           x = sx;
           y = sy;
@@ -212,7 +223,7 @@ export function ensureMiniPositioned(): void {
 }
 
 /**
- * 落盘当前坐标（"x,y,窗口高"）。
+ * 落盘当前坐标（"v2,x,y,窗口高"，见 POS_KEY）。
  *
  * 两条硬条件：必须已按稳定窗口初始化过；当前窗口尺寸与 useQtLayout 量测一致。
  * 否则宁可不存，也不要让半高窗口算出的坐标把下次启动带偏。
@@ -223,7 +234,7 @@ function persistPosition(): void {
   const winH = layout.windowHeight > 0 ? layout.windowHeight : win.windowHeight;
   if (winH <= 0 || (win.windowHeight > 0 && layout.windowHeight > 0 && Math.abs(win.windowHeight - layout.windowHeight) > 24)) return;
   try {
-    uni.setStorageSync(POS_KEY, Math.round(miniFabX.value) + "," + Math.round(miniFabY.value) + "," + Math.round(winH));
+    uni.setStorageSync(POS_KEY, POS_VERSION + "," + Math.round(miniFabX.value) + "," + Math.round(miniFabY.value) + "," + Math.round(winH));
   } catch (_) {
     logWarn("MiniPlayer", "悬浮球位置持久化失败（本次已生效，重启后回默认）");
   }

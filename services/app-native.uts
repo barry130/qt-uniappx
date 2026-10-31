@@ -9,7 +9,7 @@
  * （编译进原生层），此处通过平台分发导入调用；H5 保留 window 实现，其余降级为复制+提示。
  */
 
-import { openExternalUrl, exitAppNative, installApkNative, openNotificationSettings as openNotificationSettingsNative, isIgnoringBatteryOptimizations as isIgnoringBatteryOptimizationsNative, openBatteryOptimizationSettings as openBatteryOptimizationSettingsNative, openAutoStartSettings as openAutoStartSettingsNative, openAppDetailsSettings as openAppDetailsSettingsNative, applyLegacyInsets as applyLegacyInsetsNative, pickJsFile as pickJsFileNative, pickDirectory as pickDirectoryNative, setCustomDirUri as setCustomDirUriNative, queryPermissionStates as queryPermissionStatesNative, openPermissionSettings as openPermissionSettingsNative, getWebCookies as getWebCookiesNative } from "@/uni_modules/qt-app-native";
+import { openExternalUrl, exitAppNative, installApkNative, openNotificationSettings as openNotificationSettingsNative, isIgnoringBatteryOptimizations as isIgnoringBatteryOptimizationsNative, openBatteryOptimizationSettings as openBatteryOptimizationSettingsNative, openAutoStartSettings as openAutoStartSettingsNative, openAppDetailsSettings as openAppDetailsSettingsNative, applyLegacyInsets as applyLegacyInsetsNative, readBottomNavInset as readBottomNavInsetNative, pickJsFile as pickJsFileNative, pickDirectory as pickDirectoryNative, setCustomDirUri as setCustomDirUriNative, queryPermissionStates as queryPermissionStatesNative, openPermissionSettings as openPermissionSettingsNative, getWebCookies as getWebCookiesNative } from "@/uni_modules/qt-app-native";
 import type { PickFileResult, PickDirectoryResult, PermissionState } from "@/uni_modules/qt-app-native";
 import { logErrV } from "@/services/logger";
 import { ensureNotificationPermission as ensureNotificationPermissionNative } from "@/uni_modules/qt-audio-player";
@@ -280,6 +280,58 @@ export function applyLegacyInsets(): boolean {
   // #endif
   // #ifndef APP-ANDROID
   return false;
+  // #endif
+}
+
+/** 设备像素 → 逻辑像素的换算比例（= 屏幕密度，vivo V2505A 上 3.75）。
+ *  原生侧（安卓 WindowInsets / 鸿蒙 AvoidArea）给出的都是**设备像素**，而
+ *  layout.safeBottomPx 最终写进 uvue 的 padding-bottom / bottom，单位是**逻辑像素**。
+ *  两级单位混用正是 2026-10-31 真机上 TabBar 跑到屏幕中部的直接原因：
+ *  三键导航真实高度 158 设备像素，被当成 158 逻辑像素写进样式 = 592 设备像素，
+ *  内容区 3168 → 2576，绝对定位的悬浮胶囊被顶到窗口中部。
+ *  读不到就按 1:1 处理（宁可少让位，不要多算一个密度）。 */
+function devicePxToLogicalRatio(): number {
+  try {
+    const ratio = uni.getWindowInfo().pixelRatio;
+    if (ratio != null && ratio > 0) return ratio;
+  } catch (_) {
+    // 静默：读不到比例时走 1:1，不让换算失败把避让值算大
+  }
+  return 1;
+}
+
+/** 设备像素换算成逻辑像素，保留两位小数并保留正负号编码（正=需让位 / 负=系统已让位）。 */
+function devicePxToLogical(devicePx: number): number {
+  if (devicePx == 0) return 0;
+  const logical = Math.abs(devicePx) / devicePxToLogicalRatio();
+  const rounded = Math.round(logical * 100) / 100;
+  return devicePx > 0 ? rounded : -rounded;
+}
+
+/**
+ * 异步读取底部系统导航避让高度（**逻辑像素**，原生侧设备像素已在此折算）。
+ * 两个平台 uni.getWindowInfo().safeAreaInsets.bottom 都不报真值（2026-10-31
+ * 真机反馈：安卓机悬浮 TabBar 压在三键导航上；鸿蒙同款），只有原生窗口信息
+ * 可信。语义统一为「窗口自己让过位了吗」：
+ *   - 鸿蒙读 window.getWindowAvoidArea，非沉浸式窗口下避让区自动回 0；
+ *   - 安卓比对 DecorView 与内容根的 padding / 高度差，只在真 edge-to-edge
+ *     时回导航栏高度（避免正常机型重复叠一次，见 app-android readBottomNavInset）；
+ *   - iOS 由 safeAreaInsets 原生承担，不回调（见下）。
+ * 结果回调给 App.uvue 写入 layout.safeBottomPx（applyQtNativeSafeBottom）。
+ * 注意：**读不到结论时不要回调**（异常、iOS 等没有原生读数的平台）——调用方
+ * 把「没回调」当作未知，继续用 uni 的 safeAreaInsets 兜底；回调一个 0 会被当成
+ * 「系统已经让过位」的确定结论，反而把 iOS 的安全区让位关掉。
+ */
+export function readBottomNavInset(onResult: (px: number) => void): void {
+  // #ifdef APP-ANDROID || APP-HARMONY
+  try {
+    readBottomNavInsetNative((devicePx: number) => {
+      onResult(devicePxToLogical(devicePx));
+    });
+  } catch (e) {
+    // 静默：原生读数失败时保持「未知」，下一轮 onShow 会再试，不覆写成 0
+    logErrV("AppNative", "readBottomNavInset", e);
+  }
   // #endif
 }
 

@@ -189,6 +189,25 @@ export type ApplyLegacyInsets = () => boolean;
  */
 export type RecreateActivity = () => boolean;
 
+/**
+ * 异步读取底部系统导航的避让高度（px）。
+ *
+ * 两端 uni.getWindowInfo().safeAreaInsets.bottom 都不报真值（2026-10-31 真机
+ * 反馈：安卓机 / 鸿蒙机的悬浮 TabBar 都压在导航键上），只能取原生窗口信息：
+ *   - 鸿蒙：window.getWindowAvoidArea(TYPE_NAVIGATION_INDICATOR)。非沉浸式
+ *     窗口下避让区自动回 0，天然不会重复让位；
+ *   - 安卓：导航栏 inset 无论窗口是否 edge-to-edge 都会上报，必须再用「系统
+ *     有没有给内容区让过位」判别（见 app-android/index.uts 内的注释）；
+ *   - iOS：由 safeAreaInsets 原生承担，恒回 0。
+ *
+ * 取值约定（安卓要区分「读到了但不用让位」，故用符号编码）：
+ *   正数 = 需要让位的真实高度；0 = 不需要让位 / 取不到；
+ *   负数 = 读到了导航栏高度（取绝对值），但系统已给内容区让过位，不应再叠加。
+ * App.uvue 只把正值写进 layout.safeBottomPx，负值仅用于诊断日志。
+ * @param onResult 结果回调：见上面的取值约定（px）
+ */
+export type ReadBottomNavInset = (onResult: (px: number) => void) => void;
+
 /** 系统文件选择器的结果 */
 export type PickFileResult = {
 	/** 选中并成功读回内容 */

@@ -26,12 +26,12 @@ import {
   offerLabel,
 } from '@/services/source-update'
 import type { PackUpdateOffer } from '@/services/source-update'
-import { exitApp, ensureNotificationPermission, openNotificationSettings, applyLegacyInsets, isIgnoringBatteryOptimizations, openBatteryOptimizationSettings } from '@/services/app-native'
+import { exitApp, ensureNotificationPermission, openNotificationSettings, applyLegacyInsets, isIgnoringBatteryOptimizations, openBatteryOptimizationSettings, readBottomNavInset } from '@/services/app-native'
 import { beginLoading, finishLoading } from '@/services/ui-loading'
-import { refreshQtLayout, pauseQtLayoutWatcher, resumeQtLayoutWatcher } from '@/uni_modules/qt-ui/composables/use-qt-layout'
+import { refreshQtLayout, pauseQtLayoutWatcher, resumeQtLayoutWatcher, applyQtNativeSafeBottom } from '@/uni_modules/qt-ui/composables/use-qt-layout'
 import { installBootGuard, notifyAppForeground, notifyAppBackground } from '@/services/boot-guard'
 import { refreshMe } from '@/services/user-cache'
-import { initLogger, flushLogs, logLine, logMsgErr, LOG_ERROR } from '@/services/logger'
+import { initLogger, flushLogs, logLine, logMsgErr, LOG_ERROR, LOG_INFO } from '@/services/logger'
 import { qtConfirm } from '@/services/confirm'
 import { enqueueBootModal, BOOT_MODAL_PRIORITY_PLAY_PACK, BOOT_MODAL_PRIORITY_BATTERY, BOOT_MODAL_PRIORITY_PACK_UPDATE } from '@/services/boot-modal-queue'
 import { openPackInstallSheet, PACK_SHEET_UNAVAILABLE } from '@/services/pack-install-sheet'
@@ -39,12 +39,86 @@ import { openPackInstallSheet, PACK_SHEET_UNAVAILABLE } from '@/services/pack-in
 // + 凭据轮换/后台保活（启动 20s 首检 + 每次回前台 24h 节流，见 services/source-auth.ts）
 import { ensureSourceAuthInjected, keepaliveSourceAccounts } from '@/services/source-auth'
 
+// 最近一次已写入日志的诊断串（''=还没记过）：只记录变化，避免每次回前台刷屏；
+// 同时给真机排查留现场 —— 布局仍不对时，日志页（pages/logs）能直接看到原生读到
+// 的值与窗口几何，不用连 adb。
+let loggedBottomNavDiag: string = ''
+
+/** 底部避让的诊断串：原生返回值 + 窗口几何（windowHeight 与 screenHeight 是否相等
+ *  直接反映窗口有没有画到屏幕底边，是判别 edge-to-edge 的第二证据）。 */
+function describeBottomNavInset(raw: number): string {
+  let geometry = ''
+  try {
+    const info = uni.getWindowInfo()
+    const insets = info.safeAreaInsets
+    geometry = ' win=' + info.windowWidth + 'x' + info.windowHeight
+      + ' screen=' + info.screenWidth + 'x' + info.screenHeight
+      + ' status=' + info.statusBarHeight
+      + ' insetBottom=' + (insets != null ? insets.bottom : -1)
+  } catch (_) {
+    // 静默：取不到窗口信息时只记原生返回值
+  }
+  return '底部导航避让 raw=' + raw + geometry
+}
+
+// 底部导航避让高度的统一读取入口（见 onLaunch 内注释）；抽成函数
+// 供启动与 onShow 两处复用。结果经回调写进 layout.safeBottomPx。
+// 取值约定见 qt-app-native interface.uts：正值才让位，负值=系统已让过位。
+function refreshBottomNavInset(): void {
+  readBottomNavInset((raw: number) => {
+    const px = raw > 0 ? raw : 0
+    const diag = describeBottomNavInset(raw)
+    if (diag != loggedBottomNavDiag) {
+      loggedBottomNavDiag = diag
+      logLine(LOG_INFO, 'App', diag)
+    }
+    applyQtNativeSafeBottom(px)
+  })
+}
+
+/**
+ * 底部避让区的**前台轮询**（3s，进后台即停）。
+ *
+ * 为什么不能只在启动/回前台读一次：用户在系统里切「三键导航 ↔ 手势导航」时，
+ * 窗口尺寸常常不变（同一块屏幕的同一块内容区），而沉浸式隐藏导航条更是连
+ * 配置变更都没有 —— 只在启动点读一次的话，胶囊会一直用旧让位量，表现为
+ * 2026-10-31 用户反馈的「没有下面导航栏的时候 tab 贴在屏幕最底边」。
+ * 3s 是刻意选的：切换导航模式是低频动作，轮询本身只是一次
+ * getRootWindowInsets 读 + 局部比较，值不变时原生侧连日志都不打
+ * （见 qt-app-native readBottomNavInset 的 lastNavInsetLog 去重）。
+ */
+let bottomNavWatchTimer: number = 0
+
+function startBottomNavWatch(): void {
+  if (bottomNavWatchTimer != 0) return
+  bottomNavWatchTimer = setInterval(() => {
+    refreshBottomNavInset()
+  }, 3000) as unknown as number
+}
+
+function stopBottomNavWatch(): void {
+  if (bottomNavWatchTimer == 0) return
+  clearInterval(bottomNavWatchTimer)
+  bottomNavWatchTimer = 0
+}
+
 onLaunch(() => {
   // 三星 One UI 手势导航下 edge-to-edge 窗口会让运行时首屏挂载竞态（S24 Ultra
   // 全屏白屏），启动最早点强制窗口回归传统 inset 布局（等价三键导航），见 boot-guard.ts
   applyLegacyInsets()
   // 尽早确定宽窄屏状态（qt-page-frame / 各组件的响应式判断都依赖它）
   refreshQtLayout(720)
+  // 底部导航避让高度：只有原生窗口信息可信（uni 的 safeAreaInsets 底部在鸿蒙
+  // 三键机型实测恒 0；安卓同一字段也不报真值，2026-10-31 真机反馈 TabBar 压在
+  // 三键导航上）。原生侧按平台语义各取「窗口自己让过位没有」：鸿蒙读窗口避让区
+  // （非沉浸式时自动回 0），安卓比对 DecorView 与内容根的 padding/高度差，只在
+  // 真 edge-to-edge 时回导航栏高度，避免正常机型重复叠一次。iOS 恒回 0。
+  refreshBottomNavInset()
+  // 启动点读到的可能是首帧前的空 geometry（inset 未分发 / DecorView 未布局），
+  // 延时再读一次；之后每次回前台由 onShow 兜底。
+  setTimeout(() => {
+    refreshBottomNavInset()
+  }, 800)
   // 本地日志最先初始化：后面每一步（统计、恢复、预热）都可能出错，
   // 而那些错误只有在日志已经能落盘时才有地方记。发行包没有控制台，这是唯一现场。
   initLogger()
@@ -223,6 +297,12 @@ onShow(() => {
   useThemeStore().syncSystemTheme()
   // 回前台恢复窗口尺寸监听（后台期间系统可能改了窗口尺寸，如分屏 / 旋转）
   resumeQtLayoutWatcher(720)
+  // 后台期间用户可能切了导航模式（三键 ↔ 手势）：窗口尺寸不变、watcher
+  // 不触发，回前台重读一次原生避让区，让 TabBar / 内容 padding 重新让位
+  refreshBottomNavInset()
+  // 前台轮询兜底：中途切三键 ↔ 手势导航 / 沉浸式隐藏导航条时窗口尺寸可能不变，
+  // 只在回前台读一次会漏（见 startBottomNavWatch 注释）
+  startBottomNavWatch()
   usePlayerStore().pullChanges().catch(() => {})
   // 音源账号后台保活（24h 节流；冷启动窗口内跳过，归启动 20s 首检独占）
   keepaliveSourceAccounts('前台保活', false)
@@ -240,6 +320,8 @@ onHide(() => {
   usePlayerStore().persist()
   // 暂停宽窄屏窗口监听，避免后台空转
   pauseQtLayoutWatcher()
+  // 底部避让区轮询同理：后台不需要，回前台（onShow）重新拉起
+  stopBottomNavWatch()
   qtStatFlush()
   // 日志刷盘：后台后进程随时可能被系统回收，队列里没写完的行不能等下次启动再补
   flushLogs().catch(() => {})

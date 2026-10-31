@@ -996,11 +996,16 @@ const contentStyle = computed((): string => {
   // 不给滚动内容加 padding 的另一个原因：页面里已有 .foot-space 一类尾部占位，
   // 两处都加会叠出一条空白带。
   // 窄屏底部安全区（三键导航 / 虚拟导航条，2026-10-29 非全面屏用户反馈）：同理把内容
-  // 容器收短，全站滚动内容停在导航条上沿。悬浮 TabBar / toast / 悬浮球是绝对定位、
-  // 锚到本容器 border box 底边（= 窗口底边），不受 padding 影响，各自用 safeBottomPx
-  // 让位；页面自己的底部 padding（.portrait-home 140rpx / .body 220rpx）是相对滚动
-  // 容器底边的，收短后与 TabBar 的相对几何自动保持不变。宽屏不叠（桌面/平板极少
-  // 三键导航，宽屏底部由常驻播放栏管理）。
+  // 容器收短，全站滚动内容停在导航条上沿。
+  // 2026-10-31 安卓实测修正（原来这里写的是「绝对定位锚 border box、不受 padding 影响，
+  // 所以 TabBar 要自己叠 safeBottomPx」——错的）：`dumpsys activity top` 里本容器节点在
+  // safeBottom=42 时高度就是 1440x3011（=3168−157.5），悬浮胶囊节点 76,2577-1364,2807
+  // 相对该底边的偏移恰为 rpx(24)+42，说明**绝对定位的子节点锚的是收短后的容器底边**。
+  // 因此 pad 与子节点的 bottom 是同一方向叠加两次，TabBar 不能再叠 safeBottomPx
+  // （见 qt-tab-bar.uvue 的 bottomPx 注释）。这里保留 padding 仍是必需的：滚动内容
+  // 要停在导航条上沿。页面自己的底部 padding（.portrait-home 140rpx / .body 220rpx）
+  // 是相对滚动容器底边的，收短后与 TabBar 的相对几何自动保持不变。宽屏不叠（桌面/
+  // 平板极少三键导航，宽屏底部由常驻播放栏管理）。
   const bottom = (reservePlayerBar.value ? "padding-bottom:" + QT_PLAYER_BAR_HEIGHT_PX + "px;" : "")
     + (!layout.isWide && layout.safeBottomPx > 0 ? "padding-bottom:" + layout.safeBottomPx + "px;" : "");
   if (!framed.value) return bottom;

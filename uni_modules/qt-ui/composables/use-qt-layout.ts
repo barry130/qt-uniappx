@@ -40,7 +40,10 @@ export type QtLayoutState = {
    * App.uvue 的 applyLegacyInsets 已把窗口拉回传统 inset 布局，该值恒 0）。
    * 悬浮 TabBar / toast 让位 / 悬浮球初始边距 / 页面滚动内容底 padding
    * 都要把它叠上去，否则非全面屏手机上底部元素与触控键重叠。
-   * 读自 uni.getWindowInfo().safeAreaInsets.bottom，refreshQtLayout 时刷新。
+   * 来源优先级：原生避让区（applyQtNativeSafeBottom 写入）> uni.safeAreaInsets
+   * ——安卓上后者报 592（真值 158 设备像素 / 42 逻辑像素，2026-10-31 vivo V2505A
+   * 实锤），既不是设备像素也不是逻辑像素，只能当原生读数到达前的兜底，
+   * 详见 readSafeBottom。**本字段单位是逻辑像素（CSS px）**。
    */
   safeBottomPx: number;
   /** 每发生一次真实尺寸变化自增；给「必须重建列表」的宿主做 key 用 */
@@ -67,6 +70,20 @@ let watcherTimer: number = 0;
 let watcherPaused = false;
 /** 上一次真正读取系统信息的时间戳，用于挂载高峰期的同步节流 */
 let lastReadAt = 0;
+/**
+ * 原生侧异步读到的底部导航避让高度（px）。-1 = 尚未读到（此时退回 uni 的
+ * safeAreaInsets，见 readSafeBottom）；>=0 = 原生已给出结论，此时它是唯一可信来源
+ *（写入方 applyQtNativeSafeBottom，来源 qt-app-native 避让区查询）。
+ */
+let nativeBottomInsetPx: number = -1;
+
+/**
+ * uni safeAreaInsets 兜底值的封顶比例（相对窗口高）。安卓上这个读数报的是 592
+ * （三键导航真值 158 设备像素 = 42 逻辑像素，这个 592 既不是设备像素也不是逻辑
+ * 像素，占窗口高 18.7%），不夹住会把内容区收短半屏；封顶只在原生读数到达前 /
+ * 没有原生读数的平台起作用。
+ */
+const SAFE_BOTTOM_FALLBACK_CAP_RATIO = 0.15;
 
 /**
  * 挂载节流窗口：长列表一次挂载上百个行组件（行组件 + 行内图标都会调 useQtLayout），
@@ -144,14 +161,72 @@ export function refreshQtLayout(breakpoint: number = QT_BREAKPOINT_DEFAULT): voi
 }
 
 function readSafeBottom(): number {
+  // #ifdef APP-ANDROID || APP-HARMONY
+  // 原生读数一旦到手就是唯一可信来源，且已在 services/app-native.uts 里折算成
+  // **逻辑像素**（原生给的是设备像素：三键导航真值 158 设备像素 = 42 逻辑像素）。
+  // 2026-10-31 vivo V2505A 实锤：uni.getWindowInfo().safeAreaInsets.bottom 报 592，
+  // 既不是设备像素（158）也不是逻辑像素（42），拿它当逻辑像素写进 padding-bottom
+  // 就是 592 设备像素 —— 内容容器 3168 → 2576，绝对定位的悬浮 TabBar
+  // （bottom = 24rpx + 592 逻辑像素）被顶到窗口中部（实测 top=1707）。
+  // 鸿蒙上同款接口恒回 0，也只能靠原生。
+  // 负数 = 原生读到了但系统已经让过位（符号编码见 services/app-native.uts）→ 0。
+  if (nativeBottomInsetPx != -1) return nativeBottomInsetPx > 0 ? nativeBottomInsetPx : 0;
+  // #endif
+  let fromInsets = 0;
   try {
     const info = uni.getWindowInfo();
     const insets = info.safeAreaInsets;
-    if (insets != null && insets.bottom > 0) return Math.round(insets.bottom);
-    return 0;
+    if (insets != null && insets.bottom > 0) fromInsets = Math.round(insets.bottom);
   } catch (_) {
-    return 0;
+    // 静默：uni 查询失败时只信原生避让区
   }
+  // 兜底也必须夹：安卓上这个读数报 592（真值 158 设备像素 / 42 逻辑像素，被当成
+  // 逻辑像素就是 592 设备像素），原生读数到达之前直接采信会让首帧把内容区收短半屏。
+  // 按窗口高的固定比例封顶，不写死 px（大屏上三键导航也更高）；iOS 没有原生读数，
+  // 走的就是这条，102 设备像素量级远在封顶内。
+  if (fromInsets > 0) {
+    let windowHeight = 0;
+    try {
+      windowHeight = uni.getWindowInfo().windowHeight;
+    } catch (_) {
+      // 静默：读不到窗口高就不封顶，保持原值
+    }
+    if (windowHeight > 0) {
+      const cap = Math.round(windowHeight * SAFE_BOTTOM_FALLBACK_CAP_RATIO);
+      if (fromInsets > cap) fromInsets = cap;
+    }
+  }
+  return fromInsets;
+}
+
+/**
+ * 写入原生侧异步读到的底部导航避让高度（App.uvue 启动与每次回前台时，
+ * 经 services/app-native.uts 的 readBottomNavInset 回调进来）。
+ * uni.getWindowInfo().safeAreaInsets.bottom 在两端都不可信（2026-10-31 真机反馈：
+ * 安卓机悬浮 TabBar 跑到屏幕中部、鸿蒙机压在导航键上）：安卓上它报 592（真值
+ * 158 设备像素 / 42 逻辑像素），鸿蒙上恒回 0。所以原生读数一到手就覆盖掉 insets，
+ * 只在原生读数还没到（本函数从未被调用、nativeBottomInsetPx 仍是 -1）时才退回
+ * insets，见 readSafeBottom。传进来的 px 已是**逻辑像素**（换算在
+ * services/app-native.uts 的 readBottomNavInset 里做，原生给的是设备像素）。
+ * 负数按 0 存：那是「系统已经让过位」的符号编码，语义等于不需要再让位。
+ * 值没变不赋值，避免无谓作废响应式绑定。
+ */
+export function applyQtNativeSafeBottom(px: number): void {
+  const clamped = px > 0 ? Math.round(px) : 0;
+  if (clamped == nativeBottomInsetPx) return;
+  nativeBottomInsetPx = clamped;
+  const merged = readSafeBottom();
+  // 留痕一次（每次回前台一条）：安卓上 insets 与原生读数会差一个屏幕密度，
+  // 有这行日志就不必再靠 View 树几何反推（2026-10-31 排查就是这么绕的）。
+  let rawInsets = 0;
+  try {
+    const insets = uni.getWindowInfo().safeAreaInsets;
+    if (insets != null && insets.bottom > 0) rawInsets = Math.round(insets.bottom);
+  } catch (_) {
+    // 静默：诊断日志读不到就按 0 打
+  }
+  console.log("[QtLayout] safeBottom native=" + clamped + " insets=" + rawInsets + " -> " + merged);
+  if (merged != layout.safeBottomPx) layout.safeBottomPx = merged;
 }
 
 function startWindowWatcher(breakpoint: number): void {
@@ -308,6 +383,8 @@ export function qtRailWidth(): number {
  * 手机档内容一样会随窗口宽度放大（见 qt-tab-bar 注释），常量写死 px 就只在 375dp
  * 手机上对；在 720dp 窗口上 TabBar 实际占 144 × 0.96 ≈ 138px，而这里仍返回 72，
  * 于是 toast 与悬浮球会压进 TabBar。改成走 `qtRpx(144)` 后与 CSS 完全同源。
+ * （2026-10-31 起常量本身从 144 变 184 = 离地 64rpx + 高 120rpx，见 qt-tab-bar 的
+ * TAB_BOTTOM_RPX；上面 144 的历史推演只是当时那版数值。）
  *
  * 给「浮在底部、必须让开 TabBar 才不遮挡」的宿主用（qt-toast-host；
  * qt-mini-player 悬浮球的初始边距也按它整体取值）。抽成函数而不是让各宿主
@@ -315,7 +392,7 @@ export function qtRailWidth(): number {
  * 看得见。宽屏下 TabBar 不渲染（qt-tab-bar 自带 v-if），但调用方本来就按
  * `layout.isWide` 分支，这里不做判断。
  */
-export const QT_TAB_BAR_HEIGHT_RPX = 144;
+export const QT_TAB_BAR_HEIGHT_RPX = 184;
 
 export function qtTabBarHeightPx(): number {
   return qtRpx(QT_TAB_BAR_HEIGHT_RPX) + layout.safeBottomPx;
