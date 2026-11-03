@@ -50,18 +50,14 @@
               <QtIcon class="cell-icon cell-icon-wide" name="disc" :size="36" color="#4fb186" />
               <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">同时下载封面</text>
               <view class="cell-right">
-                <view class="switch" :class="downloads.downloadCover ? 'switch-on' : ''" :style="downloads.downloadCover ? ('background-color:' + theme.skin.accent + ';') : ('background-color:' + theme.skin.surfaceMuted + ';')">
-                  <view class="switch-dot" />
-                </view>
+                <qt-switch :model-value="downloads.downloadCover" @change="toggleCover" />
               </view>
             </view>
             <view class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleLyric">
               <QtIcon class="cell-icon cell-icon-wide" name="list" :size="36" color="#5f9ea0" />
               <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">同时下载歌词</text>
               <view class="cell-right">
-                <view class="switch" :class="downloads.downloadLyric ? 'switch-on' : ''" :style="downloads.downloadLyric ? ('background-color:' + theme.skin.accent + ';') : ('background-color:' + theme.skin.surfaceMuted + ';')">
-                  <view class="switch-dot" />
-                </view>
+                <qt-switch :model-value="downloads.downloadLyric" @change="toggleLyric" />
               </view>
             </view>
             <view class="cell cell-no-border cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showStorageMode">
@@ -78,9 +74,7 @@
               <QtIcon class="cell-icon cell-icon-wide" name="trash" :size="36" color="#d9534f" />
               <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">删除记录时同时删除文件</text>
               <view class="cell-right">
-                <view class="switch" :class="downloads.deleteFileOnRemove ? 'switch-on' : ''" :style="downloads.deleteFileOnRemove ? ('background-color:' + theme.skin.accent + ';') : ('background-color:' + theme.skin.surfaceMuted + ';')">
-                  <view class="switch-dot" />
-                </view>
+                <qt-switch :model-value="downloads.deleteFileOnRemove" @change="toggleDeleteFile" />
               </view>
             </view>
           </view>
@@ -133,18 +127,14 @@
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="disc" :size="36" color="#4fb186" />
           <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">同时下载封面</text>
           <view class="cell-right">
-            <view class="switch" :class="downloads.downloadCover ? 'switch-on' : ''" :style="downloads.downloadCover ? ('background-color:' + theme.skin.accent + ';') : ('background-color:' + theme.skin.surfaceMuted + ';')">
-              <view class="switch-dot" />
-            </view>
+            <qt-switch :model-value="downloads.downloadCover" @change="toggleCover" />
           </view>
         </view>
         <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleLyric">
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="list" :size="36" color="#5f9ea0" />
           <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">同时下载歌词</text>
           <view class="cell-right">
-            <view class="switch" :class="downloads.downloadLyric ? 'switch-on' : ''" :style="downloads.downloadLyric ? ('background-color:' + theme.skin.accent + ';') : ('background-color:' + theme.skin.surfaceMuted + ';')">
-              <view class="switch-dot" />
-            </view>
+            <qt-switch :model-value="downloads.downloadLyric" @change="toggleLyric" />
           </view>
         </view>
         <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showStorageMode">
@@ -163,9 +153,7 @@
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="trash" :size="36" color="#d9534f" />
           <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">删除记录时同时删除文件</text>
           <view class="cell-right">
-            <view class="switch" :class="downloads.deleteFileOnRemove ? 'switch-on' : ''" :style="downloads.deleteFileOnRemove ? ('background-color:' + theme.skin.accent + ';') : ('background-color:' + theme.skin.surfaceMuted + ';')">
-              <view class="switch-dot" />
-            </view>
+            <qt-switch :model-value="downloads.deleteFileOnRemove" @change="toggleDeleteFile" />
           </view>
         </view>
       </view>
@@ -189,6 +177,7 @@
       v-model:visible="sheetVisible"
       :title="sheetTitle"
       :actions="sheetActions"
+      :selected-index="sheetSelectedIndex"
       @select="onSheetSelect"
     />
   </view>
@@ -198,6 +187,7 @@
 import { qtShowToast } from "@/services/toast";
 import { qtConfirm } from "@/services/confirm";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import QtSwitch from "@/uni_modules/qt-ui/components/qt-switch/qt-switch.uvue";
 import { useQtTwoColumn } from "@/uni_modules/qt-ui/composables/use-qt-columns";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { computed, ref } from "vue";
@@ -227,11 +217,13 @@ const defaultDirHint = DOWNLOAD_DIR_HINT;
 const sheetVisible = ref(false);
 const sheetTitle = ref("");
 const sheetActions = ref<SheetAction[]>([]);
+const sheetSelectedIndex = ref(-1);
 let sheetSelect: ((index: number) => void) | null = null;
 
-function openSheet(title: string, actions: SheetAction[], select: (index: number) => void): void {
+function openSheet(title: string, actions: SheetAction[], select: (index: number) => void, selectedIndex: number = -1): void {
   sheetTitle.value = title;
   sheetActions.value = actions;
+  sheetSelectedIndex.value = selectedIndex;
   sheetSelect = select;
   sheetVisible.value = true;
 }
@@ -253,13 +245,10 @@ function downloadNameFormatText(): string {
   return "歌手 - 歌名";
 }
 function showDownloadNameFormat(): void {
-  openSheet("下载文件名格式", nameFormatOptions.map((opt) => ({
-    name: opt.name,
-    color: opt.value == downloads.downloadNameFormat ? theme.skin.accent : undefined,
-  })), (index) => {
+  openSheet("下载文件名格式", nameFormatOptions.map((opt) => ({ name: opt.name })), (index) => {
     downloads.setDownloadNameFormat(nameFormatOptions[index].value);
     qtShowToast({ title: "下载文件名格式：" + nameFormatOptions[index].name, icon: "none" });
-  });
+  }, nameFormatOptions.map((opt) => opt.value).indexOf(downloads.downloadNameFormat));
 }
 
 // ==================== 下载存储方式 ====================
@@ -271,13 +260,10 @@ const storageModeOptions: { value: string; name: string }[] = [
   { value: "sidecar", name: "同目录文件" },
 ];
 function showStorageMode(): void {
-  openSheet("下载存储方式", storageModeOptions.map((opt) => ({
-    name: opt.name,
-    color: opt.value == downloads.storageMode ? theme.skin.accent : undefined,
-  })), (index) => {
+  openSheet("下载存储方式", storageModeOptions.map((opt) => ({ name: opt.name })), (index) => {
     downloads.setStorageMode(storageModeOptions[index].value);
     qtShowToast({ title: "下载存储方式：" + storageModeOptions[index].name, icon: "none" });
-  });
+  }, storageModeOptions.map((opt) => opt.value).indexOf(downloads.storageMode));
 }
 
 // ==================== 同时下载数 ====================
@@ -291,7 +277,6 @@ function showDownloadConcurrency(): void {
   for (let n = DOWNLOAD_CONCURRENCY_MIN; n <= DOWNLOAD_CONCURRENCY_MAX; n++) {
     actions.push({
       name: n + " 个" + (n > DOWNLOAD_CONCURRENCY_WARN_ABOVE ? "（较高）" : ""),
-      color: n == downloads.concurrency ? theme.skin.accent : undefined,
     });
   }
   openSheet("同时下载数", actions, (index) => {
@@ -310,7 +295,7 @@ function showDownloadConcurrency(): void {
       return;
     }
     applyDownloadConcurrency(value);
-  });
+  }, downloads.concurrency >= DOWNLOAD_CONCURRENCY_MIN && downloads.concurrency <= DOWNLOAD_CONCURRENCY_MAX ? downloads.concurrency - DOWNLOAD_CONCURRENCY_MIN : -1);
 }
 function applyDownloadConcurrency(value: number): void {
   downloads.setConcurrency(value);
@@ -493,23 +478,6 @@ onShow(() => {
 .cell-icon-wide { margin-right: 10px; }
 
 /* 开关：与 pages/desktop-lyric 同一套（Vapor 下圆角 + flex 对齐即可，无需伪元素） */
-.switch {
-  margin-left: 8px;
-  width: 44px;
-  height: 24px;
-  border-radius: 12px;
-  flex-direction: row;
-  align-items: center;
-}
-.switch-on {
-  justify-content: flex-end;
-}
-.switch-dot {
-  width: 20px;
-  height: 20px;
-  border-radius: 10px;
-  background-color: #ffffff;
-}
 
 .hint {
   margin-top: 18rpx;

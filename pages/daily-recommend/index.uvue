@@ -41,13 +41,7 @@
           <text v-if="resultProfileText.length > 0" class="whero-profile" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(11)" :max-lines="2">{{ resultProfileText }}</text>
           <!-- 口味切换：与模式正交，切换即重新生成（force） -->
           <view class="whero-tastes">
-            <view
-              v-for="(t, ti) in DAILY_TASTE_ORDER"
-              :key="'wt-' + ti"
-              class="taste-chip"
-              :style="tasteChipStyle(t)"
-              @click="pickTaste(t)"
-            ><text class="taste-chip-text" :style="tasteTextStyle(t)">{{ DAILY_TASTE_LABEL[t] }}</text></view>
+            <QtOption v-for="(t, ti) in DAILY_TASTE_ORDER" :key="'wt-' + ti" kind="chip" :label="DAILY_TASTE_LABEL[t]" :selected="taste == t" @select="pickTaste(t)" />
           </view>
           <view class="whero-actions">
             <qt-batch-bar
@@ -128,13 +122,7 @@
               <text class="desc" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 14)" :max-lines="2">{{ resultSummary.length > 0 ? resultSummary : metaLine }}</text>
               <text class="playcount" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 13)">{{ metaLine }}</text>
               <view class="hero-tastes">
-                <view
-                  v-for="(t, ti) in DAILY_TASTE_ORDER"
-                  :key="'ht-' + ti"
-                  class="taste-chip"
-                  :style="tasteChipStyle(t)"
-                  @click="pickTaste(t)"
-                ><text class="taste-chip-text" :style="tasteTextStyle(t)">{{ DAILY_TASTE_LABEL[t] }}</text></view>
+                <QtOption v-for="(t, ti) in DAILY_TASTE_ORDER" :key="'ht-' + ti" kind="chip" :label="DAILY_TASTE_LABEL[t]" :selected="taste == t" @select="pickTaste(t)" />
               </view>
             </template>
           </view>
@@ -146,13 +134,7 @@
           <text class="style-title" :class="layout.isWide ? 'style-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(30, 16)">你爱听什么风格？</text>
           <text class="style-hint" :class="layout.isWide ? 'style-hint-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 13)">选几个（最多 {{ DAILY_STYLE_SEED_MAX }} 个），按这些风格生成</text>
           <view class="style-chips">
-            <view
-              v-for="(opt, oi) in styleOptions"
-              :key="'so-' + oi"
-              class="style-chip" :class="layout.isWide ? 'style-chip-wide' : ''"
-              :style="styleChipStyle(opt)"
-              @click="toggleStyle(opt)"
-            ><text class="style-chip-text" :class="layout.isWide ? 'style-chip-text-wide' : ''" :style="styleChipTextStyle(opt)">{{ opt }}</text></view>
+            <QtOption v-for="(opt, oi) in styleOptions" :key="'so-' + oi" kind="chip" :label="opt" :selected="stylePicked.indexOf(opt) >= 0" @select="toggleStyle(opt)" />
           </view>
           <view class="style-go" :class="layout.isWide ? 'style-go-wide' : ''" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="applyStyleSeeds">
             <QtIcon name="sparkles" :size="layout.isWide ? 14 : 26" :color="themeStore.skin.accent" />
@@ -202,9 +184,7 @@
         <!-- 推荐行：序号 + 歌名 + 「歌手 · 推荐理由」；默认推荐顺序，可搜索/前端排序 -->
         <list-item v-for="(song, i) in visibleSongs" :key="song.platform + ':' + song.id" class="rc-item" :class="layout.isWide ? 'rc-item-wide' : ''">
           <view class="rc-row" :class="layout.isWide ? 'rc-row-wide' : ''" @click="onRowClick(song)">
-            <view v-if="selecting" class="rc-check" :class="layout.isWide ? 'rc-check-wide' : ''" :style="'border-color:' + (isSelected(qtSongKey(song)) ? themeStore.skin.accent : themeStore.skin.border) + ';background-color:' + (isSelected(qtSongKey(song)) ? themeStore.skin.accent : 'transparent') + ';'" @click.stop="toggleSelect(qtSongKey(song))">
-              <QtIcon v-if="isSelected(qtSongKey(song))" name="check" :size="layout.isWide ? 12 : 22" color="#ffffff" />
-            </view>
+            <QtCheckbox v-if="selecting" class="rc-check-gap" :class="layout.isWide ? 'rc-check-gap-wide' : ''" :checked="isSelected(qtSongKey(song))" @change="toggleSelect(qtSongKey(song))" />
             <text v-else class="rc-idx" :class="layout.isWide ? 'rc-idx-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(24, 13)">{{ i + 1 }}</text>
             <image class="rc-cover" :class="layout.isWide ? 'rc-cover-wide' : ''" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
             <view class="rc-info" :class="layout.isWide ? 'rc-info-wide' : ''">
@@ -290,6 +270,8 @@ import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
 import QtSkeleton from "@/uni_modules/qt-ui/components/qt-skeleton/qt-skeleton.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
+import QtCheckbox from "@/uni_modules/qt-ui/components/qt-checkbox/qt-checkbox.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtSortPanel from "@/uni_modules/qt-ui/components/qt-sort-panel/qt-sort-panel.uvue";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
@@ -323,7 +305,8 @@ import {
   saveStyleSeeds,
   saveTaste,
 } from "@/services/daily-recommend";
-import type { DailyRecommendResult, DailyTaste } from "@/services/daily-recommend";
+import type { DailyRecommendResult } from "@/services/daily-recommend";
+import type { DailyTaste } from "@/services/recommend-types";
 
 const player = usePlayerStore();
 const themeStore = useThemeStore();
@@ -641,38 +624,22 @@ function toggleStyle(name: string): void {
   if (i >= 0) stylePicked.value.splice(i, 1);
   else if (stylePicked.value.length < DAILY_STYLE_SEED_MAX) stylePicked.value.push(name);
 }
-function styleChipStyle(name: string): string {
-  const on = stylePicked.value.indexOf(name) >= 0;
-  return "background-color:" + (on ? themeStore.skin.accent : themeStore.skin.surfaceMuted) + ";border-color:" + (on ? themeStore.skin.accent : themeStore.skin.border) + ";";
-}
-function styleChipTextStyle(name: string): string {
-  const on = stylePicked.value.indexOf(name) >= 0;
-  return "color:" + (on ? themeStore.skin.onAccent : themeStore.skin.text) + ";" + qtFontDual(23, 13);
-}
-function tasteChipStyle(t: DailyTaste): string {
-  const on = t == taste.value;
-  return "background-color:" + (on ? themeStore.skin.accentSoft : themeStore.skin.surfaceMuted) + ";border-color:" + (on ? themeStore.skin.accent : themeStore.skin.border) + ";";
-}
-function tasteTextStyle(t: DailyTaste): string {
-  const on = t == taste.value;
-  return "color:" + (on ? themeStore.skin.accent : themeStore.skin.textMuted) + ";" + qtFontDual(23, 13);
-}
 
 // ==================== AI 模式设置 ====================
 const modeSheetVisible = ref(false);
 /** 服务端 AI 仅管理员可见（qt-pc 同款门禁；规则 / 本地对所有人开放） */
 const modeActions = computed<SheetAction[]>((): SheetAction[] => {
   const acts: SheetAction[] = [];
-  acts.push({ name: "纯规则（不联网，永远可用）", color: readMode() == "rule" ? themeStore.skin.accent : "" });
-  acts.push({ name: "本地模型精选（模型挂了自动退回规则）", color: readMode() == "local" ? themeStore.skin.accent : "" });
-  if (isQtAdmin()) acts.push({ name: "服务端 AI（需登录，走 astral）", color: readMode() == "server" ? themeStore.skin.accent : "" });
+  acts.push({ name: "纯规则（不联网，永远可用）" });
+  acts.push({ name: "本地模型精选（模型挂了自动退回规则）" });
+  if (isQtAdmin()) acts.push({ name: "服务端 AI（需登录，走 astral）" });
   return acts;
 });
 const modeSelectedIndex = computed((): number => {
   const m = readMode();
   if (m == "local") return 1;
   if (m == "server" && isQtAdmin()) return 2;
-  return 0;
+  return m == "rule" ? 0 : -1;
 });
 function openModeSheet(): void {
   modeSheetVisible.value = true;
@@ -832,10 +799,6 @@ onUnmounted((): void => {
 .style-hint { margin-top: 8rpx; }
 .style-hint-wide { margin-top: 4px; }
 .style-chips { margin-top: 18rpx; flex-direction: row; flex-wrap: wrap; }
-.style-chip { margin: 0 12rpx 12rpx 0; padding: 8rpx 22rpx; border-width: 1px; border-style: solid; border-radius: 26rpx; }
-.style-chip-wide { margin: 0 6px 6px 0; padding: 4px 12px; border-radius: 14px; }
-.style-chip-text { color: #2c3242; }
-.style-chip-text-wide { }
 .style-go { margin-top: 10rpx; height: 72rpx; border-radius: 36rpx; flex-direction: row; align-items: center; justify-content: center; }
 .style-go-wide { margin-top: 8px; height: 40px; border-radius: 20px; }
 .style-go-text { margin-left: 8rpx; }
@@ -856,8 +819,8 @@ onUnmounted((): void => {
 .rc-item-wide { padding: 2px 16px; }
 .rc-row { flex-direction: row; align-items: center; padding: 10rpx 0; }
 .rc-row-wide { padding: 4px 0; }
-.rc-check { width: 40rpx; height: 40rpx; border-width: 2rpx; border-style: solid; border-radius: 20rpx; align-items: center; justify-content: center; margin-right: 16rpx; }
-.rc-check-wide { width: 20px; height: 20px; border-radius: 10px; margin-right: 8px; border-width: 1px; }
+.rc-check-gap { margin-right: 16rpx; }
+.rc-check-gap-wide { margin-right: 8px; }
 .rc-idx { width: 48rpx; text-align: center; }
 .rc-idx-wide { width: 24px; }
 .rc-cover { width: 80rpx; height: 80rpx; border-radius: 12rpx; margin-left: 12rpx; }

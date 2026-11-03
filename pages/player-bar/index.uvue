@@ -8,7 +8,7 @@
         <view class="col" :style="colStyle">
           <view class="group group-wide group-col" :style="groupStyle">
             <view class="cell cell-wide" :style="cellStyle">
-              <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">已展示 {{ barToolCounted }}/{{ maxVisible }} 个，关掉的按钮播放页不再显示</text>
+              <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">已展示 {{ barToolCounted }}/{{ maxVisible }} 个，关掉的按钮播放页最下面那一行不再显示</text>
             </view>
             <view
               v-for="(tool, index) in barTools"
@@ -21,7 +21,7 @@
               <QtIcon class="cell-icon cell-icon-wide" :name="tool.icon" :size="36" :color="toolColor(index)" />
               <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ tool.label }}</text>
               <view class="cell-right">
-                <text class="cell-value cell-value-wide" :style="('color:' + barToolColor(tool.id) + ';') + qtFontDual(24, 14)">{{ barToolText(tool.id) }}</text>
+                <QtSwitch :model-value="playerBar.isVisible(tool.id)" @change="toggleBarTool(tool.id)" />
               </view>
             </view>
           </view>
@@ -37,7 +37,7 @@
             </view>
           </view>
           <view class="hint hint-col">
-            <text class="hint-text hint-text-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">播放页进度条上方那一行、以及横屏控制行右侧那一组，都按这里的开关渲染。最多同时展示 {{ maxVisible }} 个。宽屏底栏右侧的收藏 / 播放模式 / 播放队列 / 音量是固定常驻的（它们不在这个额度里），不受这里控制。</text>
+            <text class="hint-text hint-text-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">手机播放页最下面那一行（以及横屏控制行右侧那一组）按这里的开关渲染，最多同时展示 {{ maxVisible }} 个。收藏 / 分享 / 歌手是固定常驻项（入口分别是曲名行、右上角、歌手行），不在这个额度里；播放链接仅管理员可见。</text>
           </view>
         </view>
       </view>
@@ -46,7 +46,7 @@
       <view v-else>
       <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
         <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle">
-          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">已展示 {{ barToolCounted }}/{{ maxVisible }} 个，关掉的按钮播放页不再显示</text>
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">已展示 {{ barToolCounted }}/{{ maxVisible }} 个，关掉的按钮播放页最下面那一行不再显示</text>
         </view>
         <view
           v-for="(tool, index) in barTools"
@@ -59,7 +59,7 @@
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" :name="tool.icon" :size="36" :color="toolColor(index)" />
           <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ tool.label }}</text>
           <view class="cell-right">
-            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + barToolColor(tool.id) + ';') + qtFontDual(24, 14)">{{ barToolText(tool.id) }}</text>
+            <QtSwitch :model-value="playerBar.isVisible(tool.id)" @change="toggleBarTool(tool.id)" />
           </view>
         </view>
       </view>
@@ -75,7 +75,7 @@
       </view>
 
       <view class="hint">
-        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">播放页进度条上方那一行、以及横屏控制行右侧那一组，都按这里的开关渲染。最多同时展示 {{ maxVisible }} 个。宽屏底栏右侧的收藏 / 播放模式 / 播放队列 / 音量是固定常驻的（它们不在这个额度里），不受这里控制。</text>
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">手机播放页最下面那一行（以及横屏控制行右侧那一组）按这里的开关渲染，最多同时展示 {{ maxVisible }} 个。收藏 / 分享 / 歌手是固定常驻项（入口分别是曲名行、右上角、歌手行），不在这个额度里；播放链接仅管理员可见。</text>
       </view>
       </view>
     </scroll-view>
@@ -91,11 +91,13 @@ import { qtContentWidth, QT_GUTTER_PX } from "@/uni_modules/qt-ui/composables/us
 import { computed, ref } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtSwitch from "@/uni_modules/qt-ui/components/qt-switch/qt-switch.uvue";
 import {
   PLAYER_BAR_MAX_VISIBLE,
   PLAYER_BAR_TOOLS,
   type PlayerBarToolMeta,
   playerBarCounted,
+  playerBarFixed,
   usePlayerBarStore,
 } from "@/stores/player-bar";
 import { isQtAdmin } from "@/services/music-api";
@@ -110,11 +112,12 @@ const groupStyle = computed<string>(() => "background-color:" + theme.skin.surfa
 const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
 
 const maxVisible = PLAYER_BAR_MAX_VISIBLE;
-/** 当前行清单：非管理员的 playUrl（adminOnly）不出现 */
+/** 当前行清单：固定常驻项（收藏/分享/歌手）在本页不出现；非管理员的 playUrl（adminOnly）也不出现 */
 const barTools = computed<PlayerBarToolMeta[]>(() => {
   const out: PlayerBarToolMeta[] = [];
   for (let i = 0; i < PLAYER_BAR_TOOLS.length; i++) {
     const tool = PLAYER_BAR_TOOLS[i];
+    if (playerBarFixed(tool.id)) continue;
     if (tool.adminOnly && !qtAdmin.value) continue;
     out.push(tool);
   }
@@ -132,12 +135,6 @@ function toggleBarTool(id: string): void {
   if (!ok) {
     qtShowToast({ title: "最多展示 " + maxVisible + " 个，请先关掉一个", icon: "none" });
   }
-}
-function barToolText(id: string): string {
-  return playerBar.isVisible(id) ? "已展示" : "未展示";
-}
-function barToolColor(id: string): string {
-  return playerBar.isVisible(id) ? theme.skin.accent : theme.skin.textMuted;
 }
 function resetDefault(): void {
   playerBar.reset();

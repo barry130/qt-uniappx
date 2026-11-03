@@ -537,11 +537,13 @@ function interleaveBySinger(items: ScoredCandidate[]): ScoredCandidate[] {
  * 推荐理由：只陈述能验证的事实，不编故事。优先级越靠前信号越硬
  * （收藏 > 同专辑 > 常听歌手 > 收藏口味 > 新歌手+语种 > 语种 > 没听过）。
  * 「常听歌手」与「只收藏过这个歌手」必须分开：收藏 ≠ 听过，说「常听」就是编故事。
+ * 唯一跟着口味变措辞的是最后那条「没听过」：三档都会推没听过的歌，但心动/常听
+ * 的口味是「按你的口味找同款」，说「换个口味试试」会自相矛盾（只有探索模式才是真的换）。
  */
 export function reasonFor(
   candidate: ScoredCandidate,
   profile: StyleProfile,
-  _taste: DailyTaste,
+  taste: DailyTaste,
 ): string {
   const hits: Set<string> = new Set<string>(candidate.hits as string[]);
   const song = candidate.song;
@@ -571,7 +573,13 @@ export function reasonFor(
 
   if (hits.has("main-lang")) return `符合你常听的${langName}`;
 
-  if (hits.has("unplayed")) return "你没听过，换个口味试试";
+  // 没听过的歌三档口味都会推，措辞必须跟着口味走：
+  // 心动、常听都是「按口味找同款」，说「换个口味」等于自己拆台（PC 端用户已反馈）。
+  if (hits.has("unplayed")) {
+    if (taste == "heart") return "风格贴近，你还没听过";
+    if (taste == "familiar") return "和你常听的相近，还没播过";
+    return "你没听过，换个口味试试";
+  }
 
   return "换一批看看";
 }

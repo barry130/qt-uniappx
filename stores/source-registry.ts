@@ -366,9 +366,10 @@ function migrateStaleQualities(): void {
     }
     if (ids.length == 0) continue;
     const highest = ids[ids.length - 1];
-    const playEff = sourcePlayQualityOf(src.id, player.quality);
-    if (ids.indexOf(playEff) < 0) setSourcePlayQuality(src.id, highest);
     const dlEff = sourceDownloadQualityOf(src.id, downloads.downloadQuality);
+    // 播放缺省跟随下载音质（两处口径必须一致，否则校验会把播放档位误改成最高档）
+    const playEff = sourcePlayQualityOf(src.id, dlEff);
+    if (ids.indexOf(playEff) < 0) setSourcePlayQuality(src.id, highest);
     if (ids.indexOf(dlEff) < 0) setSourceDownloadQuality(src.id, highest);
   }
 }

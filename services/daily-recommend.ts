@@ -121,8 +121,12 @@ const LOCAL_PLATFORM = "local";
  * 从**取数侧**扩维度：榜单路、风格/情绪/场景/年代关键词的跨源搜索、风格歌单、
  * 搜索历史；每首歌带「来自哪条风格线」的 provenance，排序按线交织，提示词要求
  * 覆盖 3–5 条线。池子/排序/提示词全变，当天旧缓存作废重算。
+ *
+ * v10（2026-11-01）：用户反馈「心动模式里出现换种口味的推荐」。入选规则没动，是
+ * 「没听过」这条理由的措辞不分口味（心动/常听挂「换个口味试试」自相矛盾）。
+ * `reasonFor` 按口味给措辞后，缓存里的旧字符串必须重算。
  */
-export const DAILY_RULE_VERSION = 9;
+export const DAILY_RULE_VERSION = 10;
 
 /** 目标条数 */
 export const DAILY_TARGET = 50;
@@ -1588,7 +1592,7 @@ export function rankCandidates(
 }
 
 /** 规则模式的推荐理由：只陈述能验证的事实，不编故事 */
-export function ruleReason(song: Song, pref: DailyPreference): string {
+export function ruleReason(song: Song, pref: DailyPreference, taste: DailyTaste): string {
   const profile =
     pref.style != null
       ? pref.style
@@ -1621,7 +1625,7 @@ export function ruleReason(song: Song, pref: DailyPreference): string {
   // 没听过要单独说出来：空画像时所有歌都落到兜底文案，理由就没有信息量了。
   if (!isPlayed(song, pref)) hits.push("unplayed");
   const candidate: ScoredCandidate = { song, style, score: 0, hits };
-  return reasonFor(candidate, profile, "heart");
+  return reasonFor(candidate, profile, taste);
 }
 
 /**
@@ -2429,7 +2433,7 @@ export function limitAiPicks(
       }
       offCore += 1;
     }
-    const reason = pick.reason.length > 0 ? pick.reason : ruleReason(song, pref);
+    const reason = pick.reason.length > 0 ? pick.reason : ruleReason(song, pref, taste);
     items.push({ song, reason });
   }
   return items;
@@ -2525,7 +2529,7 @@ async function pickByServer(
       }
     }
     if (dup) continue;
-    picks.push({ index, reason: ruleReason(song, pref) });
+    picks.push({ index, reason: ruleReason(song, pref, taste) });
   }
   if (picks.length == 0) {
     throw new Error(parsed.error != null ? parsed.error : "服务端没挑出可用的歌");
@@ -2692,7 +2696,7 @@ export async function generateDailyRecommend(
   const ruleItems: DailyRecommendItem[] = [];
   const ruleTop = rulePicked.slice(0, DAILY_TARGET);
   for (let i = 0; i < ruleTop.length; i++) {
-    ruleItems.push({ song: ruleTop[i], reason: ruleReason(ruleTop[i], pref) });
+    ruleItems.push({ song: ruleTop[i], reason: ruleReason(ruleTop[i], pref, taste) });
   }
   // 画像的人话描述：页面上要显示「系统认为你是什么口味」。冷启动时画像一定是空的，
   // 显示「口味还不明显」不如直接让他去选风格。
@@ -2782,7 +2786,7 @@ export async function generateDailyRecommend(
       const song = rulePicked[i];
       if (used.has(trackKey(song))) continue;
       used.add(trackKey(song));
-      items.push({ song, reason: ruleReason(song, pref) });
+      items.push({ song, reason: ruleReason(song, pref, taste) });
       filled += 1;
     }
     // 模型给的是它自己的顺序，可能把同一个歌手连着排 —— 只做最小相邻交换，

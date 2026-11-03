@@ -63,9 +63,7 @@
           </view>
           <!-- 系统音开关：默认屏蔽铃声/通知/闹钟/录音/应用音效，勾上后它们也进列表 -->
           <view class="rule-flag" :class="layout.isWide ? 'rule-flag-wide' : ''" @click="toggleSystemSounds">
-            <view class="rule-box" :class="layout.isWide ? 'rule-box-wide' : ''" :style="includeSystemSounds ? 'background-color:' + theme.skin.accent + ';border-color:' + theme.skin.accent + ';' : 'border-color:' + theme.skin.border + ';'">
-              <QtIcon v-if="includeSystemSounds" name="check" :size="layout.isWide ? 10 : 18" :color="theme.skin.onAccent" />
-            </view>
+            <qt-checkbox :checked="includeSystemSounds" size="sm" @change="toggleSystemSounds" />
             <text class="rule-flag-text" :class="layout.isWide ? 'rule-flag-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">包含系统音</text>
           </view>
         </view>
@@ -85,9 +83,7 @@
                 <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 16)" :max-lines="1">{{ folder.name }}</text>
                 <text class="meta" :class="layout.isWide ? 'meta-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)" :max-lines="1">{{ folder.path }} · {{ folder.count }} 首</text>
               </view>
-              <view class="checkbox" :class="layout.isWide ? 'checkbox-wide' : ''" :style="isChecked(folder.path) ? 'background-color:' + theme.skin.accent + ';border-color:' + theme.skin.accent + ';' : 'border-color:' + theme.skin.border + ';'">
-                <QtIcon v-if="isChecked(folder.path)" name="check" :size="layout.isWide ? 12 : 22" :color="theme.skin.onAccent" />
-              </view>
+              <qt-checkbox :checked="isChecked(folder.path)" @change="toggleFolder(folder.path)" />
               <view class="row-divider" :class="layout.isWide ? 'row-divider-wide' : ''" :style="'background-color:' + theme.skin.divider + ';'" />
             </view>
             <view class="foot-space" :class="layout.isWide ? 'foot-space-wide' : ''"></view>
@@ -102,14 +98,7 @@
              页签常驻、行高固定，勾选歌曲时页面零位移 -->
         <view class="head-row" :class="layout.isWide ? 'head-row-wide' : ''">
           <view class="seg-row">
-            <view
-              v-for="opt in viewOptions"
-              :key="opt.value"
-              class="seg-btn"
-              :class="[layout.isWide ? 'seg-btn-wide' : '', listView == opt.value ? 'seg-active' : 'seg-idle']"
-              :style="listView == opt.value ? 'background-color:' + theme.skin.accentSoft + ';color:' + theme.skin.accent + ';' : 'color:' + theme.skin.text + ';'"
-              @click="listView = opt.value"
-            >{{ opt.label }}</view>
+            <qt-segmented class="view-segments" :list="viewLabels" :model-value="viewSelectedIndex" :scrollable="true" @change="selectView" />
           </view>
           <view v-if="!selecting" class="head-acts">
             <view class="head-act" :class="layout.isWide ? 'head-act-wide' : ''" @click="toggleSearch">
@@ -231,9 +220,7 @@
           <view class="menu-item" :class="layout.isWide ? 'menu-item-wide' : ''" @click="onMenuItem('syssound')">
             <QtIcon name="sliders" :size="layout.isWide ? 14 : 26" :color="theme.skin.text" />
             <text class="menu-item-text" :class="layout.isWide ? 'menu-item-text-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">包含系统音</text>
-            <view class="menu-item-flag" :class="layout.isWide ? 'menu-item-flag-wide' : ''">
-              <QtIcon v-if="includeSystemSounds" name="check" :size="layout.isWide ? 14 : 26" :color="theme.skin.accent" />
-            </view>
+            <qt-checkbox :checked="includeSystemSounds" size="sm" @change="onMenuItem('syssound')" />
           </view>
           <view class="menu-item" :class="layout.isWide ? 'menu-item-wide' : ''" @click="onMenuItem('delmode')">
             <QtIcon name="settings" :size="layout.isWide ? 14 : 26" :color="theme.skin.text" />
@@ -255,6 +242,8 @@ import { qtShowActionSheet } from "@/services/action-sheet";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
+import QtCheckbox from "@/uni_modules/qt-ui/components/qt-checkbox/qt-checkbox.uvue";
+import QtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
 import LocalRow from "@/uni_modules/qt-ui/components/qt-local-row/qt-local-row.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
@@ -286,14 +275,12 @@ const includeSystemSounds = ref(false);
 const DELETE_FILE_KEY = "qt-local-delete-file-v1";
 const deleteFileWithSong = ref(false);
 
-/** 删除设置：弹窗二选一（删除歌曲时是否连本地文件一起删），当前项带 ✓ 标记 */
+/** 删除设置：二选一，选择态由共享 action sheet 渲染。 */
 function showDeleteModeSheet(): void {
   const onlyRemove = "删除时仅从列表移除，保留文件";
   const alsoDelete = "删除时同时删除本地文件";
-  const items = deleteFileWithSong.value
-    ? [onlyRemove, "✓ " + alsoDelete]
-    : ["✓ " + onlyRemove, alsoDelete];
-  qtShowActionSheet({ title: "删除设置", itemList: items }).then((idx: number) => {
+  const items = [onlyRemove, alsoDelete];
+  qtShowActionSheet({ title: "删除设置", itemList: items, selectedIndex: deleteFileWithSong.value ? 1 : 0 }).then((idx: number) => {
     if (idx != 0 && idx != 1) return;
     deleteFileWithSong.value = idx == 1;
     uni.setStorageSync(DELETE_FILE_KEY, deleteFileWithSong.value);
@@ -472,6 +459,12 @@ const viewOptions: { value: string; label: string }[] = [
   { value: "albums", label: "专辑" },
   { value: "folders", label: "文件夹" },
 ];
+const viewLabels = viewOptions.map((opt) => opt.label);
+const viewSelectedIndex = computed((): number => viewOptions.map((opt) => opt.value).indexOf(listView.value));
+function selectView(index: number): void {
+  if (index < 0 || index >= viewOptions.length) return;
+  listView.value = viewOptions[index].value;
+}
 
 const sortOptions: { value: string; name: string }[] = [
   { value: "title", name: "标题" },
@@ -1182,21 +1175,6 @@ onShow(() => {
 .rule-flag-wide {
   margin-top: 9px;
 }
-.rule-box {
-  width: 34rpx;
-  height: 34rpx;
-  border-radius: 10rpx;
-  /* border-style 必须显式写，否则 Vapor 下边框不绘制（未选中态会完全看不见） */
-  border-style: solid;
-  border-width: 2px;
-  align-items: center;
-  justify-content: center;
-}
-.rule-box-wide {
-  width: 20px;
-  height: 20px;
-  border-radius: 6px;
-}
 .rule-flag-text {
   margin-left: 12rpx;
   font-size: 22rpx;
@@ -1283,21 +1261,6 @@ onShow(() => {
   margin-top: 4px;
   font-size: 13px;
 }
-.checkbox {
-  width: 44rpx;
-  height: 44rpx;
-  border-radius: 22rpx;
-  /* border-style 必须显式写，否则 Vapor 下边框不绘制（未选中态会完全看不见） */
-  border-style: solid;
-  border-width: 2px;
-  align-items: center;
-  justify-content: center;
-}
-.checkbox-wide {
-  width: 24px;
-  height: 24px;
-  border-radius: 12px;
-}
 .foot-space {
   height: 210rpx;
 }
@@ -1336,8 +1299,13 @@ onShow(() => {
 /* ===== 分类页签 / 搜索行 / 统计行 / 播放全部行 ===== */
 /* 页签组：页签行左侧的分类胶囊组（无外框，参照系统播放器本地页） */
 .seg-row {
+  flex: 1;
+  min-width: 0;
   flex-direction: row;
   align-items: center;
+}
+.view-segments {
+  flex: 1;
 }
 /* 搜索行：点标题行放大镜展开/收起 */
 .search-row {
@@ -1444,19 +1412,6 @@ onShow(() => {
 }
 .search-ph { color: #969dad; font-size: 26rpx; }
 .search-ph-wide { color: #969dad; font-size: 14px; }
-.seg-btn {
-  padding: 10rpx 20rpx;
-  margin-right: 12rpx;
-  font-size: 24rpx;
-  font-weight: 500;
-  border-radius: 30rpx;
-}
-.seg-btn-wide {
-  padding: 6px 12px;
-  margin-right: 8px;
-  font-size: 13px;
-  border-radius: 16px;
-}
 .manage-btn {
   flex-direction: row;
   align-items: center;
@@ -1530,18 +1485,6 @@ onShow(() => {
 .menu-item-text-wide {
   margin-left: 10px;
   font-size: 14px;
-}
-/* 勾选标记固定贴右，且始终占位（未勾选时是空容器），菜单宽度不会因勾选变化而跳动 */
-.menu-item-flag {
-  margin-left: auto;
-  width: 26rpx;
-  height: 26rpx;
-  align-items: center;
-  justify-content: center;
-}
-.menu-item-flag-wide {
-  width: 14px;
-  height: 14px;
 }
 
 /* ===== 空状态 / 扫描中 ===== */

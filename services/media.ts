@@ -198,8 +198,14 @@ export async function uploadAvatar(filePath: string): Promise<string> {
 }
 
 /**
- * 收藏歌单封面上传（每日所有歌单合计限次，由文件夹策略承载）。
- * pid 用歌单的全局唯一键（在线歌单即平台歌单号）。
+ * 歌单封面上传（/like/playlist/{pid}/cover/** 直传链路，UPDATE_DESIGN.md §5.3）。
+ *
+ * 与头像那条链路不同的地方：complete 阶段服务端直接改数据库
+ * （`qt_like_playlist.pic_url`）并推进该用户的同步 seq，所以封面是「真的写库」，
+ * 其他设备下次增量拉取就能看到新封面，客户端不需要再补推 playlist/add。
+ *
+ * 前置条件：这个歌单在服务器上必须已有收藏行 —— 同步过的自建歌单，或任何已收藏的
+ * 在线歌单。还没同步过的自建歌单服务端会说「歌单不存在」，文案原样抛给调用方。
  */
 export async function uploadPlaylistCover(pid: string, platform: string, filePath: string): Promise<string> {
   const mime = guessImageMime(filePath);
@@ -208,20 +214,19 @@ export async function uploadPlaylistCover(pid: string, platform: string, filePat
   }
   const size = await fileSize(filePath);
   const fileName = "cover." + imageExt(filePath);
-  const url = await uploadFlow(
-    "app/user/like/playlist/" + encodeURIComponent(pid) + "/cover/ticket",
+  return await uploadFlow(
+    "app/user/like/playlist/" + pid + "/cover/ticket",
     { platform, fileName, contentType: mime, sizeBytes: size } as UTSJSONObject,
-    "app/user/like/playlist/" + encodeURIComponent(pid) + "/cover/complete?platform=" + encodeURIComponent(platform),
+    "app/user/like/playlist/" + pid + "/cover/complete?platform=" + platform,
     filePath,
     mime
   );
-  return url;
 }
 
-/** 清除歌单封面（恢复默认本地资源） */
+/** 取消自定义封面（恢复默认展示）：服务端把 pic_url 置空并推进 seq，不占每日上传次数。 */
 export async function clearPlaylistCover(pid: string, platform: string): Promise<void> {
   await apiRequest(
-    "app/user/like/playlist/" + encodeURIComponent(pid) + "/cover?platform=" + encodeURIComponent(platform),
+    "app/user/like/playlist/" + pid + "/cover?platform=" + platform,
     new UTSJSONObject(),
     "DELETE",
     true

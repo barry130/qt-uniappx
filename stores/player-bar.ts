@@ -1,16 +1,28 @@
 import { reactive } from "vue";
 import { logWarn } from "@/services/logger";
 
-const PLAYER_BAR_VISIBLE_KEY = "qt-player-bar-visible";
+/**
+ * v2：收藏 / 分享 / 歌手 改为固定常驻（见 PlayerBarToolMeta.fixed），不再进白名单，
+ * 默认展示集也随之换成「下载 / 音质 / 换源」。旧键里的 like/share/artist 在新口径下
+ * 无意义，换键而不是迁移：旧值 5 项会把新上限 4 名额挤满，用户看到的是「改了等于没改」。
+ */
+const PLAYER_BAR_VISIBLE_KEY = "qt-player-bar-visible-v2";
 
 /**
- * 硬上限：进度条上方那一行最多同时展示 5 个工具按钮（用户要求「可以限制死」）。
+ * 硬上限：手机播放页最下面那一行，除右侧「更多」外最多同时展示 4 个工具按钮
+ * （用户 m15536 明确要求「设置里改为最多4项」）。
  *
- * **与 qt-pc 的 10 不是笔误，别对齐**：PC 是鼠标操作、按钮行有整行宽度；手机进度条
- * 上方那一行要给歌词让位，5 个按钮（约 5×40px + 间距 ≈ 240px）才不挤。改大之前先在
- * 紧凑屏（≤360dp）上数一遍宽度。
+ * **与 qt-pc 的 10 不是笔误，别对齐**：PC 是鼠标操作、按钮行有整行宽度；手机那一行
+ * 要留出右侧三个点的位置，4 个按钮（约 4×44px + 间距）才不挤。改大之前先在紧凑屏
+ * （≤360dp）上数一遍宽度。
  */
-export const PLAYER_BAR_MAX_VISIBLE = 5;
+export const PLAYER_BAR_MAX_VISIBLE = 4;
+
+/**
+ * 固定常驻项：收藏 / 分享 / 歌手。它们的入口在播放页别处（收藏在歌名行、分享在
+ * 右上角、歌手在歌手行），因此不受「播放页展示设置」控制，也不消耗名额、不写进存储。
+ */
+const FIXED_TOOL_IDS: string[] = ["like", "share", "artist"];
 
 /**
  * 播放页工具按钮开关（进度条上方那一行；横屏是控制行右侧那一组）。
@@ -46,8 +58,13 @@ export const PLAYER_BAR_TOOLS: PlayerBarToolMeta[] = [
   { id: "playUrl", label: "播放链接", hint: "仅管理员：查看 / 复制当前播放地址", icon: "copy", adminOnly: true },
 ];
 
-/** 首次运行（存储里没有这个键）时的默认展示集：与原行为一致 */
-const DEFAULT_VISIBLE: string[] = ["like", "download", "artist", "quality", "playUrl"];
+/** 首次运行（存储里没有这个键）时的默认展示集：下载 / 音质 / 换源（用户 m15536 指定） */
+const DEFAULT_VISIBLE: string[] = ["download", "quality", "source"];
+
+/** 是否固定常驻项（收藏 / 分享 / 歌手）：恒显示、不占名额、不进存储 */
+export function playerBarFixed(id: string): boolean {
+  return FIXED_TOOL_IDS.indexOf(id) >= 0;
+}
 
 export function playerBarTool(id: string): PlayerBarToolMeta | null {
   for (let i = 0; i < PLAYER_BAR_TOOLS.length; i++) {
@@ -84,6 +101,7 @@ export function sanitizeVisibleTools(ids: string[], counted?: (id: string) => bo
     const id = ids[i];
     if (id == null || id.length == 0) continue;
     if (playerBarTool(id) == null) continue;
+    if (playerBarFixed(id)) continue;
     if (out.indexOf(id) >= 0) continue;
     const isCounted = counted == null ? true : counted(id);
     if (isCounted) {
@@ -127,6 +145,7 @@ class PlayerBarStore {
   }
 
   isVisible(id: string): boolean {
+    if (playerBarFixed(id)) return true;
     return this.visible.indexOf(id) >= 0;
   }
 
@@ -145,6 +164,8 @@ class PlayerBarStore {
    */
   toggle(id: string, counted: (id: string) => boolean): boolean {
     if (playerBarTool(id) == null) return false;
+    // 固定常驻项不在设置页出现；万一被调用到，按「已展示」处理，不写存储
+    if (playerBarFixed(id)) return true;
     const next: string[] = [];
     let removed = false;
     for (let i = 0; i < this.visible.length; i++) {

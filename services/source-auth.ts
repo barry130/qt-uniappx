@@ -14,19 +14,14 @@
  *   该面的凭据（数据包收到的是「这个源的这类请求一律匿名」），别的源不受
  *   牵连——关一个源的播放登录态不再连带收回其他源的官方档位。
  *
- * 开关解析链（生效值 = effectiveTogglesFor）：
- *   per-source 表（TOGGLES_KEY）→ 旧全局键（升级继承，只读）→ 缺省。
- * - 缺省口径（对齐 PC 2026-10-27）：数据面开、播放面关。数据面是搜索/歌单/
- *   歌词这类「不带凭据就用不了」的必需项；播放面默认不带凭据，避免冷门音质
- *   档拿不到链被误判成播放失败，需要时用户自己开。未登录的源同一缺省。
- * - 旧全局键（USE_META_KEY/USE_PLAY_KEY）是 per-source 表上线前所有源共用的
- *   一对开关，只读不写：作为未物化源的一次性继承源，让升级前调过全局开关
- *   的用户不回跳。**只继承「偏离旧缺省」的值**：旧版首登初始化双开，库里
- *   残留的 true/true 与「从没动过」不可区分（不携带用户意图），照旧继承会
- *   永久盖住新缺省（PC 2026-10-27「没有登录的怎么还是双开」的根因）；任一
- *   面为 false 才证明用户主动关过，此时才整体继承。两键缺/双 true = 无继承。
+ * 开关解析链（生效值 = readSourceAuthTogglesFor）：
+ *   per-source 表（TOGGLES_NS，带口径后缀）→ 缺省（数据开 / 播放关）。
+ * - 缺省口径（对齐 PC 2026-10-27，用户 2026-10-31 定案）：数据面缺省常开，
+ *   与是否登录无关（登录与否只决定开关能不能点）；播放面缺省关。
+ *   「以修改后的为准」：旧版本物化的手点值一律作废，不再从旧全局键继承。
+ * - 旧全局键（USE_META_KEY/USE_PLAY_KEY）只在口径迁移时删除，不再参与解析。
  * - 物化时机：登录成功（saveSourceAuthAccount，该源开关未在表时）与切换开关
- *   （setSourceAuthToggle），此后旧全局键不再影响这个源。
+ *   （setSourceAuthToggle）。
  *
  * 本文件是 .ts（编译后走原生 JSON.parse，产物无 .get）：存储/引擎应答的
  * 解析一律经 parseJsonToUtso 重建 UTSJSONObject（见 music-api.ts 同款说明）。
@@ -42,10 +37,24 @@ import { invokeSource, setMetaAuthHook } from "./source-engine";
 const ACCOUNTS_KEY = "qt-source-auth-accounts";
 /** 两面开关表（JSON：{ 源id: {useMeta,usePlay} }；生效值解析链见文件头） */
 const TOGGLES_KEY = "qt-source-auth-toggles";
+/**
+ * 开关表的实际读写键：带口径后缀。换口径时直接换后缀，让旧表整体失效——
+ * 不能只靠 removeStorageSync：真机上卸载重装/切基座都可能保留 storage，
+ * 2026-10-31 用户复测「卸载重装后仍显示关闭」即此因（旧表里的 false 一直生效）。
+ */
+const TOGGLES_NS = TOGGLES_KEY + "-v3";
 /** 旧全局数据面开关（"true"/"false"；只读：未物化源的一次性继承源） */
 const USE_META_KEY = "qt-source-auth-use-meta";
 /** 旧全局播放面开关（同上，只读不写） */
 const USE_PLAY_KEY = "qt-source-auth-use-play";
+/** 开关表口径版本：旧值只体现「当次手点」，会永久盖住新缺省，故一次性作废 */
+const TOGGLES_SCHEMA_KEY = "qt-source-auth-schema";
+/** 2 = 数据面缺省常开（与是否登录、与旧全局键都无关），播放面缺省仍为关
+ *  3 = 再清一次：用户设备可能已经跑过 2（升级前的老安装里点过「关」的值会被物化成
+ *      永久 false，盖住缺省），单纯改缺省对它们无效。2026-10-31 用户复述「数据请求
+ *      使用登录态默认打开」时发现仍显示关闭，故抬版强制重置一次。 */
+const TOGGLES_SCHEMA_VERSION = "3";
+
 /** 后台保活节流水位（epoch ms 字符串）：距上次实际运行不足 24h 跳过 */
 const KEEPALIVE_AT_KEY = "qt-source-auth-keepalive-at";
 /** 后台保活节流窗口：24 小时（App 每次回前台都会触发，节流防耗电） */
@@ -244,7 +253,7 @@ function writeEntries(entries: SourceAuthEntry[]): void {
  *  退回解析链下一级，不该让注入整体失效） */
 function readTogglesMapObj(): UTSJSONObject {
   try {
-    const text = storageText(TOGGLES_KEY);
+    const text = storageText(TOGGLES_NS);
     if (text == null || text.length == 0) return new UTSJSONObject();
     const obj = parseJsonToUtso(text);
     if (obj == null) return new UTSJSONObject();
@@ -261,27 +270,32 @@ function writeTogglesEntry(source: string, toggles: SourceAuthToggles): void {
   entry.set("useMeta", toggles.useMeta);
   entry.set("usePlay", toggles.usePlay);
   obj.set(source, entry);
-  storageWrite(TOGGLES_KEY, JSON.stringify(obj));
+  storageWrite(TOGGLES_NS, JSON.stringify(obj));
 }
 
 /**
- * 旧全局开关（per-source 表上线前所有源共用一对）。只读不写：作为未物化源的
- * 一次性继承源。双开 = 旧缺省 = 无信息量（首登自动初始化过），不当继承源，
- * 否则会永久盖住新缺省（详见文件头）；任一面为 false 才整体继承。null = 无。
+ * 开关表口径迁移（进程内一次）：数据面缺省常开，与登录与否无关。旧版本把用户
+ * 每次手点都物化成 per-source 条目（还有更早的全局键），这些值会永久盖住缺省——
+ * 按「以修改后的为准」一次性清空，让所有源回到新缺省（数据开 / 播放关）。
+ * 注意：实际读写键已换成带后缀的 TOGGLES_NS，即使 removeStorageSync 未生效，
+ * 旧表也不会再被读到；旧全局键同样不再参与继承（legacyGlobalToggles 已移除）。
  */
-function legacyGlobalToggles(): SourceAuthToggles | null {
-  const meta = storageText(USE_META_KEY);
-  const play = storageText(USE_PLAY_KEY);
-  if (meta == null && play == null) return null;
-  const inherited: SourceAuthToggles = { useMeta: meta == "true", usePlay: play == "true" };
-  if (inherited.useMeta && inherited.usePlay) return null;
-  return inherited;
+function ensureTogglesSchema(): void {
+  if (storageText(TOGGLES_SCHEMA_KEY) == TOGGLES_SCHEMA_VERSION) return;
+  try {
+    uni.removeStorageSync(TOGGLES_NS);
+    uni.removeStorageSync(USE_META_KEY);
+    uni.removeStorageSync(USE_PLAY_KEY);
+  } catch (_) {
+    // 静默：删不掉也只影响本次升级的继承来源，读取侧仍会回落到缺省
+  }
+  storageWrite(TOGGLES_SCHEMA_KEY, TOGGLES_SCHEMA_VERSION);
 }
 
 /**
- * 单源生效开关（同步读）：per-source 表 → 旧全局键（升级继承）→ 缺省
- * （数据开/播放关，登录与否同一缺省——开关行在无账号时本就禁用，登录后
- * 立刻生效的就是用户看到的那对值）。
+ * 单源生效开关（同步读）：per-source 表（TOGGLES_NS 命名空间）→ 缺省。
+ * 旧全局键不再参与继承：它们的 false 会把新缺省永久盖住，而缺省本身就是
+ * 「以修改后的为准」的定案（2026-10-31）。
  */
 export function readSourceAuthTogglesFor(source: string): SourceAuthToggles {
   const map = readTogglesMapObj();
@@ -293,8 +307,6 @@ export function readSourceAuthTogglesFor(source: string): SourceAuthToggles {
       return { useMeta: m.toString() == "true", usePlay: p.toString() == "true" };
     }
   }
-  const legacy = legacyGlobalToggles();
-  if (legacy != null) return legacy;
   return { useMeta: true, usePlay: false };
 }
 
@@ -534,6 +546,59 @@ export async function authImportCookie(source: string, cookie: string): Promise<
   const ok = r.get("ok");
   if (ok == null || ok.toString() != "true") return null;
   return normalizeUser(r.get("user") as UTSJSONObject | null);
+}
+
+/** 短信验证码挑战（v14 契约）：key 打包了手机号/服务端 tm/设备身份，登录时必须原样回传 */
+export type SourceSmsChallenge = { key: string; message: string };
+
+/** 短信登录成功后的凭据形状（与扫码 confirmed 同形） */
+export type SourceAuthLogin = { cookie: string; user: SourceAuthUser; refreshToken: string };
+
+/**
+ * 发送短信验证码（v14，酷我）：返回一次性挑战 key。
+ * 不声明 "sms" 能力的源会抛「该音源不支持短信登录」，宿主按 auth.methods 显隐入口。
+ */
+export async function authSendSms(source: string, phone: string): Promise<SourceSmsChallenge> {
+  const args = new UTSJSONObject();
+  args.set("source", source);
+  args.set("phone", phone);
+  const r = await authInvoke("authSendSms", args);
+  const key = r.get("key");
+  if (key == null || key.toString().length == 0) {
+    throw new Error("数据包未返回短信挑战，请稍后重试");
+  }
+  const msg = r.get("message");
+  return { key: key.toString(), message: msg == null ? "" : msg.toString() };
+}
+
+/** 解析 {credential:{cookie,refresh_token}, user} —— 短信登录与密码登录共用 */
+function parseLoginResult(r: UTSJSONObject): SourceAuthLogin {
+  const credential = r.get("credential") as UTSJSONObject | null;
+  const cookie = credential != null ? credential.get("cookie") : null;
+  const refreshToken = credential != null ? credential.get("refresh_token") : null;
+  const user = normalizeUser(r.get("user") as UTSJSONObject | null);
+  if (cookie == null || cookie.toString().length == 0 || user == null) {
+    throw new Error("登录失败：数据包应答缺凭据");
+  }
+  return { cookie: cookie.toString(), user: user, refreshToken: refreshToken == null ? "" : refreshToken.toString() };
+}
+
+/** 短信验证码登录（v14）：key = authSendSms 的挑战 key 原样带回 */
+export async function authLoginByPhone(source: string, key: string, code: string): Promise<SourceAuthLogin> {
+  const args = new UTSJSONObject();
+  args.set("source", source);
+  args.set("key", key);
+  args.set("code", code);
+  return parseLoginResult(await authInvoke("authLoginByPhone", args));
+}
+
+/** 账号密码登录（v14，酷我官方客户端形制） */
+export async function authLoginByPassword(source: string, account: string, password: string): Promise<SourceAuthLogin> {
+  const args = new UTSJSONObject();
+  args.set("source", source);
+  args.set("account", account);
+  args.set("password", password);
+  return parseLoginResult(await authInvoke("authLoginByPassword", args));
 }
 
 /**
@@ -808,3 +873,6 @@ export async function accountPlaylists(source: string): Promise<SourceAccountPla
 setMetaAuthHook((): void => {
   void ensureSourceAuthInjected();
 });
+
+// 模块初始化即做口径迁移（先于任何读取）
+ensureTogglesSchema();

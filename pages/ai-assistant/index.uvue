@@ -21,29 +21,18 @@
       </view>
 
       <!-- 历史会话浮层：只做选择/删除，不做重命名（重命名在长按里更省事，这里先不做） -->
-      <view v-if="historyOpen" class="history-mask" @tap="closeHistory">
-        <view class="history-panel" :class="layout.isWide ? 'history-panel-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';' + historyPanelMaxHeight" @tap.stop="noop">
-          <text class="history-title" :class="layout.isWide ? 'history-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(27, 15)">历史对话</text>
-          <scroll-view class="history-list" direction="vertical" :show-scrollbar="false">
-            <view v-if="conversations.length == 0" class="history-empty">
-              <text class="history-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(24, 13)">还没有历史对话</text>
+      <QtSheet v-model:visible="historyOpen" title="历史对话" @close="closeHistory">
+        <scroll-view class="history-list" direction="vertical" :show-scrollbar="false" :scroll-into-view="historyReveal.anchor.value" :style="historyPanelMaxHeight">
+          <view v-if="conversations.length == 0" class="history-empty">
+            <text class="history-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(24, 13)">还没有历史对话</text>
+          </view>
+          <QtOption v-for="(c, i) in conversations" :id="historyReveal.itemId(i)" :key="c.id" kind="row" :label="c.title.length > 0 ? c.title : '未命名对话'" :selected="c.id == activeConversationId" @select="onPickConversation(c.id)">
+            <view class="history-del" @click.stop="onDeleteConversation(c.id)">
+              <QtIcon name="trash" :size="layout.isWide ? 16 : 30" :color="themeStore.skin.iconMuted" />
             </view>
-            <view
-              v-for="c in conversations"
-              :key="c.id"
-              class="history-item"
-              :class="[layout.isWide ? 'history-item-wide' : '', c.id == activeConversationId ? 'history-item-active' : '']"
-              :style="c.id == activeConversationId ? 'background-color:' + themeStore.skin.accentSoft + ';' : ''"
-              @tap="onPickConversation(c.id)"
-            >
-              <text class="history-item-text" :class="layout.isWide ? 'history-item-text-wide' : ''" :max-lines="1" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 14)">{{ c.title.length > 0 ? c.title : '未命名对话' }}</text>
-              <view class="history-del" @tap.stop="onDeleteConversation(c.id)">
-                <QtIcon name="trash" :size="layout.isWide ? 16 : 30" :color="themeStore.skin.iconMuted" />
-              </view>
-            </view>
-          </scroll-view>
-        </view>
-      </view>
+          </QtOption>
+        </scroll-view>
+      </QtSheet>
 
       <!-- 主区：空态引导 or 消息流 -->
       <view v-if="loading" class="center-block">
@@ -213,6 +202,9 @@ import { ref, computed } from "vue";
 import { onShow, onUnload } from "@dcloudio/uni-app";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtSheet from "@/uni_modules/qt-ui/components/qt-sheet/qt-sheet.uvue";
+import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
+import { useQtSelectionReveal } from "@/uni_modules/qt-ui/composables/use-qt-selection-reveal";
 import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
 import QtSongRowLite from "@/uni_modules/qt-ui/components/qt-song-row-lite/qt-song-row-lite.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
@@ -238,7 +230,7 @@ const layout = useQtLayout();
 // 鸿蒙端 max-width / max-height 不支持百分比（仅 number|pixel），历史面板高度与
 // 气泡上限改在脚本里换算成 px 绑定；Android 端百分比本可用，但同一份模板两端
 // 都要编译，按更严的约束写（同 sticky-section 的跨端处理）
-const historyPanelMaxHeight = computed((): string => "max-height:" + Math.floor(layout.windowHeight * 0.6) + "px;");
+const historyPanelMaxHeight = computed((): string => "height:" + Math.floor(layout.windowHeight * 0.6) + "px;");
 const bubbleUserMaxWidth = computed((): string => "max-width:" + Math.floor(layout.windowWidth * (layout.isWide ? 0.62 : 0.78)) + "px;");
 const bubbleAiMaxWidth = computed((): string => "max-width:" + Math.floor(layout.windowWidth * (layout.isWide ? 0.72 : 0.88)) + "px;");
 const player = usePlayerStore();
@@ -265,6 +257,7 @@ const {
 
 const draft = ref("");
 const historyOpen = ref(false);
+const historyReveal = useQtSelectionReveal(() => historyOpen.value, () => conversations.value.findIndex((item) => item.id == activeConversationId.value), () => conversations.value.map((item) => item.id).join('|'));
 /** 交替锚点：同一个 id 反复赋值不会触发滚动，必须换 id */
 const scrollAnchor = ref("anchor-a");
 let anchorFlip = false;
@@ -503,19 +496,6 @@ function onLike(index: number, good: boolean): void {
   justify-content: center;
   align-items: center;
 }
-.history-panel {
-  width: 78%;
-  background-color: #ffffff;
-  border-radius: 20rpx;
-  padding: 24rpx;
-  flex-direction: column;
-}
-.history-title {
-  color: #191d26;
-  font-size: 27rpx;
-  font-weight: 600;
-  margin-bottom: 12rpx;
-}
 .history-list {
   flex-direction: column;
 }
@@ -527,18 +507,6 @@ function onLike(index: number, good: boolean): void {
 .history-empty-text {
   color: #737b8e;
   font-size: 24rpx;
-}
-.history-item {
-  flex-direction: row;
-  align-items: center;
-  justify-content: space-between;
-  padding: 20rpx 16rpx;
-  border-radius: 12rpx;
-}
-.history-item-text {
-  flex: 1;
-  color: #191d26;
-  font-size: 26rpx;
 }
 .history-del {
   width: 56rpx;
@@ -787,10 +755,6 @@ function onLike(index: number, good: boolean): void {
 .icon-btn-wide { width: 34px; height: 34px; border-radius: 17px; margin-left: 8px; }
 .mode-chip-wide { margin-left: 8px; padding: 6px 10px; border-radius: 14px; }
 .mode-chip-text-wide { font-size: 12px; }
-.history-panel-wide { width: 420px; border-radius: 12px; padding: 14px; }
-.history-title-wide { font-size: 15px; margin-bottom: 6px; }
-.history-item-wide { padding: 10px 8px; border-radius: 8px; }
-.history-item-text-wide { font-size: 14px; }
 .center-text-wide { font-size: 14px; margin-top: 12px; }
 .retry-btn-wide { margin-top: 14px; padding: 9px 24px; border-radius: 16px; }
 .intro-wide { padding: 32px 24px 10px; }

@@ -77,32 +77,62 @@
       <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
     </view>
   <!-- 新建歌单：页内输入弹层（uni.showModal 的 editable 在 App 端不出输入框） -->
-  <view v-if="createSheetVisible" class="cs-mask" :style="'background-color:' + themeStore.skin.scrim + ';'" @click="closeCreateSheet">
-    <view class="cs-card" :class="layout.isWide ? 'cs-card-wide' : ''" :style="csCardStyle" @click.stop>
-      <text class="cs-title" :class="layout.isWide ? 'cs-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(32, 18)">新建歌单</text>
-      <text class="cs-desc" :class="layout.isWide ? 'cs-desc-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13)">给新歌单起个名字，之后可以把喜欢的歌拷进来</text>
+  <!-- 新建 / 重命名共用一个页内输入弹层：uni.showModal 的 editable 在 App 端不出输入框，
+       所以「起名/改名」只能在页内做。两种模式只差标题、按钮文案与提交后的落点。 -->
+  <QtSheet v-model:visible="sheetVisible" :title="sheetTitle" :subtitle="sheetSubtitle" @close="closeSheet">
+    <view class="cs-body" :class="layout.isWide ? 'cs-body-wide' : ''">
       <input
         class="cs-input"
         :class="layout.isWide ? 'cs-input-wide' : ''"
         :style="csInputStyle"
-        :value="createSheetValue"
-        @input="onCreateSheetInput"
+        :value="sheetValue"
+        @input="onSheetInput"
         placeholder="请输入歌单名称"
         :placeholder-class="layout.isWide ? 'cs-ph-wide' : 'cs-ph'"
         :maxlength="40"
-        :focus="createSheetVisible"
+        :focus="sheetVisible"
       />
-      <text v-if="createSheetError.length > 0" class="cs-error" :class="layout.isWide ? 'cs-error-wide' : ''" :style="('color:' + themeStore.skin.danger + ';') + qtFontDual(22, 12)">{{ createSheetError }}</text>
+      <text v-if="sheetError.length > 0" class="cs-error" :class="layout.isWide ? 'cs-error-wide' : ''" :style="('color:' + themeStore.skin.danger + ';') + qtFontDual(22, 12)">{{ sheetError }}</text>
       <view class="cs-btn-row" :class="layout.isWide ? 'cs-btn-row-wide' : ''">
-        <view class="cs-btn" :class="layout.isWide ? 'cs-btn-wide' : ''" @click="closeCreateSheet">
+        <view class="cs-btn" :class="layout.isWide ? 'cs-btn-wide' : ''" @click="closeSheet">
           <text class="cs-btn-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(28, 15)">取消</text>
         </view>
-        <view class="cs-btn" :class="layout.isWide ? 'cs-btn-wide' : ''" @click="submitCreateSheet">
-          <text class="cs-btn-text" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(28, 15)">创建</text>
+        <view class="cs-btn" :class="layout.isWide ? 'cs-btn-wide' : ''" @click="submitSheet">
+          <text class="cs-btn-text" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(28, 15)">{{ sheetConfirmText }}</text>
         </view>
       </view>
     </view>
-  </view>
+  </QtSheet>
+  <!-- 编辑歌单封面：选图 -> 直传存储端 -> 服务端 complete 回执直接写库并推进同步 seq -->
+  <QtSheet
+    v-model:visible="coverVisible"
+    title="编辑歌单封面"
+    :subtitle="coverSubtitle"
+    :dismissible="!coverBusy"
+    @close="closeCoverSheet"
+  >
+    <view class="cv-body" :class="layout.isWide ? 'cv-body-wide' : ''">
+      <view class="cv-preview-row" :class="layout.isWide ? 'cv-preview-row-wide' : ''">
+        <image
+          class="cv-preview" :class="layout.isWide ? 'cv-preview-wide' : ''"
+          :src="coverPreview" mode="aspectFill"
+        />
+      </view>
+      <text
+        class="cv-hint" :class="layout.isWide ? 'cv-hint-wide' : ''"
+        :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)"
+      >{{ coverHasCustom ? '当前是自定义封面' : '当前是默认封面，可上传一张自定义封面' }}</text>
+      <text v-if="coverError.length > 0" class="cs-error" :class="layout.isWide ? 'cs-error-wide' : ''" :style="('color:' + themeStore.skin.danger + ';') + qtFontDual(22, 12)">{{ coverError }}</text>
+      <view class="cs-btn-row" :class="layout.isWide ? 'cs-btn-row-wide' : ''">
+        <view v-if="coverHasCustom" class="cs-btn" :class="layout.isWide ? 'cs-btn-wide' : ''" @click="resetCover">
+          <text class="cs-btn-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(28, 15)">恢复默认</text>
+        </view>
+        <view class="cs-btn" :class="layout.isWide ? 'cs-btn-wide' : ''" @click="pickCover">
+          <text class="cs-btn-text" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(28, 15)">{{ coverBusy ? '处理中...' : '从相册选择' }}</text>
+        </view>
+      </view>
+    </view>
+  </QtSheet>
   </qt-page-frame>
 </template><script setup lang="ts">
 import { qtShowToast } from "@/services/toast";
@@ -110,17 +140,14 @@ import { qtShowActionSheet } from "@/services/action-sheet";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { computed, ref } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtSheet from "@/uni_modules/qt-ui/components/qt-sheet/qt-sheet.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { usePlayerStore } from "@/stores/player";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtContentWidth, qtColumnCount, QT_MIN_COLUMN_WIDTH } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { platformShort, platformColor } from "@/services/platform";
-import {
-  uploadPlaylistCover, clearPlaylistCover, chooseImage,
-  DEFAULT_PLAYLIST_COVER_ASSET,
-} from "@/services/media";
-import { getAccessToken } from "@/services/auth";
+import { DEFAULT_PLAYLIST_COVER_ASSET, chooseImage, uploadPlaylistCover, clearPlaylistCover } from "@/services/media";
 import { beginLoading, finishLoading } from "@/services/ui-loading";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtSwitchTab } from "@/uni_modules/qt-ui/composables/qt-nav";
@@ -206,124 +233,219 @@ function openPlaylist(pl: { id: string; platform: string }): void {
   });
 }
 
-// ==================== 歌单封面（UPDATE_DESIGN.md §5.3） ====================
-// 长按收藏的在线歌单 → ActionSheet 换封面/恢复默认。文件客户端直传存储端，
-// 登记成功后服务端已是新 URL，这里只同步本地缓存；每日所有歌单合计限次由服务端策略控制。
-
-const coverBusy = ref(false);
-
-function onPlaylistLongPress(pl: { id: string; platform: string; picUrl: string; isLocal: boolean }): void {
-  // 自建歌单（本机新建 + 其他端同步回来的 platform=local）：长按 = 设为默认收藏歌单。
-  // 通知栏/车机的收藏 ♡ 收进的就是它；不设置时默认用第一个自建歌单。
-  if (pl.platform === "local") {
-    // 只有「显式设置过的那一个」才给取消入口：未设置时的默认值是「第一个自建歌单」
-    // 算出来的，对它显示取消会让人以为取消后就不收藏了，实际仍会回落到它自己
-    const isExplicit = player.defaultFavPlaylistId.length > 0 && player.defaultFavPlaylistId === pl.id;
-    const items: string[] = isExplicit ? ["取消默认收藏歌单"] : ["设为默认收藏歌单"];
-    qtShowActionSheet({ itemList: items }).then((idx: number) => {
-      if (idx !== 0) return;
-      if (isExplicit) {
-        player.setDefaultFavPlaylist("");
-        qtShowToast({ title: "已取消设置，通知栏收藏回到第一个自建歌单", icon: "none" });
-      } else {
-        player.setDefaultFavPlaylist(pl.id);
-        qtShowToast({ title: "已设为默认收藏歌单，通知栏收藏将收进这里", icon: "none" });
-      }
-    });
-    return;
-  }
-  // 在线歌单：封面只是本机展示字段，服务端歌单行是收藏元数据，开放换封面会引起同步歧义
-  if (pl.isLocal) return;
-  if (getAccessToken().length === 0) {
-    qtShowToast({ title: "登录后才能更换封面", icon: "none" });
-    return;
-  }
-  // 自定义封面 = 我们对象键（astral/{publicId}/v1/…）下的直链，此时提供恢复默认入口
-  const isCustom = pl.picUrl.indexOf("/astral/") >= 0;
-  qtShowActionSheet({ itemList: isCustom ? ["更换封面", "恢复默认封面"] : ["更换封面"] }).then((idx: number) => {
-    if (idx === 0) changeCover(pl);
-    else if (idx === 1) restoreCover(pl);
+// 长按歌单：仅自建歌单有操作。除默认收藏目标外，进「修改歌单信息」可改名称与封面；
+// 收藏的在线歌单仍不提供长按操作（2026-11-01 用户定案：原「长按换封面」在手机端
+// 整体删除；服务端歌单行仍带 pic_url，收藏/重放会照常展示）。
+function onPlaylistLongPress(pl: { id: string; name: string; platform: string }): void {
+  if (pl.platform !== "local") return;
+  // 自建歌单含本机新建及其他设备同步回来的 platform=local 条目；两者都可编辑。
+  // 通知栏/车机的收藏 ♡ 收进默认歌单；未显式设置时默认取第一个自建歌单。
+  const isExplicit = player.defaultFavPlaylistId.length > 0 && player.defaultFavPlaylistId === pl.id;
+  const items: string[] = ["修改歌单信息", isExplicit ? "取消默认收藏歌单" : "设为默认收藏歌单"];
+  qtShowActionSheet({ itemList: items }).then((idx: number) => {
+    if (idx === 0) {
+      openInfoMenu(pl);
+      return;
+    }
+    if (idx !== 1) return;
+    if (isExplicit) {
+      player.setDefaultFavPlaylist("");
+      qtShowToast({ title: "已取消设置，通知栏收藏回到第一个自建歌单", icon: "none" });
+    } else {
+      player.setDefaultFavPlaylist(pl.id);
+      qtShowToast({ title: "已设为默认收藏歌单，通知栏收藏将收进这里", icon: "none" });
+    }
   });
 }
 
-async function changeCover(pl: { id: string; platform: string }): Promise<void> {
-  if (coverBusy.value) return;
-  let path = "";
-  try {
-    path = await chooseImage();
-  } catch (_) {
-    return; // 用户取消选图
-  }
-  coverBusy.value = true;
-  const upToken = beginLoading("上传中...");
-  try {
-    const url = await uploadPlaylistCover(pl.id, pl.platform, path);
-    player.setSavedPlaylistCover(pl.platform, pl.id, url);
-    finishLoading(upToken);
-    qtShowToast({ title: "封面已更新", icon: "none" });
-  } catch (e) {
-    finishLoading(upToken);
-    qtShowToast({ title: (e as Error).message || "上传失败", icon: "none", duration: 3000 });
-  } finally {
-    coverBusy.value = false;
-  }
-}
-
-async function restoreCover(pl: { id: string; platform: string }): Promise<void> {
-  if (coverBusy.value) return;
-  coverBusy.value = true;
-  const rstToken = beginLoading("处理中...");
-  try {
-    await clearPlaylistCover(pl.id, pl.platform);
-    player.setSavedPlaylistCover(pl.platform, pl.id, "");
-    finishLoading(rstToken);
-    qtShowToast({ title: "已恢复默认封面", icon: "none" });
-  } catch (e) {
-    finishLoading(rstToken);
-    qtShowToast({ title: (e as Error).message || "操作失败", icon: "none", duration: 3000 });
-  } finally {
-    coverBusy.value = false;
-  }
+/**
+ * 二级菜单「修改歌单信息」：两项都要落到服务端数据库 ——
+ * 名称走 playlist/add 的按 pid upsert（服务端 name 覆盖旧值并推进同步 seq），
+ * 封面走封面上传链路（complete 阶段服务端直接写 qt_like_playlist.pic_url）。
+ */
+function openInfoMenu(pl: { id: string; name: string }): void {
+  qtShowActionSheet({ title: pl.name, itemList: ["编辑歌单名称", "编辑歌单封面"] }).then((idx: number) => {
+    if (idx === 0) {
+      openRenameSheet(pl);
+      return;
+    }
+    if (idx === 1) openCoverSheet(pl);
+  });
 }
 function discover() {
   qtSwitchTab("/pages/home/index");
 }
-/** 新建歌单：页内输入弹层状态（原生 showModal 的 editable 在 App 端不出输入框） */
-const createSheetVisible = ref(false);
-const createSheetValue = ref("");
-const createSheetError = ref("");
-const csCardStyle = computed<string>(() => "background-color:" + themeStore.skin.surface + ";border-radius:24rpx;");
+
+/**
+ * 新建/改名共用输入弹层：原生 showModal 的 editable 在 App 端不出输入框。
+ * 两个动作共用同一套输入、校验样式；改名会预填现有名字，保存时才改动 store。
+ */
+const sheetVisible = ref(false);
+const sheetValue = ref("");
+const sheetError = ref("");
+const sheetMode = ref<"create" | "rename">("create");
+let renameTargetId = "";
+const sheetTitle = computed<string>(() => sheetMode.value === "rename" ? "编辑歌单名称" : "新建歌单");
+const sheetSubtitle = computed<string>(() =>
+  sheetMode.value === "rename" ? "改的是服务器上的歌单名，歌曲和封面不会变" : "给新歌单起个名字，之后可以把喜欢的歌拷进来"
+);
+const sheetConfirmText = computed<string>(() => sheetMode.value === "rename" ? "保存" : "创建");
 const csInputStyle = computed<string>(() => "background-color:" + themeStore.skin.surfaceInset + ";color:" + themeStore.skin.text + ";border-radius:14rpx;");
 
 function createPlaylist(): void {
-  createSheetValue.value = "";
-  createSheetError.value = "";
-  createSheetVisible.value = true;
+  sheetMode.value = "create";
+  renameTargetId = "";
+  sheetValue.value = "";
+  sheetError.value = "";
+  sheetVisible.value = true;
 }
 
-function closeCreateSheet(): void {
-  createSheetVisible.value = false;
+function openRenameSheet(pl: { id: string; name: string }): void {
+  sheetMode.value = "rename";
+  renameTargetId = pl.id;
+  sheetValue.value = pl.name;
+  sheetError.value = "";
+  sheetVisible.value = true;
 }
 
-function onCreateSheetInput(e: InputEvent): void {
-  createSheetValue.value = e.detail.value;
-  if (createSheetError.value.length > 0) createSheetError.value = "";
+function closeSheet(): void {
+  sheetVisible.value = false;
 }
 
-/** 提交：空名/重名在弹层里红字提示，成功则关层并提示 */
-function submitCreateSheet(): void {
-  const name = createSheetValue.value.trim();
+function onSheetInput(e: InputEvent): void {
+  sheetValue.value = e.detail.value;
+  if (sheetError.value.length > 0) sheetError.value = "";
+}
+
+/** 提交：空名/重名留在弹层红字提示，成功才关闭并给出结果。 */
+function submitSheet(): void {
+  const name = sheetValue.value.trim();
+  if (sheetMode.value === "rename") {
+    const error = player.renameLocalPlaylist(renameTargetId, name);
+    if (error.length > 0) {
+      sheetError.value = error;
+      return;
+    }
+    sheetVisible.value = false;
+    qtShowToast({ title: "已重命名歌单", icon: "none" });
+    return;
+  }
   if (name.length === 0) {
-    createSheetError.value = "歌单名称不能为空";
+    sheetError.value = "歌单名称不能为空";
     return;
   }
   const created = player.createLocalPlaylist(name);
   if (created == null) {
-    createSheetError.value = "该歌单名称已存在";
+    sheetError.value = "该歌单名称已存在";
     return;
   }
-  createSheetVisible.value = false;
-  qtShowToast({ title: '已创建歌单', icon: 'none' });
+  sheetVisible.value = false;
+  qtShowToast({ title: "已创建歌单", icon: "none" });
+}
+
+/**
+ * 封面编辑：选图 → 直传存储端 → complete 回执由服务端直接把 URL 写进
+ * `qt_like_playlist.pic_url` 并推进同步 seq。也就是说这里拿到的 URL 已经是库里的值，
+ * 本地只做缓存同步（不补推 playlist/add，见 player.setPlaylistCover 注释）。
+ * 「恢复默认封面」走 DELETE 接口把 pic_url 置空，不占每日上传次数。
+ */
+const coverVisible = ref(false);
+const coverBusy = ref(false);
+const coverError = ref("");
+const coverName = ref("");
+const coverStored = ref("");
+let coverTargetId = "";
+const coverPreview = computed<string>(() => coverStored.value.length > 0 ? coverStored.value : DEFAULT_PLAYLIST_COVER_ASSET);
+const coverSubtitle = computed<string>(() =>
+  coverName.value.length > 0 ? coverName.value + " · 保存后同步到其他设备" : "保存后同步到其他设备"
+);
+
+/** 与 playlistDisplayPic 同口径：这几个占位值都不算「自定义封面」 */
+function hasCustomCover(url: string): boolean {
+  if (url.length === 0) return false;
+  return url !== DEFAULT_PLAYLIST_COVER_ASSET && url !== "/static/logo.png" && url !== "/static/qt-media/default-playlist-cover.png";
+}
+const coverHasCustom = computed<boolean>(() => hasCustomCover(coverStored.value));
+
+function openCoverSheet(pl: { id: string; name: string }): void {
+  coverTargetId = pl.id;
+  coverName.value = pl.name;
+  coverStored.value = player.playlistCoverOf(pl.id);
+  coverError.value = "";
+  coverBusy.value = false;
+  coverVisible.value = true;
+}
+
+function closeCoverSheet(): void {
+  // 上传中不允许点遮罩/关闭：结果（成功或失败文案）必须让用户看见一次
+  if (coverBusy.value) return;
+  coverVisible.value = false;
+}
+
+/** 服务端按 pid + platform 定位收藏行；本地条目可能只有 id，pid 兜底成 id */
+function coverPid(): string {
+  const pid = player.editablePlaylistPidOf(coverTargetId);
+  return pid.length > 0 ? pid : coverTargetId;
+}
+
+async function pickCover(): Promise<void> {
+  if (coverBusy.value) return;
+  // 必须在 await 之前占住 busy：chooseImage 是系统选图器，等待期间再点一次
+  // 会叠开第二个选图器（两个回调各自上传，谁后回谁覆盖）—— 2026-11-02 审阅
+  coverBusy.value = true;
+  coverError.value = "";
+  let path = "";
+  try {
+    path = await chooseImage();
+  } catch (_) {
+    coverBusy.value = false;
+    return; // 用户取消选图，静默返回
+  }
+  if (path.length == 0) {
+    coverBusy.value = false;
+    return; // 个别平台取消时给空串而不是抛错
+  }
+  const token = beginLoading("上传封面...");
+  try {
+    const url = await uploadPlaylistCover(coverPid(), "local", path);
+    const error = player.setPlaylistCover(coverTargetId, url);
+    if (error.length > 0) {
+      coverError.value = error;
+      return;
+    }
+    coverStored.value = url;
+    coverVisible.value = false;
+    qtShowToast({ title: "封面已更新", icon: "none" });
+  } catch (e) {
+    // 失败文案（大小/类型/每日限次/还没同步到服务器）由服务端下发，原样展示
+    coverError.value = (e as Error).message || "上传失败";
+  } finally {
+    finishLoading(token);
+    coverBusy.value = false;
+  }
+}
+
+async function resetCover(): Promise<void> {
+  if (coverBusy.value) return;
+  coverBusy.value = true;
+  coverError.value = "";
+  const token = beginLoading("正在恢复...");
+  try {
+    await clearPlaylistCover(coverPid(), "local");
+    const error = player.setPlaylistCover(coverTargetId, "");
+    if (error.length > 0) {
+      coverError.value = error;
+      return;
+    }
+    coverStored.value = "";
+    coverVisible.value = false;
+    qtShowToast({ title: "已恢复默认封面", icon: "none" });
+  } catch (e) {
+    coverError.value = (e as Error).message || "恢复失败";
+  } finally {
+    finishLoading(token);
+    coverBusy.value = false;
+  }
 }
 
 /** 打开导入页（拷贝歌曲进自建歌单 / 收藏远程歌单，两种方式在页内切换） */
@@ -637,38 +759,34 @@ function goImport(): void {
   font-size: 16px;
   margin-left: 7px;
 }
-/* ===== 新建歌单输入弹层（替代 uni.showModal 的 editable） ===== */
-.cs-mask {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  align-items: center;
+/* 输入与校验留在页面，遮罩和标题由 QtSheet 统一。 */
+.cs-body { padding: 0 32rpx 24rpx; }
+.cv-body { padding: 0 32rpx 24rpx; }
+.cv-body-wide { padding: 0 24px 18px; }
+.cv-preview-row {
+  flex-direction: row;
   justify-content: center;
-  z-index: 999;
+  margin-top: 24rpx;
 }
-.cs-card {
-  width: 580rpx;
-  padding: 36rpx 32rpx 20rpx;
+.cv-preview-row-wide { margin-top: 14px; }
+.cv-preview {
+  width: 220rpx;
+  height: 220rpx;
+  border-radius: 24rpx;
+  background-color: rgba(25,29,38,0.06);
 }
-.cs-card-wide {
-  width: 420px;
-  padding: 22px 24px 14px;
+.cv-preview-wide {
+  width: 140px;
+  height: 140px;
+  border-radius: 16px;
 }
-.cs-title {
-  font-weight: 600;
+.cv-hint {
+  width: 100%;
+  margin-top: 16rpx;
+  text-align: center;
 }
-.cs-title-wide {
-  font-size: 18px;
-}
-.cs-desc {
-  margin-top: 10rpx;
-  line-height: 1.5;
-}
-.cs-desc-wide {
-  margin-top: 6px;
-}
+.cv-hint-wide { margin-top: 9px; }
+.cs-body-wide { padding: 0 24px 18px; }
 .cs-input {
   margin-top: 24rpx;
   height: 80rpx;

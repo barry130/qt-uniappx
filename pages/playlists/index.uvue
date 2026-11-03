@@ -4,18 +4,7 @@
     <!-- 排序与分类都已收进标题栏宫格的下拉面板（手机档页首不再留独立操作行）；
          宽屏端分类仍折行平铺，排序条也保留在页首 -->
     <view v-if="sorts.length > 1 && layout.isWide" class="sort-bar" :class="layout.isWide ? 'sort-bar-wide' : ''">
-      <view
-        v-for="s in sorts"
-        :key="s.id"
-        class="sort-tag" :class="[layout.isWide ? 'sort-tag-wide' : '', selectedSort == s.id ? 'sort-tag-on' : '']"
-        :style="sortTagStyle(s.id)"
-        @click="selectSort(s.id)"
-      >
-        <text
-          class="sort-text" :class="[layout.isWide ? 'sort-text-wide' : '', selectedSort == s.id ? 'sort-text-on' : '']"
-           :style="qtFontDual(24, 13) + sortTextStyle(s.id)">{{ s.name }}</text
-        >
-      </view>
+      <QtOption v-for="s in sorts" :key="s.id" kind="chip" :label="s.name" :selected="selectedSort == s.id" @select="selectSort(s.id)" />
     </view>
 
     <!-- 分类标签：手机端固定两行铺排、整体可左右滑动；
@@ -27,20 +16,7 @@
       :style="'width:' + rowsWidth + 'px;'"
     >
       <view v-for="(row, rowIndex) in visibleCategoryRows" :key="rowIndex" class="cat-row cat-row-wide">
-        <view
-          v-for="cell in row"
-          :key="cell.id"
-          class="cat-tag cat-tag-wide" :class="selectedCategory == cell.id ? 'cat-tag-on' : ''"
-          :style="'width:' + cell.width + 'px;' + catTagStyle(cell.id)"
-          :hover-class="'cat-tag-hover'"
-          @click="selectCategory(cell.id)"
-        >
-          <text
-            class="cat-text cat-text-wide" :class="selectedCategory == cell.id ? 'cat-text-on' : ''"
-            :max-lines="1"
-            :style="qtFontDual(25, 14) + catTextStyle(cell.id)">{{ cell.name }}</text
-          >
-        </view>
+        <QtOption v-for="cell in row" :key="cell.id" class="cat-tag-wide" kind="chip" :label="cell.name" :selected="selectedCategory == cell.id" :style="'width:' + cell.width + 'px;'" @select="selectCategory(cell.id)" />
       </view>
       <view v-if="categoryRows.length > CAT_WIDE_ROWS" class="cat-more-row">
         <view
@@ -193,40 +169,17 @@
     >
       <!-- 排序行：常驻面板顶部（切排序不打断选分类），多音源只声明一项时不显示 -->
       <view v-if="sorts.length > 1" class="cat-sort-row" :class="layout.isWide ? 'cat-sort-row-wide' : ''">
-        <view
-          v-for="s in sorts"
-          :key="s.id"
-          class="sort-tag" :class="[layout.isWide ? 'sort-tag-wide' : '', selectedSort == s.id ? 'sort-tag-on' : '']"
-          :style="sortTagStyle(s.id)"
-          @click="selectSort(s.id)"
-        >
-          <text
-            class="sort-text" :class="[layout.isWide ? 'sort-text-wide' : '', selectedSort == s.id ? 'sort-text-on' : '']"
-             :style="qtFontDual(24, 13) + sortTextStyle(s.id)">{{ s.name }}</text
-          >
-        </view>
+        <QtOption v-for="s in sorts" :key="s.id" kind="chip" :label="s.name" :selected="selectedSort == s.id" @select="selectSort(s.id)" />
       </view>
       <scroll-view
         class="cat-scroll-area"
-        :style="'max-height:' + catPanelMaxHeight + 'px;'"
-        :scroll-into-view="catScrollAnchor"
+        direction="vertical"
+        :style="'height:' + catPanelMaxHeight + 'px;'"
+        :scroll-into-view="catReveal.anchor.value"
         :show-scrollbar="false"
       >
         <view class="cat-grid" :style="'padding:' + (layout.isWide ? '16px 20px 20px' : '10px 14px 16px') + ';'">
-          <view
-            v-for="(cat, i) in categories"
-            :key="cat.id"
-            :id="'cat-cell-' + i"
-            class="cat-cell" :class="[layout.isWide ? 'cat-cell-wide' : '', selectedCategory == cat.id ? 'cat-cell-on' : '']"
-            :style="'width:' + catCellWidth + 'px;' + catCellLayout(i) + catCellStyle(cat.id)"
-            @click="onCatCellTap(cat.id)"
-          >
-            <text
-              class="cat-cell-text" :class="selectedCategory == cat.id ? 'cat-cell-text-on' : ''"
-              :max-lines="1"
-              :style="qtFontDual(26, 14) + catCellTextStyle(cat.id)"
-            >{{ cat.name }}</text>
-          </view>
+          <QtOption v-for="(cat, i) in categories" :key="cat.id" :id="catReveal.itemId(i)" kind="chip" :label="cat.name" :selected="selectedCategory == cat.id" :style="'width:' + catCellWidth + 'px;' + catCellLayout(i)" @select="onCatCellTap(cat.id)" />
         </view>
       </scroll-view>
     </view>
@@ -247,6 +200,8 @@ import { useSourceRegistryStore } from "@/stores/source-registry";
 import type { RegistrySort } from "@/services/music-api";
 import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
+import { useQtSelectionReveal } from "@/uni_modules/qt-ui/composables/use-qt-selection-reveal";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import QtSkeletonShine from "@/uni_modules/qt-ui/components/qt-skeleton-shine/qt-skeleton-shine.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
@@ -832,7 +787,6 @@ const headerActions = ["grid"];
 const catPanelVisible = ref(false);
 /** 展开态：先挂载（收起位）再下一帧置 true，才有 translateY 的过渡 */
 const catPanelOpen = ref(false);
-const catScrollAnchor = ref("");
 let catPanelTimer: number | null = null;
 const catPanelStyle = computed((): string => {
   return "background-color:" + theme.skin.surface + ";";
@@ -854,22 +808,13 @@ function catCellLayout(i: number): string {
   const mr = i % CAT_GRID_COLS == CAT_GRID_COLS - 1 ? 0 : CAT_GRID_GAP_PX;
   return "margin-right:" + mr + "px;margin-bottom:" + CAT_GRID_GAP_PX + "px;";
 }
-function catCellStyle(id: string): string {
-  const on = selectedCategory.value == id;
-  if (on) return "background-color:" + theme.skin.accent + ";";
-  return "background-color:" + theme.skin.surfaceMuted + ";";
-}
-function catCellTextStyle(id: string): string {
-  const on = selectedCategory.value == id;
-  if (on) return "color:" + theme.skin.onAccent + ";";
-  return "color:" + theme.skin.text;
-}
 const catSelectedIndex = computed((): number => {
   for (let i = 0; i < categories.value.length; i++) {
     if (categories.value[i].id == selectedCategory.value) return i;
   }
   return -1;
 });
+const catReveal = useQtSelectionReveal(() => catPanelVisible.value && catPanelOpen.value, () => catSelectedIndex.value, () => categories.value.map((item) => item.id).join('|'));
 function openCatPanel(): void {
   if (catPanelTimer != null) {
     clearTimeout(catPanelTimer);
@@ -877,9 +822,6 @@ function openCatPanel(): void {
   }
   catPanelVisible.value = true;
   catPanelOpen.value = false;
-  // 打开时当前分类超过一屏（约两行 × 5）才需要滚到位
-  const idx = catSelectedIndex.value;
-  catScrollAnchor.value = idx > 8 ? "cat-cell-" + idx : "";
   catPanelTimer = setTimeout(() => {
     catPanelOpen.value = true;
     catPanelTimer = null;
@@ -894,7 +836,6 @@ function closeCatPanel(): void {
   catPanelOpen.value = false;
   catPanelTimer = setTimeout(() => {
     catPanelVisible.value = false;
-    catScrollAnchor.value = "";
     catPanelTimer = null;
   }, 220) as unknown as number;
 }
@@ -955,27 +896,6 @@ onUnmounted(() => {
   uni.$off(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
 });
 
-/**
- * 分类/排序胶囊配色（内联，跟随皮肤）。
- *
- * 之所以从 CSS 搬到这里：CSS 里写死的 rgba(255,255,255,0.85) 只适合浅色皮肤，
- * 深色皮肤下 71 个胶囊折成三行横跨整个内容列，成为整页最亮的一块。
- * 选中态用 accent + onAccent，未选中态用 surfaceStrong + textMuted。
- */
-function sortTagStyle(id: string): string {
-  if (selectedSort.value == id) return "background-color:" + theme.skin.accent + ";border-color:" + theme.skin.accent + ";";
-  return "background-color:" + theme.skin.surfaceStrong + ";border-color:" + theme.skin.border + ";";
-}
-function sortTextStyle(id: string): string {
-  return "color:" + (selectedSort.value == id ? theme.skin.onAccent : theme.skin.textMuted) + ";";
-}
-function catTagStyle(id: string): string {
-  if (selectedCategory.value == id) return "background-color:" + theme.skin.accent + ";border-color:" + theme.skin.accent + ";";
-  return "background-color:" + theme.skin.surfaceStrong + ";border-color:" + theme.skin.border + ";";
-}
-function catTextStyle(id: string): string {
-  return "color:" + (selectedCategory.value == id ? theme.skin.onAccent : theme.skin.textMuted) + ";";
-}
 </script>
 
 <style>
@@ -990,20 +910,6 @@ function catTextStyle(id: string): string {
   padding: 14rpx 28rpx 0;
   flex-grow: 0;
   flex-shrink: 0;
-}
-.sort-tag {
-  height: 52rpx;
-  padding-left: 24rpx;
-  padding-right: 24rpx;
-  margin-right: 14rpx;
-  border-radius: 26rpx;
-  align-items: center;
-  justify-content: center;
-  border-width: 1px; border-style: solid;
-}
-.sort-text {
-  font-size: 24rpx;
-  font-weight: 500;
 }
 .cover-load {
   position: absolute;
@@ -1058,15 +964,6 @@ function catTextStyle(id: string): string {
   flex-direction: row;
   flex-wrap: wrap;
 }
-.cat-cell {
-  height: 56px;
-  border-radius: 12px;
-  align-items: center;
-  justify-content: center;
-}
-.cat-cell-wide { height: 44px; border-radius: 10px; }
-.cat-cell-text { font-size: 26rpx; }
-.cat-cell-text-on { font-weight: 600; }
 .cat-rows {
   height: 190rpx;
   padding: 16rpx 28rpx;
@@ -1085,11 +982,6 @@ function catTextStyle(id: string): string {
   align-items: center;
   justify-content: center;
   border-width: 1px; border-style: solid;
-}
-.cat-text {
-  font-size: 25rpx;
-  font-weight: 500;
-  text-align: center;
 }
 /* list-view 需要明确的高度小于内容高度才会滚动（flex:1 + min-height:0 限定在可视区内） */
 .scroll {
@@ -1201,8 +1093,6 @@ function catTextStyle(id: string): string {
 
 .bar-wide { padding-top: 14px; padding-left: 24px; padding-right: 24px; padding-bottom: 10px; }
 .sort-bar-wide { padding: 10px 24px 0; }
-.sort-tag-wide { height: 26px; padding-left: 12px; padding-right: 12px; margin-right: 10px; border-radius: 13px; }
-.sort-text-wide { font-size: 13px; }
 .cat-rows-wide {
   /* 必须显式 height:auto：基础规则 .cat-rows 写死 height:190rpx（竖屏两行滚动区），
      而宽屏下 1rpx 会被放大到 1.7 倍（windowWidth_dp/750），190rpx ≈ 324dp。
@@ -1234,7 +1124,6 @@ function catTextStyle(id: string): string {
 .cat-tag-hover { background-color: rgba(127, 127, 127, 0.16); }
 .cat-row-wide { height: 40px; margin-bottom: 0; flex-direction: row; align-items: center; }
 .cat-tag-wide { height: 32px; margin-right: 14px; margin-bottom: 8px; border-radius: 16px; }
-.cat-text-wide { font-size: 14px; }
 .grid-row-inner-wide { padding-left: 20px; padding-right: 20px; }
 .foot-inner-wide { height: 52px; padding-bottom: 24px; }
 .pad-top-wide { height: 14px; }

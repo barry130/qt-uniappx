@@ -6,32 +6,23 @@
           <view class="col" :style="twoColumn ? colStyle : ''">
         <qt-card class="theme-card" title="明暗模式" description="跟随系统会在应用回到前台时同步系统外观。" elevated>
           <view class="mode-row">
-            <view v-for="item in modeOptions" :key="item.id" class="mode-option" :class="[theme.mode == item.id ? 'mode-option-active' : '', layout.isWide ? 'mode-option-wide' : '']" :style="'background-color:' + (theme.mode == item.id ? theme.skin.accentSoft : theme.skin.surfaceMuted) + ';border-color:' + (theme.mode == item.id ? theme.skin.accent : theme.skin.border) + ';'" @click="pickMode(item.id)" :hover-class="layout.isWide ? 'mode-option-hover' : 'none'">
-              <text class="mode-name" :style="('color:' + theme.skin.text + ';') + qtFontDual(25, 15)">{{ item.name }}</text>
-              <text class="mode-desc" :class="layout.isWide ? 'mode-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(20, 12)">{{ item.description }}</text>
-            </view>
+            <QtOption v-for="item in modeOptions" :key="item.id" class="mode-option" :class="layout.isWide ? 'mode-option-wide' : ''" kind="card" :label="item.name" :description="item.description" :selected="theme.mode == item.id" @select="pickMode(item.id)" />
           </view>
         </qt-card>
 
         <qt-card class="theme-card" title="文字大小" description="全局缩放所有页面字号；很小更紧凑，很大更易读。" elevated>
           <view class="mode-row">
-            <view v-for="item in tierOptions" :key="item.id" class="mode-option" :class="[fontScale.tier == item.id ? 'mode-option-active' : '', layout.isWide ? 'mode-option-wide' : '']" :style="'background-color:' + (fontScale.tier == item.id ? theme.skin.accentSoft : theme.skin.surfaceMuted) + ';border-color:' + (fontScale.tier == item.id ? theme.skin.accent : theme.skin.border) + ';'" @click="pickTier(item.id)" :hover-class="layout.isWide ? 'mode-option-hover' : 'none'">
-              <text class="mode-name" :style="('color:' + theme.skin.text + ';') + qtFontDual(25, 15)">{{ item.name }}</text>
-              <text class="mode-desc" :class="layout.isWide ? 'mode-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(20, 12)">{{ item.description }}</text>
-            </view>
+            <QtOption v-for="item in tierOptions" :key="item.id" class="mode-option" :class="layout.isWide ? 'mode-option-wide' : ''" kind="card" :label="item.name" :description="item.description" :selected="fontScale.tier == item.id" @select="pickTier(item.id)" />
           </view>
           <text class="font-scale-hint" :class="layout.isWide ? 'font-scale-hint-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(20, 12)">当前倍率 {{ fontScale.scale }}x</text>
         </qt-card>
 
         <qt-card class="theme-card" title="视觉基调" description="每个预置均提供浅色和深色令牌；切换预置会保留壁纸。" elevated>
-          <scroll-view class="skin-scroll" :class="layout.isWide ? 'skin-scroll-wide' : ''" direction="horizontal" :show-scrollbar="false">
+          <scroll-view class="skin-scroll" :class="layout.isWide ? 'skin-scroll-wide' : ''" direction="horizontal" :show-scrollbar="false" :scroll-into-view="skinReveal.anchor.value">
             <view class="skin-row" :class="layout.isWide ? 'skin-row-wide' : ''" :style="'width:' + skinRowWidth + 'px;'">
-              <view v-for="item in skinOptions" :key="item.id" class="skin-option" :class="[theme.skinId == item.id ? 'skin-option-active' : '', layout.isWide ? 'skin-option-wide' : '']" :style="skinOptionStyle(item.id)" @click="pickSkin(item.id)" :hover-class="layout.isWide ? 'skin-option-hover' : 'none'">
-                <view class="skin-swatch" :class="layout.isWide ? 'skin-swatch-wide' : ''" :style="'background-color:' + previewSkin(item.id).accent + ';'" />
-                <text class="skin-name" :style="('color:' + previewSkin(item.id).text + ';') + qtFontDual(28, 15)">{{ item.name }}</text>
-                <text class="skin-desc" :class="layout.isWide ? 'skin-desc-wide' : ''" :style="('color:' + previewSkin(item.id).textMuted + ';') + qtFontDual(21, 12)">{{ item.description }}</text>
-                <QtIcon v-if="theme.skinId == item.id" class="skin-check" :class="layout.isWide ? 'skin-check-wide' : ''" name="check" :size="layout.isWide ? 20 : 28" :color="previewSkin(item.id).accent" />
-              </view>
+              <QtOption v-for="(item, index) in skinOptions" :id="skinReveal.itemId(index)" :key="item.id" class="skin-option" :class="layout.isWide ? 'skin-option-wide' : ''" kind="card" :label="item.name" :description="item.description" :selected="theme.skinId == item.id" :style="skinOptionStyle(item.id)" @select="pickSkin(item.id)">
+                <template #leading><view class="skin-swatch" :class="layout.isWide ? 'skin-swatch-wide' : ''" :style="'background-color:' + previewSkin(item.id).accent + ';'" /></template>
+              </QtOption>
             </view>
           </scroll-view>
         </qt-card>
@@ -188,6 +179,9 @@ import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-fr
 import QtCard from "@/uni_modules/qt-ui/components/qt-card/qt-card.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
+import { qtSelectionColor } from "@/uni_modules/qt-ui/composables/selection";
+import { useQtSelectionReveal } from "@/uni_modules/qt-ui/composables/use-qt-selection-reveal";
 import { QT_SKINS, type QtSkin, type QtThemeMode, useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { QT_FONT_TIERS, type QtFontTier, useFontScaleStore, qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
@@ -216,6 +210,7 @@ const colStyle = computed((): string => {
 });
 const fontScale = useFontScaleStore();
 const skinOptions = QT_SKINS;
+const skinReveal = useQtSelectionReveal(() => true, () => skinOptions.findIndex((item) => item.id == theme.skinId), () => skinOptions.map((item) => item.id).join('|'));
 const modeOptions: ModeOption[] = [
   { id: "system", name: "跟随系统", description: "自动同步" },
   { id: "light", name: "浅色", description: "始终明亮" },
@@ -660,7 +655,7 @@ function previewSkin(id: string): QtSkin {
 }
 function skinOptionStyle(id: string): string {
   const skin = previewSkin(id);
-  const border = theme.skinId == id ? skin.accent : skin.border;
+  const border = theme.skinId == id ? qtSelectionColor(theme.dark) : skin.border;
   return "background-color:" + skin.background + ";border-color:" + border + ";";
 }
 function pickSkin(id: string): void {
@@ -836,9 +831,6 @@ onShow(() => {
 }
 .mode-row { flex-direction: row; }
 .mode-option { flex: 1; min-height: 104rpx; margin-right: 12rpx; padding: 18rpx; border-width: 1px; border-style: solid; border-radius: 16rpx; }
-.mode-option-active { border-width: 2px; border-style: solid; }
-.mode-name { font-size: 25rpx; font-weight: 650; }
-.mode-desc { margin-top: 7rpx; font-size: 20rpx; }
 .font-scale-hint { margin-top: 14rpx; font-size: 20rpx; }
 .skin-scroll { margin-left: -8rpx; margin-right: -8rpx; height: 240rpx; }
 .skin-row { flex-direction: row; padding: 4rpx 8rpx 12rpx; flex-wrap: nowrap; }
@@ -850,11 +842,7 @@ onShow(() => {
 .skin-option-hover {
   background-color: rgba(127, 127, 127, 0.16);
 }
-.skin-option-active { border-width: 2px; border-style: solid; }
-.skin-swatch { width: 32rpx; height: 32rpx; border-radius: 16rpx; margin-bottom: 22rpx; }
-.skin-name { font-size: 28rpx; font-weight: 650; }
-.skin-desc { margin-top: 8rpx; font-size: 21rpx; }
-.skin-check { position: absolute; right: 18rpx; top: 18rpx; }
+.skin-swatch { width: 32rpx; height: 32rpx; border-radius: 16rpx; margin-right: 12rpx; }
 .wallpaper-preview { height: 250rpx; position: relative; overflow: hidden; border-radius: 18rpx; margin-bottom: 20rpx; }
 /* <image> 对 left/right/top/bottom 四边拉伸不支持，会退化成按内容尺寸渲染
    （qt-page-frame 的壁纸、player 页的 .bg 都踩过同一个坑）→ 必须显式宽高。 */

@@ -33,9 +33,18 @@ import { sourceVipTierOf } from "./source-auth";
 // ---------- 键与事件 ----------
 
 /** 平台独立播放音质表（JSON：{源id: 档位id}；用户在账号页/播放页选定后落这里） */
-const PLAY_QUALITIES_KEY = "qt-source-play-qualities";
+/** 播放档位表的实际读写键：带口径后缀，让 v2 之前的旧手选表整体失效。
+ *  真机上卸载重装/换基座都可能保留 storage（2026-10-31 用户复测：改了缺省
+ *  仍旧显示母带），只靠 removeStorageSync 不可靠，换键最稳。 */
+const PLAY_QUALITIES_KEY = "qt-source-play-qualities-v3";
 /** 平台独立下载音质表（JSON：{源id: 档位id}） */
 const DOWNLOAD_QUALITIES_KEY = "qt-source-download-qualities";
+
+/** 播放档位口径版本：v2 起「播放音质」缺省跟随该源下载音质，旧手选值一次性作废；
+ *  v3 再清一次（用户设备可能已跑过 v2，老安装里手选的高档位仍会盖住缺省，
+ *  2026-10-31 用户复述「播放音质默认 320K」时发现 QQ 仍显示母带） */
+const PLAY_SCHEMA_KEY = "qt-source-play-quality-schema";
+const PLAY_SCHEMA_VERSION = "3";
 
 /** 平台音质表变化后广播；播放页音质标注/账号页下拉等 UI 监听刷新 */
 export const SOURCE_QUALITIES_CHANGED_EVENT = "qt-source-qualities-changed";
@@ -186,6 +195,33 @@ export function resetSourceQualities(): void {
   uni.$emit(SOURCE_QUALITIES_CHANGED_EVENT);
 }
 
+/**
+ * 播放档位口径迁移（进程内一次）：账号页「播放音质」缺省改为跟随该源的
+ * 下载音质（下载缺省 = 音源第二档，如 320k）。旧版本用户在账号页/播放页点过
+ * 的档位会永久盖住缺省，按「以修改后的为准」一次性清空播放表；下载表不动。
+ */
+function ensurePlaySchema(): void {
+  let seen = "";
+  try {
+    seen = uni.getStorageSync(PLAY_SCHEMA_KEY).toString();
+  } catch (_) {
+    seen = "";
+  }
+  if (seen == PLAY_SCHEMA_VERSION) return;
+  try {
+    uni.removeStorageSync(PLAY_QUALITIES_KEY);
+  } catch (_) {
+    // 静默：删不掉也只是本次会话仍读到旧值，下次启动重试
+  }
+  cachedPlay = null;
+  try {
+    uni.setStorageSync(PLAY_SCHEMA_KEY, PLAY_SCHEMA_VERSION);
+  } catch (_) {
+    // 静默：标记写不进时下次启动会再清一次，幂等
+  }
+  uni.$emit(SOURCE_QUALITIES_CHANGED_EVENT);
+}
+
 // ---------- v12 生效档位清单（包侧判定 + 宿主缓存） ----------
 
 /**
@@ -302,3 +338,6 @@ export async function fetchSourceQualityProfile(
   }
   return { mode: mode, qualities: qualities, aliases: aliases };
 }
+
+// 模块初始化即做口径迁移（先于任何读取）
+ensurePlaySchema();

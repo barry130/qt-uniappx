@@ -35,10 +35,18 @@
               <qt-button class="acc-btn" label="同步歌单" variant="outline" size="sm" @click="openSync(row.id, row.name)" />
               <qt-button class="acc-btn" label="退出" variant="ghost" size="sm" @click="logout(row.id, row.name)" />
             </view>
-            <view v-else-if="row.qr || row.cookie || row.web" class="src-acc" :style="rowBorderStyle">
-              <qt-button v-if="row.qr" class="acc-btn" label="扫码登录" variant="secondary" size="sm" :disabled="qrBusy" @click="startQr(row.id, row.name)" />
-              <qt-button v-if="row.cookie" class="acc-btn" label="导入 Cookie" variant="outline" size="sm" @click="openCookieSheet(row.id, row.name)" />
-              <qt-button v-if="row.web" class="acc-btn" label="网页登录" variant="outline" size="sm" @click="openWebLogin(row.id, row.name)" />
+            <view v-else-if="row.qr || row.cookie || row.web || row.sms || row.pwd" class="src-acc" :style="rowBorderStyle">
+              <!-- 未登录源最多 5 颗按钮，窄屏一行放不下；这里做「单行横向滚动」而不是换行
+                   （用户 2026-10-31：「这个我要的是左右滚动，不是换行」） -->
+              <scroll-view class="acc-scroll" :class="layout.isWide ? 'acc-scroll-wide' : ''" direction="horizontal" :show-scrollbar="false">
+                <view class="acc-track" :class="layout.isWide ? 'acc-track-wide' : ''" :style="'width:' + accTrackWidth(row) + ';'">
+                  <qt-button v-if="row.qr" class="acc-btn" label="扫码登录" variant="secondary" size="sm" :disabled="qrBusy" @click="startQr(row.id, row.name)" />
+                  <qt-button v-if="row.cookie" class="acc-btn" label="导入 Cookie" variant="outline" size="sm" @click="openCookieSheet(row.id, row.name)" />
+                  <qt-button v-if="row.sms" class="acc-btn" label="短信登录" variant="outline" size="sm" @click="openSmsSheet(row.id, row.name)" />
+                  <qt-button v-if="row.pwd" class="acc-btn" label="密码登录" variant="outline" size="sm" @click="openPwdSheet(row.id, row.name)" />
+                  <qt-button v-if="row.web" class="acc-btn" label="网页登录" variant="outline" size="sm" @click="openWebLogin(row.id, row.name)" />
+                </view>
+              </scroll-view>
             </view>
             <view v-else class="src-acc" :style="rowBorderStyle">
               <text class="src-nick" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">该源当前数据包不支持账号登录</text>
@@ -50,18 +58,14 @@
                 <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">数据请求使用登录态</text>
                 <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">搜索、歌单、歌词等数据接口；同步歌单也依赖此项</text>
               </view>
-              <view class="toggle" :class="layout.isWide ? 'toggle-wide' : ''" :style="'background-color:' + (row.useMeta ? theme.skin.accent : theme.skin.surfaceInset) + ';opacity:' + (row.logged ? '1' : '0.4') + ';'">
-                <view class="toggle-knob" :class="knobClass(row.useMeta)" :style="'background-color:' + (row.useMeta ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
-              </view>
+              <qt-switch :model-value="row.useMeta" :disabled="!row.logged" @change="toggleCardScope(row, 'meta')" />
             </view>
             <view class="scope-row" :style="rowBorderStyle" @click="toggleCardScope(row, 'play')">
               <view class="scope-main">
                 <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">播放请求使用登录态</text>
                 <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">在线播放取链（更高音质/会员内容等）；与数据面互不影响</text>
               </view>
-              <view class="toggle" :class="layout.isWide ? 'toggle-wide' : ''" :style="'background-color:' + (row.usePlay ? theme.skin.accent : theme.skin.surfaceInset) + ';opacity:' + (row.logged ? '1' : '0.4') + ';'">
-                <view class="toggle-knob" :class="knobClass(row.usePlay)" :style="'background-color:' + (row.usePlay ? theme.skin.onAccent : theme.skin.textMuted) + ';'" />
-              </view>
+              <qt-switch :model-value="row.usePlay" :disabled="!row.logged" @change="toggleCardScope(row, 'play')" />
             </view>
 
             <!-- 音质行（orphan 残留卡没有档位清单，不渲染） -->
@@ -91,24 +95,25 @@
     </scroll-view>
 
     <!-- 扫码登录弹层 -->
-    <view v-if="qrVisible" class="sheet-mask" @click="closeQrSheet">
-      <view class="sheet-card" :class="layout.isWide ? 'sheet-card-wide' : ''" :style="layout.isWide ? sheetCardStyleWide : sheetCardStyle" @click.stop>
-        <text class="sheet-title" :class="layout.isWide ? 'sheet-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(30, 17)">{{ qrName }} 扫码登录</text>
+    <qt-sheet :visible="qrVisible" :title="qrName + ' 扫码登录'" @close="closeQrSheet">
+      <scroll-view direction="vertical" :show-scrollbar="false" :style="sheetBodyStyle">
         <text class="sheet-desc" :class="layout.isWide ? 'sheet-desc-wide' : ''" :style="('color:' + qrStatusColor + ';') + qtFontDual(23, 13)">{{ qrStatusText }}</text>
         <view class="qr-wrap" :class="layout.isWide ? 'qr-wrap-wide' : ''" :style="layout.isWide ? 'background-color:#ffffff;border-radius:10px;' : 'background-color:#ffffff;border-radius:16rpx;'">
-          <image v-if="qrImage.length > 0" class="qr-img" :class="layout.isWide ? (qrStatus == 'expired' ? 'qr-img-wide qr-img-expired' : 'qr-img-wide') : (qrStatus == 'expired' ? 'qr-img-expired' : '')" :src="qrImage" mode="aspectFit" />
+          <image v-if="qrSrc.length > 0 && !qrImageError" class="qr-img" :class="layout.isWide ? (qrStatus == 'expired' ? 'qr-img-wide qr-img-expired' : 'qr-img-wide') : (qrStatus == 'expired' ? 'qr-img-expired' : '')" :src="qrSrc" mode="aspectFit" @error="onQrImageError" />
+          <text v-if="qrImage.length > 0 && qrImageError" class="qr-fallback" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 12)">二维码加载失败，可点「保存二维码」后在相册里查看</text>
         </view>
+        <text class="qr-hint" :class="layout.isWide ? 'qr-hint-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 12)">{{ qrHintText }}</text>
         <view class="sheet-btn-row" :class="layout.isWide ? 'sheet-btn-row-wide' : ''">
           <qt-button class="sheet-btn" label="取消" variant="ghost" size="sm" @click="closeQrSheet" />
+          <qt-button v-if="qrImage.length > 0 && qrStatus != 'expired'" class="sheet-btn" label="保存二维码" variant="secondary" size="sm" @click="saveQrImage" />
           <qt-button v-if="qrStatus == 'expired'" class="sheet-btn" label="重新生成" variant="secondary" size="sm" @click="regenerateQr" />
         </view>
-      </view>
-    </view>
+      </scroll-view>
+    </qt-sheet>
 
     <!-- 导入 Cookie 弹层 -->
-    <view v-if="cookieVisible" class="sheet-mask" @click="closeCookieSheet">
-      <view class="sheet-card" :class="layout.isWide ? 'sheet-card-wide' : ''" :style="layout.isWide ? sheetCardStyleWide : sheetCardStyle" @click.stop>
-        <text class="sheet-title" :class="layout.isWide ? 'sheet-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(30, 17)">{{ cookieName }} 导入 Cookie</text>
+    <qt-sheet :visible="cookieVisible" :title="cookieName + ' 导入 Cookie'" :dismissible="!cookieBusy" @close="closeCookieSheet">
+      <scroll-view direction="vertical" :show-scrollbar="false" :style="sheetBodyStyle">
         <text class="sheet-desc" :class="layout.isWide ? 'sheet-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">粘贴已登录浏览器的 Cookie 串，会先经官方接口校验，无效不保存</text>
         <textarea
           class="cookie-input"
@@ -122,15 +127,84 @@
         />
         <text v-if="cookieError.length > 0" class="sheet-error" :class="layout.isWide ? 'sheet-error-wide' : ''" :style="('color:' + theme.skin.danger + ';') + qtFontDual(22, 12)">{{ cookieError }}</text>
         <view class="sheet-btn-row" :class="layout.isWide ? 'sheet-btn-row-wide' : ''">
-          <qt-button class="sheet-btn" label="取消" variant="ghost" size="sm" @click="closeCookieSheet" />
+          <qt-button class="sheet-btn" label="取消" variant="ghost" size="sm" :disabled="cookieBusy" @click="closeCookieSheet" />
           <qt-button class="sheet-btn" label="校验并保存" variant="secondary" size="sm" :disabled="cookieBusy" @click="submitCookie" />
         </view>
-      </view>
-    </view>
+      </scroll-view>
+    </qt-sheet>
+    <!-- 短信验证码登录弹层（v14 契约，目前酷我声明 "sms"） -->
+    <qt-sheet :visible="smsVisible" :title="smsName + ' 短信登录'" :dismissible="!smsBusy && !smsSending" @close="closeSmsSheet">
+      <scroll-view direction="vertical" :show-scrollbar="false" :style="sheetBodyStyle">
+        <text class="sheet-desc" :class="layout.isWide ? 'sheet-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">先填手机号收验证码，再填验证码登录；成功后凭据直接保存到本机，下次打开即可用。</text>
+        <input
+          class="cookie-input"
+          :class="layout.isWide ? 'cookie-input-wide' : ''"
+          :style="layout.isWide ? cookieInputStyleWide : cookieInputStyle"
+          :value="smsPhone"
+          @input="onSmsPhoneInput"
+          placeholder="手机号"
+          :placeholder-class="layout.isWide ? 'cookie-ph-wide' : 'cookie-ph'"
+          :maxlength="20"
+        />
+        <view class="sheet-btn-row" :class="layout.isWide ? 'sheet-btn-row-wide' : ''">
+          <qt-button class="sheet-btn" :label="smsSending ? '发送中…' : (smsKey.length > 0 ? '重新发送' : '发送验证码')" variant="outline" size="sm" :disabled="smsSending" @click="sendSmsCode" />
+        </view>
+        <input
+          class="cookie-input"
+          :class="layout.isWide ? 'cookie-input-wide' : ''"
+          :style="layout.isWide ? cookieInputStyleWide : cookieInputStyle"
+          :value="smsCode"
+          @input="onSmsCodeInput"
+          placeholder="短信验证码"
+          type="number"
+          :placeholder-class="layout.isWide ? 'cookie-ph-wide' : 'cookie-ph'"
+          :maxlength="8"
+        />
+        <text v-if="smsHint.length > 0" class="sheet-desc" :class="layout.isWide ? 'sheet-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ smsHint }}</text>
+        <text v-if="smsError.length > 0" class="sheet-error" :class="layout.isWide ? 'sheet-error-wide' : ''" :style="('color:' + theme.skin.danger + ';') + qtFontDual(22, 12)">{{ smsError }}</text>
+        <view class="sheet-btn-row" :class="layout.isWide ? 'sheet-btn-row-wide' : ''">
+          <qt-button class="sheet-btn" label="取消" variant="ghost" size="sm" :disabled="smsBusy || smsSending" @click="closeSmsSheet" />
+          <qt-button class="sheet-btn" :label="smsBusy ? '登录中…' : '登录'" variant="secondary" size="sm" :disabled="smsBusy" @click="submitSms" />
+        </view>
+      </scroll-view>
+    </qt-sheet>
+
+    <!-- 账号密码登录弹层（v14 契约，酷我官方客户端形制） -->
+    <qt-sheet :visible="pwdVisible" :title="pwdName + ' 密码登录'" :dismissible="!pwdBusy" @close="closePwdSheet">
+      <scroll-view direction="vertical" :show-scrollbar="false" :style="sheetBodyStyle">
+        <text class="sheet-desc" :class="layout.isWide ? 'sheet-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">用酷我官方客户端的账号密码登录（不是手机号验证码）；成功后凭据直接保存到本机。</text>
+        <input
+          class="cookie-input"
+          :class="layout.isWide ? 'cookie-input-wide' : ''"
+          :style="layout.isWide ? cookieInputStyleWide : cookieInputStyle"
+          :value="pwdAccount"
+          @input="onPwdAccountInput"
+          placeholder="账号（手机号 / 邮箱）"
+          :placeholder-class="layout.isWide ? 'cookie-ph-wide' : 'cookie-ph'"
+          :maxlength="64"
+        />
+        <input
+          class="cookie-input"
+          :class="layout.isWide ? 'cookie-input-wide' : ''"
+          :style="layout.isWide ? cookieInputStyleWide : cookieInputStyle"
+          :value="pwdPassword"
+          @input="onPwdPasswordInput"
+          placeholder="密码"
+          :password="true"
+          :placeholder-class="layout.isWide ? 'cookie-ph-wide' : 'cookie-ph'"
+          :maxlength="64"
+        />
+        <text v-if="pwdError.length > 0" class="sheet-error" :class="layout.isWide ? 'sheet-error-wide' : ''" :style="('color:' + theme.skin.danger + ';') + qtFontDual(22, 12)">{{ pwdError }}</text>
+        <view class="sheet-btn-row" :class="layout.isWide ? 'sheet-btn-row-wide' : ''">
+          <qt-button class="sheet-btn" label="取消" variant="ghost" size="sm" :disabled="pwdBusy" @click="closePwdSheet" />
+          <qt-button class="sheet-btn" :label="pwdBusy ? '登录中…' : '登录'" variant="secondary" size="sm" :disabled="pwdBusy" @click="submitPwd" />
+        </view>
+      </scroll-view>
+    </qt-sheet>
+
     <!-- 同步歌单弹层（v18）：勾选 = 收藏到本地「我的歌单」，取消勾选已收藏的 = 从本地移除，只改本地不碰平台侧 -->
-    <view v-if="syncVisible" class="sheet-mask" @click="closeSyncSheet">
-      <view class="sheet-card" :class="layout.isWide ? 'sheet-card-wide' : ''" :style="layout.isWide ? sheetCardStyleWide : sheetCardStyle" @click.stop>
-        <text class="sheet-title" :class="layout.isWide ? 'sheet-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(30, 17)">{{ syncName }} · 同步歌单</text>
+    <qt-sheet :visible="syncVisible" :title="syncName + ' · 同步歌单'" :dismissible="!syncBusy" @close="closeSyncSheet">
+      <view>
         <text class="sheet-desc" :class="layout.isWide ? 'sheet-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">拉取平台侧全部歌单并勾选想要的；取消勾选已收藏的会把它从本地移除，不影响平台侧。</text>
         <text v-if="syncLoading" class="sheet-desc" :class="layout.isWide ? 'sheet-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">正在获取平台侧歌单…</text>
         <view v-else-if="syncNeedMetaLogin" class="sync-gate" :class="layout.isWide ? 'sync-gate-wide' : ''" :style="gateBorderStyle">
@@ -143,12 +217,12 @@
         </view>
         <view v-else class="sync-body">
           <view class="sync-head" @click="toggleSyncAll">
-            <qt-checkbox :checked="syncAllChecked" size="sm" @change="onSyncAllCheck" />
+            <qt-checkbox :checked="syncAllChecked" :disabled="syncBusy" size="sm" @change="onSyncAllCheck" />
             <text class="sync-head-text" :style="('color:' + theme.skin.text + ';') + qtFontDual(24, 13)">全选 · 平台侧 {{ syncRows.length }} 个，已收藏 {{ syncFavoritedCount }} 个</text>
           </view>
-          <scroll-view class="sync-list" :class="layout.isWide ? 'sync-list-wide' : ''" :show-scrollbar="false">
-            <view v-for="(row, i) in syncRows" :key="'sync-' + row.playlist.id" class="sync-row" :style="rowBorderStyle" @click="toggleSyncOne(i)">
-              <qt-checkbox :checked="syncChecked[i]" size="sm" @change="onSyncCheck(i, $event)" />
+          <scroll-view class="sync-list" direction="vertical" :show-scrollbar="false" :style="syncListStyle" :scroll-into-view="syncReveal.anchor.value">
+            <view v-for="(row, i) in syncRows" :key="'sync-' + row.playlist.id" :id="syncReveal.itemId(i)" class="sync-row" :style="rowBorderStyle" @click="toggleSyncOne(i)">
+              <qt-checkbox :checked="syncChecked[i]" :disabled="syncBusy" size="sm" @change="onSyncCheck(i, $event)" />
               <image v-if="row.playlist.picUrl.length > 0" class="sync-pic" :class="layout.isWide ? 'sync-pic-wide' : ''" :src="row.playlist.picUrl" mode="aspectFill" />
               <view v-else class="sync-pic" :class="layout.isWide ? 'sync-pic-wide' : ''" :style="'background-color:' + theme.skin.border + ';'">
                 <text class="sync-pic-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(20, 11)">歌单</text>
@@ -171,12 +245,13 @@
           />
         </view>
       </view>
-    </view>
+    </qt-sheet>
     <!-- 按源音质下拉（v12）：选项 = 该源生效档位清单 -->
     <qt-action-sheet
       v-model:visible="qualitySheetVisible"
       :title="qualitySheetTitle"
       :actions="qualitySheetActions"
+      :selected-index="qualitySheetSelectedIndex"
       @select="onQualitySheetSelect"
     />
   </qt-page-frame>
@@ -188,6 +263,9 @@ import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-fr
 import QtCard from "@/uni_modules/qt-ui/components/qt-card/qt-card.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import QtCheckbox from "@/uni_modules/qt-ui/components/qt-checkbox/qt-checkbox.uvue";
+import QtSwitch from "@/uni_modules/qt-ui/components/qt-switch/qt-switch.uvue";
+import QtSheet from "@/uni_modules/qt-ui/components/qt-sheet/qt-sheet.uvue";
+import { useQtSelectionReveal } from "@/uni_modules/qt-ui/composables/use-qt-selection-reveal";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
@@ -209,6 +287,9 @@ import {
   authQrCreate,
   authQrPoll,
   authImportCookie,
+  authSendSms,
+  authLoginByPhone,
+  authLoginByPassword,
   authCheckUser,
   saveSourceAuthAccount,
   removeSourceAuthAccount,
@@ -218,6 +299,7 @@ import {
   mergeCredentialExtras,
   type SourceAuthEntry,
   type SourceAccountPlaylist,
+  type SourceAuthLogin,
 } from "@/services/source-auth";
 import {
   accountSyncPreview,
@@ -226,7 +308,7 @@ import {
   autoSyncMissingAfterLogin,
   type AccountSyncRow,
 } from "@/services/source-playlist-sync";
-import { isHarmonyOs } from "@/services/app-native";
+import { isHarmonyOs, saveImageToGallery } from "@/services/app-native";
 import { WEB_LOGIN_DONE_EVENT } from "@/services/source-web-login";
 
 /**
@@ -267,6 +349,8 @@ type SourceCardRow = {
   qr: boolean;
   cookie: boolean;
   web: boolean;
+  sms: boolean;
+  pwd: boolean;
   useMeta: boolean;
   usePlay: boolean;
   playQualityLabel: string;
@@ -277,6 +361,26 @@ function findEntry(entries: SourceAuthEntry[], source: string): SourceAuthEntry 
     if (entries[i].source == source) return entries[i];
   }
   return null;
+}
+/**
+ * 未登录源动作区（单行横向滚动）的轨道宽度。
+ * 原生 scroll-view 不会按内容撑开（同 design.md 听歌报告页那条教训）：不给显式宽度时
+ * 轨道宽度退化成 0/容器宽，按钮被卡片右缘裁掉且滑不动 —— 2026-10-31 真机即此现象
+ * （用户「这个我要的是左右滚动，不是换行」）。每颗 qt-button size="sm" 按 220rpx 估，
+ * 已含 26rpx 左右内边距与 16rpx 间距（最长的「导入 Cookie」也放得下）。
+ */
+function accTrackWidth(row: SourceCardRow): string {
+  let count = 0;
+  if (row.qr) count++;
+  if (row.cookie) count++;
+  if (row.sms) count++;
+  if (row.pwd) count++;
+  if (row.web) count++;
+  if (count == 0) return "0px";
+  const px = layout.isWide
+    ? count * 190 + 16
+    : Math.round(((count * 220 + 16) / 750) * layout.windowWidth * 100) / 100;
+  return String(px) + "px";
 }
 /** 音质档位展示名：优先该源生效清单（官方/包声明）里的名字，找不到用裸值 */
 function qualityLabelOf(id: string, quality: string): string {
@@ -307,9 +411,14 @@ const sourceCards = computed((): SourceCardRow[] => {
       qr: auth != null && auth.methods.indexOf("qrcode") >= 0,
       cookie: auth != null && auth.methods.indexOf("cookie") >= 0,
       web: auth != null && auth.webLogin != null && !isHarmonyOs(),
-      useMeta: entry != null && tg.useMeta,
+      // 短信/密码登录（v14 契约，目前只有酷我声明）：按 auth.methods 显隐
+      sms: auth != null && auth.methods.indexOf("sms") >= 0,
+      pwd: auth != null && auth.methods.indexOf("password") >= 0,
+      // 数据面开关缺省常开（与是否登录无关）：登录与否只影响它能不能点，不影响展示值
+      useMeta: tg.useMeta,
       usePlay: entry != null && tg.usePlay,
-      playQualityLabel: qualityLabelOf(s.id, sourcePlayQualityOf(s.id, player.quality)),
+      // 播放音质缺省跟随该源的下载音质（下载缺省 = 音源第二档），两者口径一致
+      playQualityLabel: qualityLabelOf(s.id, sourcePlayQualityOf(s.id, sourceDownloadQualityOf(s.id, downloads.downloadQuality))),
       downloadQualityLabel: qualityLabelOf(s.id, sourceDownloadQualityOf(s.id, downloads.downloadQuality)),
     });
   }
@@ -327,6 +436,8 @@ const sourceCards = computed((): SourceCardRow[] => {
       qr: false,
       cookie: false,
       web: false,
+      sms: false,
+      pwd: false,
       useMeta: tg.useMeta,
       usePlay: tg.usePlay,
       playQualityLabel: "",
@@ -366,13 +477,6 @@ function toggleAllCards(): void {
 }
 
 // ── 按源两面登录态开关 ──
-function knobClass(on: boolean): string {
-  const wide = layout.isWide;
-  if (on && wide) return "toggle-knob-on toggle-knob-on-wide toggle-knob-wide";
-  if (on) return "toggle-knob-on";
-  if (wide) return "toggle-knob-wide";
-  return "";
-}
 function toggleCardScope(row: SourceCardRow, scope: "meta" | "play"): void {
   if (!row.logged) {
     qtShowToast({ title: "先登录该音源，再开关登录态", icon: "none" });
@@ -393,11 +497,13 @@ const qualitySheetVisible = ref(false);
 const qualitySheetTitle = ref("");
 const qualitySheetActions = ref<SheetAction[]>([]);
 const qualitySheetIds = ref<string[]>([]);
+const qualitySheetSelectedIndex = ref(-1);
 const qualitySheetSource = ref("");
 const qualitySheetKind = ref("play");
 function showQualitySheet(id: string, name: string, kind: string): void {
   const isPlay = kind == "play";
-  const current = isPlay ? sourcePlayQualityOf(id, player.quality) : sourceDownloadQualityOf(id, downloads.downloadQuality);
+  const downloadDefault = sourceDownloadQualityOf(id, downloads.downloadQuality);
+  const current = isPlay ? sourcePlayQualityOf(id, downloadDefault) : downloadDefault;
   const list = registry.sourceQualities(id);
   const actions: SheetAction[] = [];
   const ids: string[] = [];
@@ -405,12 +511,12 @@ function showQualitySheet(id: string, name: string, kind: string): void {
   for (let i = 0; i < list.length; i++) {
     const isCurrent = list[i].id == current;
     if (isCurrent) found = true;
-    actions.push({ name: list[i].name + (isCurrent ? "（当前）" : ""), color: isCurrent ? theme.skin.accent : "" });
+    actions.push({ name: list[i].name });
     ids.push(list[i].id);
   }
   // 落库值不在该源档位清单里（换包/换清单）时保留展示，避免下拉与实际不符（PC 同款）
   if (!found && current.length > 0) {
-    actions.unshift({ name: qualityLabelOf(id, current) + "（当前）", color: theme.skin.accent });
+    actions.unshift({ name: qualityLabelOf(id, current) });
     ids.unshift(current);
   }
   if (actions.length == 0) {
@@ -420,6 +526,7 @@ function showQualitySheet(id: string, name: string, kind: string): void {
   qualitySheetTitle.value = name + " · " + (isPlay ? "播放音质" : "下载音质");
   qualitySheetActions.value = actions;
   qualitySheetIds.value = ids;
+  qualitySheetSelectedIndex.value = ids.indexOf(current);
   qualitySheetSource.value = id;
   qualitySheetKind.value = kind;
   qualitySheetVisible.value = true;
@@ -445,6 +552,12 @@ const qrSource = ref("");
 const qrName = ref("");
 const qrKey = ref("");
 const qrImage = ref("");
+/** qrImage（base64 data URL）落盘后的绝对路径：<image> 优先吃路径，见 qrImageToPath */
+const qrFilePath = ref("");
+/** 实际绑定给 <image> 的 src：先 file:// 再裸路径再 data URL，三级自动降级 */
+const qrSrc = ref("");
+/** 三级都加载失败时的兜底提示（此时仍可从「保存二维码」进相册看） */
+const qrImageError = ref(false);
 /** waiting / scanned / expired */
 const qrStatus = ref("waiting");
 let pollTimer: number | null = null;
@@ -460,6 +573,76 @@ const qrStatusColor = computed((): string => {
   return theme.skin.textMuted;
 });
 
+/**
+ * 扫码提示（v16 契约 auth.qrHint 下发）：QQ 的 ptlogin 码只认手机 QQ 的扫一扫
+ * （QQ 音乐 App 扫不了，2026-10-25 用户实测「是让你下载QQ」）。
+ * 本机没有第二台设备时，「自己扫自己」不可能，所以补一条同机用法：
+ * 先把码存进相册，再用目标 App 的「扫一扫 → 相册」选中它。
+ */
+const qrHint = ref("");
+const qrHintText = computed((): string => {
+  const base = qrHint.value.length > 0 ? qrHint.value : "用官方 App 扫一扫";
+  return base + "；没有第二台设备时点「保存二维码」，再在该 App 的「扫一扫 → 相册」里选这张图确认";
+});
+
+/** 找该源的 qrHint（数据包自述；找不到返回空串，按通用文案） */
+function qrHintOf(id: string): string {
+  const list = registry.sources;
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].id != id) continue;
+    const caps = list[i].auth;
+    if (caps == null) return "";
+    const hint = caps.qrHint;
+    if (hint == null || hint.length == 0) return "";
+    return hint;
+  }
+  return "";
+}
+
+/**
+ * 保存二维码到相册：接口给的是 `data:image/png;base64,...`，先按 base64 落成
+ * 缓存目录里的 png（FileSystemManager.writeFileSync 的 encoding 支持 base64），
+ * 再交给 saveImageToPhotosAlbum 进相册系统。
+ */
+function saveQrImage(): void {
+  // 展示用的那份文件已经是 PNG，直接进相册；没有时再临时解码一次
+  let path = qrFilePath.value;
+  if (path.length == 0) {
+    path = qrImageToPath(qrImage.value);
+  }
+  if (path.length == 0) {
+    qtShowToast({ title: "当前二维码无法保存，请重新生成", icon: "none" });
+    return;
+  }
+  saveImageToGallery(path, "qt-qr-" + Date.now() + ".png").then((saved: string) => {
+    if (saved.length > 0) {
+      qtShowToast({ title: "已保存到相册：打开手机QQ 的扫一扫 → 相册，选这张图即可确认", icon: "none", duration: 4000 });
+    } else {
+      qtShowToast({ title: "保存失败，请检查存储空间后重试", icon: "none", duration: 3000 });
+    }
+  });
+}
+
+/** data URL 前缀（各源扫码接口统一返回 PNG base64） */
+const QR_IMG_HEAD = "data:image/png;base64,";
+
+/**
+ * 把 base64 data URL 落成本地 png，返回文件路径。
+ * 安卓真机上 `<image>` 直接吃 data URL 渲染成白框（2026-10-31 用户实测弹层里没有二维码），
+ * 落文件按路径加载才可靠；这份文件同时给「保存二维码」复用，不必二次解码。
+ */
+function qrImageToPath(dataUrl: string): string {
+  if (dataUrl.indexOf(QR_IMG_HEAD) != 0) return "";
+  const path = uni.env.CACHE_PATH + "/qt-qr-" + Date.now().toString() + ".png";
+  try {
+    uni.getFileSystemManager().writeFileSync(path, dataUrl.substring(QR_IMG_HEAD.length), "base64");
+    return path;
+  } catch (e) {
+    qtShowToast({ title: "二维码写入文件失败：" + errText(e), icon: "none" });
+    return "";
+  }
+}
+
 function startQr(source: string, name: string): void {
   if (qrBusy.value) return;
   qrBusy.value = true;
@@ -469,6 +652,13 @@ function startQr(source: string, name: string): void {
       qrName.value = name;
       qrKey.value = session.key;
       qrImage.value = session.image;
+      const qrPath = qrImageToPath(session.image);
+      qrFilePath.value = qrPath;
+      // 安卓真机：data URL 曾经因宿主没实现 responseEncoding 而是一张坏图；现在
+      // 优先落文件路径（本地相册/壁纸同款），失败再 file:// 再回退 data URL
+      qrSrc.value = qrPath.length > 0 ? qrPath : session.image;
+      qrImageError.value = false;
+      qrHint.value = qrHintOf(source);
       qrStatus.value = "waiting";
       qrVisible.value = true;
       startPolling();
@@ -555,8 +745,25 @@ function closeQrSheet(): void {
   stopPolling();
   qrVisible.value = false;
   qrImage.value = "";
+  qrFilePath.value = "";
+  qrSrc.value = "";
+  qrImageError.value = false;
   qrKey.value = "";
   qrSource.value = "";
+}
+
+/** 三级降级：file:// 路径 → 裸绝对路径 → data URL；都失败才显示兜底文案 */
+function onQrImageError(): void {
+  const src = qrSrc.value;
+  if (src.indexOf("file://") == 0 && qrFilePath.value.length > 0) {
+    qrSrc.value = qrFilePath.value;
+    return;
+  }
+  if (src != qrImage.value && qrImage.value.length > 0) {
+    qrSrc.value = qrImage.value;
+    return;
+  }
+  qrImageError.value = true;
 }
 
 // ── 导入 Cookie ──
@@ -614,6 +821,151 @@ function submitCookie(): void {
     });
 }
 
+// ── 短信验证码 / 密码登录（v14 契约，酷我）──
+const smsVisible = ref(false);
+const smsBusy = ref(false);
+const smsSending = ref(false);
+const smsSource = ref("");
+const smsName = ref("");
+const smsPhone = ref("");
+const smsCode = ref("");
+/** authSendSms 下发的一次性挑战 key（手机号/服务端 tm/设备身份打包），登录必须原样带回 */
+const smsKey = ref("");
+const smsHint = ref("");
+const smsError = ref("");
+
+const pwdVisible = ref(false);
+const pwdBusy = ref(false);
+const pwdSource = ref("");
+const pwdName = ref("");
+const pwdAccount = ref("");
+const pwdPassword = ref("");
+const pwdError = ref("");
+
+/** 登录成功统一收尾：落库 + 清失效标记 + 刷新列表 + 提示 + 顺手看平台侧歌单 */
+function saveLoginAndFinish(source: string, name: string, login: SourceAuthLogin, close: () => void): Promise<void> {
+  let extrasJson = "";
+  if (login.refreshToken.length > 0) {
+    const extras = new UTSJSONObject();
+    extras.set("refresh_token", login.refreshToken);
+    extrasJson = JSON.stringify(extras);
+  }
+  return saveSourceAuthAccount(source, login.cookie, login.user, extrasJson).then(() => {
+    close();
+    removeFromStale(source);
+    refreshFromStorage();
+    qtShowToast({ title: "已登录：" + login.user.nickname, icon: "none" });
+    maybeAutoSync(source, name);
+  });
+}
+
+function openSmsSheet(source: string, name: string): void {
+  smsSource.value = source;
+  smsName.value = name;
+  smsPhone.value = "";
+  smsCode.value = "";
+  smsKey.value = "";
+  smsHint.value = "";
+  smsError.value = "";
+  smsVisible.value = true;
+}
+function onSmsPhoneInput(e: InputEvent): void {
+  smsPhone.value = String((e.detail as any).value ?? "");
+}
+function onSmsCodeInput(e: InputEvent): void {
+  smsCode.value = String((e.detail as any).value ?? "");
+}
+function closeSmsSheet(): void {
+  smsVisible.value = false;
+  smsCode.value = "";
+  smsKey.value = "";
+  smsHint.value = "";
+  smsError.value = "";
+}
+function sendSmsCode(): void {
+  const phone = smsPhone.value.trim();
+  if (phone.length < 5) {
+    smsError.value = "请填写手机号";
+    return;
+  }
+  smsSending.value = true;
+  smsError.value = "";
+  authSendSms(smsSource.value, phone)
+    .then((challenge) => {
+      smsKey.value = challenge.key;
+      smsHint.value = challenge.message.length > 0 ? challenge.message : "验证码已发送，请查收短信后填入";
+    })
+    .catch((e) => {
+      smsError.value = "发送失败：" + errText(e);
+    })
+    .finally(() => {
+      smsSending.value = false;
+    });
+}
+function submitSms(): void {
+  const code = smsCode.value.trim();
+  if (smsKey.value.length == 0) {
+    smsError.value = "请先点「发送验证码」";
+    return;
+  }
+  if (code.length == 0) {
+    smsError.value = "请填写短信验证码";
+    return;
+  }
+  smsBusy.value = true;
+  smsError.value = "";
+  authLoginByPhone(smsSource.value, smsKey.value, code)
+    .then((login) => saveLoginAndFinish(smsSource.value, smsName.value, login, closeSmsSheet))
+    .catch((e) => {
+      smsError.value = "登录失败：" + errText(e);
+    })
+    .finally(() => {
+      smsBusy.value = false;
+    });
+}
+
+function openPwdSheet(source: string, name: string): void {
+  pwdSource.value = source;
+  pwdName.value = name;
+  pwdAccount.value = "";
+  pwdPassword.value = "";
+  pwdError.value = "";
+  pwdVisible.value = true;
+}
+function onPwdAccountInput(e: InputEvent): void {
+  pwdAccount.value = String((e.detail as any).value ?? "");
+}
+function onPwdPasswordInput(e: InputEvent): void {
+  pwdPassword.value = String((e.detail as any).value ?? "");
+}
+function closePwdSheet(): void {
+  pwdVisible.value = false;
+  pwdPassword.value = "";
+  pwdError.value = "";
+}
+function submitPwd(): void {
+  const account = pwdAccount.value.trim();
+  const password = pwdPassword.value;
+  if (account.length == 0) {
+    pwdError.value = "请填写账号";
+    return;
+  }
+  if (password.length == 0) {
+    pwdError.value = "请填写密码";
+    return;
+  }
+  pwdBusy.value = true;
+  pwdError.value = "";
+  authLoginByPassword(pwdSource.value, account, password)
+    .then((login) => saveLoginAndFinish(pwdSource.value, pwdName.value, login, closePwdSheet))
+    .catch((e) => {
+      pwdError.value = "登录失败：" + errText(e);
+    })
+    .finally(() => {
+      pwdBusy.value = false;
+    });
+}
+
 // ── 退出登录 ──
 function logout(source: string, name: string): void {
   qtConfirm({ title: "退出登录", content: "退出 " + name + " 的登录？已保存的凭据将从本机删除。", danger: true }).then((ok) => {
@@ -642,6 +994,8 @@ const syncName = ref("");
 const syncRows = ref<AccountSyncRow[]>([]);
 /** 勾选态，与 syncRows 同序：true = 希望它出现在本地「我的歌单」里 */
 const syncChecked = ref<boolean[]>([]);
+// 预览默认全勾，只在开层/异步清单或窗口变化时 reveal，用户勾选不触发滚动。
+const syncReveal = useQtSelectionReveal(() => syncVisible.value, () => syncRows.value.length > 0 ? 0 : -1, () => syncRows.value.map((row) => row.playlist.id).join('|'));
 /** 预览请求序号：一键开启重试 / 关闭弹层时丢弃在途应答 */
 let syncLoadSeq = 0;
 
@@ -735,6 +1089,7 @@ function enableMetaAndRetry(): void {
     });
 }
 function setSyncCheckedAt(i: number, value: boolean): void {
+  if (syncBusy.value) return;
   const next = syncChecked.value.slice(0);
   next[i] = value;
   syncChecked.value = next;
@@ -751,6 +1106,7 @@ function onSyncCheck(i: number, value: boolean): void {
   setSyncCheckedAt(i, value);
 }
 function toggleSyncAll(): void {
+  if (syncBusy.value) return;
   const nextAll = !syncAllChecked.value;
   const next: boolean[] = [];
   const rows = syncRows.value;
@@ -758,6 +1114,7 @@ function toggleSyncAll(): void {
   syncChecked.value = next;
 }
 function onSyncAllCheck(value: boolean): void {
+  if (syncBusy.value) return;
   const next: boolean[] = [];
   const rows = syncRows.value;
   for (let i = 0; i < rows.length; i++) next.push(value);
@@ -894,8 +1251,8 @@ onUnload(() => {
 // ── 样式常量（对齐音源包管理页的弹层口径）──
 const rowBorderStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
 const gateBorderStyle = computed<string>(() => "border-color:" + theme.skin.divider + ";");
-const sheetCardStyle = computed<string>(() => "background-color:" + theme.skin.surfaceStrong + ";border-radius:24rpx;");
-const sheetCardStyleWide = computed<string>(() => "background-color:" + theme.skin.surfaceStrong + ";border-radius:14px;");
+const sheetBodyStyle = computed<string>(() => 'max-height:' + Math.max(120, Math.floor(layout.windowHeight * 0.86) - layout.safeBottomPx - (layout.isWide ? 110 : 132)) + 'px;');
+const syncListStyle = computed<string>(() => 'height:' + Math.max(80, Math.min(layout.isWide ? 320 : 240, Math.floor(layout.windowHeight * 0.86) - layout.safeBottomPx - (layout.isWide ? 220 : 260))) + 'px;');
 const cookieInputStyle = computed<string>(() => "background-color:" + theme.skin.surfaceInset + ";color:" + theme.skin.text + ";border-radius:14rpx;");
 const cookieInputStyleWide = computed<string>(() => "background-color:" + theme.skin.surfaceInset + ";color:" + theme.skin.text + ";border-radius:8px;");
 </script>
@@ -963,6 +1320,20 @@ const cookieInputStyleWide = computed<string>(() => "background-color:" + theme.
   border-bottom-width: 1px;
   border-bottom-style: solid;
 }
+/* 未登录源的动作区：单行横向滚动（放不下时左右滑，不换行）。
+   高度必须容下 qt-button size="sm"（紧凑 88rpx / 宽屏 44px），否则按钮被裁。 */
+.acc-scroll {
+  flex: 1;
+  width: 0;
+  height: 88rpx;
+}
+.acc-scroll-wide { height: 44px; }
+.acc-track {
+  height: 88rpx;
+  flex-direction: row;
+  align-items: center;
+}
+.acc-track-wide { height: 44px; }
 .src-nick {
   flex: 1;
   font-size: 23rpx;
@@ -1001,37 +1372,6 @@ const cookieInputStyleWide = computed<string>(() => "background-color:" + theme.
   font-size: 23rpx;
 }
 
-/* 自绘开关（全仓无 switch 组件，尺寸与播放设置页一致） */
-.toggle {
-  width: 92rpx;
-  height: 52rpx;
-  border-radius: 26rpx;
-  padding: 6rpx;
-  margin-left: 16rpx;
-}
-.toggle-wide {
-  width: 46px;
-  height: 26px;
-  border-radius: 13px;
-  padding: 3px;
-  margin-left: 12px;
-}
-.toggle-knob {
-  width: 40rpx;
-  height: 40rpx;
-  border-radius: 20rpx;
-}
-.toggle-knob-wide {
-  width: 20px;
-  height: 20px;
-  border-radius: 10px;
-}
-.toggle-knob-on {
-  margin-left: 40rpx;
-}
-.toggle-knob-on-wide {
-  margin-left: 20px;
-}
 
 .empty {
   padding: 8rpx 0 4rpx;
@@ -1040,33 +1380,7 @@ const cookieInputStyleWide = computed<string>(() => "background-color:" + theme.
   line-height: 1.6;
 }
 
-/* 弹层（音源包管理页「从链接安装」同款口径） */
-.sheet-mask {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  background-color: rgba(0, 0, 0, 0.45);
-  align-items: center;
-  justify-content: center;
-  z-index: 999;
-}
-.sheet-card {
-  width: 560rpx;
-  padding: 32rpx 28rpx 24rpx;
-}
-.sheet-card-wide {
-  width: 480px;
-  padding: 22px 24px 18px;
-}
-.sheet-title {
-  font-size: 30rpx;
-  font-weight: 600;
-}
-.sheet-title-wide {
-  font-size: 17px;
-}
+/* 表单弹层的遮罩、标题与宽窄屏布局由 QtSheet 统一负责。 */
 .sheet-desc {
   margin-top: 8rpx;
   font-size: 23rpx;
@@ -1089,17 +1403,32 @@ const cookieInputStyleWide = computed<string>(() => "background-color:" + theme.
 .qr-img-expired {
   opacity: 0.3;
 }
+/* 兜底：路径也加载失败时白框里给可操作的提示，别留一片空白 */
+.qr-fallback {
+  width: 380rpx;
+  text-align: center;
+  line-height: 1.5;
+}
 /* 宽屏：380rpx 在 1067dp 窗口约 540px，超出 480px 卡片内宽（432px）会被裁掉 */
 .qr-wrap-wide { margin-top: 12px; padding: 10px; }
 .qr-img-wide { width: 300px; height: 300px; }
+/* 扫码提示（v16 契约 auth.qrHint）：QQ 的 ptlogin 码只认手机 QQ 扫一扫，扫错 App 会一直待确认 */
+.qr-hint {
+  margin-top: 16rpx;
+  padding: 0 12rpx;
+  text-align: center;
+  line-height: 1.5;
+}
+.qr-hint-wide {
+  margin-top: 10px;
+}
 
 .cookie-input {
   margin-top: 22rpx;
   height: 200rpx;
   padding: 16rpx 20rpx;
   font-size: 24rpx;
-}
-.cookie-input-wide {
+}.cookie-input-wide {
   margin-top: 12px;
   height: 110px;
   padding: 8px 12px;
@@ -1170,12 +1499,6 @@ const cookieInputStyleWide = computed<string>(() => "background-color:" + theme.
 .sync-head-text {
   margin-left: 14rpx;
   flex: 1;
-}
-.sync-list {
-  height: 440rpx;
-}
-.sync-list-wide {
-  height: 280px;
 }
 .sync-row {
   flex-direction: row;

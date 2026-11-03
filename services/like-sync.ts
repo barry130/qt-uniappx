@@ -478,20 +478,46 @@ export class LikeSyncEngine {
           break;
         }
         let maxApplied = this.likeCursor;
+        let deferred = false;
         for (let i = 0; i < res.changes.length; i++) {
           const change = res.changes[i];
+          // 这一条现在不能收（本地改名/封面的 pending 还没推成功）：游标必须停在它
+          // 之前，等下一轮 pending 出队后再取。若照旧推过游标，这条服务器版本会被
+          // 永久跳过 —— 用户在新设备/重装后看不到自己改过的歌单名与封面。
+          if (this.isDeferredLikeChange(change)) {
+            deferred = true;
+            break;
+          }
           if (change.updatedSeq > maxApplied) maxApplied = change.updatedSeq;
           this.applyLikeChange(change);
         }
         this.likeCursor = maxApplied;
         this.save();
         this.host.persistNow();
+        // 有变更被推迟：立刻重取只会又拿到同一条，直接交给下一轮同步
+        if (deferred) break;
       }
     } catch (e) {
       logMsg("[Player] 收藏增量同步失败", e);
     } finally {
       this.likeSyncBusy = false;
     }
+  }
+
+  /**
+   * 这条变更现在必须留到下一轮再收吗？
+   *
+   * 本地歌单的改名/封面走 `playlist/add` 的 pending 队列，推成功之前服务器上仍是
+   * 旧版本。此刻若把旧版本收下会覆盖本地刚改的名字/封面；更严重的是拉取游标会被
+   * 推过这条变更 —— 即使之后 pending 成功，这条也永久跳过，换个设备/重装后
+   * 看到的还是旧名旧封面（2026-11-02 审阅）。返回 true 时调用方必须停在它之前。
+   */
+  private isDeferredLikeChange(change: LikeChange): boolean {
+    if (change.type != "playlist") return false;
+    if (change.platform != "local") return false;
+    const pid = change.pid != null && change.pid.length > 0 ? change.pid! : change.id;
+    if (pid.length == 0) return false;
+    return this.hasPendingLikeOp("playlist", pid, change.platform);
   }
 
   /** 单条变更应用（D4 last-write-wins：updated_seq 大者胜出） */
@@ -578,6 +604,12 @@ export class LikeSyncEngine {
       }
       return;
     }
+    // 本地自建歌单的重命名也走 playlist/add（按 pid upsert）。离线改名时，
+    // 当前游标之后仍可能收到服务器里「改名前」的同 pid 增量；pending 未成功前
+    // 必须保留本地新名，不能让旧变更覆盖。成功推送会先出队并回写 likeSeq，
+    // 下一轮拉取即可正常接收服务端确认的版本。
+    const incomingPid = change.pid != null && change.pid.length > 0 ? change.pid! : change.id;
+    if (change.platform === "local" && this.hasPendingLikeOp("playlist", incomingPid, change.platform)) return;
     let idx = -1;
     for (let i = 0; i < this.host.savedPlaylists.length; i++) {
       const pl = this.host.savedPlaylists[i];
@@ -616,7 +648,6 @@ export class LikeSyncEngine {
     }
     // 本机自建歌单：服务器的这条变更只回写元数据，不再另建一条 savedPlaylists 记录 ——
     // 展示层是 localPlaylists + savedPlaylists 直接拼接，重复收下会出两张卡、计数多 1
-    const incomingPid = change.pid != null && change.pid.length > 0 ? change.pid! : change.id;
     if (this.host.isLocallyOwnedPlaylist(incomingPid, change.platform)) {
       for (let i = 0; i < this.host.localPlaylists.length; i++) {
         const lp = this.host.localPlaylists[i];

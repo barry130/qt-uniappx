@@ -60,3 +60,12 @@ export function getVersionText(): string {
   if (name.length === 0) return code > 0 ? code.toString() : "-";
   return code > 0 ? name + " (" + code + ")" : name;
 }
+
+/**
+ * 构建时间标记（年-月-日 时:分）—— 区分同版本号下的不同构建。
+ * manifest 版本号只在发版时变，联调期同一个版本号会连续打出很多个包，
+ * 装机验收先看「关于」页这个时间，确认跑的是最新包再判断修复效果
+ * （避免拿旧包测新代码，报「改了没效果」）。
+ * 编译脚本（.tmp-compile-with-stamp.sh）每次编译前会用 sed 刷新这一行。
+ */
+export const APP_BUILD_STAMP = "2026-11-03 09:33";

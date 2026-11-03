@@ -17,7 +17,18 @@
           @click="retry"
         />
       </view>
-      <web-view v-if="webUrl.length > 0" class="wl-web" :src="webUrl" @error="onWebError" />
+      <web-view v-if="useInnerWebView && webUrl.length > 0" class="wl-web" :src="webUrl" @error="onWebError" />
+      <view v-else-if="useNativeView" class="wl-native">
+        <text class="wl-native-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ nativeTip }}</text>
+        <qt-button
+          v-if="phase != 'done'"
+          class="wl-reopen"
+          label="重新打开官方登录页"
+          variant="outline"
+          size="sm"
+          @click="openNativeLogin"
+        />
+      </view>
     </view>
   </qt-page-frame>
 </template>
@@ -30,7 +41,7 @@ import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtShowToast } from "@/services/toast";
 import { logErrV } from "@/services/logger";
 import { useSourceRegistryStore } from "@/stores/source-registry";
-import { isHarmonyOs, getWebCookies } from "@/services/app-native";
+import { isAndroidOs, getWebCookies, openAuthWebView, closeAuthWebView } from "@/services/app-native";
 import { authImportCookie, saveSourceAuthAccount, type SourceAuthUser } from "@/services/source-auth";
 import { mergeCookies, markerHit, captureUrlsOf, WEB_LOGIN_DONE_EVENT } from "@/services/source-web-login";
 import type { RegistryWebLogin } from "@/services/music-api";
@@ -70,6 +81,60 @@ let failNotified = false;
 /** 上一轮 authImportCookie 未返回时不叠加打（避免每 1.5s 一串校验请求） */
 let importing = false;
 
+/**
+ * 安卓走原生「可控登录 WebView」（services/app-native 的 openAuthWebView）：
+ * built-in <web-view> 不转发 mqqapi:// / intent:// 这类自定义 scheme，
+ * QQ 登录页点「QQ登录」要拉起手机QQ 时毫无反应（2026-10-31 用户实测）。
+ * 鸿蒙 / iOS 没有等价实现，继续用内置 web-view（按 isAndroidOs 显式判定：
+ * 原先写 `!isHarmonyOs()` 会把 iOS 也算成「有原生实现」，页面停在
+ * 「已用系统 WebView 打开」直到 180s 超时，2026-11-02 审阅实测）。
+ */
+const useNativeView = isAndroidOs();
+const useInnerWebView = !isAndroidOs();
+/** 原生登录页是否已被用户关掉（仅影响提示文案；Cookie 轮询不受影响） */
+const nativeClosedByUser = ref(false);
+/** 原生登录 WebView 是否正开着（避免 beginPolling 重复打开/重开） */
+const nativeOpen = ref(false);
+
+/** 原生登录页的说明文案（安卓专用；鸿蒙走内置 web-view 不显示） */
+const nativeTip = computed((): string => {
+  if (nativeClosedByUser.value) return "登录页已关闭。Cookie 捕获仍在继续，需要重新打开时点下面按钮。";
+  return "登录页已在系统 WebView 中打开，返回键或右上角「关闭」可退出。QQ / 微信授权会跳到对应 App，确认后回到登录页继续即可，本页会自动完成登录。";
+});
+
+/**
+ * 原生登录页关闭：message 为空 = 用户自己关的；非空 = 插件关的并带回原因
+ * （例如没装手机QQ）。原因只用应用自己的公用 toast 提示，插件不再弹原生弹窗。
+ * 两种情况都不停轮询：Cookie 可能已经种上了。
+ */
+function onNativeClosed(message: string): void {
+  nativeOpen.value = false;
+  nativeClosedByUser.value = true;
+  if (message.length > 0) qtShowToast({ title: message, icon: "none" });
+}
+
+/**
+ * 桌面 UA：酷我的手机站（m.kuwo.cn）整站没有登录入口，手机 UA 打开 www 主站会被
+ * 302 到 m 站首页（排行榜 + 下载App）；桌面 UA 才留在 www 桌面版、右上角有「登录」。
+ * 桌面版没有 viewport meta，WebView 会按 overview 模式缩放到屏宽，插件另外开了缩放。
+ */
+const DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+/** 需要桌面 UA 才能露出登录入口的音源 */
+const DESKTOP_WEB_LOGIN_SOURCES = ["kw"];
+
+/** 当前音源该用哪个 UA（空串 = 插件内置移动端 UA） */
+function webLoginUa(): string {
+  return DESKTOP_WEB_LOGIN_SOURCES.indexOf(sourceId.value) >= 0 ? DESKTOP_UA : "";
+}
+
+/** 打开（或重新打开）原生登录页 */
+function openNativeLogin(): void {
+  if (webUrl.value.length == 0) return;
+  nativeClosedByUser.value = false;
+  nativeOpen.value = true;
+  openAuthWebView(webUrl.value, onNativeClosed, webLoginUa());
+}
+
 /** 与 source-auth 页同一组常量（PC：1500ms / 180s） */
 const WEB_LOGIN_TIMEOUT_MS = 180000;
 const WEB_LOGIN_INTERVAL_MS = 1500;
@@ -83,6 +148,7 @@ const statusColor = computed((): string => {
 const statusText = computed((): string => {
   if (phase.value == "loading") return "正在打开官方登录页…";
   if (phase.value == "done") return "登录成功，正在返回…";
+  if (phase.value == "polling" && nativeClosedByUser.value) return "登录页已关闭，仍在等待登录凭据；需要继续时可点「重新打开官方登录页」";
   if (phase.value == "timeout") {
     if (markerSeen.value) return "已捕获官方登录 Cookie，但账号校验未通过。请在网页确认账号状态后点「重新加载」";
     if (capturedSeen.value) return "已读取到部分 Cookie，但还没捕获到登录凭据。请先在网页完成登录，再点「重新加载」";
@@ -147,6 +213,9 @@ function beginPolling(): void {
   stopPolling();
   pollTimer = setInterval(tick, WEB_LOGIN_INTERVAL_MS);
   tick();
+  // 安卓：登录页由原生 Dialog 承载（内置 web-view 不转发 mqqapi:// 等 scheme）。
+  // retry 复用同一窗口，已开着就不再重开，避免用户填到一半被弹走。
+  if (useNativeView && !nativeOpen.value) openNativeLogin();
 }
 
 /** 一轮检测：读 Cookie → 拼「name=value; …」头 → 命中标记即导入校验 */
@@ -194,6 +263,12 @@ function tick(): void {
 function finishLogin(cookie: string, user: SourceAuthUser): void {
   phase.value = "done";
   stopPolling();
+  // 登录已成，立即收掉原生登录页（不等 navigateBack）：
+  // 否则用户在「登录成功」toast 期间还能操作网页，容易误触
+  if (nativeOpen.value) {
+    nativeOpen.value = false;
+    closeAuthWebView();
+  }
   saveSourceAuthAccount(sourceId.value, cookie, user, "")
     .then(() => {
       uni.$emit(WEB_LOGIN_DONE_EVENT, sourceId.value);
@@ -249,6 +324,11 @@ onLoad((options: Record<string, string> | null) => {
 
 onUnload(() => {
   stopPolling();
+  // 页面被返回/关闭：连带收掉原生登录页，避免 Dialog 挂在已销毁的页面上
+  if (nativeOpen.value) {
+    nativeOpen.value = false;
+    closeAuthWebView();
+  }
 });
 </script>
 
@@ -274,5 +354,22 @@ onUnload(() => {
   flex: 1;
   width: 100%;
   min-height: 0;
+}
+/* 安卓原生登录页（Dialog）盖在上面时，本页退化成「后台轮询 + 提示」 */
+.wl-native {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48rpx 40rpx;
+}
+.wl-native-text {
+  text-align: center;
+  line-height: 1.6;
+}
+.wl-reopen {
+  margin-top: 32rpx;
 }
 </style>

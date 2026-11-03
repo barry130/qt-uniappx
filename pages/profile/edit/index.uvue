@@ -110,6 +110,7 @@ import {
   DEFAULT_AVATAR_ASSET,
 } from "@/services/media";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { saveImageToGallery } from "@/services/app-native";
 
 const themeStore = useThemeStore();
 const layout = useQtLayout();
@@ -258,12 +259,10 @@ function downloadToTemp(url: string): Promise<string> {
 }
 
 function saveToAlbum(filePath: string): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    uni.saveImageToPhotosAlbum({
-      filePath,
-      success: () => resolve(),
-      fail: () => reject(new Error("保存到相册失败，请检查相册权限")),
-    });
+  // 走 app-native 的 MediaStore 写入：uni.saveImageToPhotosAlbum 在 Android 14+ 会因
+  // 清单里 WRITE_EXTERNAL_STORAGE 带 maxSdkVersion 而抛异常打崩页面（见 services/app-native.uts）
+  return saveImageToGallery(filePath, "qt-avatar-" + Date.now() + ".png").then((saved: string) => {
+    if (saved.length == 0) throw new Error("保存到相册失败，请检查存储空间");
   });
 }
 

@@ -82,7 +82,6 @@ import { ref, computed } from "vue";
 import { usePlayerStore } from "@/stores/player";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { musicApi } from "@/services/music-api";
 import type { Song } from "@/types/music";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useQtSongColumns, qtSongPairs } from "@/uni_modules/qt-ui/composables/use-qt-song-columns";
@@ -184,11 +183,11 @@ function backToTop() {
 
 async function play(song: Song): Promise<void> {
   try {
-    // 本地歌曲已带 content:// 地址，跳过在线取址
-    if (song.platform != "local") {
-      song.url = await musicApi.playUrl(song, player.quality);
-    }
-    player.playSingle(song);
+    // 不预取在线地址（本地歌的 content:// 也不需要）：解析桥（onResolveRequest）
+    // 在起播那一刻才取链——本地歌直接交 song.url，在线歌先走本地优先
+    // （下载账本身份级/跨源元数据级→本地曲库）再在线。预取会把在线 urlSize
+    // 灌进码率显示，本地命中后还显示在线码率，像「还是在线」（m22743）。
+    await player.playSingle(song);
   } catch (_) {
     qtShowToast({ title: "该歌曲暂时无法播放", icon: "none" });
   }

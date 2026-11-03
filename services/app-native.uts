@@ -9,9 +9,9 @@
  * （编译进原生层），此处通过平台分发导入调用；H5 保留 window 实现，其余降级为复制+提示。
  */
 
-import { openExternalUrl, exitAppNative, installApkNative, openNotificationSettings as openNotificationSettingsNative, isIgnoringBatteryOptimizations as isIgnoringBatteryOptimizationsNative, openBatteryOptimizationSettings as openBatteryOptimizationSettingsNative, openAutoStartSettings as openAutoStartSettingsNative, openAppDetailsSettings as openAppDetailsSettingsNative, applyLegacyInsets as applyLegacyInsetsNative, readBottomNavInset as readBottomNavInsetNative, pickJsFile as pickJsFileNative, pickDirectory as pickDirectoryNative, setCustomDirUri as setCustomDirUriNative, queryPermissionStates as queryPermissionStatesNative, openPermissionSettings as openPermissionSettingsNative, getWebCookies as getWebCookiesNative } from "@/uni_modules/qt-app-native";
+import { openExternalUrl, exitAppNative, installApkNative, openNotificationSettings as openNotificationSettingsNative, isIgnoringBatteryOptimizations as isIgnoringBatteryOptimizationsNative, openBatteryOptimizationSettings as openBatteryOptimizationSettingsNative, openAutoStartSettings as openAutoStartSettingsNative, openAppDetailsSettings as openAppDetailsSettingsNative, applyLegacyInsets as applyLegacyInsetsNative, readBottomNavInset as readBottomNavInsetNative, pickJsFile as pickJsFileNative, pickDirectory as pickDirectoryNative, setCustomDirUri as setCustomDirUriNative, queryPermissionStates as queryPermissionStatesNative, openPermissionSettings as openPermissionSettingsNative, getWebCookies as getWebCookiesNative, openAuthWebView as openAuthWebViewNative, closeAuthWebView as closeAuthWebViewNative, saveToPublicMedia as saveToPublicMediaNative } from "@/uni_modules/qt-app-native";
 import type { PickFileResult, PickDirectoryResult, PermissionState } from "@/uni_modules/qt-app-native";
-import { logErrV } from "@/services/logger";
+import { logErrV, logWarn } from "@/services/logger";
 import { ensureNotificationPermission as ensureNotificationPermissionNative } from "@/uni_modules/qt-audio-player";
 import { qtShowToast } from "@/services/toast";
 
@@ -33,6 +33,33 @@ export function isHarmonyOs(): boolean {
   return true;
   // #endif
   // #ifndef APP-HARMONY
+  return false;
+  // #endif
+}
+
+/**
+ * 本机是否为安卓端（原生登录 WebView 只有安卓实现，iOS 必须继续用内置 web-view）。
+ *
+ * 为什么不写 `!isHarmonyOs()`：iOS / H5 也满足「非鸿蒙」，但原生登录 WebView 在
+ * 这两个平台上是空实现 —— 2026-11-02 审阅实测：iOS 上页面判定「已用系统 WebView
+ * 打开」，可实际什么都没弹，用户只能干等到 180s 超时（旧版 iOS 靠内置 web-view
+ * 是能登录的，属平台级回退）。平台能力要显式判定，别靠排除法。
+ */
+export function isAndroidOs(): boolean {
+  // #ifdef APP-ANDROID
+  return true;
+  // #endif
+  // #ifndef APP-ANDROID
+  return false;
+  // #endif
+}
+
+/** 本机是否为 iOS 端（同上：显式判定，供页面选内置 web-view 或原生 WebView） */
+export function isIosOs(): boolean {
+  // #ifdef APP-IOS
+  return true;
+  // #endif
+  // #ifndef APP-IOS
   return false;
   // #endif
 }
@@ -477,5 +504,68 @@ export function getWebCookies(urls: string[]): Promise<string[]> {
   // #endif
   // #ifndef APP-ANDROID || APP-HARMONY
   return Promise.resolve([] as string[]);
+  // #endif
+}
+
+/**
+ * 用「可控登录 WebView」打开官方网页登录页（网页登录 v17，Android）。
+ *
+ * 为什么不用内置 <web-view>：QQ 登录页在手机 UA 下把「QQ登录」做成应用跳转
+ * （mqqapi:// / intent:// 等自定义 scheme），内置组件既没有 shouldOverrideUrlLoading
+ * 钩子也不转发自定义 scheme，点下去页面纹丝不动（2026-10-31 用户实测「无反应」）。
+ * 原生 Dialog + WebView 能接管导航并交给系统 Intent，拉起手机QQ 完成授权，
+ * 授权后 Cookie 落在同进程 CookieManager，原有的 getWebCookies 轮询照旧工作。
+ *
+ * @param url     登录页地址（数据包 webLogin.url）
+ * @param onClose 关闭时的回调：message 为空 = 用户自己关掉；非空 = 关闭原因
+ *                （例如没装手机QQ）。提示一律由宿主用 qtShowToast 展示，
+ *                插件内部不弹 Toast / AlertDialog。
+ * @param ua      WebView 的 User-Agent；空串 = 插件内置移动端 UA。个别站点只有
+ *                桌面版布局才露出「登录」入口（酷我手机 UA 会被 302 到
+ *                m.kuwo.cn 的无登录位首页），这类源由调用方传桌面 UA。
+ */
+export function openAuthWebView(url: string, onClose: (message: string) => void, ua: string): void {
+  // #ifdef APP-ANDROID
+  openAuthWebViewNative(url, onClose, ua);
+  // #endif
+  // #ifndef APP-ANDROID
+  // iOS / H5 没有原生登录 WebView：调用方（pages/web-login）必须按 isAndroidOs()
+  // 选内置 web-view，走到这里是调用方判错了平台，留一行 warn 方便定位
+  logWarn("app-native", "openAuthWebView 当前平台无原生实现（iOS/H5 请用内置 web-view）: " + url);
+  // #endif
+}
+
+/** 关闭 openAuthWebView 打开的登录 WebView（未打开时无副作用，不触发 onClose） */
+export function closeAuthWebView(): void {
+  // #ifdef APP-ANDROID
+  closeAuthWebViewNative();
+  // #endif
+}
+
+/**
+ * 保存图片到系统相册。
+ *
+ * 为什么不用 `uni.saveImageToPhotosAlbum`：它走 uni-media 的权限链，在 Android 14+
+ * 上会经 XXPermissions 校验清单里 WRITE_EXTERNAL_STORAGE 的声明；本工程清单写的是
+ * `<uses-permission ... android:maxSdkVersion="28"/>`，XXPermissions 直接抛
+ * `IllegalArgumentException: ... does not meet the requirements`，把页面打崩
+ * （2026-10-31 用户实测，点「保存二维码」必现）。
+ * 安卓改走自己的 MediaStore 写入：Android 10+ 不需要任何存储权限，图片落在
+ * `Pictures/qtMusic/`，系统相册即可扫到。
+ *
+ * @returns 落盘后的绝对路径；失败返回空串
+ */
+export function saveImageToGallery(tempPath: string, fileName: string): Promise<string> {
+  // #ifdef APP-ANDROID
+  return saveToPublicMediaNative(tempPath, "picture", fileName, "qtMusic");
+  // #endif
+  // #ifndef APP-ANDROID
+  return new Promise<string>((resolve: (value: string) => void, _reject: (err: any) => void) => {
+    uni.saveImageToPhotosAlbum({
+      filePath: tempPath,
+      success: () => resolve(tempPath),
+      fail: () => resolve(""),
+    });
+  });
   // #endif
 }

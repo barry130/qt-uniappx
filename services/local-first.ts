@@ -22,6 +22,7 @@ import { musicApi } from "@/services/music-api";
 import { logMsg } from "@/services/logger";
 import { useDownloadsStore } from "@/stores/downloads";
 import type { Song } from "@/types/music";
+import { statLocalFile } from "@/uni_modules/qt-app-native";
 import type { LocalAudioItem } from "@/uni_modules/qt-app-native";
 
 /** 总开关持久化键（对齐 audio-player.uts 的 GAPLESS_KEY 命名风格） */
@@ -206,7 +207,14 @@ export function metaMatchesEither(
   return metaMatches(wantTitle, wantSinger, wantDuration, singer, title, duration);
 }
 
-/** 文件在不在（异步：公共目录同步 stat 会卡 IO，见 downloads.ts fileSizeOf 注释） */
+/** 文件在不在（异步：公共目录同步 stat 会卡 IO，见 downloads.ts fileSizeOf 注释）
+ *
+ * uni.getFileSystemManager().getFileInfo 对安卓公共目录（MediaStore 落盘的下载
+ * 成品）经常 fail——文件明明在盘上也报「不在盘」（2026-11-01 真机诊断弹窗复现，
+ * /storage/emulated/0/Download/... stat 始终 false，本地优先整链被卡掉）。
+ * 所以 fail 后再走原生 statLocalFile 兜底（java.io.File 直查，与
+ * readEmbeddedTags 的 FileInputStream 直读同源，那条线实测能读到这些文件）。
+ */
 function fileExists(filePath: string): Promise<boolean> {
   return new Promise((resolve) => {
     if (filePath == null || filePath.length == 0) {
@@ -216,7 +224,37 @@ function fileExists(filePath: string): Promise<boolean> {
     uni.getFileSystemManager().getFileInfo({
       filePath,
       success: (_res) => resolve(true),
-      fail: () => resolve(false),
+      fail: () => {
+        // 静默：uni stat 公共目录经常 fail，交给原生兜底判定，不在这里报错
+        const nativeSize = statLocalFile(filePath);
+        resolve(nativeSize >= 0);
+      },
+    });
+  });
+}
+
+/**
+ * 文件字节数（异步，读不到 0）：本地优先命中后给播放页算真实 kbps 用
+ * （本地文件不走在线取链，urlSize 永远量不到，只能 stat 磁盘文件）。
+ * uni stat 失败时同样走原生 statLocalFile 兜底（同 fileExists 的公共目录问题）。
+ */
+export function localFileSizeOf(filePath: string): Promise<number> {
+  return new Promise((resolve) => {
+    if (filePath == null || filePath.length == 0) {
+      resolve(0);
+      return;
+    }
+    uni.getFileSystemManager().getFileInfo({
+      filePath,
+      success: (res) => {
+        const size = res.size;
+        resolve(size != null && size > 0 ? size : 0);
+      },
+      fail: () => {
+        // 静默：uni stat 失败不代表文件不在盘，原生兜底读真实字节数
+        const nativeSize = statLocalFile(filePath);
+        resolve(nativeSize > 0 ? nativeSize : 0);
+      },
     });
   });
 }
@@ -260,6 +298,23 @@ export async function localFileFor(song: Song): Promise<string | null> {
     logMsg("[LocalFirst] 下载账本命中: " + song.platform + ":" + song.id + " -> " + dl.path);
     return dl.path;
   }
+  // ② 下载账本：元数据级跨源（在 A 源下载、在 B 源的歌单里点播同一首：身份对不上，
+  //    但歌名+歌手+时长三关一致且文件在盘 → 同样交本地文件。门与替身链 B 池同款
+  //    metaMatches：标题归一全等 + 歌手 token 相交 + 时长差 ≤3s，任一侧未知放行）
+  const dls = useDownloadsStore().items;
+  for (let i = 0; i < dls.length; i++) {
+    const item = dls[i];
+    if (item == null || item.path == null || item.path.length == 0) continue;
+    // ① 已按身份试过同一条（fileExists 也已失败），不重复 stat
+    if (item.song.platform == song.platform && item.song.id == song.id) continue;
+    if (!metaMatches(song.name, song.singer, song.duration, item.song.name, item.song.singer, item.song.duration)) {
+      continue;
+    }
+    if (await fileExists(item.path)) {
+      logMsg("[LocalFirst] 下载账本跨源命中: " + song.platform + ":" + song.id + " -> " + item.song.platform + ":" + item.song.id + " " + item.path);
+      return item.path;
+    }
+  }
   // ⑤ 本地曲库：元数据级（K2 三关）。content:// 不做存在性预检（见文件头注释）
   const items = readLocalAudioItems();
   for (let i = 0; i < items.length; i++) {
@@ -271,6 +326,77 @@ export async function localFileFor(song: Song): Promise<string | null> {
     }
   }
   return null;
+}
+
+/**
+ * 本地优先诊断（管理端「当前播放地址」弹窗用，纯读、不改变任何行为）：
+ * 把 localFileFor 的三段链对这首歌逐段复跑一遍，把「为什么没走本地」讲清楚。
+ * 用户侧「下载了还是在线」不再靠猜——弹窗里直接看是 ①身份没记录、
+ * ②元数据三关差哪关、⑤曲库有没有，还是文件不在盘。
+ */
+export async function localFirstDiagnose(song: Song): Promise<string> {
+  const store = useDownloadsStore();
+  const dls = store.items;
+  if (!localFirstEnabled()) {
+    return "本地优先: 关（下载账本 " + dls.length + " 条）";
+  }
+  let report = "本地优先: 开 · 下载账本 " + dls.length + " 条";
+  // ① 身份级（与 localFileFor 同口径：find 精确 + 路径非空 + 文件在盘）
+  const dl = store.find(song);
+  if (dl == null) {
+    report += "\n①身份: 无记录（" + song.platform + ":" + song.id + "）";
+  } else if (dl.path == null || dl.path.length == 0) {
+    report += "\n①身份: 有记录·无路径";
+  } else {
+    report += "\n①身份: 有记录" + ((await fileExists(dl.path)) ? "·文件在盘" : "·文件不在盘") + " " + dl.path;
+  }
+  // ② 元数据级跨源：逐条评三关，报告过关最多的候选与它挂在哪一关
+  let bestGates = -1;
+  let bestReason = "";
+  for (let i = 0; i < dls.length; i++) {
+    const item = dls[i];
+    if (item == null) continue;
+    const r = item.song;
+    // 与 localFileFor 同口径：①已按身份试过的同一条不重复评
+    if (r.platform == song.platform && r.id == song.id) continue;
+    let gates = 0;
+    let reason = "";
+    if (normalizeForMatch(r.name) == normalizeForMatch(song.name)) gates++;
+    else reason += "标题「" + song.name + "」vs「" + r.name + "」";
+    if (singersOverlap(song.singer, r.singer)) gates++;
+    else reason += (reason.length > 0 ? " " : "") + "歌手「" + song.singer + "」vs「" + r.singer + "」";
+    if (durationClose(song.duration, r.duration)) gates++;
+    else reason += (reason.length > 0 ? " " : "") + "时长" + (song.duration != null ? song.duration : 0) + "s vs " + (r.duration != null ? r.duration : 0) + "s";
+    if (gates == 3) {
+      if (item.path == null || item.path.length == 0) {
+        report += "\n②元数据: 全匹配 " + r.platform + ":" + r.id + "·无路径";
+      } else {
+        report += "\n②元数据: 全匹配 " + r.platform + ":" + r.id + ((await fileExists(item.path)) ? "·文件在盘" : "·文件不在盘") + " " + item.path;
+      }
+      bestGates = 3;
+      break;
+    }
+    if (gates > bestGates) {
+      bestGates = gates;
+      bestReason = r.platform + ":" + r.id + " 过" + gates + "/3关（" + reason + "）";
+    }
+  }
+  if (bestGates < 3) {
+    report += "\n②元数据: " + (bestGates >= 0 ? "无全匹配·最近 " + bestReason : "无候选");
+  }
+  // ⑤ 本地曲库（存档元数据级，content:// 不做存在性预检）
+  const items = readLocalAudioItems();
+  let libUri = "";
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item == null || item.uri == null || item.uri.length == 0) continue;
+    if (metaMatchesEither(song.name, song.singer, song.duration, item.title, item.singer, item.duration)) {
+      libUri = item.uri;
+      break;
+    }
+  }
+  report += "\n⑤曲库: " + (libUri.length > 0 ? "命中 " + libUri : "无匹配（存档 " + items.length + " 条）");
+  return report;
 }
 
 /**

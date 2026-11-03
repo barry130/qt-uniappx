@@ -722,15 +722,13 @@ onBackPress((options: OnBackPressOptions): boolean => {
   return true;
 });
 async function play(song: Song): Promise<void> {
+  // 不预取在线地址：解析桥（onResolveRequest）在起播那一刻才取链，且取链前
+  // 先走本地优先（下载账本身份级/跨源元数据级→本地曲库）。在这里预取会把在线
+  // urlSize 灌进码率显示，本地命中后还显示在线码率，像「还是在线」（m22743）。
   try {
-    song.url = await musicApi.playUrl(song, player.quality);
-    try {
-      await player.playSingle(song);
-    } catch (_) {
-      // 取到链接但起播失败：与取链失败同口径提示，不留无声失败
-      qtShowToast({ title: "该歌曲暂时无法播放", icon: "none" });
-    }
+    await player.playSingle(song);
   } catch (_) {
+    // 起播失败：同口径提示，不留无声失败
     qtShowToast({ title: "该歌曲暂时无法播放", icon: "none" });
   }
 }

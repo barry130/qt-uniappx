@@ -9,22 +9,7 @@
         title="第 1 步 · 选 AI 引擎"
         description="每日推荐与音乐助手共用这一档选择。只有「本地模型精选」才需要往下填模型配置。"
       >
-        <view
-          v-for="(m, index) in engineRows"
-          :key="m.key"
-          class="engine-row"
-          :class="layout.isWide ? 'engine-row-wide' : ''"
-          :style="engineMode == m.key ? 'background-color:' + theme.skin.accentSoft + ';border-radius:' + (layout.isWide ? '10px' : '16rpx') + ';' : ''"
-          @click="pickEngine(m.key)"
-        >
-          <view class="engine-dot" :class="layout.isWide ? 'engine-dot-wide' : ''" :style="'border-color:' + (engineMode == m.key ? theme.skin.accent : theme.skin.border) + ';'">
-            <view v-if="engineMode == m.key" class="engine-dot-in" :class="layout.isWide ? 'engine-dot-in-wide' : ''" :style="'background-color:' + theme.skin.accent + ';'"></view>
-          </view>
-          <view class="engine-main">
-            <text class="engine-name" :style="'color:' + theme.skin.text + ';' + qtFontDual(28, 15)">{{ m.name }}</text>
-            <text class="engine-sub" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(21, 12)">{{ m.sub }}</text>
-          </view>
-        </view>
+        <qt-option v-for="m in engineRows" :key="m.key" :label="m.name" :description="m.sub" :selected="engineMode == m.key" @select="pickEngine(m.key)" />
       </qt-card>
 
       <!-- 第 2 步：模型配置。只在「本地模型精选」下展开；其余模式收起并说明理由，
@@ -58,7 +43,7 @@
           <view class="profile-main">
             <view class="profile-title-row">
               <text class="profile-name" :style="'color:' + theme.skin.text + ';' + qtFontDual(30, 16)">{{ p.name.length > 0 ? p.name : "未命名供应商" }}</text>
-              <view v-if="activeId == p.id" class="active-badge" :style="activeBadgeStyle"><text class="active-badge-text" :style="'color:' + theme.skin.onAccent + ';' + qtFontDual(20, 11)">生效中</text></view>
+
             </view>
             <text class="profile-url" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)">{{ p.baseUrl }}</text>
             <text class="profile-meta" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)">{{ protocolLabel(p.protocol) }} · {{ activeModelOf(p) }} · 密钥 {{ keyMaskText(p) }}</text>
@@ -67,7 +52,7 @@
         </view>
         <view class="profile-btn-row" :class="layout.isWide ? 'profile-btn-row-wide' : ''">
           <qt-button class="profile-btn" label="编辑" variant="ghost" size="sm" @click="openEdit(p)" />
-          <qt-button v-if="activeId != p.id" class="profile-btn" label="设为生效" variant="secondary" size="sm" @click="setActive(p.id)" />
+          <qt-option class="profile-btn" :label="activeId == p.id ? '当前生效' : '设为生效'" kind="chip" :selected="activeId == p.id" @select="setActive(p.id)" />
           <qt-button class="profile-btn" label="删除" variant="outline" size="sm" @click="removeProfile(p)" />
         </view>
       </view>
@@ -85,13 +70,8 @@
     </scroll-view>
 
     <!-- 编辑弹层：列表页进入单档编辑（qt-pc 的 AiProvidersDialog 移动端形态） -->
-    <view v-if="editVisible" class="edit-mask" @click="closeEdit">
-      <view class="edit-panel" :class="[layout.isWide ? 'edit-panel-wide' : '', editOpen ? 'edit-panel-on' : '']" :style="editPanelStyle" @click.stop>
-        <scroll-view class="edit-scroll" :show-scrollbar="false">
-          <view class="edit-head">
-            <text class="edit-title" :style="'color:' + theme.skin.text + ';' + qtFontDual(32, 18)">{{ isNew ? "新增供应商" : "编辑供应商" }}</text>
-            <view class="edit-close" @click="closeEdit"><QtIcon name="close" :size="layout.isWide ? 18 : 30" :color="theme.skin.iconMuted" /></view>
-          </view>
+    <qt-sheet :visible="editVisible" :title="isNew ? '新增供应商' : '编辑供应商'" @close="closeEdit">
+        <scroll-view class="edit-scroll" direction="vertical" :style="editPanelStyle" :show-scrollbar="false">
 
           <view class="field-row">
             <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13)">名称</text>
@@ -117,6 +97,7 @@
           <view class="field-row" @click="toggleCert">
             <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13)">证书校验</text>
             <text class="field-value" :style="'color:' + theme.skin.text + ';' + qtFontDual(25, 14)">{{ skipCert ? "已跳过（自签证书网关用）" : "严格校验（默认）" }}</text>
+            <qt-switch :model-value="!skipCert" @change="toggleCert" />
           </view>
 
           <text v-if="testText.length > 0" class="test-text" :style="'color:' + (testOk ? theme.skin.success : theme.skin.danger) + ';' + qtFontDual(22, 12)">{{ testText }}</text>
@@ -127,20 +108,20 @@
           </view>
           <view class="edit-pad"></view>
         </scroll-view>
-      </view>
-    </view>
-
-    <qt-action-sheet :visible="protoSheetVisible" title="选择协议" :actions="protoActions" @select="onProtoSelect" @close="protoSheetVisible = false" />
-    <qt-action-sheet :visible="modelSheetVisible" title="选择模型" :actions="modelActions" @select="onModelSelect" @close="modelSheetVisible = false" />
+    </qt-sheet>
   </qt-page-frame>
 </template>
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { onShow, onUnload } from "@dcloudio/uni-app";
+import { onShow } from "@dcloudio/uni-app";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
-import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtSheet from "@/uni_modules/qt-ui/components/qt-sheet/qt-sheet.uvue";
+import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
+import QtSwitch from "@/uni_modules/qt-ui/components/qt-switch/qt-switch.uvue";
+import { qtSelectionColor } from "@/uni_modules/qt-ui/composables/selection";
+import { qtShowActionSheet } from "@/services/action-sheet";
 import QtCard from "@/uni_modules/qt-ui/components/qt-card/qt-card.uvue";
 import { qtConfirm } from "@/services/confirm";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
@@ -159,7 +140,6 @@ import {
   type AiProviderProfile,
   type AiProviderProtocol,
 } from "@/services/ai-providers";
-import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import { readAiMode, saveAiMode } from "@/services/ai-mode";
 import type { AiEngineMode } from "@/services/ai-mode";
 import { isQtAdmin } from "@/services/music-api";
@@ -227,9 +207,8 @@ function reload(): void {
 }
 reload();
 
-/** 编辑弹层（16ms 进场动画与歌单广场分类面板同一配方） */
+/** 编辑草稿保留原保存/测试契约，开关层由 QtSheet 负责。 */
 const editVisible = ref(false);
-const editOpen = ref(false);
 const isNew = ref(false);
 const editId = ref("");
 const keepKeys = ref<string[]>([]);
@@ -243,7 +222,6 @@ const testing = ref(false);
 const testOk = ref(false);
 const testText = ref("");
 const loadingModels = ref(false);
-let openTimer = 0;
 
 const keyPlaceholder = computed((): string => {
   if (keepKeys.value.length == 0) return "尚未设置密钥";
@@ -278,21 +256,8 @@ function openEdit(p: AiProviderProfile): void {
   showEdit();
 }
 
-function showEdit(): void {
-  editVisible.value = true;
-  if (openTimer != 0) clearTimeout(openTimer);
-  openTimer = setTimeout((): void => { editOpen.value = true; }, 16);
-}
-
-function closeEdit(): void {
-  editOpen.value = false;
-  if (openTimer != 0) { clearTimeout(openTimer); openTimer = 0; }
-  setTimeout((): void => { editVisible.value = false; }, 220);
-}
-
-onUnload((): void => {
-  if (openTimer != 0) clearTimeout(openTimer);
-});
+function showEdit(): void { editVisible.value = true; }
+function closeEdit(): void { editVisible.value = false; }
 
 function protocolLabel(p: AiProviderProtocol): string {
   if (p == "openai") return "OpenAI";
@@ -310,34 +275,14 @@ function toggleCert(): void {
   skipCert.value = !skipCert.value;
 }
 
-/** 协议选择 */
-const protoSheetVisible = ref(false);
-const protoActions = computed((): SheetAction[] => {
-  const acts: SheetAction[] = [];
-  for (let i = 0; i < AI_PROTOCOL_ORDER.length; i++) {
-    const p = AI_PROTOCOL_ORDER[i];
-    acts.push({ name: protocolLabel(p), color: p == proto.value ? theme.skin.accent : "" });
-  }
-  return acts;
-});
-
-function openProtoSheet(): void { protoSheetVisible.value = true; }
-
-function onProtoSelect(_action: SheetAction, index: number): void {
-  proto.value = AI_PROTOCOL_ORDER[index];
-  protoSheetVisible.value = false;
+/** 协议与模型挂全局 host，始终盖在编辑 Sheet 之上。 */
+function openProtoSheet(): void {
+  qtShowActionSheet({ title: "选择协议", itemList: AI_PROTOCOL_ORDER.map((p): string => protocolLabel(p)), selectedIndex: AI_PROTOCOL_ORDER.indexOf(proto.value) }).then((index: number): void => {
+    if (index >= 0 && index < AI_PROTOCOL_ORDER.length) proto.value = AI_PROTOCOL_ORDER[index];
+  });
 }
 
 /** 模型列表：网关不支持 /v1/models 时允许手动输入 */
-const modelSheetVisible = ref(false);
-const modelsList = ref<string[]>([]);
-const modelActions = computed((): SheetAction[] => {
-  const acts: SheetAction[] = [];
-  for (let i = 0; i < modelsList.value.length; i++) {
-    acts.push({ name: modelsList.value[i], color: modelsList.value[i] == modelT.value ? theme.skin.accent : "" });
-  }
-  return acts;
-});
 
 function fetchModels(): void {
   const base = baseT.value.trim();
@@ -351,19 +296,17 @@ function fetchModels(): void {
         qtShowToast({ title: "接口没返回模型列表，请手动填模型 ID", icon: "none" });
         return;
       }
-      modelsList.value = models;
-      modelSheetVisible.value = true;
+      // 异步到货后读取最终草稿模型 ID；不要用发请求时的旧值定位。
+      if (!editVisible.value) return;
+      qtShowActionSheet({ title: "选择模型", itemList: models, selectedIndex: models.indexOf(modelT.value.trim()) }).then((index: number): void => {
+        if (index >= 0 && index < models.length) modelT.value = models[index];
+      });
     })
     .catch((err: any): void => {
       loadingModels.value = false;
       const msg = err != null && err.message != null ? String(err.message) : "拉取失败";
       qtShowToast({ title: msg + "，请手动填模型 ID", icon: "none" });
     });
-}
-
-function onModelSelect(action: SheetAction, _index: number): void {
-  modelT.value = action.name;
-  modelSheetVisible.value = false;
 }
 
 /** 测试：一条 你好 消息走完整链路（qt-pc AiLocalTestResult 同口径） */
@@ -423,6 +366,8 @@ function save(): void {
 
 function setActive(id: string): void {
   const cfg = readProviders();
+  // 已经是生效供应商：重复点击不该再存一遍盘、刷一遍列表、弹一次「已设为生效」
+  if (cfg.activeId == id) return;
   cfg.activeId = id;
   saveProviders(cfg);
   reload();
@@ -452,12 +397,8 @@ function keyMaskText(p: AiProviderProfile): string {
 
 const profileStyle = computed((): ((p: AiProviderProfile) => string) => {
   return (p: AiProviderProfile): string => {
-    return "background-color:" + theme.skin.surface + ";border-color:" + (activeId.value == p.id ? theme.skin.accent : theme.skin.border) + ";";
+    return "background-color:" + theme.skin.surface + ";border-color:" + (activeId.value == p.id ? qtSelectionColor(theme.dark) : theme.skin.border) + ";";
   };
-});
-
-const activeBadgeStyle = computed((): string => {
-  return "background-color:" + theme.skin.accent + ";";
 });
 
 const emptyStyle = computed((): string => {
@@ -465,9 +406,9 @@ const emptyStyle = computed((): string => {
 });
 
 const editPanelStyle = computed((): string => {
-  // max-height 不支持百分比（编译报错），面板限高在脚本里按窗口高算 px
-  const maxH = Math.floor(layout.windowHeight * (layout.isWide ? 0.8 : 0.82));
-  return "background-color:" + theme.skin.surface + ";max-height:" + maxH + "px;";
+  // QtSheet 负责壳与安全区；内部滚动区为标题和底部留足空间。
+  const maxH = Math.max(160, Math.floor(layout.windowHeight * 0.86) - layout.safeBottomPx - (layout.isWide ? 110 : 132));
+  return "max-height:" + maxH + "px;";
 });
 
 const fieldInputStyle = computed((): string => {
@@ -480,15 +421,6 @@ const fieldInputStyle = computed((): string => {
 .intro-card { margin-bottom: 20rpx; }
 .intro-card-wide { margin-bottom: 12px; margin-right: 0; }
 .intro-hint { margin-top: 4rpx; line-height: 36rpx; }
-.engine-row { flex-direction: row; align-items: center; padding: 20rpx 0; }
-.engine-row-wide { padding: 11px 0; }
-.engine-dot { width: 36rpx; height: 36rpx; border-radius: 999rpx; border-width: 2rpx; border-style: solid; align-items: center; justify-content: center; margin-right: 20rpx; flex-shrink: 0; }
-.engine-dot-wide { width: 19px; height: 19px; border-width: 1px; margin-right: 11px; }
-.engine-dot-in { width: 18rpx; height: 18rpx; border-radius: 999rpx; }
-.engine-dot-in-wide { width: 10px; height: 10px; }
-.engine-main { flex: 1; min-width: 0; }
-.engine-name { font-weight: 600; }
-.engine-sub { margin-top: 6rpx; line-height: 32rpx; }
 .step-head { padding: 6rpx 4rpx 16rpx; }
 .step-head-wide { padding: 3px 2px 11px; }
 .step-title { font-weight: 600; }
@@ -500,7 +432,6 @@ const fieldInputStyle = computed((): string => {
 .profile-main { flex: 1; min-width: 0; }
 .profile-title-row { flex-direction: row; align-items: center; }
 .profile-name { font-weight: 600; }
-.active-badge { margin-left: 12rpx; border-radius: 999rpx; padding: 2rpx 14rpx; }
 .profile-url { margin-top: 6rpx; line-height: 32rpx; }
 .profile-meta { margin-top: 2rpx; line-height: 32rpx; }
 .profile-btn-row { flex-direction: row; justify-content: flex-end; margin-top: 16rpx; }
@@ -515,14 +446,7 @@ const fieldInputStyle = computed((): string => {
 .add-btn { width: 420rpx; }
 .add-btn-wide { width: 260px; }
 .pad { height: 40rpx; }
-.edit-mask { position: fixed; left: 0; right: 0; top: 0; bottom: 0; background-color: rgba(0, 0, 0, 0.45); }
-.edit-panel { position: fixed; left: 0; right: 0; bottom: 0; border-top-left-radius: 24rpx; border-top-right-radius: 24rpx; transform: translateY(102%); transition-property: transform; transition-duration: 220ms; }
-.edit-panel-on { transform: translateY(0); }
-.edit-panel-wide { border-top-left-radius: 14px; border-top-right-radius: 14px; }
 .edit-scroll { padding: 28rpx 32rpx 0; }
-.edit-head { flex-direction: row; align-items: center; justify-content: space-between; margin-bottom: 16rpx; }
-.edit-title { font-weight: 600; }
-.edit-close { padding: 8rpx; }
 .field-row { flex-direction: row; align-items: center; padding: 20rpx 0; }
 .field-label { width: 150rpx; flex-shrink: 0; }
 .field-input { flex: 1; height: 60rpx; border-bottom-width: 1rpx; border-bottom-style: solid; font-size: 26rpx; }

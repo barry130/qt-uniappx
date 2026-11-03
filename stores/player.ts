@@ -10,7 +10,7 @@ import { isContentFailError, musicApi } from "@/services/music-api";
 import { findSubstituteSong, localFileFor, localFirstEnabled } from "@/services/local-first";
 import type { AudioPlaylistItem } from "@/uni_modules/qt-audio-player";
 import type { LocalAudioItem } from "@/uni_modules/qt-app-native";
-import { readEmbeddedTags } from "@/uni_modules/qt-app-native";
+import { readEmbeddedTags, statLocalFile } from "@/uni_modules/qt-app-native";
 import type { EmbeddedReadResult } from "@/uni_modules/qt-app-native";
 import { likeBatch, fetchChanges, fetchAllLikes } from "@/services/like";
 import { parseJsonToUtso } from "@/services/http";
@@ -28,7 +28,8 @@ import { findCrossSourceDup, collectDupMessage, type CollectDupConflict } from "
 import { qtShowToast } from "@/services/toast";
 import { qtConfirm } from "@/services/confirm";
 import { qtShowActionSheet } from "@/services/action-sheet";
-import { setSourcePlayQuality, sourcePlayQualityOf } from "@/services/source-quality";
+import { setSourcePlayQuality, sourcePlayQualityOf, sourceDownloadQualityOf } from "@/services/source-quality";
+import { useDownloadsStore } from "@/stores/downloads";
 
 const LIKED_KEY = "qt-liked-songs";
 const HISTORY_KEY = "qt-history-songs";
@@ -94,6 +95,8 @@ class PlayerStore {
   defaultFavPlaylistId = "";
   sleepStopAfterCurrent = false;
   sleepEndTime = 0;
+  /** Display the selected preset, not a changing countdown remainder, in both settings sheets. */
+  sleepRequestedMinutes = 0;
   quality = "320";
   private sleepTimer: number | null = null;
   /** 已因链接失效重取过地址的歌曲（platform:id）与重取时刻，避免「失败→重取」死循环 */
@@ -104,6 +107,17 @@ class PlayerStore {
   private localFirstUsed = new Map<string, string>();
   /** 本地优先已拉黑过的 mediaId（本地文件起播失败，本会话内不再用它顶在线歌） */
   private localFirstFailed = new Map<string, boolean>();
+  /** 本地优先「直推时间线」索引：mediaId -> 磁盘上确认在盘的下载成品路径。
+   *  构建时间线条目（pushTimeline/syncTimeline）前先刷这张表：命中的在线歌把
+   *  本地路径直接当条目地址推给原生（DefaultDataSource 按路径路由到
+   *  FileDataSource），绕开懒解析层（其上游是 HTTP 数据源，喂本地路径会起播
+   *  失败→拉黑→回退在线，2026-11-02 真机定位），也不进音频缓存（下载文件不必
+   *  再拷一份）。没命中的照旧推 qt-resolve 占位地址。 */
+  private localPathByMid = new Map<string, string>();
+  /** 本地优先命中版本号：localFirstUsed 每次写入/删除都 +1。Map 本身不是响应式
+   *  依赖，播放页「本地文件」标签的 computed 追踪不到它的变动，靠这个版本号重算
+   *  （本地优先命中发生在取链回调里，比切歌那一帧晚，必须由 tick 触发二次刷新） */
+  localFirstTick = 0;
   /** 当前歌曲**在播本地文件**的内嵌封面（空串=文件里没有封面；key 不匹配自动作废，
    *  防止切歌瞬间旧图串到新歌上）。内嵌优先于在线封面，见 coverOf */
   embeddedCover = "";
@@ -111,6 +125,27 @@ class PlayerStore {
   /** 当前歌曲**在播本地文件**的内嵌歌词（空串=文件里没有词，调用方退回在线取词） */
   embeddedLyric = "";
   embeddedLyricKey = "";
+  /** 上一次内嵌标签读取的诊断文本（「本地文件地址」弹窗里展示，现场排查封面/歌词
+   *  到底卡在哪一步：没读到文件 / 读到但无封面 / 封面被截断）。空串=没读过 */
+  embeddedDiag = "";
+  embeddedDiagKey = "";
+  /** 上一次内嵌读取耗时（毫秒，0=命中缓存），拼进诊断文本用 */
+  private embeddedDiagCost = 0;
+  /**
+   * 内嵌标签读取结果缓存（文件地址 → 结果）。
+   *
+   * 为什么必须有：一次解析要读 1MiB 起、封面不够再按 2 的倍数放大重读（上限
+   * 8MiB），而且同一首本地文件在切歌路径上会被 `syncLocalFileMedia` 与
+   * `syncSongExtras` 各读完一遍 —— 双份几 MB 的同步 IO（2026-11-02 真机
+   * 「本地歌起播反而比在线慢 5 秒」的主要来源）。缓存按文件地址，会话级。
+   */
+  private embeddedCache: Map<string, EmbeddedReadResult> = new Map();
+  /** 用户点播/切歌的时刻（起播耗时诊断用；playing=true 时报一次并清零） */
+  private playKickAt = 0;
+  // 播放请求序号：play() 的快路上有一次 await（localFileFor 本地复查），期间用户
+  // 可能又点了另一首。await 回来必须确认自己仍是最新请求，否则会把旧歌顶回
+  // （this.current = 旧歌）或把新歌进度清掉（seek(0)）——2026-11-02 审阅实测。
+  private playSeq = 0;
   /** 本地歌替身链已替过的歌（platform:id）与时刻，口径对齐 urlRetryKey：
    *  同一首一分钟内只替一次，防止「替身也失效→再替→再失效」无限拉锯 */
   private substituteKey = "";
@@ -553,6 +588,11 @@ class PlayerStore {
           this.listenSession.resetSample();
           this.playing = playing;
           qtDiag("[QT Prog] 播放状态同步 → playing=" + playing);
+          // 起播耗时诊断：从点播/切歌到「真的播起来了」到底等了多久（只报一次）
+          if (playing && this.playKickAt > 0) {
+            qtDiag("[QT Prog] 起播耗时 " + (Date.now() - this.playKickAt) + "ms");
+            this.playKickAt = 0;
+          }
           // 底层给出了权威状态：起播宽限到此结束（真播起来了，或用户从通知栏
           // 暂停了）。不清的话下一次真暂停后仍会被宽限压制对账。
           this.playRequestedAt = 0;
@@ -649,6 +689,7 @@ class PlayerStore {
                 cur.url = localUrl;
               }
               this.localFirstUsed.set(mediaId, localUrl);
+              this.localFirstTick++;
               // 这一刻 song.url 还是在线流地址，syncSongExtras 读不到文件标签区：
               // 拿到真实文件路径后补读内嵌封面/歌词，才能做到「内嵌优先于在线」
               this.syncLocalFileMedia(song, localUrl);
@@ -710,7 +751,15 @@ class PlayerStore {
    */
   effQualityOf(song: Song): string {
     if (song == null) return this.quality;
-    return sourcePlayQualityOf(song.platform, this.quality);
+    return sourcePlayQualityOf(song.platform, this.sourceDownloadQualityFallback(song.platform));
+  }
+
+  /**
+   * 播放音质的回落值 = 该源的下载音质（下载缺省 = 音源第二档）。
+   * 设置页默认值即此口径；播放页手动选过的档位仍优先（sourcePlayQualityOf 已处理）。
+   */
+  sourceDownloadQualityFallback(platform: string): string {
+    return sourceDownloadQualityOf(platform, useDownloadsStore().downloadQuality);
   }
 
   /**
@@ -737,6 +786,7 @@ class PlayerStore {
   }
 
   setSleep(minutes: number): void {
+    this.sleepRequestedMinutes = minutes;
     this.sleepStopAfterCurrent = false;
     this.sleepEndTime = 0;
     const timer = this.sleepTimer;
@@ -1003,6 +1053,9 @@ class PlayerStore {
   }
 
   async play(song: Song, queue: Song[] = [], restorePosition = false, auto = false): Promise<void> {
+    // 每次播放请求递增；下面快路的 await 之后只认「我还是最新那次」
+    this.playSeq += 1;
+    const playSeq = this.playSeq;
     // 用户手动发起的播放（点歌/播放全部/手动切歌/按播放续播）重开自动切歌熔断
     if (!auto) {
       this.autoNext = true;
@@ -1012,6 +1065,8 @@ class PlayerStore {
       this.pauseIntentAt = 0;
       this.explicitPlayAt = Date.now();
     }
+    // 起播耗时基准：playing=true 时据此报一行「起播耗时 Xms」（见 state 回调）
+    this.playKickAt = Date.now();
     // 播放全部/外部队列：先剔除被屏蔽的歌（点播的 song 永远保留——
     // 屏蔽语义是「别自动出现」，不是「禁止聆听」）。无规则时原样返回不复制
     if (queue.length > 0) {
@@ -1029,13 +1084,40 @@ class PlayerStore {
     // 同一首重播（点列表里正在播的歌/队列环绕/切回旧歌）：底层时间线当前条目就是
     // 这首歌时 seek(0)+resume 即可（不重复记历史/播放次数）。不能盲目 seek+resume ——
     // 冷启动后播放器还没建（时间线为空），那样会静默空转「点了没反应」，必须落到
-    // 下面的完整推时间线流程（首播簿记 + 建播放器 + 定位）
+    // 下面的完整推时间线流程（首播簿记 + 建播放器 + 定位）。
+    // 但快路会沿用底层条目「上次已解析的旧地址」：这首歌上次解析成在线流（当时下载
+    // 还没完成），之后下载完成了，用户「重新播放」期望走本地优先，却被快路锁死在
+    // 在线流上（反复报「下载了还是在线」的根源）。所以对在线歌补一次本地复查：
+    // 本地能找到就放弃快路，落回下面完整重推（占位符 → 懒解析 → 本地优先命中本地
+    // 文件）；找不到/已拉黑/已本地才维持 seek(0)+resume 快路
     if (!switched && !restorePosition && queue.length == 0) {
       if (audioPlayer.currentMediaId() == this.mediaIdOf(song)) {
-        this.playing = true;
-        this.seek(0);
-        audioPlayer.resume();
-        return;
+        let fastReplay = true;
+        if (
+          song.platform != "local" &&
+          localFirstEnabled() &&
+          this.localFirstPathOf(song).length == 0 &&
+          !this.localFirstFailed.has(this.mediaIdOf(song))
+        ) {
+          const recheck = await localFileFor(song);
+          // 等本地复查的这段时间用户又切了歌：这条请求已经过期，直接放手
+          // （新请求会自己走完完整流程；继续跑只会把旧歌顶回当前）
+          if (playSeq != this.playSeq) return;
+          if (recheck != null && recheck.length > 0) {
+            // 本地有货：放弃快路，走完整重推（懒解析命中后点亮本地标签/kbps）
+            fastReplay = false;
+          }
+        }
+        if (fastReplay) {
+          this.playing = true;
+          this.seek(0);
+          audioPlayer.resume();
+          // 快路是「同一首原地重播」，不是新起播：基准必须在置 playing 之前清掉，
+          // 否则状态回调里 `this.playing != playing` 恒 false 永远清不掉基准，
+          // 之后用户暂停再播会打出一条跨整段播放的假「起播耗时」（2026-11-02 审阅）
+          this.playKickAt = 0;
+          return;
+        }
       }
     }
     this.current = song;
@@ -1071,14 +1153,38 @@ class PlayerStore {
     // 队列推给 media3：条目用 qt-resolve:// 占位地址，真正加载那一刻才向 JS 换
     // 真实播放地址（懒解析）。play() 本身不再取址 —— 切歌瞬时完成；解析失败由
     // 原生 Error → handlePlaybackError 的既有重试/熔断路径兜住
+    // 分段各记各的起点（原先四段都减同一个起点，数字互相包含，看不出真正贵在哪段）
+    let segMark = Date.now();
     this.pushTimeline(song, resumeAt);
+    const segTimeline = Date.now() - segMark;
+    segMark = Date.now();
     this.persist();
+    const segPersist = Date.now() - segMark;
+    segMark = Date.now();
     // 桌面歌词跟随切歌重新拉词
     desktopLyric.notifySongChanged();
     // 封面兜底 + 车机蓝牙歌词同步（⑧/⑩ 批次接线点，详见 syncSongExtras）
     this.syncSongExtras(song);
+    const segExtras = Date.now() - segMark;
+    segMark = Date.now();
     // 无缝播放：刚起播就顺手把下一首的地址取好 + 整首预取（默认开启，见 audio-player.uts GAPLESS_KEY）
     this.preloadNextUrl();
+    const segPreload = Date.now() - segMark;
+    // 起播分段耗时：本地歌/在线歌差在哪一段，一眼能看出来（配合「起播耗时」那一行）
+    qtDiag(
+      "[QT Player] play 分段 时间线=" +
+        segTimeline +
+        "ms 落盘=" +
+        segPersist +
+        "ms 附加=" +
+        segExtras +
+        "ms 预取=" +
+        segPreload +
+        "ms 直推=" +
+        (this.localPathByMid.get(this.mediaIdOf(song)) != null ? "1" : "0") +
+        " 起播处=" +
+        (this.playKickAt > 0 ? "等原生" : "已播")
+    );
   }
 
   /**
@@ -1119,6 +1225,9 @@ class PlayerStore {
     if (song == null) return;
     // 本地歌直接推 content:// 播放，不经过取链，无需预热
     if (song.platform == "local") return;
+    // 时间线已直推磁盘路径的在线歌同理（见 refreshLocalPathIndex）：预热在线
+    // 取链纯属白费，本地文件也不需要预取
+    if (this.localPathByMid.has(nextMid)) return;
     this.preloadMid = nextMid;
     this.preloadAt = Date.now();
     // 本地优先预热（DESIGN §7.13）：下一首能在本地找到就直接预热本地文件，
@@ -1184,6 +1293,24 @@ class PlayerStore {
   }
 
   /**
+   * 本地优先**会话状态**的一句话补充说明（管理端「当前播放地址」弹窗用）：
+   * localFirstDiagnose 讲的是「账本/文件层面能不能用」，讲不到「这次为什么还是
+   * 走了在线」——那个答案只在播放器会话态里（已直推 / 已回退）。空串=无补充。
+   */
+  localFirstSessionNote(song: Song): string {
+    if (song == null || song.platform == "local") return "";
+    const mid = this.mediaIdOf(song);
+    if (this.localFirstUsed.has(mid)) return "";
+    if (this.localFirstFailed.has(mid)) {
+      return "本次会话已回退在线（本地文件起播失败过，重按播放/重开应用会再试）";
+    }
+    const p = this.localPathByMid.get(mid);
+    if (p != null && p.length > 0) return "时间线已直推本地文件，起播即读磁盘";
+    if (!localFirstEnabled()) return "本地优先已关闭（走在线取链）";
+    return "";
+  }
+
+  /**
    * 当前歌曲的**显示封面**：在播本地文件有内嵌封面就用它，否则用曲目自带封面。
    * 播放页/播放条/迷你条统一走这里 —— 本地文件（含本地优先命中的在线歌）判断口径
    * 与 syncSongExtras 一致，不能只看 platform=="local"。
@@ -1204,6 +1331,72 @@ class PlayerStore {
     if (song == null) return "";
     if (this.embeddedLyricKey == this.mediaIdOf(song)) return this.embeddedLyric;
     return "";
+  }
+
+  /**
+   * 上一拍内嵌标签读取的诊断（「本地文件地址」弹窗展示用；key 不匹配=空串）。
+   * 为什么需要：真机「播得响、有歌词、就是没封面」时分不清是文件本来没图、
+   * 封面被截断、还是根本没读到文件 —— 这行文本一次说清（2026-11-02 现场）。
+   */
+  embeddedDiagOf(song: Song): string {
+    if (song == null) return "";
+    if (this.embeddedDiagKey.length == 0) return "";
+    if (this.embeddedDiagKey != this.mediaIdOf(song)) return "";
+    return this.embeddedDiag;
+  }
+
+  /** 内嵌标签读取结果 → 一行诊断文本（读了多少字节 / 封面多少字节 / 歌词多少字 / 读了几毫秒） */
+  private embeddedDiagText(embedded: EmbeddedReadResult | null, costMs: number): string {
+    const tail = costMs > 0 ? "，读耗时 " + costMs + "ms" : "（命中缓存）";
+    if (embedded == null) return "内嵌标签：读不到（无标签区，或文件读不开）" + tail;
+    let text =
+      "内嵌标签：读 " +
+      embedded.readBytes +
+      "B，封面 " +
+      embedded.coverBytes +
+      "B，歌词 " +
+      embedded.lrcText.length +
+      " 字";
+    if (embedded.coverBytes == 0) {
+      text += "（文件里没有封面，播放页只能显示默认图）";
+    } else if (embedded.coverPath.length == 0) {
+      text += "（封面已抽出但缓存落盘失败）";
+    }
+    return text + tail;
+  }
+
+  /**
+   * 读内嵌标签（带会话级缓存 + 耗时日志）。
+   *
+   * 这是同步原生调用，一次可能读几 MB：调用方**必须**在起播命令下发之后的
+   * 下一拍再调（见 `syncLocalFileMedia` / `syncSongExtras`），否则本地歌起播
+   * 会被这段 IO 堵住（2026-11-02 真机定位）。
+   */
+  private readEmbeddedCached(fileUrl: string): EmbeddedReadResult | null {
+    const hit = this.embeddedCache.get(fileUrl);
+    if (hit != null) {
+      this.embeddedDiagCost = 0;
+      return hit;
+    }
+    const started = Date.now();
+    let result: EmbeddedReadResult | null = null;
+    // 静默：读不到按「无内嵌」处理（封面走在线、歌词走在线词源）
+    try {
+      result = readEmbeddedTags(fileUrl);
+    } catch (e) {
+      result = null;
+    }
+    const cost = Date.now() - started;
+    this.embeddedDiagCost = cost;
+    if (cost >= 300) {
+      logMsgWarn("[QT Player] 内嵌标签读取耗时 " + cost + "ms：" + fileUrl);
+    }
+    // 只缓存成功的：读失败多半是文件刚落盘还没同步（下载完成瞬间），下次还能再试
+    if (result != null) {
+      if (this.embeddedCache.size >= 24) this.embeddedCache.clear();
+      this.embeddedCache.set(fileUrl, result);
+    }
+    return result;
   }
 
   /** 按 mediaId 找歌：先看当前曲，再查播放队列（懒解析回调只可能要这两处的歌） */
@@ -1228,6 +1421,48 @@ class PlayerStore {
   }
 
   /**
+   * 重建本地优先直推索引：下载账本（完成品）逐条原生 stat 确认在盘。
+   * 账本一般几条到几十条，stat 是同步本地调用，切歌路径上的开销可忽略。
+   * 在 pushTimeline/syncTimeline 组装时间线前各刷一次：下载完成、应用重启
+   * （账本持久化而索引是内存态）都能被覆盖到。
+   */
+  private refreshLocalPathIndex(): void {
+    this.localPathByMid.clear();
+    // 本地优先关掉时一律在线取链，不做任何直推（开关语义见 DESIGN §7.13）
+    if (!localFirstEnabled()) return;
+    const items = useDownloadsStore().items;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (it == null || it.path == null || it.path.length == 0) continue;
+      const mid = this.mediaIdOf(it.song);
+      // 已拉黑的曲目不再直推（本会话内本地文件起播失败过，交给在线取链）
+      if (this.localFirstFailed.has(mid)) continue;
+      // 静默：stat 异常按「不在盘」处理，该曲回落在线取链
+      try {
+        if (statLocalFile(it.path) >= 0) this.localPathByMid.set(mid, it.path);
+      } catch (e) {
+        logMsgWarn("[QT Player] 直推索引 stat 失败：" + it.path + " " + (e != null ? e.toString() : ""));
+      }
+    }
+  }
+
+  /** 当前曲命中直推索引时的状态对齐：让弹窗/播放页（localFirstPathOf 等）与
+   *  「原生时间线已拿到本地地址」保持同一口径，不依赖 resolve 回调（占位地址
+   *  都不会上引擎，回调自然不存在）。返回是否命中。 */
+  private adoptLocalPathIfIndexed(s: Song | null): boolean {
+    if (s == null) return false;
+    const mid = this.mediaIdOf(s);
+    const path = this.localPathByMid.get(mid);
+    if (path == null || path.length == 0) return false;
+    this.resolvedUrlMap.set(mid, path);
+    this.localFirstUsed.set(mid, path);
+    if (s.url == null || s.url != path) s.url = path;
+    this.syncLocalFileMedia(s, path);
+    this.localFirstTick++;
+    return true;
+  }
+
+  /**
    * 时间线条目构建（pushTimeline / syncTimeline 共用）。
    *
    * 注意：这里**不算**收藏态（liked）—— 逐条算要把 likedSongs 全表扫一遍，
@@ -1238,17 +1473,24 @@ class PlayerStore {
     const mid = this.mediaIdOf(s);
     // 本地歌直接推真实 content:// 地址：DefaultDataSource 按 scheme 路由到
     // ContentDataSource，不经过懒解析层也不进音频缓存（避免把本地文件再拷一份）。
-    // 在线歌用懒解析占位符：q 仅调试用，实际音质由 resolve 回调经 effQualityOf
-    // 按歌的平台现取（平台独立档位 + 全局默认回落），换音质后尚未加载的条目自动用新档
+    // 在线歌优先直推下载成品（refreshLocalPathIndex 确认在盘）：本地路径由
+    // DefaultDataSource 路由到 FileDataSource，绕开懒解析层（HTTP 上游喂本地
+    // 路径必败，2026-11-02 真机定位）。占位地址 q 仅调试用，实际音质由 resolve
+    // 回调经 effQualityOf 按歌的平台现取（平台独立档位 + 全局默认回落），
+    // 换音质后尚未加载的条目自动用新档。
+    let uri = "";
+    if (s.platform == "local" && s.url != null && s.url.length > 0) {
+      uri = s.url;
+    } else {
+      const localPath = this.localPathByMid.get(mid);
+      if (localPath != null && localPath.length > 0) uri = localPath;
+    }
+    if (uri.length == 0) {
+      uri = "qt-resolve://song/?mid=" + encodeURIComponent(mid) + "&q=" + this.effQualityOf(s);
+    }
     const item: AudioPlaylistItem = {
       mediaId: mid,
-      uri:
-        s.platform == "local" && s.url != null && s.url.length > 0
-          ? s.url
-          : "qt-resolve://song/?mid=" +
-            encodeURIComponent(mid) +
-            "&q=" +
-            this.effQualityOf(s),
+      uri: uri,
       title: s.name,
       artist: s.singer,
       album: s.album,
@@ -1266,6 +1508,9 @@ class PlayerStore {
    * 队列里找不到 song 时（恢复场景队列丢失等）用单条时间线兜底。
    */
   private pushTimeline(song: Song, resumeAt: number): void {
+    // 本地优先直推索引重建（DESIGN §7.13）：本轮时间线里已下载且在盘的在线歌
+    // 直接推磁盘路径，绕开懒解析层（其上游是 HTTP 数据源，喂本地路径必败）
+    this.refreshLocalPathIndex();
     // 重推时间线后 loader 会把位置直接跳到新起播点：这段位移不是「播放前进」，
     // 抑制窗口内一律不计入 healthyRun（否则重取地址会被误判成播放成功，见 onTime）
     this.healthyRun = 0;
@@ -1347,6 +1592,9 @@ class PlayerStore {
     // 列表循环/随机 → 列表环绕（随机的顺序来自洗牌时间线）。
     // 必须放在 setPlaylist 之后：首播时播放器由 setPlaylist 内部引导创建，
     // 先设 repeat 会打在 null 上静默丢失，整轮播放退化为不循环
+    // 本地优先直推命中当前曲：状态对齐（resolvedUrlMap/song.url/内嵌媒体/版本号），
+    // 让弹窗与播放页立即显示「本地文件」，不依赖取链回调（直推时根本没有回调）
+    this.adoptLocalPathIfIndexed(song);
     audioPlayer.setPlaylist(items, startIndex, true, resumeAt);
     audioPlayer.setRepeatMode(this.mode == "single" ? 1 : 2);
   }
@@ -1360,6 +1608,9 @@ class PlayerStore {
   syncTimeline(): void {
     if (this.current == null) return;
     if (this.timelineIds.length == 0) return;
+    // 本地优先直推索引重建（见 pushTimeline 同款注释）：队列编辑、屏蔽规则变化、
+    // 下载完成后重推，也要让已下载且在盘的歌回到磁盘路径
+    this.refreshLocalPathIndex();
     let expected: Song[] = [];
     if (this.mode == "random") {
       // 旧时间线里仍在队列的按原顺序保留（随机序列不重排），不在的（已删）自然剔除
@@ -1413,6 +1664,8 @@ class PlayerStore {
     audioPlayer.syncTimeline(items, this.mediaIdOf(this.current));
     // 重推的条目带的是「未收藏」样式（buildTimelineItem 不算收藏态，见其注释），
     // 当前曲的红心必须重算回写，否则编辑一次队列图标就凭空变空
+    // 直推命中当前曲时同步对齐展示状态（resolvedUrlMap/song.url/内嵌媒体/版本号）
+    this.adoptLocalPathIfIndexed(this.current);
     this.refreshNativeRating();
   }
 
@@ -1561,18 +1814,30 @@ class PlayerStore {
    * 本地优先命中（在线歌播磁盘文件）后补读内嵌标签。为什么不在 syncSongExtras 里做：
    * 那一刻 song.url 还是在线流地址（本地地址是取链回调里异步回写的），读不到标签区。
    * 内嵌封面/歌词只登记「显示用」（coverOf / embeddedLyricOf），不写回 song.picUrl。
+   * 只在目标确为当前曲时生效（时间线直推会把非当前曲的地址提前写好，不能抢跑）。
    */
   private syncLocalFileMedia(song: Song, fileUrl: string): void {
-    const cur = this.current;
-    if (cur == null || cur.platform + ":" + cur.id != this.mediaIdOf(song)) return;
-    let embedded: EmbeddedReadResult | null = null;
-    try {
-      embedded = readEmbeddedTags(fileUrl);
-    } catch (e) {
-      embedded = null;
-    }
-    if (embedded == null) return;
+    // 关键：本函数在 `pushTimeline` 里被 `adoptLocalPathIfIndexed` 调，位置就在
+    // `audioPlayer.setPlaylist(...)` **之前**。内嵌标签解析是同步原生 IO（可能读
+    // 几 MB），同步做在这里等于把「推时间线 → 原生起播」整条路堵住 —— 这就是
+    // 「本地歌起播 5 秒、纯在线 1-2 秒」的真凶（2026-11-02 真机）。
+    // 所以推到下一拍：起播命令先发出去，标签解析随后补上（封面/歌词晚一帧到）。
     const mediaId = this.mediaIdOf(song);
+    const cur = this.current;
+    if (cur == null || this.mediaIdOf(cur) != mediaId) return;
+    setTimeout((): void => {
+      const now = this.current;
+      if (now == null || this.mediaIdOf(now) != mediaId) return;
+      const embedded = this.readEmbeddedCached(fileUrl);
+      this.applyLocalFileMedia(mediaId, embedded);
+    }, 0);
+  }
+
+  /** 内嵌标签落地（封面/歌词/车机歌词 + 诊断）；延迟读取与缓存命中共用 */
+  private applyLocalFileMedia(mediaId: string, embedded: EmbeddedReadResult | null): void {
+    this.embeddedDiag = this.embeddedDiagText(embedded, this.embeddedDiagCost);
+    this.embeddedDiagKey = mediaId;
+    if (embedded == null) return;
     if (embedded.coverPath.length > 0) {
       this.embeddedCover = embedded.coverPath;
       this.embeddedCoverKey = mediaId;
@@ -1600,7 +1865,6 @@ class PlayerStore {
    *    落地后异步补推，预取与 lyrics() 共用同一份缓存/inflight，不会重复请求。
    */
   private syncSongExtras(song: Song): void {
-    let embedded: EmbeddedReadResult | null = null;
     // 内嵌读取只对本地文件有意义（在线歌曲 url 是流地址，没有标签区可读）。
     // 「本地文件」的判定不能只看 platform=="local"：已下载歌曲离线播放时，播放器
     // 会把落盘路径写回 song.url，而 platform 仍是 qq/netease（downloads.ts 的
@@ -1611,52 +1875,45 @@ class PlayerStore {
       songUrl.length > 0 &&
       songUrl.toLowerCase().indexOf("http://") != 0 &&
       songUrl.toLowerCase().indexOf("https://") != 0;
-    if (isLocalFile) {
-      try {
-        embedded = readEmbeddedTags(songUrl);
-      } catch (e) {
-        // 读不到内嵌标签按「无内嵌」处理：封面走网络兜底、歌词清空
-        embedded = null;
-      }
-    }
     // 切歌先清空内嵌状态：宁可这一拍先显示在线封面，也不能让上一首的内嵌串过来
     this.embeddedCover = "";
     this.embeddedCoverKey = "";
     this.embeddedLyric = "";
     this.embeddedLyricKey = "";
-    if (embedded != null) {
-      // 内嵌优先（文件里自带的那份最准，也省掉同一首歌的在线请求）；
-      // 只登记「显示用」，不写回 song.picUrl —— 那会被收藏同步带上服务端（like-sync.ts:121）
-      const mediaId = this.mediaIdOf(song);
-      if (embedded.coverPath.length > 0) {
-        this.embeddedCover = embedded.coverPath;
-        this.embeddedCoverKey = mediaId;
-      }
-      if (embedded.lrcText.length > 0) {
-        this.embeddedLyric = embedded.lrcText;
-        this.embeddedLyricKey = mediaId;
-        // 本函数在 desktopLyric.notifySongChanged() 之后才跑到：那一次拉词看到的是
-        // 「还没有内嵌词」的旧状态，这里补一次「词源变了」的重拉
-        desktopLyric.notifyLyricChanged();
-      }
-    }
-    if (song.picUrl == null || song.picUrl.length == 0) {
-      if (embedded != null && embedded.coverPath.length > 0) {
-        this.applyCover(song, embedded.coverPath);
-      } else {
-        this.backfillCover(song);
-      }
-    }
-    if (isLocalFile) {
-      audioPlayer.setCarLyric(embedded != null ? embedded.lrcText : "");
-    } else {
+    this.embeddedDiag = "";
+    this.embeddedDiagKey = "";
+    this.embeddedDiagCost = 0;
+    if (!isLocalFile) {
+      // 在线歌：没有标签区可读，封面缺就网络回填，车机歌词等 lyrics 落地再推
+      if (song.picUrl == null || song.picUrl.length == 0) this.backfillCover(song);
       musicApi
         .lyrics(song)
         .then((text: string) => {
           audioPlayer.setCarLyric(text);
         })
         .catch(() => {});
+      return;
     }
+    // 本地文件：上一首的车机歌词先清掉，标签解析推到下一拍再做。
+    // 同步读要读几 MB（还可能要放大窗口重读），堵在这里会把起播与取链回调一起
+    // 拖慢 —— 「本地歌起播 5 秒、纯在线 1-2 秒」就是它（2026-11-02 真机）
+    audioPlayer.setCarLyric("");
+    const mediaId = this.mediaIdOf(song);
+    setTimeout((): void => {
+      const now = this.current;
+      if (now == null || this.mediaIdOf(now) != mediaId) return;
+      const embedded = this.readEmbeddedCached(songUrl);
+      // 内嵌优先（文件里自带的那份最准，也省掉同一首歌的在线请求）；
+      // 只登记「显示用」，不写回 song.picUrl —— 那会被收藏同步带上服务端（like-sync.ts:121）
+      this.applyLocalFileMedia(mediaId, embedded);
+      if (song.picUrl == null || song.picUrl.length == 0) {
+        if (embedded != null && embedded.coverPath.length > 0) {
+          this.applyCover(song, embedded.coverPath);
+        } else {
+          this.backfillCover(song);
+        }
+      }
+    }, 0);
   }
 
   recordPlay(song: Song): void {
@@ -2064,6 +2321,7 @@ class PlayerStore {
       if (this.localFirstUsed.has(key)) {
         this.localFirstUsed.delete(key);
         this.localFirstFailed.set(key, true);
+        this.localFirstTick++;
         logMsg("[QT Player] 本地优先文件播放失败，已拉黑并回退在线取链：" + key);
       }
       // 同一首歌只重取一次；换歌或超过一分钟后重新允许，覆盖长时间播放后再次失效的情况
@@ -2594,6 +2852,148 @@ class PlayerStore {
     // 其他设备拉不到。断网时进 pendingOps，联网自动补推。
     this.enqueueLikeOp({ type: "playlist", action: "add", dataJson: this.likePlaylistPayloadJson(playlist) });
     return playlist;
+  }
+
+  /**
+   * 重命名自建歌单（「我的收藏歌单」长按 → 修改歌单信息 → 编辑歌单名称）。
+   *
+   * 返回空串=成功，否则是可直接展示给用户的中文原因，调用方不必再翻译。
+   * 校验与新建同一套：空白名、超长、重名都不落库。
+   *
+   * 两个存储都要覆盖：本机建的在 `localPlaylists`（按 id 命中），别的设备建好同步
+   * 回来的落在 `savedPlaylists`（platform=local、id 即 pid）——收藏歌单页是两者直接
+   * 拼接展示，长按对两张卡都得能用。
+   *
+   * 落盘后按 pid 补推一次 `playlist/add`：**这条才是改数据库的那一步**。服务端
+   * `upsertActive` 里 `name = COALESCE(EXCLUDED.name, 库里已有名)`，带非空 name 就
+   * 覆盖旧名并推进该用户的同步 seq，其他设备下次拉取即可看到新名；断网时先进
+   * pendingOps，联网自动补推。推送积压期间拉取合并会被 `hasPendingLikeOp` 挡住，
+   * 本地这份不会被服务器上的旧名覆盖回去。
+   */
+  renameLocalPlaylist(playlistId: string, name: string): string {
+    const trimmed = name != null ? name.trim() : "";
+    if (trimmed.length === 0) return "歌单名称不能为空";
+    // 服务端 QtLikePlaylistActionDto.name 是 @Size(max = 128)，本地先挡，免得白推一次
+    if (trimmed.length > 128) return "歌单名称不能超过 128 个字符";
+    let target: Playlist | null = null;
+    let inLocalList = false;
+    for (let i = 0; i < this.localPlaylists.length; i++) {
+      if (this.localPlaylists[i].id === playlistId) {
+        target = this.localPlaylists[i];
+        inLocalList = true;
+        break;
+      }
+    }
+    if (target == null) {
+      for (let i = 0; i < this.savedPlaylists.length; i++) {
+        const pl = this.savedPlaylists[i];
+        if (pl.platform === "local" && pl.id === playlistId) {
+          target = pl;
+          break;
+        }
+      }
+    }
+    if (target == null) return "歌单不存在";
+    if (target.name === trimmed) return "";
+    // 重名只和「自己的歌单」比：本机建的 + 同步回来的自建歌单，排除自己；
+    // 收藏的在线歌单不参与（它们不归这里改名，也不会和自己撞成两张同名卡）
+    for (let i = 0; i < this.localPlaylists.length; i++) {
+      const pl = this.localPlaylists[i];
+      if (pl.id !== playlistId && pl.name === trimmed) return "该歌单名称已存在";
+    }
+    for (let i = 0; i < this.savedPlaylists.length; i++) {
+      const pl = this.savedPlaylists[i];
+      if (pl.platform === "local" && pl.id !== playlistId && pl.name === trimmed) return "该歌单名称已存在";
+    }
+    target.name = trimmed;
+    if (inLocalList) {
+      // localPlaylists 那条：就地改名后整表落盘（写成功由 saveLocalPlaylistList 清脏标记）
+      this.localPlaylistsDirty = true;
+      this.saveLocalPlaylistList();
+    } else {
+      // savedPlaylists 这条没有紧跟整表写，必须自己置脏，交给 persist 落盘
+      this.playlistsDirty = true;
+    }
+    this.persist();
+    this.enqueueLikeOp({ type: "playlist", action: "add", dataJson: this.likePlaylistPayloadJson(target) });
+    return "";
+  }
+
+  /**
+   * 写入歌单封面的本地缓存（「我的收藏歌单」长按 → 修改歌单信息 → 编辑歌单封面）。
+   *
+   * 与改名相反，这里**不再** enqueue `playlist/add`：封面上传走
+   * `/like/playlist/{pid}/cover/complete`，服务端在那里已经把 URL 直接写进
+   * `qt_like_playlist.pic_url` 并推进了同步 seq，再补推一次同值只会白涨一格 seq、
+   * 白插一条 pending。断网也做不成这个操作（要先直传文件），所以无需离队重放。
+   *
+   * 返回空串=成功，否则是可直接展示的原因。
+   */
+  setPlaylistCover(playlistId: string, coverUrl: string): string {
+    let target: Playlist | null = null;
+    let inLocalList = false;
+    for (let i = 0; i < this.localPlaylists.length; i++) {
+      if (this.localPlaylists[i].id === playlistId) {
+        target = this.localPlaylists[i];
+        inLocalList = true;
+        break;
+      }
+    }
+    if (target == null) {
+      for (let i = 0; i < this.savedPlaylists.length; i++) {
+        const pl = this.savedPlaylists[i];
+        if (pl.platform === "local" && pl.id === playlistId) {
+          target = pl;
+          break;
+        }
+      }
+    }
+    if (target == null) return "歌单不存在";
+    target.picUrl = coverUrl;
+    if (inLocalList) {
+      this.localPlaylistsDirty = true;
+      this.saveLocalPlaylistList();
+    } else {
+      this.playlistsDirty = true;
+    }
+    this.persist();
+    return "";
+  }
+
+  /**
+   * 长按可编辑的目标歌单 pid（服务端以 pid + platform 定位收藏行/封面），取不到返回空串。
+   * 与内部 private playlistPidOf 的区别：本机新建但还没拿到 pid 的歌单回落到 id，
+   * 调用方（封面上传）需要的是一个可拼进 URL 的稳定值，而不是「未同步」的信号。
+   */
+  editablePlaylistPidOf(playlistId: string): string {
+    for (let i = 0; i < this.localPlaylists.length; i++) {
+      const lp = this.localPlaylists[i];
+      if (lp.id === playlistId) return lp.pid != null && lp.pid!.length > 0 ? lp.pid! : lp.id;
+    }
+    for (let i = 0; i < this.savedPlaylists.length; i++) {
+      const pl = this.savedPlaylists[i];
+      if (pl.platform === "local" && pl.id === playlistId) {
+        return pl.pid != null && pl.pid!.length > 0 ? pl.pid! : pl.id;
+      }
+    }
+    return "";
+  }
+
+  /**
+   * 长按可编辑歌单「库里存的」封面：返回原始 picUrl，不让 playlistDisplayPic 的
+   * 「本地歌单没封面就随第一首歌」的展示兜底混进来 —— 编辑弹层要用它判断
+   * 「有没有自定义封面」（决定是否显示「恢复默认封面」），也用它做预览。
+   */
+  playlistCoverOf(playlistId: string): string {
+    for (let i = 0; i < this.localPlaylists.length; i++) {
+      const lp = this.localPlaylists[i];
+      if (lp.id === playlistId) return lp.picUrl != null ? lp.picUrl : "";
+    }
+    for (let i = 0; i < this.savedPlaylists.length; i++) {
+      const pl = this.savedPlaylists[i];
+      if (pl.platform === "local" && pl.id === playlistId) return pl.picUrl != null ? pl.picUrl : "";
+    }
+    return "";
   }
 
   // 生成本地歌单 ID（时间戳 + 随机段），不保证绝对唯一，但范围足够大
@@ -3322,23 +3722,6 @@ class PlayerStore {
         return true;
     }
     return false;
-  }
-
-  /**
-   * 更新收藏歌单的自定义封面（UPDATE_DESIGN.md §5.3）。
-   * 服务端已由 cover/complete 直写 qt_like_playlist.pic_url，这里只同步本地缓存；
-   * 后续 likePlaylist add 重放会带上新 URL，两端一致。
-   */
-  setSavedPlaylistCover(platform: string, pid: string, picUrl: string): void {
-    for (let i = 0; i < this.savedPlaylists.length; i++) {
-      const pl = this.savedPlaylists[i];
-      // 在线歌单的 pid 就是平台歌单号（与 id 相同），两个键都兜一下
-      if (pl.platform === platform && (pl.id === pid || pl.pid === pid)) {
-        pl.picUrl = picUrl;
-        this.savePlaylistList();
-        return;
-      }
-    }
   }
 
   toggleSavePlaylist(playlist: Playlist): void {

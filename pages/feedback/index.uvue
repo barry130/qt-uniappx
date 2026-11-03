@@ -3,14 +3,7 @@
   <view class="page">
     <!-- 顶部：Tab + 提交按钮 -->
     <view class="topbar" :class="layout.isWide ? 'topbar-wide' : ''">
-      <view class="tabs" :class="layout.isWide ? 'tabs-wide' : ''" :style="tabsStyle">
-        <view class="tab" :class="[tab == 'mine' ? 'tab-active' : '', layout.isWide ? 'tab-wide' : '']" :style="tab == 'mine' ? 'background-color:' + themeStore.skin.accent + ';' : ''" @tap="switchTab('mine')">
-          <text class="tab-text" :class="[tab == 'mine' ? 'tab-text-active' : '', layout.isWide ? 'tab-text-wide' : '']" :style="(tab == 'mine' ? 'color:' + themeStore.skin.onAccent + ';' : 'color:' + themeStore.skin.textMuted + ';') + qtFontDual(26, 14)">我的</text>
-        </view>
-        <view class="tab" :class="[tab == 'public' ? 'tab-active' : '', layout.isWide ? 'tab-wide' : '']" :style="tab == 'public' ? 'background-color:' + themeStore.skin.accent + ';' : ''" @tap="switchTab('public')">
-          <text class="tab-text" :class="[tab == 'public' ? 'tab-text-active' : '', layout.isWide ? 'tab-text-wide' : '']" :style="(tab == 'public' ? 'color:' + themeStore.skin.onAccent + ';' : 'color:' + themeStore.skin.textMuted + ';') + qtFontDual(26, 14)">公开</text>
-        </view>
-      </view>
+      <QtSegmented class="tabs" :class="layout.isWide ? 'tabs-wide' : ''" :list="['我的', '公开']" :model-value="tab == 'mine' ? 0 : 1" @change="switchTab($event == 0 ? 'mine' : 'public')" />
       <view class="submit-btn" :class="layout.isWide ? 'submit-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @tap="goSubmit">
         <text class="submit-btn-text" :class="layout.isWide ? 'submit-btn-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(26, 14)">+ 提交反馈</text>
       </view>
@@ -87,6 +80,7 @@ import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-fr
 import { ref, computed } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
 import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
@@ -108,9 +102,6 @@ import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const themeStore = useThemeStore();
 const layout = useQtLayout();
-// 皮肤令牌：Tab 容器底原先写死成半透明白面板，换皮肤时不跟着变；本仓库无 CSS 变量，只能内联输出。
-const tabsStyle = computed((): string => "background-color:" + themeStore.skin.surface + ";");
-
 /** 当前 Tab：我的 / 公开 */
 const tab = ref<"mine" | "public">("mine");
 const items = ref<FeedbackItem[]>([]);
@@ -256,24 +247,15 @@ onShow(() => {
   justify-content: space-between;
   padding: 20rpx 24rpx;
 }
+/* 定宽：顶栏是 row + space-between，不定宽时分段器收缩到文字宽度，
+   两个分段会贴在一起（等宽模式下每格只剩文字宽，没有任何内边距） */
 .tabs {
   flex-direction: row;
   align-items: center;
   border-radius: 36rpx;
   padding: 6rpx;
-}
-.tab {
-  padding: 12rpx 36rpx;
-  border-radius: 30rpx;
-}
-.tab-active {
-}
-.tab-text {
-  font-size: 26rpx;
-  font-weight: 500;
-}
-.tab-text-active {
-  font-weight: 600;
+  width: 240rpx;
+  flex-shrink: 0;
 }
 .submit-btn {
   padding: 14rpx 28rpx;
@@ -331,9 +313,7 @@ onShow(() => {
 
 /* Vapor 宽屏：px 覆盖 rpx，1600x900 下避免按窗口比例放大 2.7 倍 */
 .topbar-wide { padding: 12px 24px; }
-.tabs-wide { border-radius: 18px; padding: 3px; }
-.tab-wide { padding: 8px 20px; border-radius: 15px; }
-.tab-text-wide { font-size: 14px; }
+.tabs-wide { border-radius: 18px; padding: 3px; width: 160px; }
 .submit-btn-wide { padding: 9px 18px; border-radius: 18px; }
 .submit-btn-text-wide { font-size: 14px; }
 /* 桌面指针反馈 */

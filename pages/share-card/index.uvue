@@ -6,22 +6,28 @@
       </view>
 
       <template v-else>
+        <!-- 内容整体可滚：卡片（尤其歌词卡）在小屏上高过可视区，旧版是普通 view
+             直接裁底，两个操作按钮根本点不到（m21618）。参照公告详情页的
+             scroll(direction=vertical)+flex:1 模式。 -->
+        <scroll-view class="scroll" direction="vertical" :show-scrollbar="false" :scroll-into-view="scrollInto">
+          <view class="scroll-body">
         <!-- 卡片模式切换 -->
         <view class="mode-row" :class="layout.isWide ? 'mode-row-wide' : ''">
           <QtSegmented v-model="mode" :list="['歌曲卡片', '歌词卡片']" :item-gap="16" />
         </view>
 
         <!-- 卡片本体：takeSnapshot 截这个节点 -->
-        <view class="card-wrap" :class="layout.isWide ? 'card-wrap-wide' : ''">
-          <view id="shareCard" class="card" :style="'background-color:' + themeStore.skin.surface + ';'">
+        <view class="card-wrap" :style="'width:' + cardPx + 'px;'">
+          <view id="shareCard" class="card" :style="'background-color:' + themeStore.skin.surface + ';width:' + cardPx + 'px;'">
             <image
               class="cover"
               :src="coverUrl"
               mode="aspectFill"
+              :style="'width:' + cardPx + 'px;height:' + cardPx + 'px;'"
               @load="onCoverLoad"
               @error="onCoverLoad"
             />
-            <view class="info">
+            <view class="info" :style="'width:' + cardPx + 'px;'">
               <text class="song-name" max-lines="2" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(18)">{{ song.name }}</text>
               <text class="song-singer" max-lines="1" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(13)">{{ song.singer }}</text>
               <view v-if="mode == 1" class="lyric-block">
@@ -41,9 +47,14 @@
                 <text v-else class="lyric-line" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(14)">暂无歌词</text>
               </view>
             </view>
-            <view class="footer">
-              <text class="footer-brand" :style="('color:' + themeStore.skin.accent + ';') + qtFontPx(13)">轻听音乐</text>
-              <text class="footer-sub" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(10)">QuietMusic</text>
+            <view class="footer" :style="'width:' + cardPx + 'px;'">
+              <view class="footer-left">
+                <text class="footer-brand" :style="('color:' + themeStore.skin.accent + ';') + qtFontPx(13)">轻听音乐</text>
+                <text class="footer-tip" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(10)">扫码下载客户端</text>
+                <text class="footer-sub" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(10)">QuietMusic</text>
+              </view>
+              <!-- 下载二维码：静态 PNG（黑白固定，不跟主题），随卡片一起被 takeSnapshot 截进去 -->
+              <image class="footer-qr" src="/static/share/share-qr.png" mode="aspectFit" />
             </view>
           </view>
         </view>
@@ -60,6 +71,8 @@
         <view class="tip-row" :class="layout.isWide ? 'tip-row-wide' : ''">
           <text class="tip-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(12)">生成图片后可分享到微信、QQ 等应用</text>
         </view>
+          </view>
+        </scroll-view>
       </template>
     </view>
   </qt-page-frame>
@@ -80,6 +93,7 @@ import { useShareCardStore } from "@/stores/share-card";
 import { DEFAULT_PLAYLIST_COVER_ASSET } from "@/services/media";
 import { beginLoading, finishLoading } from "@/services/ui-loading";
 import { qtFontPx } from "@/uni_modules/qt-ui/stores/font-scale";
+import { saveImageToGallery } from "@/services/app-native";
 
 const layout = useQtLayout();
 const themeStore = useThemeStore();
@@ -97,8 +111,21 @@ const working = ref(false);
 const coverUrl = computed(() => {
   const s = song.value;
   if (s == null) return DEFAULT_PLAYLIST_COVER_ASSET;
-  return s.picUrl != null && s.picUrl.length > 0 ? s.picUrl : DEFAULT_PLAYLIST_COVER_ASSET;
+  return s.picUrl != null && s.picUrl!.length > 0 ? s.picUrl! : DEFAULT_PLAYLIST_COVER_ASSET;
 });
+
+/** 卡片响应式宽度（m21618「分享页面太大了」）：固定 300px 在小屏手机上太高，
+ *  高过可视区且旧版无滚动，底部按钮被裁。手机按窗口宽收缩（两侧共留 96px），
+ *  下限 220 保住封面观感，宽屏维持 340 上限。封面保持正方形，与卡片同宽。 */
+const cardPx = computed((): number => {
+  const cap = layout.isWide ? 340 : 300;
+  const fit = Math.floor(Math.max(layout.windowWidth, 1) - 96);
+  return Math.min(cap, Math.max(220, fit));
+});
+/** 截图前把卡片滚回可视区：歌词卡会超出视口，takeSnapshot 对视口外节点不可靠。 */
+const scrollInto = ref("");
+/** snapshotCard 的滚动等待定时器，onUnload 清理，防止离开页面后仍触截图。 */
+let snapDelay = 0;
 
 onLoad(() => {
   qtTrackPage("pages/share-card/index");
@@ -108,6 +135,10 @@ onLoad(() => {
 onUnload(() => {
   // 离开页面即清目标，避免返回后再进残留上一首
   shareCard.song = null;
+  if (snapDelay != 0) {
+    clearTimeout(snapDelay);
+    snapDelay = 0;
+  }
 });
 
 function loadLyrics(): void {
@@ -147,11 +178,24 @@ function snapshotCard(onDone: (tempPath: string) => void, onFail: () => void): v
     return;
   }
   working.value = true;
+  // 歌词卡可能被滚出视口：先把卡片滚回可视区再截（scroll-into-view 对齐顶部），
+  // 等一拍滚动完成；working 已置位挡住等待窗口内的重复点击。
+  // 截图结束后 runSnapshot 会把 scrollInto 复位为 ""，下次还能重新触发滚动。
+  scrollInto.value = "shareCard";
+  snapDelay = setTimeout(() => {
+    snapDelay = 0;
+    runSnapshot(el);
+  }, 320) as unknown as number;
+}
+
+/** 真正执行截图；与 snapDelay 分离后 onUnload 清定时器即可安全放弃未启动的截图 */
+function runSnapshot(el: UniElement): void {
   // 截图是异步原生调用，先给 loading，避免“点了没反应”的错觉
   const snapToken = beginLoading("生成图片中...");
   el.takeSnapshot({
     success: (res) => {
       working.value = false;
+      scrollInto.value = "";
       finishLoading(snapToken);
       const path = res.tempFilePath;
       if (path == null || path.length == 0) {
@@ -163,6 +207,7 @@ function snapshotCard(onDone: (tempPath: string) => void, onFail: () => void): v
     },
     fail: () => {
       working.value = false;
+      scrollInto.value = "";
       finishLoading(snapToken);
       qtShowToast({ title: "生成图片失败", icon: "none", duration: 2500 });
       onFail();
@@ -190,21 +235,27 @@ function doShare(): void {
 
 function doSave(): void {
   snapshotCard((tempPath) => {
-    uni.saveImageToPhotosAlbum({
-      filePath: tempPath,
-      success: () => {
+    saveImageToGallery(tempPath, "qt-share-" + Date.now() + ".png").then((saved: string) => {
+      if (saved.length > 0) {
         qtShowToast({ title: "已保存到相册", icon: "none", duration: 2500 });
-      },
-      fail: () => {
-        qtShowToast({ title: "保存失败，请检查相册权限", icon: "none", duration: 2500 });
-      },
+      } else {
+        qtShowToast({ title: "保存失败，请检查存储空间", icon: "none", duration: 2500 });
+      }
     });
   }, () => {});
 }
 </script>
 <style lang="css">
 .page {
+  flex: 1;
   padding: 16px;
+  align-items: center;
+}
+.scroll {
+  flex: 1;
+  width: 100%;
+}
+.scroll-body {
   align-items: center;
 }
 .page-wide {
@@ -228,25 +279,17 @@ function doSave(): void {
   margin-bottom: 24px;
 }
 .card-wrap {
-  width: 300px;
   align-items: center;
 }
-.card-wrap-wide {
-  width: 340px;
-}
 .card {
-  width: 300px;
   border-radius: 16px;
   overflow: hidden;
 }
 .cover {
-  width: 300px;
-  height: 300px;
   border-top-left-radius: 16px;
   border-top-right-radius: 16px;
 }
 .info {
-  width: 300px;
   padding: 18px 18px 6px 18px;
 }
 .song-name {
@@ -271,19 +314,31 @@ function doSave(): void {
   text-overflow: ellipsis;
 }
 .footer {
-  width: 300px;
   padding: 12px 18px 16px 18px;
   flex-direction: row;
   align-items: center;
   justify-content: space-between;
 }
+.footer-left {
+  flex-direction: column;
+  align-items: flex-start;
+}
 .footer-brand {
   font-size: 13px;
   font-weight: bold;
 }
+.footer-tip {
+  font-size: 10px;
+  margin-top: 3px;
+}
 .footer-sub {
   font-size: 10px;
   letter-spacing: 2px;
+  margin-top: 3px;
+}
+.footer-qr {
+  width: 64px;
+  height: 64px;
 }
 .actions {
   margin-top: 24px;

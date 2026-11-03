@@ -8,19 +8,7 @@
          不用整块纯色填充选中态的原因：五个按钮并排，纯色块会显得很重，
          这里用 accentSoft 底 + accent 图标/文字，选中感足够又不抢眼。 -->
     <view class="filter-row" :class="layout.isWide ? 'filter-row-wide' : ''">
-      <view
-        v-for="f in filters"
-        :key="f.key"
-        class="chip" :class="layout.isWide ? 'chip-wide' : ''"
-        :style="chipStyle(f.key)"
-        @click="switchFilter(f.key)"
-      >
-        <view class="chip-icon" :class="layout.isWide ? 'chip-icon-wide' : ''" :style="chipIconStyle(f.key)">
-          <QtIcon :name="f.icon" :size="layout.isWide ? 17 : 34" :color="chipIconColor(f.key)" />
-        </view>
-        <text class="chip-text" :class="layout.isWide ? 'chip-text-wide' : ''" :style="chipTextStyle(f.key)">{{ f.label }}</text>
-        <text class="chip-count" :class="layout.isWide ? 'chip-count-wide' : ''" :style="chipCountStyle(f.key)">{{ f.count }}</text>
-      </view>
+      <QtOption v-for="f in filters" :key="f.key" class="chip" :class="layout.isWide ? 'chip-wide' : ''" kind="chip" :label="f.label" :description="String(f.count)" :selected="filter == f.key" @select="switchFilter(f.key)" />
     </view>
 
     <!-- 操作行：固定行高、左右等高替换，切换选择态时页面零位移。
@@ -124,17 +112,11 @@
         <template v-else>
           <view class="row-card" :class="layout.isWide ? 'row-card-wide' : ''" :hover-class="layout.isWide ? 'row-card-hover' : 'none'" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';'">
             <view class="main" @click="onItemTap(entry.data)">
-              <view
-                v-if="selecting"
-                class="checkbox checkbox-gap" :class="layout.isWide ? 'checkbox-wide checkbox-gap-wide' : ''"
-                :style="isItemSelected(entry.data) ? 'background-color:' + theme.skin.accent + ';border-color:' + theme.skin.accent + ';' : 'border-color:' + theme.skin.border + ';'"
-              >
-                <QtIcon v-if="isItemSelected(entry.data)" name="check" :size="layout.isWide ? 12 : 22" :color="theme.skin.onAccent" />
-              </view>
+              <QtCheckbox v-if="selecting" class="checkbox-gap" :class="layout.isWide ? 'checkbox-gap-wide' : ''" :checked="isItemSelected(entry.data)" @change="onItemTap(entry.data)" />
               <image class="cover" :class="layout.isWide ? 'cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="entry.data.song.picUrl" mode="aspectFill" />
               <view class="info" :class="layout.isWide ? 'info-wide' : ''">
                 <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 16)" :max-lines="1">{{ entry.data.song.name }}</text>
-                <text class="meta" :class="layout.isWide ? 'meta-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 14)" :max-lines="1">{{ itemMeta(entry.data) }}</text>
+                <text class="meta" :class="layout.isWide ? 'meta-wide' : ''" :style="('color:' + (missingFiles.indexOf(entry.data.path) >= 0 ? theme.skin.danger : theme.skin.textMuted) + ';') + qtFontDual(23, 14)" :max-lines="1">{{ itemMeta(entry.data) }}</text>
               </view>
             </view>
             <view v-if="!selecting" class="row-hit" :class="layout.isWide ? 'row-hit-wide' : ''" @click="removeSingle(entry.data)">
@@ -173,6 +155,8 @@ import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-fr
 import { onShow } from "@dcloudio/uni-app";
 import { computed, ref } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
+import QtCheckbox from "@/uni_modules/qt-ui/components/qt-checkbox/qt-checkbox.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import QtEmpty from "@/uni_modules/qt-ui/components/qt-empty/qt-empty.uvue";
 import { useDownloadsStore, type DownloadItem, type DownloadTask } from "@/stores/downloads";
@@ -181,6 +165,8 @@ import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import type { Song } from "@/types/music";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { platformShort } from "@/services/platform";
+import { statLocalFile } from "@/uni_modules/qt-app-native";
 
 const downloads = useDownloadsStore();
 const player = usePlayerStore();
@@ -277,10 +263,55 @@ function switchFilter(key: string): void {
 
 onShow(() => {
   downloads.restore();
+  // 每次进页实测一遍成品文件在不在盘：下载页显示的大小是下载完成时存的，
+  // 文件被系统清理/目录迁移/手动删过时记录仍挂着「已完成」，肉眼分辨不出来。
+  // 本地优先解析链按「文件在盘」判定，缺失的记录永远不会命中——在这里亮出来。
+  verifyFiles();
   // 默认页签是「下载中」；真进来发现一个在途任务都没有（全下完了或从没下过），
   // 就落到「已完成」，别让用户对着一个必然为空的列表。
   if (!userPickedFilter && taskCount.value == 0) filter.value = FILTER_DONE;
 });
+
+/** stat 失败的成品路径（整组替换驱动刷新，页面期间不再反复扫盘） */
+const missingFiles = ref<string[]>([]);
+function verifyFiles(): void {
+  const items = downloads.items;
+  if (items.length == 0) {
+    missingFiles.value = [];
+    return;
+  }
+  let pending = items.length;
+  const missing: string[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const path = items[i].path;
+    if (path == null || path.length == 0) {
+      missing.push("");
+      pending--;
+      continue;
+    }
+    uni.getFileSystemManager().getFileInfo({
+      filePath: path,
+      success: (_res) => {
+        pending--;
+        if (pending <= 0) missingFiles.value = missing;
+      },
+      fail: () => {
+        // uni 的 getFileInfo 在 Android 公共目录（默认落盘 /Download/QtDownload/Music）
+        // 上常常直接 fail —— Scoped Storage 下它拿不到权威结果，fail 不等于文件不在盘。
+        // 用原生 statLocalFile 直查兜底（java.io.File 语义，services/local-first.ts 同口径），
+        // 只有真的 -1 才标「文件缺失」，否则安卓成品会整片误报（2026-11-02 审阅）
+        if (statLocalFile(path) < 0) missing.push(path);
+        pending--;
+        if (pending <= 0) missingFiles.value = missing;
+      },
+    });
+  }
+  // 全部条目 path 为空的极端情形：循环里没有异步回调兜底，这里收尾
+  if (pending <= 0) missingFiles.value = missing;
+}
+function isFileMissing(item: DownloadItem): boolean {
+  return missingFiles.value.indexOf(item.path) >= 0;
+}
 
 /** 当前页签下的条目数：操作行左侧那行字跟着筛选走，不再固定报「N 个任务」 */
 const visibleCount = computed<number>(() => {
@@ -345,9 +376,13 @@ function taskMeta(task: DownloadTask): string {
 
 /** 已下载行第二行：歌手 - 专辑 · 大小 */
 function itemMeta(item: DownloadItem): string {
-  const base = item.song.singer + " - " + item.song.album;
-  if (item.size > 0) return base + " · " + formatBytes(item.size);
-  return base;
+  // 音源打头：本地优先按「同音源同 id」身份级 + 跨源元数据级命中，
+  // 播放页没亮「本地文件」标签时，先在这里对一下下载音源和播放音源是否一致
+  const base = platformShort(item.song.platform) + " · " + item.song.singer + " - " + item.song.album;
+  let tail = "";
+  if (item.size > 0) tail += " · " + formatBytes(item.size);
+  if (isFileMissing(item)) tail += " · 文件缺失";
+  return base + tail;
 }
 
 /** 「已下载 / 总大小」；两者都未知返回空串（不显示 0 B 这种噪音） */
@@ -384,36 +419,6 @@ function formatSpeed(bytesPerSec: number): string {
   return formatBytes(bytesPerSec) + "/s";
 }
 
-// ---- 筛选按钮样式（选中态用强调色弱化底 + 强调色字，未选中走弱底 + 正文色） ----
-
-function chipStyle(key: string): string {
-  if (filter.value == key) {
-    return 'background-color:' + theme.skin.accentSoft + ';border-color:' + theme.skin.accentSoft + ';';
-  }
-  return 'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';';
-}
-
-/** 图标底座：选中态给强调色弱底，让五个图标块有主次 */
-function chipIconStyle(key: string): string {
-  if (filter.value == key) {
-    return 'background-color:' + theme.skin.accent + ';';
-  }
-  return 'background-color:' + theme.skin.surfaceMuted + ';';
-}
-
-function chipIconColor(key: string): string {
-  return filter.value == key ? theme.skin.onAccent : theme.skin.iconMuted;
-}
-
-function chipTextStyle(key: string): string {
-  const color = filter.value == key ? theme.skin.accent : theme.skin.textMuted;
-  return 'color:' + color + ';' + qtFontDual(23, 13);
-}
-
-function chipCountStyle(key: string): string {
-  const color = filter.value == key ? theme.skin.accent : theme.skin.textSubtle;
-  return 'color:' + color + ';' + qtFontDual(21, 12);
-}
 
 /**
  * 说明：这里**不需要**页面自己的时钟。
@@ -721,35 +726,6 @@ function removeTask(song: Song): void {
   padding: 8px 0 7px;
   border-radius: 12px;
 }
-.chip-icon {
-  width: 56rpx;
-  height: 56rpx;
-  border-radius: 16rpx;
-  align-items: center;
-  justify-content: center;
-}
-.chip-icon-wide {
-  width: 32px;
-  height: 32px;
-  border-radius: 9px;
-}
-.chip-text {
-  margin-top: 10rpx;
-  font-size: 23rpx;
-  font-weight: 500;
-}
-.chip-text-wide {
-  margin-top: 6px;
-  font-size: 13px;
-}
-.chip-count {
-  margin-top: 2rpx;
-  font-size: 21rpx;
-}
-.chip-count-wide {
-  margin-top: 1px;
-  font-size: 12px;
-}
 
 .ops-line {
   flex-direction: row;
@@ -832,21 +808,6 @@ function removeTask(song: Song): void {
 .manage-btn-text-wide {
   margin-left: 4px;
   font-size: 13px;
-}
-.checkbox {
-  width: 44rpx;
-  height: 44rpx;
-  border-radius: 22rpx;
-  /* border-style 必须显式写，否则 Vapor 下边框不绘制（未选中态会完全看不见） */
-  border-style: solid;
-  border-width: 2px;
-  align-items: center;
-  justify-content: center;
-}
-.checkbox-wide {
-  width: 24px;
-  height: 24px;
-  border-radius: 12px;
 }
 .checkbox-gap {
   margin-right: 22rpx;

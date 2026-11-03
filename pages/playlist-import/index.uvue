@@ -61,16 +61,10 @@
             <QtIcon name="chevron-right" :size="24" :color="themeStore.skin.textMuted" />
           </view>
         </view>
-        <view v-if="targetOpen" class="plat-menu" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
-          <view class="plat-option" :class="existingList.length > 0 ? 'plat-option-line' : ''" @click="pickTarget(0)" :hover-class="layout.isWide ? 'plat-option-hover' : 'none'">
-            <text class="plat-option-text" :style="('color:' + (targetChoice == 0 ? themeStore.skin.accent : themeStore.skin.text) + ';') + qtFontDual(26, 14)">新建歌单</text>
-            <QtIcon v-if="targetChoice == 0" name="check" :size="24" :color="themeStore.skin.accent" />
-          </view>
-          <view v-for="(pl, i) in existingList" :key="pl.id" class="plat-option" :class="i < existingList.length - 1 ? 'plat-option-line' : ''" @click="pickTarget(i + 1)" :hover-class="layout.isWide ? 'plat-option-hover' : 'none'">
-            <text class="plat-option-text" max-lines="1" :style="('color:' + (targetChoice == i + 1 ? themeStore.skin.accent : themeStore.skin.text) + ';') + qtFontDual(26, 14)">{{ pl.name }}</text>
-            <QtIcon v-if="targetChoice == i + 1" name="check" :size="24" :color="themeStore.skin.accent" />
-          </view>
-        </view>
+        <scroll-view v-if="targetOpen" class="plat-menu" direction="vertical" :scroll-into-view="targetReveal.anchor.value" :style="'height:' + (layout.isWide ? 260 : 220) + 'px;background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
+          <QtOption :id="targetReveal.itemId(0)" kind="row" label="新建歌单" :selected="targetChoice == 0" @select="pickTarget(0)" />
+          <QtOption v-for="(pl, i) in existingList" :id="targetReveal.itemId(i + 1)" :key="pl.id" kind="row" :label="pl.name" :selected="targetChoice == i + 1" @select="pickTarget(i + 1)" />
+        </scroll-view>
         <text v-if="targetChoice == 0" class="field-label" :class="layout.isWide ? 'field-label-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13)">歌单名称（留空默认同名）</text>
         <input
           v-if="targetChoice == 0"
@@ -120,6 +114,8 @@ import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-fr
 import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
 import QtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
+import { useQtSelectionReveal } from "@/uni_modules/qt-ui/composables/use-qt-selection-reveal";
 import { ref, computed, watch } from "vue";
 import { onLoad, onBackPress } from "@dcloudio/uni-app";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
@@ -200,6 +196,7 @@ const detailPlaceholder = computed((): string =>
 const targetChoice = ref(0);
 const targetOpen = ref(false);
 const existingList = ref<Playlist[]>([]);
+const targetReveal = useQtSelectionReveal(() => targetOpen.value, () => targetChoice.value >= 0 && targetChoice.value <= existingList.value.length ? targetChoice.value : -1, () => existingList.value.map((item) => item.id).join('|'));
 const targetChoiceText = computed((): string => {
   if (targetChoice.value == 0) return "新建歌单";
   const pl = existingList.value[targetChoice.value - 1];

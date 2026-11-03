@@ -3,7 +3,7 @@ import { musicApi, isPlayUrlStale } from "@/services/music-api";
 import { isEncryptedMediaUrl } from "@/services/music-api";
 import type { Source } from "@/services/music-api";
 import { parseJsonToUtso } from "@/services/http";
-import { saveToPublicMedia, ensurePublicDirPermission, deleteMediaByPath, embedAudioTags } from "@/uni_modules/qt-app-native";
+import { saveToPublicMedia, ensurePublicDirPermission, deleteMediaByPath, embedAudioTags, statLocalFile } from "@/uni_modules/qt-app-native";
 import type { EmbedTagsOptions } from "@/uni_modules/qt-app-native";
 import { restoreCustomDir } from "@/services/app-native";
 import type { Song } from "@/types/music";
@@ -1675,7 +1675,11 @@ class DownloadsStore {
           const size = res.size;
           resolve(size != null && size > 0 ? size : 0);
         },
-        fail: () => resolve(0),
+        fail: () => {
+          // 静默：uni stat 公共目录经常 fail（文件在盘也读不到），原生兜底读真实字节数
+          const nativeSize = statLocalFile(filePath);
+          resolve(nativeSize > 0 ? nativeSize : 0);
+        },
       });
     });
   }

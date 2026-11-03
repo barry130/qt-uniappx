@@ -617,8 +617,10 @@ function onPacksChanged(): void {
 
 async function play(song: Song): Promise<void> {
   try {
-    song.url = await musicApi.playUrl(song, player.quality);
-    player.playSingle(song);
+    // 不预取在线地址：解析桥（onResolveRequest）在起播那一刻才取链，且取链前
+    // 先走本地优先（下载账本身份级/跨源元数据级→本地曲库）。在这里预取会把在线
+    // urlSize 灌进码率显示，本地命中后还显示在线码率，像「还是在线」（m22743）。
+    await player.playSingle(song);
   } catch (_) {
     qtShowToast({ title: "该歌曲暂时无法播放", icon: "none" });
   }
@@ -630,7 +632,7 @@ async function playAll(): Promise<void> {
   if (list.length == 0) return;
   const first = list[0];
   try {
-    first.url = await musicApi.playUrl(first, player.quality);
+    // 同 play()：不预取首曲地址（搜索页 playAll 的既有口径），起播走解析桥
     await player.play(first, list);
   } catch (_) {
     qtShowToast({ title: "暂时无法播放全部", icon: "none" });

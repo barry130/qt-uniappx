@@ -8,9 +8,7 @@
             <text class="head-title" :class="layout.isWide ? 'head-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(32, 16)">均衡器</text>
             <text class="head-sub" :class="layout.isWide ? 'head-sub-wide' : ''" max-lines="2" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 12)">五段音效调节，对所有播放声音即时生效</text>
           </view>
-          <view class="toggle" :class="layout.isWide ? 'toggle-wide' : ''" :style="'background-color:' + (enabled ? themeStore.skin.accent : themeStore.skin.surfaceInset) + ';'" @click="toggleEnabled">
-            <view class="toggle-knob" :class="knobClass" :style="'background-color:' + (enabled ? themeStore.skin.onAccent : themeStore.skin.textMuted) + ';'" />
-          </view>
+          <QtSwitch :model-value="enabled" @change="toggleEnabled" />
         </view>
       </view>
 
@@ -18,17 +16,7 @@
       <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';'">
         <text class="section-title" :class="layout.isWide ? 'section-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 14)">预设</text>
         <view class="chips">
-          <view
-            v-for="(name, idx) in presets"
-            :key="idx"
-            class="chip"
-            :class="layout.isWide ? 'chip-wide' : ''"
-            :style="'background-color:' + (presetIndex == idx ? themeStore.skin.accent : themeStore.skin.surfaceInset) + ';'"
-            @click="applyPreset(idx)"
-          :hover-class="layout.isWide ? 'chip-hover' : 'none'"
-          >
-            <text class="chip-text" :class="layout.isWide ? 'chip-text-wide' : ''" :style="('color:' + (presetIndex == idx ? themeStore.skin.onAccent : themeStore.skin.text) + ';') + qtFontDual(26, 13)">{{ name }}</text>
-          </view>
+          <QtOption v-for="(name, idx) in presets" :key="idx" class="chip" :class="layout.isWide ? 'chip-wide' : ''" kind="chip" :label="name" :selected="presetIndex == idx" @select="applyPreset(idx)" />
         </view>
       </view>
 
@@ -60,6 +48,8 @@
 import { onLoad } from "@dcloudio/uni-app";
 import { computed, ref } from "vue";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import QtSwitch from "@/uni_modules/qt-ui/components/qt-switch/qt-switch.uvue";
+import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
 import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
@@ -85,19 +75,6 @@ const presetBands: number[][] = [
 const enabled = ref(audioPlayer.eqEnabled);
 const bands = ref<number[]>(audioPlayer.eqBands.slice());
 const presetIndex = ref(-1);
-
-/**
- * 滑块的 class 有两个来源（开/关位移 + 宽窄尺寸），:class 只能绑一个表达式，
- * 所以这里合成一个字符串。不要拆成两处 :class —— Vapor 会后者覆盖前者。
- */
-const knobClass = computed((): string => {
-  const on = enabled.value;
-  const wide = layout.isWide;
-  if (on && wide) return "toggle-knob-on toggle-knob-on-wide toggle-knob-wide";
-  if (on) return "toggle-knob-on";
-  if (wide) return "toggle-knob-wide";
-  return "";
-});
 
 onLoad(() => {
   qtTrackPage("pages/equalizer/index");
@@ -201,36 +178,6 @@ function toggleEnabled(): void {
   margin-top: 4px;
   font-size: 12px;
 }
-.toggle {
-  width: 92rpx;
-  height: 52rpx;
-  border-radius: 26rpx;
-  padding: 6rpx;
-  margin-left: 24rpx;
-}
-.toggle-wide {
-  width: 46px;
-  height: 26px;
-  border-radius: 13px;
-  padding: 3px;
-  margin-left: 12px;
-}
-.toggle-knob {
-  width: 40rpx;
-  height: 40rpx;
-  border-radius: 20rpx;
-}
-.toggle-knob-wide {
-  width: 20px;
-  height: 20px;
-  border-radius: 10px;
-}
-.toggle-knob-on {
-  margin-left: 40rpx;
-}
-.toggle-knob-on-wide {
-  margin-left: 20px;
-}
 .section-title {
   font-size: 28rpx;
   font-weight: bold;
@@ -257,12 +204,6 @@ function toggleEnabled(): void {
   border-radius: 14px;
   padding: 6px 14px;
   margin: 0 10px 10px 0;
-}
-.chip-text {
-  font-size: 26rpx;
-}
-.chip-text-wide {
-  font-size: 13px;
 }
 .band-row {
   flex-direction: row;

@@ -190,14 +190,16 @@ export type RegistrySource = {
 export type RegistrySort = { id: string; name: string };
 /** 某源的账号登录能力自述（v9 契约）：methods 含 qrcode/cookie，domains 为注入域后缀；
  *  officialQualities（v11）非空 = 登录态下音质选择整体切官方清单（id=官方 level，
- *  name=官方展示名，min=最低会员档 none/vip/svip，宿主按账号等级过滤展示） */
+ *  name=官方展示名，min=最低会员档 none/vip/svip，宿主按账号等级过滤展示）；
+ *  qrHint（v16）= 该源二维码要用哪个 App 扫的一句话提示（QQ 的 ptlogin 通道只能手机QQ扫，
+ *  QQ音乐App扫不了），空串按通用文案。 */
 export type RegistryOfficialQuality = { id: string; name: string; min: string };
 /** 网页登录声明（v17 契约）：url=官方登录页地址，cookieMarkers=「可以开始校验」的
  *  Cookie 名（任一命中即尝试；空数组=有域 Cookie 就试），captureUrls=逐 URL 读
  *  Cookie 的地址（空=按 domains 拼 https://{domain}/，host-only Cookie 如
  *  y.qq.com 的 qm_keyst 必须精确到登录域才读得到），note=展示给用户的一句话说明 */
 export type RegistryWebLogin = { url: string; cookieMarkers: string[]; note: string; captureUrls: string[] };
-export type RegistryAuthCaps = { methods: string[]; domains: string[]; officialQualities?: RegistryOfficialQuality[]; webLogin?: RegistryWebLogin };
+export type RegistryAuthCaps = { methods: string[]; domains: string[]; officialQualities?: RegistryOfficialQuality[]; qrHint?: string; webLogin?: RegistryWebLogin };
 /** 数据包注册表里的一个音质档位 */
 export type RegistryQuality = { id: string; name: string };
 /** 数据包注册表（音源清单 + 音质档位；宿主 UI 选项的唯一来源） */
@@ -647,7 +649,10 @@ export class MusicApi {
           const authMethods = rawAuth.get("methods") as string[] | null;
           const authDomains = rawAuth.get("domains") as string[] | null;
           if (authMethods != null && authMethods.length > 0) {
-            src.auth = { methods: authMethods, domains: authDomains != null ? authDomains : [] };
+            // qrHint（v16 契约）：扫码弹层里展示的「用哪个 App 扫」。QQ 的 ptlogin
+            // 通道只认手机QQ的扫一扫（2026-10-25 用户反馈「是让你下载QQ」），
+            // 这一句必须由数据包下发，宿主不硬编码平台文案。
+            src.auth = { methods: authMethods, domains: authDomains != null ? authDomains : [], qrHint: this.strOf(rawAuth.get("qrHint")) };
             // 官方线路档位（v11 契约，{id,name,min} 对象数组低到高）：id=官方
             // level 同名直通，name=官方展示名，min=最低会员档。旧包没有/空数组
             // 时保持 undefined（= 登录态不切官方清单）。
@@ -1779,6 +1784,11 @@ export class MusicApi {
       // 实测字节数同理，只增不清：老包不返回 size（null）时保留上一次测到的值
       if (result.size != null && result.size > 0) {
         this.urlSize.set(cacheKey, result.size as number);
+        // 写进表就广播。播放页的 kbps 只在「切歌 / 音质变 / playing 翻真 / 收到本事件」
+        // 这几个时刻重算，而**包内直接回报 size**这条主路径此前一个事件都不发：取链比
+        // playing 翻真晚到（弱网更明显）时那一帧算出 0，之后再没有任何触发点 → 码率行
+        // 永久只剩音质名（用户 m17489「有时后面的 kpbs 会不显示」）。
+        uni.$emit(MusicApi.URL_SIZE_EVENT, "");
       } else {
         // 包没量到（老包没实现 Range 预检 / CDN 没回 Content-Range）→ 宿主
         // HEAD 兜底测一次。异步不阻塞取链，测到就广播（播放页补算 kbps）。
