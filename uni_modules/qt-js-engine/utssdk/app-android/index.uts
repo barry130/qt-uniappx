@@ -59,6 +59,7 @@ import File from 'java.io.File'
 import FileInputStream from 'java.io.FileInputStream'
 import FileOutputStream from 'java.io.FileOutputStream'
 import GZIPInputStream from 'java.util.zip.GZIPInputStream'
+import Base64 from 'android.util.Base64'
 import { UTSAndroid } from 'io.dcloud.uts'
 
 import {
@@ -729,10 +730,15 @@ function startHttp(o: UTSJSONObject): void {
 	const method = fieldStr(o, 'method')
 	const headers = fieldStr(o, 'headers')
 	const body = fieldStr(o, 'body')
+	// 包侧契约（contract.ts）：redirect:"manual" 时不许跟随 302（Set-Cookie / Location
+	// 只挂在 302 响应上）；responseEncoding:"base64" 时响应体按原始字节出 base64
+	// 字符串（QQ 扫码 PNG 必须走这条，解码成文本会把字节全变成替换字符）。
+	const redirectManual = fieldStr(o, 'redirect') == 'manual'
+	const wantBase64 = fieldStr(o, 'encoding') == 'base64'
 	let timeoutMs = fieldInt(o, 'timeoutMs')
 	if (timeoutMs <= 0) timeoutMs = DEFAULT_HTTP_TIMEOUT_MS
 	// HTTP 不占引擎线程：各起一条线程，回来再 post 到引擎线程
-	const t = new Thread(new HttpTask(id, url, method, headers, body, timeoutMs))
+	const t = new Thread(new HttpTask(id, url, method, headers, body, timeoutMs, redirectManual, wantBase64))
 	t.start()
 }
 
@@ -1036,14 +1042,20 @@ class HttpTask implements Runnable {
 	private headers: string
 	private body: string
 	private timeoutMs: number
+	/** 契约 redirect:"manual"：只回 302 本身，不自动跟随（Location / Set-Cookie 要用） */
+	private redirectManual: boolean
+	/** 契约 responseEncoding:"base64"：响应体按原始字节出 base64 文本 */
+	private wantBase64: boolean
 
-	constructor(id: string, url: string, method: string, headers: string, body: string, timeoutMs: number) {
+	constructor(id: string, url: string, method: string, headers: string, body: string, timeoutMs: number, redirectManual: boolean, wantBase64: boolean) {
 		this.id = id
 		this.url = url
 		this.method = method
 		this.headers = headers
 		this.body = body
 		this.timeoutMs = timeoutMs
+		this.redirectManual = redirectManual
+		this.wantBase64 = wantBase64
 	}
 
 	override run(): void {
@@ -1062,7 +1074,7 @@ class HttpTask implements Runnable {
 			const t = this.timeoutMs.toInt()
 			c.setConnectTimeout(t)
 			c.setReadTimeout(t)
-			c.setInstanceFollowRedirects(true)
+			c.setInstanceFollowRedirects(!this.redirectManual)
 			c.setRequestMethod(this.method)
 			c.setRequestProperty('Accept-Encoding', 'gzip')
 			// headers 是从 JS 传来的 "Name: value" 多行文本
@@ -1112,7 +1124,9 @@ class HttpTask implements Runnable {
 				if (bits > 0) {
 					headersJson = injectHeader(headersJson, QT_FLAC_BITS_HEADER, `${bits}`)
 				}
-				body = raw.text
+				// base64 通道必须用原始字节编码：文本解码会把 PNG 的 0x80+ 字节
+				// 变成替换字符，包侧再拼 data:image/png;base64, 就是一张坏图（空白）。
+				body = this.wantBase64 ? Base64.encodeToString(raw.bytes, Base64.NO_WRAP) : raw.text
 			}
 		} catch (e) {
 			error = errText(e)

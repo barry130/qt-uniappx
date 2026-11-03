@@ -180,10 +180,17 @@ await check('无标签：mp3 同步头直开 / 非 flac / 空数组 → null', a
   assert.equal(api.readFlacEmbedded(new Uint8Array(0)), null);
 });
 
-// (j) 截断：声明尺寸大于前缀（纯填充体）→ null；标签头不完整 → null
-await check('截断：ID3 声明尺寸超出前缀 + 纯填充体 → null（fail-closed）', async () => {
+// (j) 截断：声明尺寸大于前缀 → **带回 coverNeed 的对象**（宿主据此放大窗口重读）；  
+//     标签头都不完整 → null（fail-closed）。  
+//     口径变更说明（2026-11-02）：旧实现在「全空且截断」时返回 null，宿主拿不到  
+//     coverNeed 就直接放弃，大封面 + 无歌词的文件永远读不出封面（审阅实测）。
+await check('截断：ID3 声明尺寸超出前缀 → 带 coverNeed 的对象；头不完整 → null', async () => {
   const tag = u8([0x49, 0x44, 0x33, 0x03, 0x00, 0x00].concat(syncsafe(500)).concat(new Array(40).fill(0x00)));
-  assert.equal(api.readMp3Embedded(tag), null);
+  const read = api.readMp3Embedded(tag);
+  assert.ok(read, '截断标签不能返回 null，否则宿主拿不到 coverNeed');
+  assert.equal(read.coverBytes, null);
+  assert.equal(read.lrcText, '');
+  assert.equal(read.coverNeed, 510); // 10 字节标签头 + 声明的体长 500
   assert.equal(api.readMp3Embedded(u8([0x49, 0x44, 0x33, 0x03, 0x00])), null); // 头都不完整
 });
 
@@ -245,6 +252,103 @@ await check('多 APIC 择优：front cover(0x03) 优先于其他类型', async (
   assert.ok(read);
   eqBytes(read.coverBytes, front);
   assert.equal(read.coverMime, 'image/png');
+});
+
+// (p) coverNeed：大封面被前缀截断时给出「还差多少字节」，宿主据此放大窗口重读
+//     真机背景：网易 HI-RES FLAC 的 1-3MB PICTURE 会越过 1MiB 窗口，
+//     旧实现只返回「歌词有、封面无」，播放页只能显示默认图（2026-11-02 现场）。
+await check('coverNeed：flac 大 PICTURE 被截断 → 报出块尾位置，整段读入后封面正常', async () => {
+  const cover = new Uint8Array(220 * 1024); // 220KB：PICTURE 块体必然越过 128KB 前缀
+  for (let i = 0; i < cover.length; i++) cover[i] = (i * 7) % 251;
+  const lrc = '[00:02.00]大封面场景';
+  const picBody = be32(3) // 类型 3 = 封面
+    .concat(be32(10)).concat(ascii('image/jpeg'))
+    .concat(be32(0)) // 描述长度 0
+    .concat(be32(1500)).concat(be32(1500)).concat(be32(24)).concat(be32(0))
+    .concat(be32(cover.length)).concat(Array.from(cover));
+  const flac = u8([0x66, 0x4c, 0x61, 0x43]
+    .concat(flacBlock(4, false, vorbisEntries(['LYRICS=' + lrc])))
+    .concat(flacBlock(6, true, picBody)));
+  const truncated = flac.slice(0, 128 * 1024);
+  const partial = api.readFlacEmbedded(truncated);
+  assert.ok(partial, '截断前缀也要返回已抽到的歌词');
+  assert.equal(partial.lrcText, lrc);
+  assert.equal(partial.coverBytes, null);
+  assert.ok(partial.coverNeed > truncated.length, 'coverNeed 必须大于已读长度，否则宿主不会放大窗口');
+  // 按 coverNeed 放大重读：封面完整、coverNeed 归零
+  const full = api.readFlacEmbedded(flac.slice(0, partial.coverNeed + 4096));
+  assert.ok(full);
+  assert.equal(full.coverNeed, 0);
+  eqBytes(full.coverBytes, cover);
+  assert.equal(full.coverMime, 'image/jpeg');
+});
+
+// (q) coverNeed：mp3 的 APIC 越过前缀 → 报出「整签声明长度」，放大后封面正常
+await check('coverNeed：mp3 大 APIC 被截断 → 报出整签长度，整签读入后封面正常', async () => {
+  const cover = new Uint8Array(200 * 1024);
+  for (let i = 0; i < cover.length; i++) cover[i] = (i * 13) % 253;
+  const lrc = '[00:03.00]mp3大封面';
+  const plan = api.planMp3(u8([0xff, 0xfb, 0x90, 0x44]), {
+    title: 't', artist: 'a', album: 'b', lrcText: lrc, coverBytes: cover, coverMime: 'image/png',
+  });
+  assert.ok(plan);
+  const cut = plan.newTag.slice(0, 96 * 1024);
+  const partial = api.readMp3Embedded(cut);
+  assert.ok(partial);
+  assert.equal(partial.lrcText, lrc);
+  assert.equal(partial.coverBytes, null);
+  assert.ok(partial.coverNeed > cut.length);
+  const full = api.readMp3Embedded(plan.newTag.slice(0, partial.coverNeed + 4096));
+  assert.ok(full);
+  assert.equal(full.coverNeed, 0);
+  eqBytes(full.coverBytes, cover);
+  assert.equal(full.coverMime, 'image/png');
+});
+
+// (r) coverNeed 回归：**没有内嵌歌词**时也必须报出「还差多少」
+//     2026-11-02 审阅实测：旧判据「全空且截断 → null」把 coverNeed 一起丢掉，
+//     而两个解析器都 null 时宿主第一遍就 break → 大封面 + 无歌词的文件永远读不到封面
+//     （正是本次重写要解决的网易 HI-RES 场景）。(p)/(q) 因为带了 LYRICS 才躲过这个洞。
+await check('coverNeed：flac 大 PICTURE 且无内嵌歌词 → 仍报出块尾位置，放大后封面正常', async () => {
+  const cover = new Uint8Array(220 * 1024);
+  for (let i = 0; i < cover.length; i++) cover[i] = (i * 11) % 249;
+  const picBody = be32(3).concat(be32(10)).concat(ascii('image/jpeg'))
+    .concat(be32(0))
+    .concat(be32(1200)).concat(be32(1200)).concat(be32(24)).concat(be32(0))
+    .concat(be32(cover.length)).concat(Array.from(cover));
+  const flac = u8([0x66, 0x4c, 0x61, 0x43].concat(flacBlock(6, true, picBody)));
+  const truncated = flac.slice(0, 128 * 1024);
+  const partial = api.readFlacEmbedded(truncated);
+  assert.ok(partial, '只有大封面、没有歌词时不能返回 null，否则宿主拿不到 coverNeed');
+  assert.equal(partial.lrcText, '');
+  assert.equal(partial.coverBytes, null);
+  assert.ok(partial.coverNeed > truncated.length, 'coverNeed 必须大于已读长度');
+  const full = api.readFlacEmbedded(flac.slice(0, partial.coverNeed + 4096));
+  assert.ok(full);
+  assert.equal(full.coverNeed, 0);
+  eqBytes(full.coverBytes, cover);
+  assert.equal(full.coverMime, 'image/jpeg');
+});
+
+// (s) 同上，mp3 的 APIC 且无 USLT 歌词
+await check('coverNeed：mp3 大 APIC 且无内嵌歌词 → 仍报出整签长度，放大后封面正常', async () => {
+  const cover = new Uint8Array(200 * 1024);
+  for (let i = 0; i < cover.length; i++) cover[i] = (i * 17) % 247;
+  const plan = api.planMp3(u8([0xff, 0xfb, 0x90, 0x44]), {
+    title: 't', artist: 'a', album: 'b', lrcText: '', coverBytes: cover, coverMime: 'image/jpeg',
+  });
+  assert.ok(plan);
+  const cut = plan.newTag.slice(0, 96 * 1024);
+  const partial = api.readMp3Embedded(cut);
+  assert.ok(partial, '只有大 APIC、没有歌词时不能返回 null');
+  assert.equal(partial.lrcText, '');
+  assert.equal(partial.coverBytes, null);
+  assert.ok(partial.coverNeed > cut.length);
+  const full = api.readMp3Embedded(plan.newTag.slice(0, partial.coverNeed + 4096));
+  assert.ok(full);
+  assert.equal(full.coverNeed, 0);
+  eqBytes(full.coverBytes, cover);
+  assert.equal(full.coverMime, 'image/jpeg');
 });
 
 console.log(`[check-read-embed] ${passed} 条读取用例通过`);

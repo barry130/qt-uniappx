@@ -4,7 +4,7 @@
  * 本项目以 Android 为主，此处保证接口可编译；实际调用方对返回值做降级处理。
  */
 
-import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, IsIgnoringBatteryOptimizations, OpenBatteryOptimizationSettings, OpenAutoStartSettings, OpenAppDetailsSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteMediaByPath, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, ReadBottomNavInset, PickFileResult, PickJsFile, PickDirectoryResult, PickDirectory, SetCustomDirUri, PermissionState, QueryPermissionStates, OpenPermissionSettings, EmbedAudioTags, EmbedTagsOptions, EmbeddedReadResult, ReadEmbeddedTags, GetWebCookies } from "../interface.uts";
+import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, IsIgnoringBatteryOptimizations, OpenBatteryOptimizationSettings, OpenAutoStartSettings, OpenAppDetailsSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteMediaByPath, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, ReadBottomNavInset, PickFileResult, PickJsFile, PickDirectoryResult, PickDirectory, SetCustomDirUri, PermissionState, QueryPermissionStates, OpenPermissionSettings, EmbedAudioTags, EmbedTagsOptions, EmbeddedReadResult, ReadEmbeddedTags, GetWebCookies, OpenAuthWebView, CloseAuthWebView, StatLocalFile } from "../interface.uts";
 
 export const openExternalUrl: OpenExternalUrl = (url: string): boolean => {
   if (url == null || url.length == 0) return false;
@@ -158,4 +158,20 @@ export const getWebCookies: GetWebCookies = function (urls: string[]): Promise<s
     const empty: string[] = [];
     resolve(empty);
   });
+};
+
+// iOS 端可控登录 WebView（SFSafariViewController 无法接管自定义 scheme，需 WKWebView 另排期）：
+// 占位实现不打开任何页面，宿主 web-login 页用 isHarmonyOs() 判平台，iOS 端暂不展示原生入口。
+export const openAuthWebView: OpenAuthWebView = (url: string, onClose: (message: string) => void, ua: string): void => {
+  console.log("[AppNative] openAuthWebView iOS 端暂未实现: " + url + (ua.length > 0 ? ' (desktop ua)' : ''));
+};
+
+export const closeAuthWebView: CloseAuthWebView = (): void => {
+  // iOS 端没有可关闭的登录 WebView
+};
+
+// iOS 下载落私有沙盒（uni.env.USER_DATA_PATH），uni stat 可靠，无需原生兜底；
+// 恒 -1 = 「stat 不到」，调用方回落 uni stat 原行为，零回归。
+export const statLocalFile: StatLocalFile = (filePath: string): number => {
+  return -1;
 };

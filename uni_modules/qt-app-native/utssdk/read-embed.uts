@@ -43,6 +43,15 @@ export type EmbeddedRead = {
 	coverMime: string;
 	/** LRC 歌词原文（已含时间轴）；无歌词 = 空串 */
 	lrcText: string;
+	/**
+	 * 取到封面「还需要读多少字节」（从文件头算起）；0 = 不需要再读。
+	 *
+	 * 用途：真实世界里大封面（网易云 HI-RES 的 1-3MB PNG/JPEG）会把标签区推过
+	 * 1MiB 读取窗口，此时 coverBytes = null 但歌词照常返回 —— 宿主拿到这个数就能
+	 * 把窗口放大再读一遍（app-android / app-harmony 的 readEmbeddedTags 两遍读）。
+	 * 只在「确实有封面块/帧但被截断」时给出，格式不识别或无封面一律 0。
+	 */
+	coverNeed: number;
 };
 
 /** 封面帧解析产物（内部用） */
@@ -366,15 +375,26 @@ function preferCover(current: CoverFrame | null, next: CoverFrame): CoverFrame {
 	return current;
 }
 
-/** 解析收尾：全空结果的处理口径（截断/损坏 → null，完整标签 → 空对象） */
-function assembleRead(cover: CoverFrame | null, lrcText: string, failed: boolean): EmbeddedRead | null {
-	if (cover == null && lrcText.length == 0 && failed) {
+/**
+ * 解析收尾：全空结果的处理口径。
+ * 三类结果：
+ * 1. 已抽到封面或歌词 → 原样返回（即使是截断前缀，宿主先拿到能用的部分）；
+ * 2. **全空但还差 N 字节才够到封面块**（coverNeed > 0）→ 也必须返回对象，
+ *    否则宿主拿不到「还差多少」，放大重读永不触发。2026-11-02 审阅实测：
+ *    FLAC/MP3 只有大封面、没有内嵌歌词时旧判据直接 null，宿主第一遍就 break，
+ *    封面依旧读不出来（大封面场景正是本次重写要解决的那一类）；
+ * 3. 全空且无可期待的内容（截断的坏标签）→ null。
+ */
+function assembleRead(cover: CoverFrame | null, lrcText: string, failed: boolean, coverNeed: number): EmbeddedRead | null {
+	const need = cover == null && coverNeed > 0 ? coverNeed : 0;
+	if (cover == null && lrcText.length == 0 && need == 0 && failed) {
 		return null;
 	}
 	const result: EmbeddedRead = {
 		coverBytes: cover == null ? null : cover.data,
 		coverMime: cover == null ? '' : cover.mime,
 		lrcText: lrcText,
+		coverNeed: need,
 	};
 	return result;
 }
@@ -394,11 +414,15 @@ export function readMp3Embedded(prefix: Uint8Array): EmbeddedRead | null {
 	if (major == 2 && (flags & 0x40) != 0) return null; // v2.2 整签压缩（zlib）：无法解 → 忽略整签
 	const tagSize = readSyncSafe32(prefix, 6);
 	if (tagSize <= 0) return null;
+	// 标签声明的完整长度（含 10 字节头）：前缀不够时据此告诉宿主「再读这么多就有封面」
+	const tagFullEnd = 10 + tagSize;
 	let bodyEnd = 10 + tagSize;
 	let failed = false;
+	let coverNeed = 0;
 	if (bodyEnd > prefix.length) {
 		bodyEnd = prefix.length;
 		failed = true; // 标签体被前缀截断
+		coverNeed = tagFullEnd;
 	}
 	// 标签级 unsynchronisation（标志 bit7，三版通用）：先整签去反同步再解析帧
 	let body: Uint8Array;
@@ -418,14 +442,14 @@ export function readMp3Embedded(prefix: Uint8Array): EmbeddedRead | null {
 			if (extSize >= 0 && 4 + extSize <= body.length) {
 				pos = 4 + extSize;
 			} else {
-				return assembleRead(cover, lrcText, true); // 扩展头损坏，直接收摊
+				return assembleRead(cover, lrcText, true, 0); // 扩展头损坏，直接收摊
 			}
 		} else {
 			extSize = readSyncSafe32(body, 0);
 			if (extSize >= 6 && extSize <= body.length) {
 				pos = extSize;
 			} else {
-				return assembleRead(cover, lrcText, true);
+				return assembleRead(cover, lrcText, true, 0);
 			}
 		}
 	}
@@ -472,6 +496,7 @@ export function readMp3Embedded(prefix: Uint8Array): EmbeddedRead | null {
 		}
 		if (pos + headLen + frameSize > body.length) {
 			failed = true; // 帧体被截断（超出标签/前缀）
+			if (coverNeed < tagFullEnd) coverNeed = tagFullEnd;
 			break;
 		}
 		let data = copyBytes(body, pos + headLen, pos + headLen + frameSize);
@@ -517,7 +542,7 @@ export function readMp3Embedded(prefix: Uint8Array): EmbeddedRead | null {
 		}
 		pos += headLen + frameSize;
 	}
-	return assembleRead(cover, lrcText, failed);
+	return assembleRead(cover, lrcText, failed, coverNeed);
 }
 
 /**
@@ -611,10 +636,13 @@ export function readFlacEmbedded(prefix: Uint8Array): EmbeddedRead | null {
 	let cover: CoverFrame | null = null;
 	let lrcText = '';
 	let failed = false;
+	// 截断后要读到的位置：宿主据 coverNeed 放大窗口重读一遍（大 PICTURE 常见）
+	let coverNeed = 0;
 	let pos = base + 4;
 	for (;;) {
 		if (pos + 4 > prefix.length) {
 			failed = true; // 没读到 last 块就到头了：块区被截断
+			coverNeed = pos + 4; // 先读到块头，下一遍才知道块体多大
 			break;
 		}
 		const head = at(prefix, pos);
@@ -629,6 +657,7 @@ export function readFlacEmbedded(prefix: Uint8Array): EmbeddedRead | null {
 		const bTo = bFrom + bLen;
 		if (bTo > prefix.length) {
 			failed = true; // 块体被前缀截断（大 PICTURE 常见）
+			if (type == 4 || type == 6) coverNeed = bTo;
 			break;
 		}
 		if (type == 4) {
@@ -642,5 +671,5 @@ export function readFlacEmbedded(prefix: Uint8Array): EmbeddedRead | null {
 		pos = bTo;
 		if (isLast) break;
 	}
-	return assembleRead(cover, lrcText, failed);
+	return assembleRead(cover, lrcText, failed, coverNeed);
 }

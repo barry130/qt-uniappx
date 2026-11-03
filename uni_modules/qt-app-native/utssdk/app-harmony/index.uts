@@ -37,6 +37,9 @@ import type {
   EmbedAudioTags,
   EmbeddedReadResult,
   ReadEmbeddedTags,
+  OpenAuthWebView,
+  CloseAuthWebView,
+  StatLocalFile,
 } from '../interface.uts';
 import { EmbedTagsData, Mp3Plan, FlacPlan, planMp3, planFlac } from '../embed-bytes.uts';
 import { EmbeddedRead, readMp3Embedded, readFlacEmbedded } from '../read-embed.uts';
@@ -1124,19 +1127,61 @@ function readEmbeddedTagsSync(filePath: string): EmbeddedReadResult | null {
     if (!fileIo.accessSync(src)) return null;
     const stat = fileIo.statSync(src);
     if (stat.size < 32) return null;
-    // 封面与歌词固定写在文件头的标签区（写入侧 planMp3/planFlac 的产物），
-    // 1MiB 前缀必然覆盖（大 APIC 场景由字节层「截断降级」处理：歌词照出、封面置空）
-    const prefix = readFileBytes(src, 1024 * 1024);
-    if (prefix == null) return null;
-    let read: EmbeddedRead | null = readMp3Embedded(prefix);
-    if (read == null) read = readFlacEmbedded(prefix);
-    if (read == null) return null;
-    let coverPath = '';
-    const cover = read.coverBytes;
-    if (cover != null) {
-      coverPath = writeCoverCache(cover, read.coverMime);
+    // 两遍读（与 Android 同口径）：首遍 1MiB 盖住常规标签区；解析器报
+    // 「封面还差 N 字节」（大 PICTURE）时按需放大窗口重读一遍，上限 8MiB
+    //（同步链路，再大的内嵌图不值得把起播拖成秒级，同 Android 侧说明）。
+    const FIRST = 1024 * 1024;
+    const HARD_CAP = 8 * 1024 * 1024;
+    let window = FIRST;
+    let bestCover: Uint8Array | null = null;
+    let bestMime = '';
+    let bestLrc = '';
+    let found = false;
+    let readBytes = 0;
+    let lastLen = 0;
+    for (let pass = 0; pass < 3; pass++) {
+      const prefix = readFileBytes(src, window);
+      if (prefix == null) break;
+      readBytes = prefix.length;
+      // 窗口没长进（coverNeed 报得比真实文件还大，或文件已被截断）：再读也是同一段字节
+      if (prefix.length <= lastLen) break;
+      lastLen = prefix.length;
+      // 两个容器都试一遍：flac 前挂 ID3v2 的文件（网易云抓轨常见）两种都能命中
+      const mp3: EmbeddedRead | null = readMp3Embedded(prefix);
+      const flac: EmbeddedRead | null = readFlacEmbedded(prefix);
+      if (mp3 == null && flac == null) break;
+      found = true;
+      // 封面优先 flac，歌词谁有用谁
+      if (flac != null && flac.coverBytes != null) {
+        bestCover = flac.coverBytes;
+        bestMime = flac.coverMime;
+      } else if (mp3 != null && mp3.coverBytes != null) {
+        bestCover = mp3.coverBytes;
+        bestMime = mp3.coverMime;
+      }
+      if (mp3 != null && mp3.lrcText.length > 0) bestLrc = mp3.lrcText;
+      else if (flac != null && flac.lrcText.length > 0) bestLrc = flac.lrcText;
+      // 再读尺寸：取「封面还差多少」的最大值，下一遍窗口按它放大
+      let need = 0;
+      if (flac != null && flac.coverNeed > need) need = flac.coverNeed;
+      if (mp3 != null && mp3.coverNeed > need) need = mp3.coverNeed;
+      if (bestCover != null) break;
+      if (need <= prefix.length) break;
+      if (prefix.length >= HARD_CAP) break;
+      const want = need + 4096;
+      window = want > HARD_CAP ? HARD_CAP : want;
     }
-    const result: EmbeddedReadResult = { coverPath: coverPath, lrcText: read.lrcText };
+    if (!found) return null;
+    let coverPath = '';
+    if (bestCover != null) {
+      coverPath = writeCoverCache(bestCover, bestMime);
+    }
+    const result: EmbeddedReadResult = {
+      coverPath: coverPath,
+      lrcText: bestLrc,
+      readBytes: readBytes,
+      coverBytes: bestCover == null ? 0 : bestCover.length,
+    };
     return result;
   } catch (e) {
     console.log('[AppNative] readEmbeddedTags 失败: ' + (e != null ? e.toString() : 'unknown'));
@@ -1163,3 +1208,37 @@ export function getWebCookies(urls: string[]): Promise<string[]> {
     resolve(empty);
   });
 }
+
+/**
+ * 可控登录 WebView（契约见 interface.uts 的 OpenAuthWebView）。
+ * 鸿蒙端暂无等价实现（Android 先行）：宿主 web-login 页在鸿蒙继续走内置 <web-view>，
+ * 不会调用到这里；保留占位只为三端接口一致、可编译。
+ */
+export const openAuthWebView: OpenAuthWebView = (url: string, onClose: (message: string) => void, ua: string): void => {
+  console.info('[AppNative] openAuthWebView 鸿蒙端暂未实现: ' + url + (ua.length > 0 ? ' (desktop ua)' : ''));
+};
+
+/** 关闭可控登录 WebView（鸿蒙端无实现，无副作用） */
+export const closeAuthWebView: CloseAuthWebView = (): void => {
+  // 鸿蒙端没有可关闭的登录 WebView
+};
+
+/**
+ * 原生 stat 兜底（契约见 interface.uts 的 StatLocalFile）。
+ *
+ * 为什么绕开 uni：getFileSystemManager().getFileInfo 在安卓公共目录上已被实测
+ * 不可靠（文件在盘也报不在盘），鸿蒙的 uni 实现同源、同风险；这里用
+ * fileIo.statSync 直查。与 openSync 同款，file://docs/... 这类沙盒 URI 直接认。
+ */
+export const statLocalFile: StatLocalFile = (filePath: string): number => {
+  if (filePath == null || filePath.length == 0) return -1;
+  try {
+    const st = fileIo.statSync(filePath);
+    if (!st.isFile()) return -1;
+    const size = st.size;
+    return size > 0 ? size : 0;
+  } catch (e) {
+    console.info('[AppNative] statLocalFile stat 不到: ' + filePath);
+    return -1;
+  }
+};

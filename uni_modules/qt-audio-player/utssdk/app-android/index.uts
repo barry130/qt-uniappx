@@ -374,8 +374,15 @@ function isPlaying(): boolean {
 // 「同时播放」设置（gConcurrentMode）在此处生效：
 // - 不允许(0)：申请 AUDIOFOCUS_GAIN，任何焦点丢失都暂停（上述默认行为）；
 // - 部分场景(1)：同样申请 GAIN，但对方只是「可被压低」时降音量继续，只有需要独占时才暂停；
-// - 全部场景(2)：申请 AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK（让对方降音量而不是停止），
-//   并忽略所有焦点丢失，实现与其他应用完全同时播放。
+// - 全部场景(2)：**完全不参与焦点仲裁**——不申请、不放弃、忽略一切焦点变化。
+//   2026-10-31 修正：此前 mode2 仍会申请 AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK，
+//   而 MAY_DUCK 的语义是「请求期间其他应用应降音量/让路」。于是每次播放、恢复、
+//   重推播放列表（audioSetPlaylist/nativePlay/audioResume/widgetTogglePlay 都会
+//   调用 requestAudioFocusIfNeeded）都把正在放视频/直播广告的应用压低或暂停一下，
+//   表现为用户报的「切到别的软件看视频不会同时播放、会停顿一下，虎牙出广告卡卡的」。
+//   全部场景的正确语义是：我们自己安静地放，既不去打扰别人，也不因别人的请求而停。
+//   代价：不再通过焦点仲裁获得媒体键优先级，媒体键改由 media3 MediaSession 路由
+//   （MediaSessionService 的媒体键派发不依赖音频焦点）。
 
 class QtAudioFocusListener extends AudioManager.OnAudioFocusChangeListener {
   override onAudioFocusChange(focusChange: Int): void {
@@ -492,14 +499,8 @@ function restoreVolume(): void {
   applyVolume(mp)
 }
 
-/** 同时播放模式下申请焦点用的 gain 类型：全部场景用 MAY_DUCK 让对方共存而非停止 */
+/** 申请焦点用的 gain 类型：全部场景(2) 永不申请焦点，这里只服务 0/1 两档 */
 function buildFocusRequest(): AudioFocusRequest {
-  // 全部场景：MAY_DUCK —— 我方请求焦点时对方只需降音量，不必停止，双方可同时出声
-  if (gConcurrentMode == 2) {
-    return new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-      .setOnAudioFocusChangeListener(getFocusListener())
-      .build()
-  }
   return new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
     .setOnAudioFocusChangeListener(getFocusListener())
     .build()
@@ -541,10 +542,15 @@ function nativeSetConcurrentMode(mode: number): void {
   gFocusRequest = null
   gFocusRequestGainMode = -1
   restoreVolume()
-  if (isPlaying()) requestAudioFocusIfNeeded()
+  // 全部场景(2)：只放弃已持有的焦点（上面的 wasHeld 分支），不再申请。
+  // 否则切档瞬间就会把正在播放的其他应用压低一下，属于同一类打扰。
+  if (m != 2 && isPlaying()) requestAudioFocusIfNeeded()
 }
 
 function requestAudioFocusIfNeeded(): void {
+  // 全部场景(2)：彻底不参与焦点仲裁——不申请，因此也不会收到 LOSS、不会让任何应用让路。
+  // 这是「与其他应用完全同时播放」的必要条件（见文件头 368 行附近的三档说明）。
+  if (gConcurrentMode == 2) return
   if (gFocusHeld) return
   const context = getContext()
   if (context == null) return
@@ -755,6 +761,23 @@ class QtResolveFire implements Runnable {
 
 /** 懒解析器：qt-resolve:// 条目在加载前向 JS 换取真实地址 */
 class QtResolveResolver implements ResolvingDataSource.Resolver {
+  /**
+   * media3 1.11.1 给 Resolver 加了默认方法 `resolveReportedUri(Uri): Uri?`（TeeDataSource /
+   * CacheDataSource 打开数据流时用它把「上报地址」和真实地址对齐）。
+   *
+   * 必须在这里**显式实现**，不能让编译器去走默认方法：UTS 编译出的 dex 会生成一个合成桥方法
+   * `invoke-static ResolvingDataSource$Resolver$-CC.$default$resolveReportedUri(...)`，
+   * 而标准基座 APK 里的 media3 是「原生默认方法」形态（没有 `$-CC` 伴生类），
+   * 于是每次 CacheDataSource/TeeDataSource 取 URI 都抛
+   * `java.lang.NoClassDefFoundError: Landroidx/media3/datasource/ResolvingDataSource$Resolver$-CC`，
+   * 整个 loader 线程崩掉（2026-10-31 用户实测，dex 已用 dexdump 核对）。
+   * 显式实现后既不再引用 `$-CC`，也不依赖运行时 media3 是否带这个默认方法（老版本同样安全）。
+   * 语义就是「上报地址原样返回」——真实地址替换在 resolveDataSpec 里已经做完。
+   */
+  override resolveReportedUri(uri: Uri): Uri {
+    return uri
+  }
+
   override resolveDataSpec(dataSpec: DataSpec): DataSpec {
     const uri = dataSpec.uri
     if (RESOLVE_SCHEME != uri.getScheme()) return dataSpec
@@ -1815,7 +1838,7 @@ function buildHeaders(): HashMap<string, string> {
 /**
  * 播放用的完整数据源栈：DefaultDataSource（scheme 路由）→ CacheDataSource
  * （LRU 磁盘缓存，key=占位地址串）→ ResolvingDataSource（qt-resolve:// 懒解析
- * 取链）→ DefaultHttpDataSource。buildPlayerOnce 与 audioPreloadTrack 共用，
+ * 取链）→ DefaultDataSource（scheme 路由）→ DefaultHttpDataSource/FileDataSource。buildPlayerOnce 与 audioPreloadTrack 共用，
  * **两边必须同一份工厂代码**：预取与播放各自 new factory 没问题（SimpleCache
  * 是进程级单例 gAudioCache，span 写入天然合并），但栈结构一旦分叉，缓存 key
  * 或懒解析行为就会对不上，预取白干。
@@ -1831,7 +1854,14 @@ function buildAudioDataSourceFactory(context: Context): DefaultDataSource.Factor
   // 懒解析层：qt-resolve:// 条目在真正建连那一刻才向 JS 换取真实地址（见 QtResolveResolver）；
   // 其余 scheme（content:///file:///http 直连）原样直过。放在缓存之下：缓存 key 用稳定的
   // 占位地址（歌+音质），播过的歌二次播放直接命中磁盘缓存，不再解析也不再联网。
-  const resolvingFactory = new ResolvingDataSource.Factory(httpFactory, new QtResolveResolver())
+  // 解析层的上游必须能路由本地文件：qt-resolve:// 懒解析换回来的地址可能是磁盘
+  // 路径（本地优先直推的下载成品，2026-11-02 真机定位）——只接 HTTP 工厂时，
+  // DefaultHttpDataSource.open 对本地路径直接 Source error，播放器把歌误判成坏
+  // 歌，整轮播放拉黑本地、回退在线取链。先包一层 DefaultDataSource（按解析后的
+  // scheme 路由：裸路径/file:// → FileDataSource、content:// → ContentDataSource、
+  // 其余 → HTTP），HTTP 行为完全不变。
+  const routingFactory = new DefaultDataSource.Factory(context, httpFactory)
+  const resolvingFactory = new ResolvingDataSource.Factory(routingFactory, new QtResolveResolver())
   // DefaultDataSource 会按 scheme 路由：content://（本地媒体库）→ ContentDataSource、
   // file:// → FileDataSource，其余回落到 HTTP 工厂。只传 HTTP 工厂时 content:// 会直接 Source error。
   // HTTP 链路外层再包 CacheDataSource（LRU 磁盘缓存，播过的歌二次播放直接读缓存）；
@@ -1871,9 +1901,14 @@ let gLoudnessEnhancer: LoudnessEnhancer | null = null
 function buildQtRenderersFactory(appContext: Context): DefaultRenderersFactory {
   const rf = new DefaultRenderersFactory(appContext)
   if (gFloatOutput) {
-    // float 输出 + 让 AudioTrack 自己处理倍速（避免 Sonic 重采样在非 1.0x 时的音染）
+    // float 输出 + 让音频输出自己处理倍速（避免 Sonic 重采样在非 1.0x 时的音染）。
+    // 两个开关写的是不同字段，缺一不可（2026-11-02 审阅：只留下面一行会让「32bit 浮点输出」
+    // 变成空开关——setEnableAudioFloatOutput 才是真正切 float sink 的那个，
+    // setEnableAudioOutputPlaybackParameters 管的是倍速走音频输出）：
+    //   enableFloatOutput               ← setEnableAudioFloatOutput
+    //   enableAudioOutputPlaybackParameters ← setEnableAudioOutputPlaybackParameters
     rf.setEnableAudioFloatOutput(true)
-    rf.setEnableAudioTrackPlaybackParams(true)
+    rf.setEnableAudioOutputPlaybackParameters(true)
   }
   if (gPreferSoftwareDecoder) {
     // PREFER_SOFTWARE：同一编码优先用软件解码器，硬件仅在无软解时兜底
@@ -3141,11 +3176,17 @@ export function audioSetLiked(mediaId: string, liked: boolean): void {
     //   userRating   → MediaSessionLegacyStub.setRatingType（决定系统卡片渲染 ♡ 还是 ★）
     //   overallRating→ LegacyConversions 写成 "android.media.metadata.RATING"，
     //                  这是 vivo CooperateController 唯一读取的心形实心/空心来源（c3.t）
-    // extras 由 buildUpon 原样继承，这里显式重设一遍以防将来有人改成新建 Builder
+    // extras 由 buildUpon 原样继承，这里不能整体替换：当前条目的 extras 里可能躺着
+    // 车机歌词（android.media.metadata.LYRICS，见 applyCarLyric）。2026-11-02 审阅实测：
+    // 原先这里 setExtras(buildVivoExtras()) 会连歌词一起抹掉，而 applyCarLyric 的去重记忆
+    // 仍认为「已下发」→ 点一次红心，车机歌词整首消失到下次切歌。改成复制旧 extras 再补 vivo 位。
+    const oldExtras = cur.mediaMetadata.extras
+    const extras = oldExtras != null ? new Bundle(oldExtras) : new Bundle()
+    extras.putLong(VIVO_SUPPORT_EVENT_KEY, VIVO_SUPPORT_EVENT_BITS.toLong())
     const meta = cur.mediaMetadata.buildUpon()
       .setUserRating(new HeartRating(liked))
       .setOverallRating(new HeartRating(liked))
-      .setExtras(buildVivoExtras())
+      .setExtras(extras)
       .build()
     mp.replaceMediaItem(
       mp.getCurrentMediaItemIndex(),

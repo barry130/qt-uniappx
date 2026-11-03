@@ -40,8 +40,19 @@ import Handler from "android.os.Handler";
 import Looper from "android.os.Looper";
 import Runnable from "java.lang.Runnable";
 import CookieManager from "android.webkit.CookieManager";
+import Dialog from "android.app.Dialog";
+import DialogInterface from "android.content.DialogInterface";
+import WebView from "android.webkit.WebView";
+import WebViewClient from "android.webkit.WebViewClient";
+import WebResourceRequest from "android.webkit.WebResourceRequest";
+import WebChromeClient from "android.webkit.WebChromeClient";
+import LinearLayout from "android.widget.LinearLayout";
+import TextView from "android.widget.TextView";
+import Gravity from "android.view.Gravity";
+import Color from "android.graphics.Color";
+import TypedValue from "android.util.TypedValue";
 import Arrays from "java.util.Arrays";
-import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, IsIgnoringBatteryOptimizations, OpenBatteryOptimizationSettings, OpenAutoStartSettings, OpenAppDetailsSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteMediaByPath, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, ReadBottomNavInset, PickFileResult, PickJsFile, PickDirectoryResult, PickDirectory, SetCustomDirUri, PermissionState, QueryPermissionStates, OpenPermissionSettings, EmbedTagsOptions, EmbedAudioTags, EmbeddedReadResult, ReadEmbeddedTags, GetWebCookies } from "../interface.uts";
+import { OpenExternalUrl, ExitAppNative, InstallApkNative, SaveToPublicMedia, EnsurePublicDirPermission, OpenNotificationSettings, IsIgnoringBatteryOptimizations, OpenBatteryOptimizationSettings, OpenAutoStartSettings, OpenAppDetailsSettings, LocalAudioItem, ScanLocalAudio, DeleteLocalMedia, DeleteMediaByPath, DeleteLocalMediaResult, ApplyLegacyInsets, RecreateActivity, ReadBottomNavInset, PickFileResult, PickJsFile, PickDirectoryResult, PickDirectory, SetCustomDirUri, PermissionState, QueryPermissionStates, OpenPermissionSettings, EmbedTagsOptions, EmbedAudioTags, EmbeddedReadResult, ReadEmbeddedTags, GetWebCookies, OpenAuthWebView, CloseAuthWebView, StatLocalFile } from "../interface.uts";
 import { EmbedTagsData, Mp3Plan, FlacPlan, planMp3, planFlac, base64Encode, base64Decode } from "../embed-bytes.uts";
 import { EmbeddedRead, readMp3Embedded, readFlacEmbedded } from "../read-embed.uts";
 
@@ -577,7 +588,10 @@ function saveLegacy(source: File, dirType: string, displayName: string, mime: st
 		console.log("[MediaStore] legacy: 缺少 WRITE_EXTERNAL_STORAGE 权限");
 		return "";
 	}
-	const rootType = dirType == "music" ? Environment.DIRECTORY_MUSIC : Environment.DIRECTORY_DOWNLOADS;
+	// picture：存图集（相册）；music：音乐库；其余（download）落 Download
+	const rootType = dirType == "music"
+		? Environment.DIRECTORY_MUSIC
+		: (dirType == "picture" ? Environment.DIRECTORY_PICTURES : Environment.DIRECTORY_DOWNLOADS);
 	const root = Environment.getExternalStoragePublicDirectory(rootType);
 	const dir = new File(root, subDir);
 	if (!dir.exists()) dir.mkdirs();
@@ -632,10 +646,13 @@ function saveScoped(source: File, dirType: string, displayName: string, mime: st
 	}
 
 	const useMusic = dirType == "music";
-	const relativePath = (useMusic ? Environment.DIRECTORY_MUSIC : Environment.DIRECTORY_DOWNLOADS) + "/" + subDir + "/";
+	const usePicture = dirType == "picture";
+	const relativePath = (useMusic
+		? Environment.DIRECTORY_MUSIC
+		: (usePicture ? Environment.DIRECTORY_PICTURES : Environment.DIRECTORY_DOWNLOADS)) + "/" + subDir + "/";
 	const collection = useMusic
 		? MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-		: MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+		: (usePicture ? MediaStore.Images.Media.EXTERNAL_CONTENT_URI : MediaStore.Downloads.EXTERNAL_CONTENT_URI);
 
 	const values = new ContentValues();
 	values.put(MediaStore.MediaColumns.DISPLAY_NAME, displayName);
@@ -1541,7 +1558,7 @@ function readFileBytes(path: string, maxLen: number): Uint8Array | null {
 		if (!file.exists()) return null;
 		const input = new FileInputStream(path);
 		try {
-			const CHUNK = 65536;
+			const CHUNK = 262144;
 			const bufSize = maxLen < CHUNK ? maxLen : CHUNK;
 			const buffer = new ByteArray(bufSize.toInt());
 			const parts: Array<Uint8Array> = [];
@@ -1875,7 +1892,7 @@ function readPrefixFromContent(uriText: string, maxLen: number): Uint8Array | nu
 		const input: InputStream | null = resolver.openInputStream(Uri.parse(uriText));
 		if (input == null) return null;
 		try {
-			const CHUNK = 65536;
+			const CHUNK = 262144;
 			const bufSize = maxLen < CHUNK ? maxLen : CHUNK;
 			const buffer = new ByteArray(bufSize.toInt());
 			const parts: Array<Uint8Array> = [];
@@ -1915,31 +1932,101 @@ function readPrefixFromContent(uriText: string, maxLen: number): Uint8Array | nu
 	}
 }
 
+/** 读文件前缀（content:// 走 ContentResolver，其余走 java.io.File）；读不到 = null */
+function readPrefixAny(filePath: string, maxLen: number): Uint8Array | null {
+	if (filePath.indexOf("content://") == 0) {
+		return readPrefixFromContent(filePath, maxLen);
+	}
+	const realPath = resolveRealPath(filePath);
+	const file = new File(realPath);
+	if (!file.exists()) return null;
+	// 先按 Long 比：写进 Int 会让 >2GiB 的文件溢出成负数，反被判成「不在盘」
+	const size = file.length();
+	if (size < 32) return null;
+	return readFileBytes(realPath, maxLen);
+}
+
+/** 一遍解析结果（两种容器的择优产物） */
+type EmbeddedPass = {
+	coverBytes: Uint8Array | null;
+	coverMime: string;
+	lrcText: string;
+	coverNeed: number;
+};
+
+/**
+ * 用一段前缀同时喂 mp3 / flac 两个解析器，选「更完整」的那份：
+ * 有封面 > 有歌词 > 有什么算什么。为什么两个都试：真实世界里有 flac 前挂 ID3v2
+ * 的文件（网易云抓轨常见），只认第一个会丢掉另一容器里的封面。
+ */
+function parseEmbeddedPass(prefix: Uint8Array): EmbeddedPass | null {
+	const mp3: EmbeddedRead | null = readMp3Embedded(prefix);
+	const flac: EmbeddedRead | null = readFlacEmbedded(prefix);
+	if (mp3 == null && flac == null) return null;
+	let cover: Uint8Array | null = null;
+	let mime = "";
+	let lrc = "";
+	let need = 0;
+	// 封面：优先 flac（真无损容器的 PICTURE 更可信），没有再用 mp3 的 APIC
+	if (flac != null && flac.coverBytes != null) {
+		cover = flac.coverBytes;
+		mime = flac.coverMime;
+	} else if (mp3 != null && mp3.coverBytes != null) {
+		cover = mp3.coverBytes;
+		mime = mp3.coverMime;
+	}
+	// 歌词：谁有就用谁（两者同一首歌时内容一致）
+	if (mp3 != null && mp3.lrcText.length > 0) lrc = mp3.lrcText;
+	else if (flac != null && flac.lrcText.length > 0) lrc = flac.lrcText;
+	// 再读尺寸：取「封面还差多少」的最大值，下一遍窗口按它放大
+	if (flac != null && flac.coverNeed > need) need = flac.coverNeed;
+	if (mp3 != null && mp3.coverNeed > need) need = mp3.coverNeed;
+	const pass: EmbeddedPass = { coverBytes: cover, coverMime: mime, lrcText: lrc, coverNeed: cover == null ? need : 0 };
+	return pass;
+}
+
 function readEmbeddedTagsSync(filePath: string): EmbeddedReadResult | null {
 	if (filePath.length == 0) return null;
 	try {
-		// 封面与歌词固定写在文件头的标签区（写入侧 planMp3/planFlac 的产物），
-		// 1MiB 前缀必然覆盖（大 APIC 场景由字节层「截断降级」处理：歌词照出、封面置空）
-		let prefix: Uint8Array | null = null;
-		if (filePath.indexOf("content://") == 0) {
-			prefix = readPrefixFromContent(filePath, 1024 * 1024);
-		} else {
-			const realPath = resolveRealPath(filePath);
-			const file = new File(realPath);
-			if (!file.exists()) return null;
-			if (file.length().toInt() < 32) return null;
-			prefix = readFileBytes(realPath, 1024 * 1024);
+		// 两遍读：首遍 1MiB 盖住常规标签区；解析器报「封面还差 N 字节」（大 PICTURE，
+		// 网易 HI-RES 的 1-3MB 封面就属于这档）时按需放大窗口再读一遍。
+		// 上限 8MiB：这条链路是同步的（起播前的那一拍），再大的内嵌图不值得为它
+		// 多读几十 MB 把起播拖成秒级（2026-11-02 真机「本地歌起播 5s」教训）
+		const FIRST = 1024 * 1024;
+		const HARD_CAP = 8 * 1024 * 1024;
+		let window = FIRST;
+		let best: EmbeddedPass | null = null;
+		let readBytes = 0;
+		let lastLen = 0;
+		for (let pass = 0; pass < 3; pass++) {
+			const prefix = readPrefixAny(filePath, window);
+			if (prefix == null) break;
+			readBytes = prefix.length;
+			// 窗口没长进（coverNeed 报得比真实文件还大，或文件已被截断）：再读也是同一段字节，收摊
+			if (prefix.length <= lastLen) break;
+			lastLen = prefix.length;
+			const parsed = parseEmbeddedPass(prefix);
+			if (parsed != null) best = parsed;
+			// 拿到封面 / 无需再读 / 已到上限：收摊
+			if (best == null) break;
+			if (best.coverBytes != null) break;
+			if (best.coverNeed <= prefix.length) break;
+			if (prefix.length >= HARD_CAP) break;
+			// 多读 4KB 余量：coverNeed 是块尾位置，块后还可能有歌词块
+			const want = best.coverNeed + 4096;
+			window = want > HARD_CAP ? HARD_CAP : want;
 		}
-		if (prefix == null) return null;
-		let read: EmbeddedRead | null = readMp3Embedded(prefix);
-		if (read == null) read = readFlacEmbedded(prefix);
-		if (read == null) return null;
+		if (best == null) return null;
 		let coverPath = "";
-		const cover = read.coverBytes;
-		if (cover != null) {
-			coverPath = writeCoverCache(cover, read.coverMime);
+		if (best.coverBytes != null) {
+			coverPath = writeCoverCache(best.coverBytes, best.coverMime);
 		}
-		const result: EmbeddedReadResult = { coverPath: coverPath, lrcText: read.lrcText };
+		const result: EmbeddedReadResult = {
+			coverPath: coverPath,
+			lrcText: best.lrcText,
+			readBytes: readBytes,
+			coverBytes: best.coverBytes == null ? 0 : best.coverBytes.length,
+		};
 		return result;
 	} catch (e) {
 		console.log("[AppNative] readEmbeddedTags 失败: " + (e != null ? e.toString() : "unknown"));
@@ -1953,6 +2040,30 @@ function readEmbeddedTagsSync(filePath: string): EmbeddedReadResult | null {
  */
 export const readEmbeddedTags: ReadEmbeddedTags = function (filePath: string): EmbeddedReadResult | null {
 	return readEmbeddedTagsSync(filePath);
+};
+
+/**
+ * 原生 stat 兜底（契约见 interface.uts 的 StatLocalFile）。
+ *
+ * 为什么绕开 uni：getFileSystemManager().getFileInfo 对公共目录里 MediaStore
+ * 落盘的文件经常 fail（文件明明在盘也报不在盘），把本地优先整链卡掉。
+ * java.io.File 直查同一路径与 readEmbeddedTags 的 FileInputStream 直读同源，
+ * 那条线实测能读到这些文件，exists/length 自然也能看穿。
+ */
+export const statLocalFile: StatLocalFile = function (filePath: string): number {
+	if (filePath == null || filePath.length == 0) return -1;
+	try {
+		// 与 readPrefixAny 同口径：先过 resolveRealPath（去 file:// 前缀、转绝对路径、
+		// unifile://usr → 真实目录）。2026-11-02 审阅：这里原先直接 new File(filePath)，
+		// 调用方传 file:// 前缀时永远得 -1，把「文件明明在盘」误报成不在盘。
+		const f = new File(resolveRealPath(filePath));
+		if (!f.exists() || !f.isFile()) return -1;
+		const len = f.length();
+		return len > 0 ? len : 0;
+	} catch (e) {
+		console.log("[AppNative] statLocalFile 失败: " + (e != null ? e.toString() : "unknown"));
+		return -1;
+	}
 };
 
 // ==================== WebView Cookie 读取（网页登录 v17） ====================
@@ -2003,4 +2114,378 @@ export const getWebCookies: GetWebCookies = function (urls: string[]): Promise<s
 	return new Promise<string[]>((resolve: (value: string[]) => void, _reject: (err: any) => void) => {
 		webCookieHandler().post(new WebCookieTask(urls, resolve));
 	});
+};
+
+// ==================== 可控登录 WebView（网页登录 v17：拉起手机QQ授权） ====================
+
+/**
+ * 为什么不用内置 <web-view>：QQ 帐号登录页在手机 UA 下把「QQ登录」做成**应用跳转**
+ * （mqqapi:// / mqqopensdkapi:// / intent:// 等自定义 scheme），内置组件既没有
+ * shouldOverrideUrlLoading 钩子、也不转发自定义 scheme，点下去页面停在原地，
+ * 表现就是用户看到的「实际无反应」（2026-10-31 实测）。
+ *
+ * 这里用 Dialog 装一个真正的 android.webkit.WebView：
+ *   - 接管 shouldOverrideUrlLoading：http(s) 留在内部加载，其余 scheme 交给系统
+ *     Intent（手机QQ/微信/应用市场）；intent:// 按 URI_INTENT_SCHEME 解析并支持
+ *     browser_fallback_url 兜底；
+ *   - 同进程 CookieManager（含 httpOnly 与第三方 Cookie），宿主照旧用
+ *     getWebCookies 轮询即可读到授权后种回的 Cookie，流程无需改动；
+ *   - 返回键 / 代码调用 closeAuthWebView 都能关；只有**用户自己关**才回调 onClose。
+ */
+
+/** 登录 WebView 所在的 Dialog；null = 未打开 */
+let gAuthDialog: Dialog | null = null;
+/** Dialog 里的 WebView（关闭时需要 destroy 释放渲染进程引用） */
+let gAuthWebView: WebView | null = null;
+/** 用户主动关闭时的回调；程序化关闭不触发 */
+let gAuthOnClose: ((message: string) => void) | null = null;
+/**
+ * 当前登录 Dialog 的世代号。
+ *
+ * Dialog.dismiss() 的 onDismiss 是 Handler **异步投递**的（Dialog.sendDismissMessage），
+ * 执行时 UI 状态早已推进到下一拍——2026-11-02 审阅实测：原先用同步布尔 gAuthClosing
+ * 判断「程序化关闭」，dismiss 返回后标记立刻复位，异步 onDismiss 读到的永远是 false，
+ * 于是代码关闭被误报成用户关闭；更糟的是「关闭 → 立刻重新打开」同批入队时，旧 Dialog
+ * 的 onDismiss 会读到新的全局状态，把新 WebView 销毁掉。
+ *
+ * 改法：每次打开/关闭都 +1，监听器带着自己的 token，onDismiss 里 token 不符直接忽略。
+ */
+let gAuthDialogToken = 0;
+/**
+ * 是否刚从我们的窗口跳去外部 App（手机QQ/微信）拉起授权。
+ * 用于「回来后重载一次登录页」：QQ 授权结束回到本 App 时，网页本身并不知道，
+ * 重载一次让页面带着新 Cookie 重新跑登录判定；不做这个的话会一直停在等待态。
+ */
+let gAuthExternalLaunched = false;
+
+/**
+ * 移动端 Chrome UA：去掉默认 WebView UA 里的 "wv" 标记。
+ *
+ * 有 "wv" 时部分站点（含腾讯系登录）会判定为「嵌入式浏览器」而只给扫码/降级方案；
+ * 用主流手机 Chrome 的 UA 才走「点 QQ登录 → 拉起手机QQ」这条正常路径。
+ */
+const AUTH_WEBVIEW_UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
+
+/** 非 http(s) 的自定义 scheme 交给系统打开（拉起手机QQ/微信等） */
+function qtAuthOpenExternalUrl(url: string): void {
+	const activity = UTSAndroid.getUniActivity();
+	if (activity == null) return;
+	// 标记「正在离开自己去外部 App」：回到本窗口时重载一次登录页
+	gAuthExternalLaunched = true;
+	try {
+		if (url.toLowerCase().startsWith("intent:")) {
+			// intent://...#Intent;scheme=mqqapi;package=com.tencent.mobileqq;S.browser_fallback_url=...;end
+			const intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME);
+			try {
+				activity.startActivity(intent);
+				return;
+			} catch (err1) {
+				console.log("[AppNative] 授权 intent 无对应应用: " + (err1 != null ? err1.toString() : "unknown"));
+				// 不自动打开 browser_fallback_url（实测通常是 QQ 下载页）：会把用户甩去系统浏览器，
+				// 且登录结果再也回不到本页；直接提示改走扫码（2026-10-31：用户环境没装 QQ）
+				qtAuthFail("没有找到手机QQ，已关闭授权页，请改用扫码登录");
+				return;
+			}
+		}
+		const intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+		intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+		try {
+			activity.startActivity(intent);
+		} catch (err2) {
+			console.log("[AppNative] 授权 scheme 拉起失败: " + (err2 != null ? err2.toString() : "unknown") + " url=" + url);
+			qtAuthFail("没有找到对应的 App，已关闭授权页，请改用扫码登录");
+		}
+	} catch (e) {
+		// 目标 App 没装 / 系统拒绝：必须给用户可见反馈，不能只写日志
+		console.log("[AppNative] 授权 scheme 解析失败: " + (e != null ? e.toString() : "unknown") + " url=" + url);
+		qtAuthFail("无法打开授权页，请改用扫码登录");
+	}
+}
+
+/** 轻提示：失败原因一律回传 JS 侧，由宿主用应用自己的公用 toast 展示 */
+function qtAuthFail(message: string): void {
+	// 插件内部不弹 Toast / AlertDialog：风格跟应用自绘的公用 toast 不一致
+	// （2026-10-31 用户指出「这个提醒的弹窗不是之前公用的toast」）。
+	const cb = gAuthOnClose;
+	const dlg = gAuthDialog;
+	const wv = gAuthWebView;
+	gAuthDialog = null;
+	gAuthWebView = null;
+	gAuthOnClose = null;
+	gAuthExternalLaunched = false;
+	// 让随后到达的 onDismiss 认不出自己（程序化关闭不回调）
+	gAuthDialogToken += 1;
+	try {
+		if (dlg != null) dlg.dismiss();
+	} catch (e) {
+		console.log("[AppNative] 登录 Dialog 关闭失败: " + (e != null ? e.toString() : "unknown"));
+	}
+	try {
+		if (wv != null) {
+			wv.loadUrl("about:blank");
+			wv.destroy();
+		}
+	} catch (e) {
+		console.log("[AppNative] 登录 WebView 销毁失败: " + (e != null ? e.toString() : "unknown"));
+	}
+	if (cb != null) cb(message);
+}
+
+/** 登录 WebView 的导航钩子：只放行 http(s) 与内部协议，其余交给系统 */
+class QtAuthWebViewClient extends WebViewClient {
+	constructor() {
+		super();
+	}
+
+	/**
+	 * 导航钩子：只放行 http(s) 与内部协议，其余交给系统。
+	 * 用 API 24+ 的 WebResourceRequest 重载（manifest 里 minSdkVersion=26，
+	 * 不存在低版本兼容问题）；旧的 `shouldOverrideUrlLoading(view, url)` 已废弃，
+	 * 用它会被编译器报「overrides a deprecated member」。
+	 */
+	override shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): boolean {
+		const uri = request.getUrl();
+		if (uri == null) return false;
+		const url = uri.toString();
+		if (url.length == 0) return false;
+		const lower = url.toLowerCase();
+		if (lower.startsWith("http://") || lower.startsWith("https://") ||
+			lower.startsWith("about:") || lower.startsWith("javascript:") ||
+			lower.startsWith("data:") || lower.startsWith("blob:") || lower.startsWith("file:")) {
+			return false;
+		}
+		qtAuthOpenExternalUrl(url);
+		return true;
+	}
+}
+
+/** 登录 WebView：额外接管「窗口重新获得焦点」的时机（从手机QQ授权回来） */
+class QtAuthWebView extends WebView {
+	constructor(context: Context) {
+		super(context);
+	}
+
+	override onWindowFocusChanged(hasWindowFocus: boolean): void {
+		if (!hasWindowFocus) return;
+		if (!gAuthExternalLaunched) return;
+		gAuthExternalLaunched = false;
+		try {
+			// 重载一次：授权回跳的 URL/Cookie 只有在页面重新走一遍登录判定后才会生效
+			this.reload();
+		} catch (e) {
+			console.log("[AppNative] 授权回流重载失败: " + (e != null ? e.toString() : "unknown"));
+		}
+	}
+}
+
+/** 顶栏「关闭」按钮：关掉登录 Dialog（用户设备没有 QQ 时唯一可靠的退出入口） */
+class QtAuthCloseClickListener implements View.OnClickListener {
+	constructor() {
+		super();
+	}
+
+	override onClick(v: View): void {
+		// 走「用户主动关闭」：与返回键一致地回调 onClose("")。
+		// 2026-11-02 审阅：这里原先走程序化关闭（qtAuthDismissCurrentOnMain 先清 cb），
+		// 导致顶栏关闭永不回调，而返回键会回调，两个主动关闭入口行为不一致（违反 interface.uts 契约）。
+		qtAuthUserCloseOnMain();
+	}
+}
+
+/** Dialog 关闭监听：区分「用户关闭」与「程序化关闭」，顺手释放 WebView */
+class QtAuthDismissListener implements DialogInterface.OnDismissListener {
+	/** 建这个 Dialog 时的世代号；与当前 gAuthDialogToken 不符 = 过期 Dialog 的异步回调 */
+	private token: number;
+
+	constructor(token: number) {
+		super();
+		this.token = token;
+	}
+
+	override onDismiss(dialog: DialogInterface): void {
+		// onDismiss 是异步投递的：程序化关闭已把 token +1，过期的回调在这里止步，
+		// 既不会误销毁新 WebView，也不会把代码关闭误报成用户关闭。
+		if (this.token != gAuthDialogToken) return;
+		const cb = gAuthOnClose;
+		const wv = gAuthWebView;
+		gAuthDialog = null;
+		gAuthWebView = null;
+		gAuthOnClose = null;
+		try {
+			if (wv != null) {
+				wv.loadUrl("about:blank");
+				wv.destroy();
+			}
+		} catch (e) {
+			console.log("[AppNative] 登录 WebView 销毁失败: " + (e != null ? e.toString() : "unknown"));
+		}
+		if (cb != null) cb("");
+	}
+}
+
+/** 主线程：销毁当前登录 WebView（不触发 onClose），供重复打开/宿主关闭复用 */
+function qtAuthDismissCurrentOnMain(): void {
+	const dlg = gAuthDialog;
+	const wv = gAuthWebView;
+	if (dlg == null && wv == null) return;
+	gAuthDialog = null;
+	gAuthWebView = null;
+	gAuthOnClose = null;
+	gAuthExternalLaunched = false;
+	// 让随后到达的 onDismiss 认不出自己（程序化关闭不回调）
+	gAuthDialogToken += 1;
+	try {
+		if (dlg != null) dlg.dismiss();
+	} catch (e) {
+		console.log("[AppNative] 登录 Dialog 关闭失败: " + (e != null ? e.toString() : "unknown"));
+	}
+	try {
+		if (wv != null) {
+			wv.loadUrl("about:blank");
+			wv.destroy();
+		}
+	} catch (e) {
+		console.log("[AppNative] 登录 WebView 销毁失败: " + (e != null ? e.toString() : "unknown"));
+	}
+}
+
+/**
+ * 主线程：用户点了顶栏「关闭」——按「用户主动关闭」处理。
+ *
+ * 只 dismiss，不碰全局回调：真正的清理与 onClose("") 交给异步到达的 onDismiss，
+ * 这样顶栏关闭与返回键（Dialog.cancel → onDismiss）走同一条路径、回调一致。
+ */
+function qtAuthUserCloseOnMain(): void {
+	const dlg = gAuthDialog;
+	if (dlg == null) return;
+	gAuthExternalLaunched = false;
+	try {
+		dlg.dismiss();
+	} catch (e) {
+		console.log("[AppNative] 登录 Dialog 关闭失败: " + (e != null ? e.toString() : "unknown"));
+		// dismiss 失败兜底：按程序化关闭收摊，至少不能把 Dialog 与 WebView 泄漏掉
+		qtAuthDismissCurrentOnMain();
+	}
+}
+
+/** 主线程：真正建 Dialog + WebView 并加载登录页 */
+function qtAuthOpenOnMain(url: string, onClose: (message: string) => void, ua: string): void {
+	const activity = UTSAndroid.getUniActivity();
+	if (activity == null) {
+		console.log("[AppNative] openAuthWebView: Activity 不可用");
+		return;
+	}
+	qtAuthDismissCurrentOnMain();
+	gAuthExternalLaunched = false;
+	// 旧 Dialog 的异步 onDismiss 已被上一次 +1 作废；这里再 +1 给新 Dialog 一个专属世代号
+	gAuthDialogToken += 1;
+	const dialogToken = gAuthDialogToken;
+
+	const dialog = new Dialog(activity);
+	const wv = new QtAuthWebView(activity);
+	const settings = wv.getSettings();
+	settings.setJavaScriptEnabled(true);
+	settings.setDomStorageEnabled(true);
+	settings.setUseWideViewPort(true);
+	settings.setLoadWithOverviewMode(true);
+	// 桌面版布局（ua 非空）整页比手机宽得多：开缩放，用户能双指放大登录入口
+	if (ua.length > 0) {
+		settings.setSupportZoom(true);
+		settings.setBuiltInZoomControls(true);
+		settings.setDisplayZoomControls(false);
+	}
+	settings.setUserAgentString(ua.length > 0 ? ua : AUTH_WEBVIEW_UA);
+	wv.setWebViewClient(new QtAuthWebViewClient());
+	wv.setWebChromeClient(new WebChromeClient());
+
+	// 第三方 Cookie：QQ 登录页在 y.qq.com 里用隐藏 iframe 轮询 ptlogin2/ssl.ptlogin2 的登录态，
+	// 不放开第三方 Cookie 会一直停在「请登录」
+	const cm = CookieManager.getInstance();
+	cm.setAcceptCookie(true);
+	cm.setAcceptThirdPartyCookies(wv, true);
+
+	// 顶栏 + WebView：必须给显式关闭入口。设备没装 QQ 时页面停在原处，
+	// 用户「不报错、也关不掉」（2026-10-31 实测），只靠返回键不可靠。
+	const density = activity.getResources().getDisplayMetrics().density;
+	const root = new LinearLayout(activity);
+	root.setOrientation(LinearLayout.VERTICAL);
+
+	const bar = new LinearLayout(activity);
+	bar.setOrientation(LinearLayout.HORIZONTAL);
+	bar.setHorizontalGravity(Gravity.END);
+	bar.setVerticalGravity(Gravity.CENTER_VERTICAL);
+	bar.setBackgroundColor(Color.rgb(246, 247, 249));
+	bar.setPadding((16 * density).toInt(), (4 * density).toInt(), (6 * density).toInt(), (4 * density).toInt());
+
+	const closeBtn = new TextView(activity);
+	closeBtn.setText("关闭");
+	closeBtn.setTextSize(TypedValue.COMPLEX_UNIT_DIP.toInt(), 15.0.toFloat());
+	closeBtn.setTextColor(Color.rgb(23, 110, 214));
+	closeBtn.setPadding((16 * density).toInt(), (10 * density).toInt(), (16 * density).toInt(), (10 * density).toInt());
+	closeBtn.setOnClickListener(new QtAuthCloseClickListener());
+	bar.addView(closeBtn);
+	root.addView(bar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT.toInt(), ViewGroup.LayoutParams.WRAP_CONTENT.toInt()));
+
+	// 高度 0 + weight=1：让 WebView 吃掉顶栏之外的全部空间
+	root.addView(wv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT.toInt(), 0, 1.0.toFloat()));
+
+	dialog.setContentView(root);
+	dialog.setCanceledOnTouchOutside(false);
+	dialog.setOnDismissListener(new QtAuthDismissListener(dialogToken));
+	const win = dialog.getWindow();
+	if (win != null) {
+		win.setLayout(ViewGroup.LayoutParams.MATCH_PARENT.toInt(), ViewGroup.LayoutParams.MATCH_PARENT.toInt());
+	}
+
+	gAuthDialog = dialog;
+	gAuthWebView = wv;
+	gAuthOnClose = onClose;
+	try {
+		dialog.show();
+		wv.loadUrl(url);
+	} catch (e) {
+		console.log("[AppNative] openAuthWebView 失败: " + (e != null ? e.toString() : "unknown"));
+		qtAuthDismissCurrentOnMain();
+	}
+}
+
+/** 主线程任务：打开登录 WebView（UTS 插件函数跑在 JS 线程，无 Looper，必须 post） */
+class QtAuthOpenTask implements Runnable {
+	private url: string;
+	private onClose: (message: string) => void;
+	private ua: string;
+
+	constructor(url: string, onClose: (message: string) => void, ua: string) {
+		super();
+		this.url = url;
+		this.onClose = onClose;
+		this.ua = ua;
+	}
+
+	override run(): void {
+		qtAuthOpenOnMain(this.url, this.onClose, this.ua);
+	}
+}
+
+/** 主线程任务：关闭登录 WebView */
+class QtAuthCloseTask implements Runnable {
+	constructor() {
+		super();
+	}
+
+	override run(): void {
+		qtAuthDismissCurrentOnMain();
+	}
+}
+
+/**
+ * 用「可控 WebView」打开官方登录页（契约见 interface.uts 的 OpenAuthWebView）。
+ */
+export const openAuthWebView: OpenAuthWebView = function (url: string, onClose: (message: string) => void, ua: string): void {
+	webCookieHandler().post(new QtAuthOpenTask(url, onClose, ua));
+};
+
+/** 关闭 openAuthWebView 打开的登录 WebView（未打开时无副作用，不触发 onClose） */
+export const closeAuthWebView: CloseAuthWebView = function (): void {
+	webCookieHandler().post(new QtAuthCloseTask());
 };

@@ -851,6 +851,19 @@ function rawBufferOf(resp: http.HttpResponse): buffer.Buffer | null {
 }
 
 /**
+ * 原始字节 → base64（契约 responseEncoding=base64 用，QQ 扫码 PNG 走这里）。
+ * @ohos.buffer 的 Buffer.toString 支持 'base64'；失败返回空串，调用方按
+ * 「响应体无法转换为文本」处理（与 UTF-8 分支的错误语义保持一致）。
+ */
+function base64Of(buf: buffer.Buffer): string {
+	try {
+		return buf.toString('base64')
+	} catch (e) {
+		return ''
+	}
+}
+
+/**
  * 从原始响应字节里嗅探 FLAC 位深（0 = 不是 FLAC / 头部不完整 / 数值非法）。
  *
  * 与 PC 侧 `commands.rs::flac_bits_of`、安卓侧 `app-android/index.uts::flacBitsOf`
@@ -2356,8 +2369,12 @@ function startHttp(o: UTSJSONObject): void {
 	const hostPart = hostPartOf(url)
 	const t0 = Date.now()
 	const headerFields = httpHeadersOf(headers)
-	// 极小 Range 预检才值得换 ARRAY_BUFFER 去拿原始字节（见 TINY_RANGE_MAX_BYTES 注释）
-	let wantBytes = wantsRawBytes(headers)
+	// 契约 responseEncoding=base64（QQ 扫码 PNG 这类二进制响应）：宿主必须按原始字节
+	// 出 base64，否则 UTF-8 解码会把 PNG 糟蹋成替换字符（安卓宿主同款修复见
+	// app-android/index.uts 的 wantBase64）。
+	const wantBase64 = fieldStr(o, 'encoding') == 'base64'
+	// 极小 Range 预检 / base64 响应才值得换 ARRAY_BUFFER 去拿原始字节（见 TINY_RANGE_MAX_BYTES 注释）
+	let wantBytes = wantsRawBytes(headers) || wantBase64
 	let req = newHttpRequest()
 	let settled = false
 	const watchdog = timerSet(() => {
@@ -2430,6 +2447,12 @@ function startHttp(o: UTSJSONObject): void {
 					// 化会变成 `[object ArrayBuffer]` 之类的垃圾（bodyTextOf 的兜底分支）
 					const buf = rawBufferOf(resp)
 					if (buf == null) {
+						if (wantBase64) {
+							// base64 契约下退回 STRING 重发只会得到一串替换字符，
+							// 直接失败比交回坏数据更诚实（调用方按失败处理）
+							finish(0, '{}', '', '响应体原始字节不可用（responseEncoding=base64）')
+							return
+						}
 						// 拿不到字节就退回 STRING 重发一次：没有 x-qt-flac-bits 时包侧
 						// 只会把位深当未知处理，不会误判音质 —— 退化是安全的
 						console.warn('[qt-js-engine] 原始字节不可用，降级为 STRING 重试:', hostPart)
@@ -2443,7 +2466,7 @@ function startHttp(o: UTSJSONObject): void {
 					if (bits > 0) {
 						headersJson = injectHeader(headersJson, QT_FLAC_BITS_HEADER, `${bits}`)
 					}
-					probe = new TextProbe(true, buf.toString('utf-8'))
+					probe = new TextProbe(true, wantBase64 ? base64Of(buf) : buf.toString('utf-8'))
 				} else {
 					probe = bodyTextOf(resp)
 				}

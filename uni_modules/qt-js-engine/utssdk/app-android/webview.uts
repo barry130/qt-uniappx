@@ -45,6 +45,7 @@ import WebResourceResponse from 'android.webkit.WebResourceResponse'
 import ValueCallback from 'android.webkit.ValueCallback'
 import RenderProcessGoneDetail from 'android.webkit.RenderProcessGoneDetail'
 import PackageInfo from 'android.content.pm.PackageInfo'
+import Context from 'android.content.Context'
 import ContextThemeWrapper from 'android.view.ContextThemeWrapper'
 import View from 'android.view.View'
 import ViewGroup from 'android.view.ViewGroup'
@@ -288,6 +289,19 @@ const QT_V8_BOOTSTRAP = `
 let gWebView: WebView | null = null
 /** 挂到 Activity 上的那个 1×1 视图（销毁时要摘掉，不能留一个 destroyed 的 WebView 在视图树里） */
 let gHostView: View | null = null
+/**
+ * 1×1 宿主当前是否挂在某个窗口里。
+ * 页面 Activity 销毁时窗口会整体 detach（见 QtV8HostView），这里置 false；
+ * 下一次求值前由 v8RehostIfNeeded 挂到当前页面 Activity 上。
+ */
+let gHostAttached = false
+/**
+ * 宿主「挂载代次」：每次 addContentView 成功 +1。
+ * detach 是异步善后（post 到主线程尾部），而我们在 v8RehostIfNeeded 里会先
+ * removeView 再挂到新页面——那次 removeView 同样会触发 detach 回调。
+ * 用代次把「已经过期的 detach」认出来，否则善后任务会把刚挂好的新宿主又摘掉。
+ */
+let gHostGen = 0
 let gMainHandler: Handler | null = null
 /** 页面是否已 onPageFinished（未就绪前不能 evaluateJavascript） */
 let gPageReady = false
@@ -471,6 +485,10 @@ class V8EvalPost implements Runnable {
 			this.slot.latch.countDown()
 			return
 		}
+		// 页面切换后宿主可能已被摘掉（见 QtV8HostView.onDetachedFromWindow）：
+		// 求值前先挂回当前页面的 Activity。WebView 不在窗口里会被系统节流，
+		// 泵/定时器就会拖慢，表现成「搜索偶尔特别慢」。
+		v8RehostIfNeeded()
 		try {
 			wv.evaluateJavascript(this.code, new V8EvalCallback(this.slot))
 		} catch (e) {
@@ -495,6 +513,78 @@ class V8MainTask implements Runnable {
 
 function v8OnMain(fn: () => void): void {
 	v8MainHandler().post(new V8MainTask(fn))
+}
+
+/**
+ * 引擎宿主：那个 1×1 的 WebView。这里子类化只为捕获一次窗口 detach。
+ *
+ * 本插件一页一 Activity，而引擎是全 App 单例：静态 gHostView/gWebView 长期持有
+ * 这个 WebView，WebView.mParent 又指回它被 addContentView 进去的那个页面
+ * Activity 的 ContentFrameLayout。Activity 销毁时系统只把窗口 detach
+ * （View.mAttachInfo 置空、mWindowAttachCount 归零），**不会**把 mParent 置空，
+ * 于是「静态变量 → WebView → mParent → ContentFrameLayout → 已销毁 Activity」
+ * 把整个页面扣在内存里——2026-10-31 LeakCanary 实锤：
+ *   static IndexKt.gHostView → WebView → ContentFrameLayout → UniPageActivity
+ *   [Page: pages/source-pack/index]（371KB / 6894 objects，mDestroyed=true）。
+ * 修法：detach 时 post 一个主线程任务把宿主从父链摘掉；
+ * 下一次求值前（V8EvalPost.run → v8RehostIfNeeded）再挂到当前页面的 Activity 上，
+ * 引擎因此可以跨页面继续工作，且不再扣住任何死掉的 Activity。
+ */
+class QtV8HostView extends WebView {
+	constructor(context: Context) {
+		super(context)
+	}
+
+	override onDetachedFromWindow(): void {
+		super.onDetachedFromWindow()
+		// 不能在 detach 的遍历过程中直接改父链（会撞 ConcurrentModification），
+		// 投到主线程队列尾部再摘。带上代次：若排队期间宿主已重新挂到新页面
+		// （v8RehostIfNeeded 的 removeView 也会走到这里），这次善后必须作废。
+		const gen = gHostGen
+		v8OnMain(() => {
+			v8DetachHostFromWindow(gen)
+		})
+	}
+}
+
+/** 主线程：把宿主从已销毁窗口的父链上摘掉（断「静态变量 → 死 Activity」这条链） */
+function v8DetachHostFromWindow(gen: number): void {
+	// 代次已变 = 排队期间又挂到了新窗口，这次 detach 属过期善后，不能再去摘父链
+	if (gen != gHostGen) return
+	const host = gHostView
+	if (host == null) return
+	gHostAttached = false
+	try {
+		const parent = host.getParent()
+		if (parent != null) {
+			(parent as ViewGroup).removeView(host)
+		}
+	} catch (e) {
+		console.error('[qt-js-engine/v8] 摘除宿主视图失败:', e)
+	}
+}
+
+/** 主线程：确保宿主挂在当前页面的 Activity 上（切页/页面销毁后重挂） */
+function v8RehostIfNeeded(): void {
+	const host = gHostView
+	if (host == null || gHostAttached) return
+	try {
+		const activity = UTSAndroid.getUniActivity()
+		if (activity == null) return
+		// 已经在销毁/已销毁的 Activity 不能再当宿主：挂上去等于把刚拆掉的泄漏链重新接回来
+		// （切页瞬间 getUniActivity 可能还指向正在销毁的旧页面）。等下次求值再挂新页面。
+		if (activity.isDestroyed() || activity.isFinishing()) return
+		const parent = host.getParent()
+		if (parent != null) {
+			(parent as ViewGroup).removeView(host)
+		}
+		// 1×1：WebView 必须在窗口里才会正常执行 JS，1×1 比 0×0 稳（0 尺寸会被当作不可见节流）
+		activity.addContentView(host, new ViewGroup.LayoutParams(1, 1))
+		gHostAttached = true
+		gHostGen = gHostGen + 1
+	} catch (e) {
+		// 静默：暂时挂不回去就保持 detach（JS 仍可求值，只是可能被系统降频），下次再试
+	}
 }
 
 // ==================== WebViewClient ====================
@@ -648,12 +738,15 @@ export function v8Start(): string {
 				return
 			}
 			// 用「应用级 Context + 当前主题」建 WebView，而不是直接用 activity：
-			// 引擎是全 App 单例，WebView 若持有某个页面的 Activity（本插件是一页一
-			// Activity 架构），页面销毁后 555KB 的 Activity/View 树会一直被静态
+			// 引擎是全 App 单例，WebView 若直接持有某个页面的 Activity（本插件是一页一
+			// Activity 架构），页面销毁后成百 KB 的 Activity/View 树会一直被静态
 			// gWebView/gHostView 扣住（2026-10-25 LeakCanary 实锤）。应用级 Context
 			// 生命周期与进程一致，且 WebView 仍通过 addContentView 挂进窗口执行 JS。
+			// 注意：Context 换了应用级，但**父视图仍是页面 Activity 的内容根**，
+			// 那条泄漏链要靠 QtV8HostView.onDetachedFromWindow + v8RehostIfNeeded
+			// 来断（2026-10-31 LeakCanary：pages/source-pack/index 仍被扣住 371KB）。
 			const themed = new ContextThemeWrapper(activity.getApplicationContext(), activity.getTheme())
-			const wv = new WebView(themed)
+			const wv = new QtV8HostView(themed)
 			const s = wv.getSettings()
 			s.setJavaScriptEnabled(true)
 			// 不放开本地文件/内容访问：bundle 走 shouldInterceptRequest，不需要 file:// 权限
@@ -675,6 +768,8 @@ export function v8Start(): string {
 			const host = wv as View
 			activity.addContentView(host, new ViewGroup.LayoutParams(1, 1))
 			gHostView = host
+			gHostAttached = true
+			gHostGen = gHostGen + 1
 			wv.loadDataWithBaseURL(V8_BASE_URL, V8_HTML, 'text/html', 'utf-8', null)
 		} catch (e) {
 			createError = v8ErrText(e)
@@ -775,6 +870,7 @@ function destroyOnMain(): void {
 	}
 	gHostView = null
 	gWebView = null
+	gHostAttached = false
 }
 
 // ==================== 求值 ====================
