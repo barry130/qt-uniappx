@@ -165,6 +165,8 @@ export function useAiChat() {
   let pollStartedAt = 0;
   /** 读取序号：切会话时旧响应晚到不得写进新会话 */
   let loadSeq = 0;
+  /** 轮询代次：切会话/停止后，在途 fetchEvents 晚到不得写状态、也不得重挂轮询（2026-11-03 审阅 R2） */
+  let pollSeq = 0;
   /** 上一轮候选搜索用的关键词与页码：追问（「再来点」）时沿用主题、往后翻页 */
   let lastSearchKeyword = "";
   let lastSearchPage = 1;
@@ -574,6 +576,9 @@ export function useAiChat() {
 
   function startPolling(requestId: number, messageIndex: number): void {
     stopPolling();
+    // stopPolling 已递增过一次，这里再固定到自己的代次：在途旧 tick
+    // 返回后一比对不上就散场，不写状态、不重挂 timeout。
+    const seq = ++pollSeq;
     pollStartedAt = Date.now();
     let cursor = 0;
     let finished = false;
@@ -595,6 +600,10 @@ export function useAiChat() {
       }
       try {
         const batch = await fetchEvents(requestId, cursor, 100);
+        // 请求期间用户切了会话/点了停止（stopPolling 已换代）：旧响应直接丢弃，
+        // 否则它会写进当前会话的消息流，还会在下面把轮询重新挂起来，
+        // 甚至把用户主动置的 CANCELLED 又改回 STREAMING。
+        if (seq != pollSeq) return;
         if (batch.nextSequence > cursor) cursor = batch.nextSequence;
         for (let i = 0; i < batch.events.length; i++) {
           applyEvent(batch.events[i].type, batch.events[i].data, messageIndex);
@@ -624,6 +633,9 @@ export function useAiChat() {
   }
 
   function stopPolling(): void {
+    // 递增代次让在途 tick 散场：clearTimeout 只能清「已排队」的 timeout，
+    // 挡不住 await 中的 fetchEvents 返回后继续写状态并重挂下一个 timeout。
+    pollSeq++;
     if (pollTimer != null) {
       clearTimeout(pollTimer);
       pollTimer = null;

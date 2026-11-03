@@ -182,9 +182,18 @@ async function load(): Promise<void> {
   loading.value = true;
   try {
     fb.value = await fetchFeedbackDetail(feedbackId.value);
+  } catch (_) {
+    // 详情本身拿不到（被删/无权限）才算「不存在」；详情在、只是回复列表暂时
+    // 拉空（网络抖动），仍要正常渲染——原来两步共用一个 catch，会把
+    // 「详情在但回复挂了」也误报成不存在页
+    notFound.value = true;
+    loading.value = false;
+    return;
+  }
+  try {
     replies.value = await fetchReplies(feedbackId.value);
   } catch (_) {
-    notFound.value = true;
+    replies.value = [];
   } finally {
     loading.value = false;
   }

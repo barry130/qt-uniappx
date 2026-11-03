@@ -716,7 +716,12 @@ function removeLocalWallpaper(path: string): void {
     文件名带时间戳：路径每次都不同，<image> 才会重新解码，否则同一路径换图会显示旧位图。 */
 function saveLocalWallpaper(tempPath: string, previous: string): Promise<string> {
   return new Promise<string>((resolve) => {
-    const dest = uni.env.USER_DATA_PATH + "wallpaper-" + Date.now() + "." + wallpaperExt(tempPath);
+    // R10-A：USER_DATA_PATH 在 Android 是 `unifile://usr`（原生注释/真机实测，
+    // 无尾斜杠），直接拼会把 dest 写成 unifile://usrwallpaper-... 必 fail ——
+    // 本地相册壁纸因此从未成功过。这里按「无尾斜杠则补」规范化，两态都安全。
+    const dir = uni.env.USER_DATA_PATH;
+    const sep = dir.lastIndexOf("/") == dir.length - 1 ? "" : "/";
+    const dest = dir + sep + "wallpaper-" + Date.now() + "." + wallpaperExt(tempPath);
     uni.getFileSystemManager().saveFile({
       tempFilePath: tempPath,
       filePath: dest,

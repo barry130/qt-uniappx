@@ -14,6 +14,7 @@
 
 import { accountApi } from "@/services/music-api";
 import { getAccessToken } from "@/services/auth";
+import { parseJsonToUtso } from "@/services/http";
 
 const ME_CACHE_KEY = "qt-user-me";
 
@@ -26,7 +27,10 @@ export function getCachedMe(): UTSJSONObject | null {
   try {
     const raw = uni.getStorageSync(ME_CACHE_KEY) as string;
     if (raw == null || raw.length === 0) return null;
-    const obj = JSON.parse(raw) as UTSJSONObject | null;
+    // R11/R15：App 端 JSON.parse 产物是普通对象、没有 .get 方法（真机已踩过
+    // item.get is not a function）；消费方（qt-profile-overview 等）拿返回值
+    // 调 res.get("user") 会抛 TypeError。parseJsonToUtso 全树转 UTSJSONObject。
+    const obj = parseJsonToUtso(raw);
     if (obj != null) memoryMe = obj;
     return obj;
   } catch (_) {

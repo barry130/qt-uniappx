@@ -557,7 +557,15 @@ function bindSessionListeners(session: avSession.AVSession): void {
 			const idx = Math.round(itemId)
 			if (idx < 0 || idx >= gItems.length) return
 			if (idx == gIndex) {
-				// 点的是当前这首 = 从头重播（与 media3 seekToDefaultPosition 一致）
+				// 点的是当前这首 = 从头重播（与 media3 seekToDefaultPosition 一致）。
+				// completed 状态走 playInternal：audioSeek 的状态闸门会拦掉 completed
+				//（seek 无意义），而 AVPlayer 在 completed 下 play() 本身就是从头重播
+				//——不补这条分支，播完后在系统卡片上点当前曲会毫无反应
+				const p = gPlayer
+				if (p != null && p.state == 'completed') {
+					playInternal()
+					return
+				}
 				audioSeek(0.0)
 				return
 			}
@@ -1406,19 +1414,43 @@ function playInternal(): void {
  */
 function onAudioInterrupt(info: audio.InterruptEvent): void {
 	const hint = info.hintType
+	const forced = info.forceType == audio.InterruptForceType.INTERRUPT_FORCE
 	if (hint == audio.InterruptHint.INTERRUPT_HINT_DUCK) {
-		if (gConcurrentMode != 2) {
-			gDucked = true
-			applyVolumeToPlayer()
+		if (gConcurrentMode == 2) return
+		if (gConcurrentMode == 0) {
+			// 独占模式与安卓对齐：安卓 mode0 对 CAN_DUCK 也是暂停（「任何焦点
+			// 丢失都暂停」，见 app-android QtAudioFocusListener），鸿蒙原来
+			// 一律压低续播，跨端口径不一致。暂停由 UNDUCK/RESUME 自动续播
+			gPausedByFocusLoss = true
+			if (!forced) {
+				const p = gPlayer
+				if (p != null) {
+					try {
+						p.pause()
+					} catch (e) {
+						// 静默：暂停失败播放器已异常，重播时重建
+					}
+				}
+				gIntendPlay = false
+				firePause()
+			}
+			return
 		}
+		gDucked = true
+		applyVolumeToPlayer()
 		return
 	}
 	if (hint == audio.InterruptHint.INTERRUPT_HINT_UNDUCK) {
 		gDucked = false
 		applyVolumeToPlayer()
+		// mode0 在 DUCK 时按上面暂停过：对方还回的 UNDUCK 就是续播信号，
+		// 与 RESUME 分支同款——只续播「因焦点让路暂停」的，用户主动暂停的不动
+		if (gConcurrentMode != 2 && gPausedByFocusLoss) {
+			gPausedByFocusLoss = false
+			playInternal()
+		}
 		return
 	}
-	const forced = info.forceType == audio.InterruptForceType.INTERRUPT_FORCE
 	if (hint == audio.InterruptHint.INTERRUPT_HINT_PAUSE || hint == audio.InterruptHint.INTERRUPT_HINT_STOP) {
 		if (gConcurrentMode == 2) return
 		if (gConcurrentMode == 1 && hint == audio.InterruptHint.INTERRUPT_HINT_PAUSE) {

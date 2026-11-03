@@ -31,6 +31,60 @@ import { qtShowActionSheet } from "@/services/action-sheet";
 import { setSourcePlayQuality, sourcePlayQualityOf, sourceDownloadQualityOf } from "@/services/source-quality";
 import { useDownloadsStore } from "@/stores/downloads";
 
+/**
+ * 本地文件路径 → `<image src>` 能吃的地址。
+ *
+ * 真机上直接把内嵌封面那串绝对路径（`/data/user/0/<pkg>/cache/...jpg`）喂给
+ * `<image>` 是**静默失败**：不报错、不占位，就是一片空白（2026-11-03 真机
+ * 「本地歌还是没有封面」）。uni-app x 里本地文件只认带协议的写法：
+ * `unifile://`（FS API 返回的私有目录地址）、`file://`（原生写的绝对路径）、
+ * `content://`（相册/媒体库）。网络地址、静态资源、data URL 原样返回。
+ */
+function imageSrcOfLocal(path: string): string {
+  if (path == null || path.length == 0) return "";
+  const lower = path.toLowerCase();
+  if (lower.indexOf("http://") == 0 || lower.indexOf("https://") == 0) return path;
+  if (lower.indexOf("file://") == 0 || lower.indexOf("unifile://") == 0) return path;
+  if (lower.indexOf("content://") == 0 || lower.indexOf("data:") == 0) return path;
+  if (path.indexOf("/static/") == 0) return path;
+  if (path.indexOf("/") == 0) return "file://" + path;
+  return path;
+}
+
+/**
+ * 这个封面地址**值得绑给 `<image>`** 吗（纯形状判断，不做任何 IO）。
+ *
+ * 存在的意义：上一版把原生 cache 里的裸绝对路径直接写进了 `song.picUrl` 并落盘，
+ * 那条路径播下一首就被原生删掉，重启后只剩一条死链 —— 界面不报错、不显示占位，
+ * 就是一片空白（2026-11-03 真机反馈的「本地歌还是没有封面」就是这个 +
+ * 裸路径本身也不被 `<image>` 接受）。形状不对的地址一律当「没有封面」处理，
+ * 重新解析一次即可自愈，不用磁盘 stat（`art()` 每帧都会调它）。
+ */
+function coverSrcUsable(path: string): boolean {
+  if (path == null || path.length == 0) return false;
+  const lower = path.toLowerCase();
+  if (lower.indexOf("http://") == 0 || lower.indexOf("https://") == 0) return true;
+  if (lower.indexOf("unifile://") == 0) return true;
+  if (lower.indexOf("content://") == 0) return true;
+  if (lower.indexOf("data:") == 0) return true;
+  if (path.indexOf("/static/") == 0) return true;
+  // 裸绝对路径（含老版本落盘的原生 cache 路径）：`<image>` 在真机上静默失败
+  return false;
+}
+
+/** 歌曲 key 安全化（本地封面要落成文件名）：非字母数字一律换成下划线 */
+function safeCoverKey(song: Song): string {
+  const raw = song.platform + "-" + song.id;
+  let out = "";
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw.charAt(i);
+    const ok =
+      (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c == "-" || c == "_";
+    out += ok ? c : "_";
+  }
+  return out.length > 96 ? out.substring(0, 96) : out;
+}
+
 const LIKED_KEY = "qt-liked-songs";
 const HISTORY_KEY = "qt-history-songs";
 const STATE_KEY = "qt-player-state";
@@ -1318,9 +1372,11 @@ class PlayerStore {
   coverOf(song: Song): string {
     if (song == null) return "";
     if (this.embeddedCover.length > 0 && this.embeddedCoverKey == this.mediaIdOf(song)) {
-      return this.embeddedCover;
+      return imageSrcOfLocal(this.embeddedCover);
     }
-    return song.picUrl;
+    // 死链/裸路径当没有封面（见 coverSrcUsable）：宁可显示占位图，也不留一片空白
+    if (!coverSrcUsable(song.picUrl)) return "";
+    return imageSrcOfLocal(song.picUrl);
   }
 
   /**
@@ -1805,9 +1861,106 @@ class PlayerStore {
     musicApi
       .songCover(song)
       .then((cover: string) => {
-        if (cover != null && cover.length > 0) this.applyCover(song, cover);
+        if (cover != null && cover.length > 0) {
+          this.applyCover(song, cover);
+          this.appendCoverDiag("联网取到");
+          logMsg("[QT Player] 本地歌封面联网取到: " + song.name + " -> " + cover);
+        } else {
+          this.appendCoverDiag("联网也没取到");
+        }
       })
-      .catch(() => {});
+      .catch(() => {
+        this.appendCoverDiag("联网取封面失败");
+      });
+  }
+
+  /** 把封面补齐结果拼到「本地文件地址」诊断行末尾（一行看清卡在哪一步） */
+  private appendCoverDiag(note: string): void {
+    if (this.embeddedDiagKey.length == 0) return;
+    if (this.embeddedDiag.indexOf("；封面：") >= 0) return;
+    this.embeddedDiag = this.embeddedDiag + "；封面：" + note;
+  }
+
+  /**
+   * 本地文件歌曲的封面补齐：**文件内嵌优先，没有内嵌就联网取**（与歌词同一套兜底）。
+   *
+   * 顺序：① 内嵌封面 → 拷进私有目录换成稳定地址再写回 song.picUrl，列表/播放条
+   * 一起有图；② 没有内嵌 → musicApi.songCover 对 local 走「歌手 歌名」关键词搜索
+   * （原生 cover 入口要源站主键，本地歌没有，直接喂本地 id 必然空手）；
+   * ③ 都失败保持空，界面显示占位图，不写脏数据。
+   */
+  private resolveLocalCover(song: Song, embedded: EmbeddedReadResult | null): void {
+    if (song.picUrl != null && song.picUrl.length > 0) {
+      if (coverSrcUsable(song.picUrl)) return;
+      // 老版本把原生 cache 的裸路径写进 picUrl 落盘了：那条路径早被删掉，
+      // 清空后按下面的流程重新解析（内嵌 → 私有目录，没有内嵌就联网）
+      logMsg("[QT Player] 清理失效的本地封面地址: " + song.picUrl);
+      song.picUrl = "";
+    }
+    if (embedded != null && embedded.coverPath.length > 0) {
+      const saved = this.persistEmbeddedCover(song, embedded.coverPath);
+      if (saved.length > 0) {
+        this.applyCover(song, saved);
+        this.appendCoverDiag("内嵌已落私有目录");
+        logMsg("[QT Player] 本地内嵌封面已落盘: " + song.name + " -> " + saved);
+        return;
+      }
+      this.appendCoverDiag("内嵌落盘失败（暂用缓存路径）");
+      logMsgWarn("[QT Player] 内嵌封面落盘失败，仅当前曲显示: " + song.name);
+      // 落盘失败：至少让当前曲能显示（原生 cache 路径补 file:// 后可用，
+      // 但**不能**写回 song.picUrl —— 下次解析别的文件时它会被删成死链）
+      this.embeddedCover = imageSrcOfLocal(embedded.coverPath);
+      this.embeddedCoverKey = this.mediaIdOf(song);
+      return;
+    }
+    this.backfillCover(song);
+  }
+
+  /**
+   * 内嵌封面 → 私有目录里的稳定文件，返回可直接绑 `<image>` 的地址（失败返回空串）。
+   *
+   * 为什么必须复制一份：原生把封面写在 cache 目录，并且**解析下一个文件时删掉
+   * 上一个**（writeCoverCache 的 lastCoverCachePath）。把那条路径直接存进
+   * song.picUrl，播下一首就变成死链 —— 列表里一排黑图、播放页回到占位图。
+   * 私有目录按歌曲 key 固定命名，重复播放覆盖同名文件，不会越攒越多。
+   */
+  private persistEmbeddedCover(song: Song, rawPath: string): string {
+    const dir = uni.env.USER_DATA_PATH;
+    if (dir == null || dir.length == 0) return "";
+    const lower = rawPath.toLowerCase();
+    const ext = lower.indexOf(".png") >= 0 ? "png" : "jpg";
+    const src = lower.indexOf("file://") == 0 ? rawPath.substring(7) : rawPath;
+    // USER_DATA_PATH 的尾斜杠平台间不齐（Android 实测带斜杠，iOS/Harmony 不保证）：
+    // 无则补，有则不叠出双斜杠（downloads.ts 的 base+"/"+name 在安卓叠出的
+    // usr//dir 只是碰巧被 FS 层容忍，别学）
+    const sep = dir.lastIndexOf("/") == dir.length - 1 ? "" : "/";
+    const dest = dir + sep + "local-cover-" + safeCoverKey(song) + "." + ext;
+    try {
+      const fs = uni.getFileSystemManager();
+      // 两种写法都试：uni 的 FS 层对「原生写的绝对路径」和「file:// 前缀」在不同
+      // 平台/版本上接受度不一致（2026-11-03 真机只能先这么兜）
+      let data = "";
+      try {
+        data = fs.readFileSync(src, "base64") as string;
+      } catch (_) {
+        data = "";
+      }
+      if (data == null || data.length == 0) {
+        try {
+          data = fs.readFileSync("file://" + src, "base64") as string;
+        } catch (_) {
+          data = "";
+        }
+      }
+      if (data == null || data.length == 0) return "";
+      fs.writeFileSync(dest, data, "base64");
+      return dest;
+    } catch (e) {
+      logMsgWarn(
+        "[QT Player] 内嵌封面落私有目录失败：" + rawPath + " / " + (e != null ? e.toString() : "unknown")
+      );
+      return "";
+    }
   }
 
   /**
@@ -1886,9 +2039,16 @@ class PlayerStore {
     if (!isLocalFile) {
       // 在线歌：没有标签区可读，封面缺就网络回填，车机歌词等 lyrics 落地再推
       if (song.picUrl == null || song.picUrl.length == 0) this.backfillCover(song);
+      // 与本地分支同口径：进门先清上一首的车机歌词（这次取词失败时，
+      // 车机上不能还挂着旧词）；取词是异步的，回来先验还是不是这首 ——
+      // 慢于切歌的响应会把旧词推到新曲的系统卡片上（2026-11-03）
+      audioPlayer.setCarLyric("");
+      const onlineMediaId = this.mediaIdOf(song);
       musicApi
         .lyrics(song)
         .then((text: string) => {
+          const now = this.current;
+          if (now == null || this.mediaIdOf(now) != onlineMediaId) return;
           audioPlayer.setCarLyric(text);
         })
         .catch(() => {});
@@ -1903,16 +2063,10 @@ class PlayerStore {
       const now = this.current;
       if (now == null || this.mediaIdOf(now) != mediaId) return;
       const embedded = this.readEmbeddedCached(songUrl);
-      // 内嵌优先（文件里自带的那份最准，也省掉同一首歌的在线请求）；
-      // 只登记「显示用」，不写回 song.picUrl —— 那会被收藏同步带上服务端（like-sync.ts:121）
+      // 内嵌优先（文件里自带的那份最准，也省掉同一首歌的在线请求）
       this.applyLocalFileMedia(mediaId, embedded);
-      if (song.picUrl == null || song.picUrl.length == 0) {
-        if (embedded != null && embedded.coverPath.length > 0) {
-          this.applyCover(song, embedded.coverPath);
-        } else {
-          this.backfillCover(song);
-        }
-      }
+      // 封面补齐：内嵌 → 落私有目录持久化；没有内嵌就联网取（与歌词同一套兜底）
+      this.resolveLocalCover(song, embedded);
     }, 0);
   }
 
@@ -2063,8 +2217,9 @@ class PlayerStore {
     this.localPlaylistsDirty = true;
     this.playCounts = new Map<string, number>();
     this.defaultFavPlaylistId = "";
-    this.likeCursor = 0;
-    this.pendingOps = [];
+    // 游标/队列归 LikeSyncEngine 管（原先 this.likeCursor/this.pendingOps 是
+    // 未声明字段，写的是幽灵属性，引擎里真正的队列纹丝不动——残留操作仍会被重放）
+    this.resetLikeSync();
     this.persist();
     await useListenStatsStore().clear();
   }
@@ -3130,6 +3285,9 @@ class PlayerStore {
     const pid = this.playlistPidOf(playlistId);
     if (pid.length === 0) return 0;
     let added = 0;
+    // 先攒整批再统一入队：enqueueLikeOps 一次落盘一次推送，
+    // 且拉取合并的 hasPendingLikeOp 判断能一次覆盖整批
+    const ops: PendingLikeOp[] = [];
     for (let i = 0; i < tracks.length; i++) {
       const song = tracks[i];
       if (song == null) continue;
@@ -3139,7 +3297,7 @@ class PlayerStore {
         const entry = this.likedSongs[idx];
         if (entry == null || !this.addPidToSong(entry, pid)) continue;
         added++;
-        this.pendingOps.push({
+        ops.push({
           type: "song",
           action: "add",
           dataJson: this.likeSongPayloadJson(entry, pid),
@@ -3159,7 +3317,7 @@ class PlayerStore {
         this.likedSongs.push(entry);
         added++;
         this.likedDirty = true;
-        this.pendingOps.push({
+        ops.push({
           type: "song",
           action: "add",
           dataJson: this.likeSongPayloadJson(entry, pid),
@@ -3168,8 +3326,7 @@ class PlayerStore {
     }
     if (added > 0) {
       this.persist();
-      this.saveLikeSync();
-      this.flushPendingOps().catch(() => {});
+      this.enqueueLikeOps(ops);
       // 批量导入可能包含正在播放的这首，红心要跟上（原生按 mediaId 判定，无关则空操作）
       this.refreshNativeRating();
     }
@@ -3204,6 +3361,8 @@ class PlayerStore {
     let removed = 0;
     /** 摘完 pid 后不属于任何歌单的记录，循环走完再整条删（与单曲路径同口径） */
     const emptied: Song[] = [];
+    // 先攒整批再统一入队（enqueueLikeOps：一次落盘一次推送）
+    const ops: PendingLikeOp[] = [];
     for (let i = 0; i < tracks.length; i++) {
       const song = tracks[i];
       if (song == null) continue;
@@ -3212,7 +3371,7 @@ class PlayerStore {
       const entry = this.likedSongs[idx];
       if (entry == null || !this.removePidFromSong(entry, pid)) continue;
       removed++;
-      this.pendingOps.push({
+      ops.push({
         type: "song",
         action: "remove",
         dataJson: this.likeSongPayloadJson(entry, pid),
@@ -3229,8 +3388,7 @@ class PlayerStore {
         }
       }
       this.persist();
-      this.saveLikeSync();
-      this.flushPendingOps().catch(() => {});
+      this.enqueueLikeOps(ops);
       // 批量取消收藏可能摘掉正在播放的这首，红心要跟上（原生按 mediaId 判定，无关则空操作）
       this.refreshNativeRating();
     }
@@ -3606,6 +3764,10 @@ class PlayerStore {
 
   private enqueueLikeOp(op: PendingLikeOp): void {
     likeSync().enqueueLikeOp(op);
+  }
+
+  private enqueueLikeOps(ops: PendingLikeOp[]): void {
+    likeSync().enqueueLikeOps(ops);
   }
 
   private pushSongPid(song: Song, pid: string, action: "add" | "remove"): void {

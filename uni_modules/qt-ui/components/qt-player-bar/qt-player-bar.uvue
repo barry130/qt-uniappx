@@ -135,7 +135,7 @@ import { qtFontPx } from "@/uni_modules/qt-ui/stores/font-scale";
 import { QT_PLAYER_BAR_HEIGHT_PX } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { qtShowToast } from "@/services/toast";
-import { audioPlayer } from "@/services/audio-player";
+import { audioPlayer, PLAYER_VOLUME_CHANGED_EVENT } from "@/services/audio-player";
 
 const props = defineProps<{
   /**
@@ -326,6 +326,17 @@ function toggleMute(): void {
   qtShowToast({ title: next ? "已静音" : "取消静音", icon: "none" });
 }
 
+/**
+ * 从包装层重读音量/静音快照。setup 时的 ref 只是一次性快照，设置在别处被改写
+ * （缓存页 resetSettings 等）时 UI 会脱节；订阅 PLAYER_VOLUME_CHANGED_EVENT
+ * （applyVolume 广播）重读即可。本组件滑杆自己触发的写入重读回来是幂等 no-op。
+ */
+function syncVolumeSnapshot(): void {
+  const next = Math.round(audioPlayer.getVolume() * 100);
+  volPercent.value = next < 0 ? 0 : next > 100 ? 100 : next;
+  muted.value = audioPlayer.getMuted();
+}
+
 function formatTime(sec: number): string {
   if (sec < 0 || !isFinite(sec)) return "0:00";
   const total = Math.floor(sec);
@@ -421,9 +432,12 @@ function measureTrack(attempt: number): void {
 onMounted(() => {
   barAlive = true;
   measureTrack(0);
+  // 音量/静音在别处被改写（缓存页重置设置等）时重读快照，防止滑杆/图标脱节
+  uni.$on(PLAYER_VOLUME_CHANGED_EVENT, syncVolumeSnapshot);
 });
 onUnmounted(() => {
   barAlive = false;
+  uni.$off(PLAYER_VOLUME_CHANGED_EVENT, syncVolumeSnapshot);
   // 布局变化触发的延迟测量若跨过销毁时点，会对已卸载节点空跑一次，显式清掉
   if (measureTimer != null) {
     clearTimeout(measureTimer);

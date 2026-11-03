@@ -320,6 +320,9 @@ function sendNext(done: (ok: boolean) => void): void {
 					try {
 						consecutiveFailures = 0
 						queue = queue.slice(batch.length)
+						// 出队即落盘：发送中杀进程时 storage 里的旧队列会整批重发
+						// 已成功上报的事件（重复入库）；每批 ≤200 条，同步写开销可忽略
+						persistQueue()
 					} catch (_) {
 						// 静默：出队失败最不少清一批，下轮 flush 会重试
 					}

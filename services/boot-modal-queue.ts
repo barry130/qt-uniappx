@@ -32,6 +32,8 @@ import { useHomePopupStore } from "@/stores/home-popup";
 export const BOOT_MODAL_PRIORITY_PLAY_PACK = 300;
 /** 电池白名单引导：一次性系统设置提示，重要性次之 */
 export const BOOT_MODAL_PRIORITY_BATTERY = 200;
+/** 通知权限引导：播控体验所需（锁屏/后台不显示就废了一半），略高于电池引导 */
+export const BOOT_MODAL_PRIORITY_NOTIFICATION = 250;
 /** 音源包更新提示：纯提示性质，红点会保留，晚一点不丢信息 */
 export const BOOT_MODAL_PRIORITY_PACK_UPDATE = 100;
 

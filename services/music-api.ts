@@ -890,6 +890,39 @@ export class MusicApi {
     return up.length > 0 ? up : normalized;
   }
 
+  /** 生效档位清单里的最高档（2026-11-03 审阅 R2）。
+   *
+   * 不能拿数组末位当最高：包侧 qualities 数组低→高、高→低两种顺序都存在
+   * （契约只约束「这些档位可用」，不约束顺序），末位在高→低排序的包里
+   * 恰好是最低档。按全局档位基准序取排名最大的；官方 level id 不在全局
+   * 档位表里时，仿 clampQualityFor 的口径把清单反转后插到高位，保证
+   * 官方档之间也有正确的高低关系。档位表还没装好（ranks 空）＝对高低
+   * 一无所知，退回末位（维持旧行为，调用方清单非空已由条件保证）。
+   */
+  highestQualityOf(ids: string[]): string {
+    const ranks = qualityRanksOf(this.registryQualities);
+    if (ranks.length == 0) return ids[ids.length - 1];
+    let ranksAll = ranks;
+    let hasUnknown = false;
+    for (let i = 0; i < ids.length; i++) {
+      if (ranks.indexOf(ids[i]) < 0) {
+        hasUnknown = true;
+        break;
+      }
+    }
+    if (hasUnknown) ranksAll = ids.slice().reverse().concat(ranks);
+    let best = ids[ids.length - 1];
+    let bestRank = -1;
+    for (let i = 0; i < ids.length; i++) {
+      const rank = ranksAll.indexOf(ids[i]);
+      if (rank > bestRank) {
+        bestRank = rank;
+        best = ids[i];
+      }
+    }
+    return best;
+  }
+
   private strOf(v: any): string {
     return v != null ? v.toString() : "";
   }
@@ -2341,16 +2374,46 @@ export class MusicApi {
    */
   async songCover(song: Song): Promise<string> {
     if (song.picUrl != null && song.picUrl.length > 0) return song.picUrl;
-    const source: Source = song.platform == "local" ? "kw" : (song.platform as Source);
+    // 本地歌曲没有源站主键（id 是本地路径派生出来的），cover 入口拿它去问必空手：
+    // 与取词同一口径 —— 按「歌手 歌名」搜索命中，再用命中项取封面
+    //（2026-11-03 真机「本地歌没有内嵌封面时也不联网取图」）。
+    if (song.platform == "local") return this.coverByKeyword(song);
+    const source: Source = song.platform as Source;
     const args = new UTSJSONObject();
     args.set("source", source);
     args.set("song", this.songArgsOf(song));
     try {
       const response = await this.engineInvoke("cover", args);
-      return this.strOf(response.get("url"));
+      const url = this.strOf(response.get("url"));
+      if (url.length > 0) return url;
     } catch (_) {
-      return "";
+      // 静默：单源 cover 失败继续走关键词兜底
     }
+    // 单源取不到（源站没这张图 / 该源不支持 cover）：退到关键词搜索找同名曲的封面
+    return this.coverByKeyword(song);
+  }
+
+  /**
+   * 按「歌手 歌名」搜一首同名曲，拿它的封面地址（本地歌与单源取图失败的兜底）。
+   *
+   * 先酷我后网易云：与 fetchLyricFor 的本地取词顺序一致，酷我命中率更高且更省字节。
+   * 搜索结果的 picUrl 就是现成的网络封面，不再回问 cover 入口，省一次 invoke。
+   */
+  private async coverByKeyword(song: Song): Promise<string> {
+    const keyword = song.singer.length > 0 ? song.singer + " " + song.name : song.name;
+    if (keyword.trim().length == 0) return "";
+    const sources: Source[] = ["kw", "wyy"];
+    for (let i = 0; i < sources.length; i++) {
+      try {
+        const hits = await this.search(keyword, sources[i], "song", 1, 1);
+        if (hits.length == 0) continue;
+        const hit = hits[0] as Song;
+        if (hit.picUrl != null && hit.picUrl.length > 0) return hit.picUrl;
+      } catch (_) {
+        // 静默：单源搜索失败换下一个源
+      }
+    }
+    return "";
   }
 
   /**

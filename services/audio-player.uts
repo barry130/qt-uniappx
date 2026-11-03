@@ -118,6 +118,13 @@ const MUTED_KEY = "qt-playback-muted";
 const VOLUME_DEFAULT = 1.0;
 
 /**
+ * 音量/静音在包装层之外被改写时（缓存页 resetSettings 直接 setVolume/setMuted、
+ * 未来任何设置入口）广播给 UI：qt-player-bar 的滑杆/图标是 setup 时的一次性
+ * 快照，不订阅就会和实际音量脱节（重置后仍显示旧值）。
+ */
+export const PLAYER_VOLUME_CHANGED_EVENT = "qt-player-volume-changed";
+
+/**
  * 轻听音乐播放器封装。
  * - Android：使用自研原生播放器 qt-audio-player（前台服务保活 + 原生媒体通知栏控制）。
  * - 其他平台（H5 等）：使用 uni.createInnerAudioContext 降级实现（不影响编译）。
@@ -267,6 +274,9 @@ export class AudioPlayer {
    */
   private applyVolume(): void {
     const effective = this.getMuted() ? 0.0 : this.getVolume();
+    // 通知 UI 侧快照重读（qt-player-bar 订阅）。滑杆自身触发的 setVolume 也会
+    // 走到这里，重读回来的值与刚写入的一致，是幂等 no-op，不构成回环
+    uni.$emit(PLAYER_VOLUME_CHANGED_EVENT);
     // #ifdef APP-ANDROID || APP-HARMONY
     this.ensureNativeBound();
     audioSetVolume(effective);

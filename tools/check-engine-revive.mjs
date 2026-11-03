@@ -68,24 +68,44 @@ const mods = {
       }
       cb({ ok: true, value: '{"lines":3}', error: "" });
     },
+    // v3.2 新增接口：play 包装载与表达式求值（本检查不驱动它们，仅满足 import）
+    loadPlayBundle: (code, cb) => {
+      calls.loadBundle++;
+      cb({ ok: true, error: "" });
+    },
+    evaluate: (code, timeoutMs, cb) => {
+      cb({ ok: true, value: "null", error: "" });
+    },
     isRunning: () => true,
     isHealthy: () => healthy,
   },
   // v3 schema 3：引擎只读生效位与产物文件
   "@/services/source-bundle-fs": {
     activePack: () => null,
-    activeMetaPack: () => null,
-    readPackArtifact: async () => "",
+    // 统一包模型后 meta 不再内置：模拟「已安装一个生效 meta 包」，
+    // resolveMetaText 才能拿到包并走正常装载/验契约路径
+    activeMetaPack: () => ({ id: "meta-official", kind: "meta", versionCode: 1, versionName: "meta.1" }),
+    readPackArtifact: async (packId, name) =>
+      name === "meta-bundle.js"
+        ? '/*__QT_PACK__{"kind":"meta","id":"meta-official","name":"官方基线","versionCode":1,"versionName":"meta.1","updateUrl":""}*/\n// stub meta bundle\n'
+        : "",
     ensureLocalStateRestored: async () => {},
     ARTIFACT_CHAIN: "chain.json",
     ARTIFACT_PLAY: "play-bundle.js",
     ARTIFACT_META: "meta-bundle.js",
+    PACK_KIND_META: "meta",
   },
-  // 内置 meta 基线（带 __QT_PACK__ 头，resolveMetaText 会 parsePackHeader 它）
-  "@/services/source-meta-code": {
-    metaBundleCode: () =>
-      '/*__QT_PACK__{"kind":"meta","id":"meta-official","name":"内置基线","versionCode":1,"versionName":"meta.1","updateUrl":""}*/\n' +
-      "// stub meta bundle\n",
+  // 官方包验签器源码常量（本检查不真装载 nacl，只满足 import）
+  "@/services/pack-verify-nacl": {
+    PACK_VERIFY_NACL_SRC: '/* mock: check-engine-revive 不真装载 nacl */',
+  },
+  // 日志服务（直接转发控制台，避免测试输出被吞）
+  "@/services/logger": {
+    logErr: (msg) => console.error(msg),
+    logErrV: (msg) => console.error(msg),
+    logInfo: (msg) => console.log(msg),
+    logWarn: (msg) => console.warn(msg),
+    logWarnV: (msg) => console.warn(msg),
   },
   // 包头解析（与 services/source-pack-header.uts 同语义的最小实现）
   "@/services/source-pack-header": {

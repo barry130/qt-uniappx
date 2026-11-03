@@ -33,7 +33,7 @@ import { installBootGuard, notifyAppForeground, notifyAppBackground } from '@/se
 import { refreshMe } from '@/services/user-cache'
 import { initLogger, flushLogs, logLine, logMsgErr, LOG_ERROR, LOG_INFO } from '@/services/logger'
 import { qtConfirm } from '@/services/confirm'
-import { enqueueBootModal, BOOT_MODAL_PRIORITY_PLAY_PACK, BOOT_MODAL_PRIORITY_BATTERY, BOOT_MODAL_PRIORITY_PACK_UPDATE } from '@/services/boot-modal-queue'
+import { enqueueBootModal, BOOT_MODAL_PRIORITY_PLAY_PACK, BOOT_MODAL_PRIORITY_BATTERY, BOOT_MODAL_PRIORITY_PACK_UPDATE, BOOT_MODAL_PRIORITY_NOTIFICATION } from '@/services/boot-modal-queue'
 import { openPackInstallSheet, PACK_SHEET_UNAVAILABLE } from '@/services/pack-install-sheet'
 // 音源账号登录态注入：import 即注册「meta 装载成功」钩子（服务模块级副作用）
 // + 凭据轮换/后台保活（启动 20s 首检 + 每次回前台 24h 节流，见 services/source-auth.ts）
@@ -391,23 +391,30 @@ onError((err: any) => {
 // 所以这里注册不了全局拒绝钩子——拒绝值只能由各调用点自己 catch 后 logError，
 // services 里的关键链路（http / 音源 / 下载 / 更新）都按这个约定处理。
 
-/** 启动时检查通知栏权限，未授权则弹系统授权框，并说明用途 */
+/** 启动时检查通知栏权限，未授权则弹系统授权框，并说明用途。
+ *  走启动弹窗队列（优先级介于播放包引导与电池引导之间）：首启时间线上
+ *  免责声明/公告/系统授权框各自异步冒出，qtConfirm 单槽互顶（2026-10-27
+ *  用户反馈「首次启动弹窗通知重叠」的另一半根源），直弹会顶掉/被顶掉。 */
 function checkNotificationPermission(): void {
-  ensureNotificationPermission().then((granted) => {
-    if (granted) return
-    // 拒绝或未授权：说明用途，避免用户不理解为何需要此权限
-    qtConfirm({
-      title: '开启通知权限',
-      content: '为了在后台播放时也能显示歌曲信息与播放控制，需要开启「通知」权限。\n是否前往系统设置开启？',
-      confirmText: '去设置',
-      cancelText: '暂不',
-      danger: true,
-    }).then((ok) => {
-      if (!ok) return
-      const opened = openNotificationSettings()
-      if (!opened) {
-        qtShowToast({ title: '无法打开设置页，请手动在系统设置中开启', icon: 'none' })
-      }
+  enqueueBootModal('notification-permission', BOOT_MODAL_PRIORITY_NOTIFICATION, () => {
+    return ensureNotificationPermission().then((granted) => {
+      if (granted) return
+      // 拒绝或未授权：说明用途，避免用户不理解为何需要此权限
+      return qtConfirm({
+        title: '开启通知权限',
+        content: '为了在后台播放时也能显示歌曲信息与播放控制，需要开启「通知」权限。\n是否前往系统设置开启？',
+        confirmText: '去设置',
+        cancelText: '暂不',
+        danger: true,
+      }).then((ok) => {
+        if (!ok) return
+        const opened = openNotificationSettings()
+        if (!opened) {
+          qtShowToast({ title: '无法打开设置页，请手动在系统设置中开启', icon: 'none' })
+        }
+      })
+    }).catch(() => {
+      // 引导链路意外失败不外抛：队列侧虽会兜底 settle，这里吞掉避免未处理拒绝
     })
   })
 }

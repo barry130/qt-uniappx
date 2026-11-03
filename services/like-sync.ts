@@ -22,6 +22,23 @@ const LIKE_CURSOR_KEY = "qt-like-cursor";
 const LIKE_OPS_KEY = "qt-like-pending-ops";
 /** 收藏批量推送的单批上限（与后端 /like/batch 的 200 对齐，qt-stat 分片同款先例） */
 const LIKE_BATCH_LIMIT = 200;
+/**
+ * 单条隔离重推的失败上限：探针证明网络通、单条仍连续失败这么多次，
+ * 就认定为服务端不收的毒丸数据，剔除并记日志（2026-11-03 加）。
+ * 取 3：一次失败可能是偶发，两次仍在概率上基本排除抖动，三次才动数据。
+ */
+const LIKE_POISON_FAIL_LIMIT = 3;
+
+/**
+ * 这个封面地址能不能同步给服务端。
+ *
+ * 只认 http(s)：本地歌的内嵌封面落在设备私有目录（unifile://usr/local-cover-*.jpg），
+ * 推到服务端后别的设备/网页端只会拿到一条打不开的路径（2026-11-03 加）。
+ */
+function portablePicUrl(url: string): boolean {
+  const lower = url.toLowerCase();
+  return lower.indexOf("http://") == 0 || lower.indexOf("https://") == 0;
+}
 
 export class LikeSyncEngine {
   private host: PlayerStore;
@@ -117,8 +134,12 @@ export class LikeSyncEngine {
     };
     if (song.musicId != null && song.musicId.length > 0) obj["hash"] = song.musicId;
     if (pid != null && pid.length > 0) obj["pid"] = pid;
-    // 封面一并入 payload：在线收藏和离线重放共用，断网期间入队的收藏恢复后仍能带图
-    if (song.picUrl != null && song.picUrl.length > 0) obj["picUrl"] = song.picUrl;
+    // 封面一并入 payload：在线收藏和离线重放共用，断网期间入队的收藏恢复后仍能带图。
+    // 但**只同步网络缩略图**：本地歌的内嵌封面在私有目录里（unifile://usr/local-cover-*.jpg），
+    // 那种路径换台设备就是破图，推给服务端等于把脏数据写进数据库（2026-11-03）。
+    if (song.picUrl != null && song.picUrl.length > 0 && portablePicUrl(song.picUrl)) {
+      obj["picUrl"] = song.picUrl;
+    }
     return JSON.stringify(obj);
   }
 
@@ -131,13 +152,34 @@ export class LikeSyncEngine {
       platform: playlist.platform,
       name: playlist.name,
     };
-    if (playlist.picUrl != null && playlist.picUrl.length > 0) obj["picUrl"] = playlist.picUrl;
+    // 与歌曲侧同口径（portablePicUrl）：设备本地封面路径不上送，
+    // 否则旧脏数据会把 unifile://usr/... 写进服务端歌单表（2026-11-03）
+    if (playlist.picUrl != null && playlist.picUrl.length > 0 && portablePicUrl(playlist.picUrl)) {
+      obj["picUrl"] = playlist.picUrl;
+    }
     return JSON.stringify(obj);
   }
 
   /** 本地变更入队并尝试推送（断网暂存，联网后自动补推） */
   enqueueLikeOp(op: PendingLikeOp): void {
     this.pendingOps.push(op);
+    this.save();
+    this.flushPendingOps().catch(() => {});
+  }
+
+  /**
+   * 批量入队（导入/移除歌单场景）：一次落盘一次推送。
+   * 逐条 enqueueLikeOp 会 save×N、flush×N（flush 被 busy 标记拦住大半，
+   * 但 save 每条都要序列化整个队列），导入几百首时纯属放大开销；
+   * 更要紧的是保持整批入队的**顺序可见性**——全部入队后再推，
+   * 拉取合并的 hasPendingLikeOp 判断一次就能覆盖整批。
+   */
+  enqueueLikeOps(ops: PendingLikeOp[]): void {
+    if (ops.length == 0) return;
+    for (let i = 0; i < ops.length; i++) {
+      const op = ops[i];
+      if (op != null) this.pendingOps.push(op);
+    }
     this.save();
     this.flushPendingOps().catch(() => {});
   }
@@ -228,23 +270,84 @@ export class LikeSyncEngine {
         logMsg("[Player] 收藏批量推送成功 " + batch.length + " 条 seq=" + seq);
       } catch (e) {
         logMsg("[Player] 收藏批量推送失败 " + batch.length + " 条 err=" + (e != null ? e.toString() : "unknown"));
+        // 整批留队保序重放是断网场景的正解；但若失败来自某条服务端不收的数据，
+        // 毒丸会永久堵住队首（游标停摆、defer 拉取死循环）——交给毒丸隔离判定：
+        // 探针证明网络通才拆批单发隔离，网络不通什么都不动（绝不丢数据）
+        await this.isolatePoisonOps(batch, bodies);
         return;
       }
-      // 成功：整批出队并盖章。本批占用连续 seq 区段，统一盖整批最大 seq
-      // 不会误判 LWW（其他端这期间的变更 seq 必然更大）
-      for (let i = 0; i < batch.length; i++) {
-        const idx = this.pendingOps.indexOf(batch[i]);
-        if (idx >= 0) this.pendingOps.splice(idx, 1);
+      // 成功：整批出队并盖章
+      this.retireOps(batch, seq);
+    }
+  }
+
+  /**
+   * 一批操作成功上送后的收尾：整批出队并盖章。本批占用连续 seq 区段，
+   * 统一盖整批最大 seq 不会误判 LWW（其他端这期间的变更 seq 必然更大）。
+   * 从整批成功路径抽出（2026-11-03），单条隔离重推成功后复用同一口径。
+   */
+  private retireOps(batch: PendingLikeOp[], seq: number): void {
+    for (let i = 0; i < batch.length; i++) {
+      const idx = this.pendingOps.indexOf(batch[i]);
+      if (idx >= 0) this.pendingOps.splice(idx, 1);
+    }
+    for (let i = 0; i < batch.length; i++) {
+      const op = batch[i];
+      if (op.action == "add") {
+        if (op.type == "song") this.markSongLikedSeq(op.dataJson, seq);
+        else this.markPlaylistLikedSeq(op.dataJson, seq);
       }
-      for (let i = 0; i < batch.length; i++) {
-        const op = batch[i];
-        if (op.action == "add") {
-          if (op.type == "song") this.markSongLikedSeq(op.dataJson, seq);
-          else this.markPlaylistLikedSeq(op.dataJson, seq);
+    }
+    if (seq > this.likeCursor) this.likeCursor = seq;
+    this.save();
+  }
+
+  /**
+   * 批量推送失败后的毒丸隔离（2026-11-03 加）。
+   *
+   * 背景：/like/batch 整批原子，一条服务端不收的 op 会让整批永远失败，
+   * 队列堵在队首、游标停摆、isDeferredLikeChange 的 defer 拉取死循环。
+   *
+   * 判定分两级，保守优先：
+   * 1. 先发一次增量拉取当**探针**——它和 /like/batch 同令牌同网络，
+   *    探针都失败说明是网络/鉴权问题，整批原样留队重放（不丢数据，直接返回）；
+   * 2. 探针通过后把整批拆成单条逐个推：成功的单条立即出队盖章，
+   *    失败的单条累计 failCount，连续失败 LIKE_POISON_FAIL_LIMIT 次才剔除。
+   *    剔除是最后手段——扔掉的是「服务器明确拒绝过的数据」，不是用户输入本身，
+   *    本地收藏表里的记录不受影响，只是这条变更不再上送。
+   */
+  private async isolatePoisonOps(batch: PendingLikeOp[], bodies: string[]): Promise<void> {
+    let probeOk = false;
+    try {
+      const probe = await fetchChanges(this.likeCursor);
+      probeOk = probe != null;
+    } catch (_) {
+      probeOk = false;
+    }
+    if (!probeOk) return;
+    logMsg("[Player] 收藏批量推送失败但网络探针通过，拆批单发隔离毒丸 " + batch.length + " 条");
+    for (let i = 0; i < batch.length; i++) {
+      const op = batch[i];
+      const body = bodies[i];
+      if (op == null || body == null) continue;
+      let singleSeq = 0;
+      try {
+        singleSeq = await likeBatch([body]);
+      } catch (_) {
+        const fails = (op.failCount != null ? op.failCount : 0) + 1;
+        op.failCount = fails;
+        if (fails >= LIKE_POISON_FAIL_LIMIT) {
+          const idx = this.pendingOps.indexOf(op);
+          if (idx >= 0) this.pendingOps.splice(idx, 1);
+          this.save();
+          logMsg("[Player] 收藏推送剔除毒丸条目 type=" + op.type + " action=" + op.action + " 连续失败 " + fails + " 次 dataJson=" + op.dataJson);
+        } else {
+          logMsg("[Player] 收藏单条重推失败 " + fails + "/" + LIKE_POISON_FAIL_LIMIT + " type=" + op.type + " action=" + op.action);
         }
+        continue;
       }
-      if (seq > this.likeCursor) this.likeCursor = seq;
-      this.save();
+      this.retireOps([op], singleSeq);
+      logMsg("[Player] 收藏单条重推成功 type=" + op.type + " action=" + op.action + " seq=" + singleSeq);
     }
   }
 
@@ -294,10 +397,11 @@ export class LikeSyncEngine {
       if (songPid != null && songPid.length > 0 && songPid.length <= 64) {
         body["pid"] = songPid;
       }
-      // 封面仅 add 且非空时上送（remove 没有图片语义，空值不上送避免覆盖云端已有图）
+      // 封面仅 add 且非空时上送（remove 没有图片语义，空值不上送避免覆盖云端已有图）。
+      // portablePicUrl：存量队列里可能残留修复前入队的设备本地路径，重建时一并拦下
       if (op.action == "add") {
         const picUrl = obj["picUrl"] as string | null;
-        if (picUrl != null && picUrl.length > 0) body["picUrl"] = picUrl;
+        if (picUrl != null && picUrl.length > 0 && portablePicUrl(picUrl)) body["picUrl"] = picUrl;
       }
       return JSON.stringify(body);
     }
@@ -319,7 +423,8 @@ export class LikeSyncEngine {
     if (name != null && name.length > 0) body["name"] = name;
     if (op.action == "add") {
       const picUrl = obj["picUrl"] as string | null;
-      if (picUrl != null && picUrl.length > 0) body["picUrl"] = picUrl;
+      // 与歌曲侧同口径（portablePicUrl）：设备本地路径不上送
+      if (picUrl != null && picUrl.length > 0 && portablePicUrl(picUrl)) body["picUrl"] = picUrl;
     }
     return JSON.stringify(body);
   }
@@ -730,7 +835,10 @@ export class LikeSyncEngine {
         }
       }
       const localSeq = local.likeSeq != null ? local.likeSeq! : 0;
-      if (this.hasPendingLikeOp("song", local.id, local.platform) || localSeq > serverSeq) {
+      // 本地歌不上服务器（buildLikeOpBodyJson 对 platform=="local" 返回 null，
+      // 服务器永远没有它的记录），按 pending/seq 判定必然双双落空 → 无条件保留。
+      // 否则换设备登录触发一次全量拉取，收藏总表里的本地歌就被整批清掉（2026-11-03）。
+      if (local.platform == "local" || this.hasPendingLikeOp("song", local.id, local.platform) || localSeq > serverSeq) {
         if (foundIdx >= 0) mergedSongs[foundIdx] = local;
         else mergedSongs.push(local);
       }

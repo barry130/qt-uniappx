@@ -365,7 +365,9 @@ function migrateStaleQualities(): void {
       ids = src.qualities;
     }
     if (ids.length == 0) continue;
-    const highest = ids[ids.length - 1];
+    // 最高档不能拿数组末位当：包侧 qualities 顺序高→低、低→高都存在，
+    // 按 musicApi 的全局档位基准序取排名最大的（2026-11-03 审阅 R2）。
+    const highest = musicApi.highestQualityOf(ids);
     const dlEff = sourceDownloadQualityOf(src.id, downloads.downloadQuality);
     // 播放缺省跟随下载音质（两处口径必须一致，否则校验会把播放档位误改成最高档）
     const playEff = sourcePlayQualityOf(src.id, dlEff);

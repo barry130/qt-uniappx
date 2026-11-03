@@ -475,22 +475,54 @@ export function deleteLocalMedia(items: LocalAudioItem[]): DeleteLocalMediaResul
  *
  * 下载文件都是本应用写入的：公共下载目录（Download/QtDownload/Music）在下载时已持有
  * READ_WRITE_DOWNLOAD_DIRECTORY，私有目录文件本就无限制，因此直接 unlinkSync 即可，
- * 不需要再走权限申请。路径可能是 file:// 前缀（与 saveToPublicMedia 同规则，剥掉再删）。
+ * 不需要再走权限申请。路径形态两头兼容：file://docs/... 沙盒 URI 按原串走
+ * （fileIo 直接认，见 probeVisiblePath），tempFilePath 那种 file:// 绝对路径剥前缀。
  * 权限被用户事后在系统设置里撤回时，公共目录文件会删失败，计入 failed 由调用方提示。
  */
+/**
+ * 在 fileIo 眼里探路：原串可见就原样返回；不可见且带 file:// 前缀时，再试剥掉
+ * 前缀的普通路径形态。两种形态都探不到返回空串。
+ *
+ * 为什么必须先按原串探：fileIo 对 file://docs/... 这类沙盒 URI 是**直接认的**
+ * （见 statLocalFile 注释与 readUriBytes 的 openSync 用法），而 saveToCustomDir
+ * 返回给调用方的就是这种 URI。旧代码一律先剥 file:// —— 沙盒 URI 剥完变成
+ * 「docs/storage/...」这种相对串，accessSync 永远探不到，删除/读取整条空转。
+ * 反过来 uni.downloadFile 的 tempFilePath（file:///data/... 绝对路径带前缀）
+ * 必须剥了才认，所以剥掉的动作保留为第二形态兜底，两头兼容。
+ */
+function probeVisiblePath(p: string): string {
+  if (p == null || p.length == 0) return '';
+  try {
+    if (fileIo.accessSync(p)) return p;
+  } catch (e) {
+    // 静默：accessSync 在路径不可见时会抛，探不到按不可见处理、走下一形态
+  }
+  if (p.indexOf('file://') == 0) {
+    const stripped = p.substring(7);
+    try {
+      if (fileIo.accessSync(stripped)) return stripped;
+    } catch (e2) {
+      // 静默：同上——剥掉 file:// 前缀后仍探不到，返回空串由调用方降级
+    }
+  }
+  return '';
+}
+
 export function deleteMediaByPath(paths: string[]): DeleteLocalMediaResult {
   const result: DeleteLocalMediaResult = { deleted: 0, pending: 0, failed: 0 } as DeleteLocalMediaResult;
   for (let i = 0; i < paths.length; i++) {
-    let p = paths[i];
+    const p = paths[i];
     if (p == null || p.length == 0) {
       result.failed++;
       continue;
     }
-    if (p.indexOf('file://') == 0) p = p.substring(7);
+    const target = probeVisiblePath(p);
     try {
-      if (fileIo.accessSync(p)) {
-        fileIo.unlinkSync(p);
+      if (target.length > 0) {
+        fileIo.unlinkSync(target);
       }
+      // 探不到（文件已被外部删掉，或 URI 授权过期）按已删计：调用方把 failed
+      // 当错误弹给用户，「本来就没有」不该报错
       result.deleted++;
     } catch (e) {
       console.log('[AppNative] 按路径删除失败 ' + p + ': ' + (e != null ? e.toString() : 'unknown'));
@@ -1081,8 +1113,13 @@ function embedAudioTagsSync(audioTempPath: string, opts: EmbedTagsOptions): stri
 
 // ==================== 内嵌标签读取侧（与 embedAudioTags 写入侧对偶） ====================
 
-/** 上一次写出的封面缓存文件路径：重复读取先删它，避免 cache 目录堆积 */
-let lastCoverCachePath = '';
+/**
+ * 封面缓存文件的环形保留队列（最多 24 个 = player.embeddedCache 的条目上限，
+ * 与 Android 侧同款）。每写新文件把队首最老的删掉；不能只删「上一张」——
+ * 24 条缓存记忆里随时可能有歌曲还指着更早的文件，单删会让缓存命中的歌丢封面。
+ */
+const coverCacheKeep = 24;
+const coverCachePaths: string[] = [];
 
 /** 封面缓存自增序号：与 Date.now() 一起构成唯一文件名，防同毫秒覆盖 */
 let coverCacheSeq = 0;
@@ -1090,13 +1127,14 @@ let coverCacheSeq = 0;
 /** 封面字节 → cache 目录缓存文件，返回绝对路径（失败返回空串，调用方按无封面走） */
 function writeCoverCache(bytes: Uint8Array, mime: string): string {
   try {
-    if (lastCoverCachePath.length > 0) {
+    while (coverCachePaths.length >= coverCacheKeep) {
+      const oldest = coverCachePaths.shift();
+      if (oldest == null) continue;
       try {
-        fileIo.unlinkSync(lastCoverCachePath);
+        fileIo.unlinkSync(oldest);
       } catch (e1) {
         // 静默：旧封面缓存删除失败不阻塞新缓存写出
       }
-      lastCoverCachePath = '';
     }
     const ctx = UTSHarmony.getUIAbilityContext() as common.UIAbilityContext;
     if (ctx == null) return '';
@@ -1111,7 +1149,7 @@ function writeCoverCache(bytes: Uint8Array, mime: string): string {
     } finally {
       fileIo.closeSync(out);
     }
-    lastCoverCachePath = path;
+    coverCachePaths.push(path);
     return path;
   } catch (e) {
     console.log('[AppNative] writeCoverCache 失败: ' + (e != null ? e.toString() : 'unknown'));
@@ -1120,8 +1158,9 @@ function writeCoverCache(bytes: Uint8Array, mime: string): string {
 }
 
 function readEmbeddedTagsSync(filePath: string): EmbeddedReadResult | null {
-  let src = filePath;
-  if (src.indexOf('file://') == 0) src = src.substring(7);
+  // 先探路再读：file://docs/... 沙盒 URI（自定义下载目录形态）必须按原串走，
+  // 旧写法上来就剥 file:// → accessSync 永远探不到 → 内嵌封面/歌词整条链路空转
+  const src = probeVisiblePath(filePath);
   if (src.length == 0) return null;
   try {
     if (!fileIo.accessSync(src)) return null;

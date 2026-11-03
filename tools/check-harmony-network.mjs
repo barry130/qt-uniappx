@@ -49,7 +49,7 @@ const httpCode = executable(httpSource);
 const authCode = executable(source('services/auth.ts'));
 const updateCode = executable(
   constants(updateSource, ['HOST_API_VERSION', 'MANIFEST_TIMEOUT_MS', 'PROBE_TIMEOUT_MS', 'PROBE_RANGE_BYTES', 'DOWNLOAD_TIMEOUT_MS']) + '\n' +
-  functions(updateSource, ['requestJson', 'fetchManifest', 'probePackHeader', 'probeRangeText', 'manifestFromJson', 'releaseFromJson', 'strOf', 'numOf', 'boolOfDefault', 'downloadTextFollowHop', 'downloadTextOnce', 'downloadToTemp', 'extractHopLink', 'isSecurePackLink']),
+  functions(updateSource, ['requestJson', 'bodyOf', 'fetchManifest', 'probePackHeader', 'probeRangeText', 'manifestFromJson', 'releaseFromJson', 'strOf', 'numOf', 'boolOfDefault', 'downloadTextFollowHop', 'downloadTextOnce', 'downloadToTemp', 'extractHopLink', 'isSecurePackLink']),
 );
 const statCode = executable(
   constants(statSource, ['QUEUE_KEY', 'MAX_RETRY', 'SERVER_BATCH_LIMIT', 'REQUEST_TIMEOUT']) + '\n' +

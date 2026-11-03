@@ -211,8 +211,10 @@
         :key="song.platform + ':' + song.id"
         :id="'s-' + index"
         class="song-item" :class="layout.isWide ? 'song-item-wide' : ''"
-        @click="onRowTap(song)"
       >
+        <!-- 行点击完全交给组件自己（@play / @select），宿主不在这层 list-item 上
+             再绑 @click：双层处理一次点击会把 play 触发两遍（组件发一次、冒泡到
+             list-item 再来一次，pushTimeline/统计翻倍），daily 页同款口径 -->
         <qt-song-row-lite :song="song" :use-picker="true" :selecting="selecting" :selected="isSelected(qtSongKey(song))" @play="play(song)" @more="openSheet" @pick="onPick" @select="onRowSelect(song)" />
       </list-item>
       </sticky-section>
@@ -791,16 +793,6 @@ function enqueueAll(): void {
 }
 
 // ---------- 批量选择 ----------
-/**
- * 行点击：选择态下必须早退。
- * `qt-song-row-lite` 内部整行点击在 selecting 时会 emit('select')，而这次点击同时
- * 也会冒泡到 list-item 的 @click —— 两处都处理的话一次点击会「勾上又播放」。
- */
-function onRowTap(song: Song): void {
-  if (selecting.value) return;
-  play(song);
-}
-
 /** 行内勾选（组件 @select，含点中勾选框本身） */
 function onRowSelect(song: Song): void {
   toggleSelect(qtSongKey(song));

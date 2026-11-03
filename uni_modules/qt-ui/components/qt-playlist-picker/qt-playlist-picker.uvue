@@ -4,7 +4,7 @@
       <view v-for="(playlist, index) in playlists" :key="playlist.id" :id="itemId(index)">
         <QtOption :label="playlist.name" kind="row" :selected="isSelected(playlist.id)" @select="togglePlaylist(playlist)">
           <template #leading>
-            <image v-if="playlist.picUrl" class="picker-cover" :class="layout.isWide ? 'picker-cover-wide' : ''" :src="playlist.picUrl" mode="aspectFill" />
+            <image v-if="playlist.picUrl && !failedCovers.has(playlist.id)" class="picker-cover" :class="layout.isWide ? 'picker-cover-wide' : ''" :src="playlist.picUrl" mode="aspectFill" @error="onCoverError(playlist.id)" />
             <view v-else class="picker-cover picker-placeholder" :class="layout.isWide ? 'picker-cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'">
               <text :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(32, 16)">{{ playlist.name.charAt(0) }}</text>
             </view>
@@ -58,6 +58,11 @@ const layout = useQtLayout();
 const theme = useThemeStore();
 const selectedPlaylistIds = ref<string[]>([...props.selectedIds]);
 const newName = ref("");
+/** 封面地址加载失败的歌单 id：失败后回落首字占位（口径同 qt-local-mixes onCoverError） */
+const failedCovers = ref<Set<string>>(new Set());
+function onCoverError(id: string): void {
+  failedCovers.value.add(id);
+}
 const externalSelectionKey = computed((): string => JSON.stringify(props.selectedIds));
 const playlistKey = computed((): string => JSON.stringify(props.playlists.map((playlist: Playlist): string => playlist.id + ":" + playlist.name + ":" + playlist.picUrl)));
 const revealIndex = ref(-1);

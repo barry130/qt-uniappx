@@ -44,13 +44,31 @@ function takeSongs(rows: ListenSong[]): Song[] {
   return out;
 }
 
+/** 与 stores/player.ts 的 coverSrcUsable 同口径（2026-11-03 审阅 R6）：
+ * 只有 http(s)/unifile/content/data:// 或 /static/ 形状才值得绑给 image；
+ * 老版本落进 picUrl 的裸绝对路径在真机上静默失败，组件的 onCoverError
+ * 都拦不住，卡面会出现空白格。这里不 import player（services 不反向
+ * 依赖 stores），两处改口径时保持同步。
+ */
+function coverSrcUsable(path: string): boolean {
+  if (path == null || path.length == 0) return false;
+  const lower = path.toLowerCase();
+  if (lower.indexOf("http://") == 0 || lower.indexOf("https://") == 0) return true;
+  if (lower.indexOf("unifile://") == 0) return true;
+  if (lower.indexOf("content://") == 0) return true;
+  if (lower.indexOf("data:") == 0) return true;
+  if (path.indexOf("/static/") == 0) return true;
+  return false;
+}
+
 function finish(key: LocalMixKey, title: string, subtitle: string, rows: ListenSong[]): LocalMix | null {
   if (rows.length < MIN_SONGS) return null;
   const songs = takeSongs(rows);
   const coverUrls: string[] = [];
   // 卡面是 2×2 的四格拼贴，收满 4 张才够铺；不足时组件按缺省图标补位。
+  // 裸路径死链直接跳过（见 coverSrcUsable），后面的歌顶上，不留空白格。
   for (let i = 0; i < songs.length && coverUrls.length < 4; i++) {
-    if (songs[i].picUrl.length > 0) coverUrls.push(songs[i].picUrl);
+    if (coverSrcUsable(songs[i].picUrl)) coverUrls.push(songs[i].picUrl);
   }
   return { key, title, subtitle, coverUrls, songs };
 }

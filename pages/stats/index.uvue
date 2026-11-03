@@ -511,6 +511,11 @@ function openDailyRow(entry: ReportEntry): void { openDetail(dailyKind.value, en
 // 这三个切换点都要写在模板里能取到的地方（<script setup> 顶层即可）。
 function pickDailyKind(kind: string): void { dailyKind.value = kind; dailyKinds.value[dailyIndex.value] = kind; }
 
+// R9-D：dailyKinds 是「每个日/周/月档位各自记住的子类」，pickDailyKind 只在用户点
+// 子类分段器时写入。切档（dailyIndex 变化）从不读回，导致每档记住的选择永远沉默——
+// 用户上周挑过「常听歌手」，这周再点周榜还是从头显示「最常播放」。这里补上回读。
+watch(dailyIndex, () => { dailyKind.value = dailyKinds.value[dailyIndex.value]; });
+
 /**
  * 日榜里的歌手头像。
  *

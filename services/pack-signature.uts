@@ -60,7 +60,23 @@ export function splitSignatureBlock(text: string): { content: string; sig: strin
     const info = JSON.parse(json) as UTSJSONObject;
     const sig = info.get("sig");
     if (sig != null) {
-      return { content: text.substring(0, pos), sig: `${sig}` };
+      const sigText = `${sig}`;
+      // sig 会原样内插进验签表达式的字符串字面量（见 verifyOfficialSignature），
+      // 是**攻击面**：夹带 `"));return "qt:ok"...` 之类的值能提前返回伪造通过。
+      // Ed25519 签名 base64 编码后天然只含字母数字 + / =（2026-11-03）：
+      // 出现字母表以外任何一个字符 = 有人在 sig 里夹代码，直接判无签名。
+      for (let i = 0; i < sigText.length; i++) {
+        const c = sigText.charCodeAt(i);
+        const isB64 =
+          (c >= 65 && c <= 90) ||
+          (c >= 97 && c <= 122) ||
+          (c >= 48 && c <= 57) ||
+          c == 43 ||
+          c == 47 ||
+          c == 61;
+        if (!isB64) return { content: text, sig: "" };
+      }
+      return { content: text.substring(0, pos), sig: sigText };
     }
     return { content: text, sig: "" };
   } catch (e) {
@@ -73,7 +89,9 @@ export function splitSignatureBlock(text: string): { content: string; sig: strin
  * \\、"、' 与控制字符 → C 风格转义；其余非 ASCII codeUnit → \uXXXX。
  * 代入点在本文件的验签表达式（分块送验时每块独立转义，先切块后转义，
  * \uXXXX 不可能被从中间切断），包内容里任何中文/引号/反斜杠都会被
- * 无歧义转义，不存在注入面。
+ * 无歧义转义。sig 代入点同样过本函数（2026-11-03：此前 sig 是唯一
+ * 原样内插的代入点，构成注入面——splitSignatureBlock 已加 base64
+ * 字母表过滤，这里再转义一次双保险）。
  */
 export function escapeJsAscii(text: string): string {
   const parts: string[] = [];
@@ -235,7 +253,7 @@ export async function verifyOfficialSignature(text: string): Promise<PackSignChe
       "var sm=" +
       b64ToBytes +
       "(atob(\"" +
-      parts.sig +
+      escapeJsAscii(parts.sig) +
       "\"));" +
       "if(sm.length!==64)return String(\"qt:err:siglen\");" +
       "function hb(s){var a=new Uint8Array(s.length/2);for(var i=0;i<s.length;i+=2){a[i>>1]=parseInt(s.substr(i,2),16)}return a}" +

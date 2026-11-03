@@ -894,6 +894,11 @@ class DesktopLyricService {
       }
     } catch (e) {
       qtDiag("[QT Lyric] 桌面歌词取词异常：" + (e != null ? e.toString() : ""));
+      // 认领必须随失败一起释放：loadedKey 是在 try 之前先占上的，异常不清的话，
+      // 本曲后续所有触发（重播/换来源）都在入口被 `key == loadedKey` 短路掉，
+      // 一次瞬时的取词异常就让这首歌直到切走为止都停在「暂无歌词」
+      // （2026-11-03 审阅 R4）。
+      this.loadedKey = "";
       if (this.active && this.currentSongKey() == key && this.lyricEpoch == epoch) {
         this.lines = [];
         this.lastLineIndex = -2;

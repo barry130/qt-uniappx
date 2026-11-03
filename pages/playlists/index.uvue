@@ -739,7 +739,9 @@ async function loadMore(): Promise<void> {
     if (added == 0) hasMore.value = false;
   } catch (error) {
     logMsgErr("[QT Music Playlists More] " + sourceStore.current + " p" + page.value, error);
-    qtShowToast({ title: "加载更多失败，请重试", icon: "none" });
+    // R8：晚到的旧请求失败不弹 toast —— 在途切分类/切音源后，旧页的报错会
+    // 盖在新列表上误导用户「新列表也失败了」；日志照记供诊断
+    if (seq === loadSeq) qtShowToast({ title: "加载更多失败，请重试", icon: "none" });
   } finally {
     loadingMore.value = false;
   }

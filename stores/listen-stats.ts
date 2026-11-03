@@ -1160,6 +1160,10 @@ class ListenStatsStore {
     this.trackingSince = this.resetAt;
     this.songs = [];
     this.clearDays();
+    // 用户主动清空 = 连备份一起清：日/周/月榜会从归档分片恢复，
+    // 只清主存档的话，下次启动 loadArchivedThrough 会读回旧水位，
+    // 已清掉的天数又从备份分片里复活（2026-11-03 审阅 R2）。
+    await this.clearArchives();
     // 用户主动清空后统计已经归零，没有「没有日期的旧数据」再需要初始化了，
     // 保持标记为真，避免下次启动又把空的累计值当成当天数据补一遍。
     this.daysSeeded = true;
@@ -1170,6 +1174,28 @@ class ListenStatsStore {
     this.avatarAttempts.clear();
     this.dirty = true;
     await this.flush();
+  }
+
+  /** 清空统计时把备份分片、归档索引与水位一并清掉。
+   *
+   * 只清主存档不清备份的话：下次启动 loadArchivedThrough 读回旧水位，
+   * 日/周/月榜又把已清空的天数从备份分片里拼回来，「清除统计」等于没清。
+   * 分片编号是连续的，删除沿用 commitArchive 的「删失败即止」惯例；
+   * 失败只影响下次启动多读几片旧数据，不阻塞清空主流程。
+   */
+  private async clearArchives(): Promise<void> {
+    this.archivedThrough = "";
+    this.discarded = true;
+    if (!canUseListenStatsArchive()) return;
+    try {
+      await removeListenStatsArchive(0);
+      for (let i = 1; i <= ARCHIVE_PART_LIMIT; i++) {
+        if (!await removeListenStatsArchive(i)) break;
+      }
+      await removeListenStatsArchiveIndex();
+    } catch (_) {
+      // 静默：备份清不掉只多占几片旧文件，下次 clear/轮转还会再试。
+    }
   }
 
   async recordPlay(song: Song): Promise<void> {
@@ -1197,6 +1223,8 @@ class ListenStatsStore {
     const generation = this.generation;
     await this.load();
     if (generation != this.generation) return;
+    // 清空（clear()）后又来了新数据：解除归档暂停，瘦身恢复工作。
+    this.discarded = false;
     const row = this.row(song);
     row.song = copySong(song);
     row.seconds += seconds;

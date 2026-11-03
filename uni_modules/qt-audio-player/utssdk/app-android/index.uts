@@ -306,7 +306,10 @@ function nativeAudioCacheSize(): number {
 
 /** 手动清空音频磁盘缓存：先停播放（避免删除正在读取的分片），再释放缓存实例并删除目录与索引库，下次播放自动重建 */
 function nativeClearAudioCache(): boolean {
-  if (isPlaying()) nativeStop()
+  // R12-B：暂停态也持有已打开的缓存分片 fd——isPlaying() 只拦「正在播」，
+  // 暂停着去清缓存会删到打开中的文件、SimpleCache 索引与磁盘对不上账。
+  // 只要不是彻底 stop（播放器已释放）就先停，保证清空时没有在用的分片。
+  if (!isStopped()) nativeStop()
   releaseAudioCache()
   const context = getContext()
   if (context == null) return false
@@ -363,6 +366,11 @@ function isPlaying(): boolean {
   } catch (e) {
     return false
   }
+}
+
+/** 播放器是否已彻底停止（实例已释放）。清磁盘缓存前用它判断，暂停态不算停 */
+function isStopped(): boolean {
+  return gMediaPlayer == null
 }
 
 // ==================== 音频焦点（手动管理） ====================
@@ -1018,6 +1026,9 @@ export function audioSetPlaylist(items: AudioPlaylistItem[], startIndex: number,
   if (context == null) return
   // 整条重推 = 新一轮取址：清掉旧条目的解析记忆，refetch 流程才能拿到新地址
   gResolvedUrls.clear()
+  // R12-C：缓存 key 备忘表随解析记忆一起清——旧 mediaId 已不在新队列里，
+  // 残留条目只会让「提前结束」自愈路径误删无关条目的磁盘分片
+  gCacheKeyByMid.clear()
   // 整条重推也 = 车机歌词新一轮：setMediaItems 用 buildPlaylistMediaItem 重建全部条目，
   // 旧条目 extras 里的 LYRICS key 随之消失，同文本的下发必须放行（gCarLyricGen 见文末）
   gCarLyricGen++
@@ -2769,23 +2780,35 @@ class WidgetCoverRunnable implements Runnable {
   override run(): void {
     try {
       const connection = new URL(this.url).openConnection() as HttpURLConnection
-      connection.setConnectTimeout(5000)
-      connection.setReadTimeout(5000)
+      // R12-A：小部件封面是应用里唯一没走 DefaultHttpDataSource 的网络加载点——
+      // 裸 HttpURLConnection 不带 UA/Referer、不跟随跨协议重定向，图床挑 UA 或
+      // 302 到 http 时就拉不到图（通知栏同图能显示、小部件却一直是占位）。
+      // 这里对齐通知侧 coverHttpFactory 的口径：同一套 UA/Referer + 15s。
+      connection.setRequestProperty('User-Agent', UA_HEADER)
+      connection.setRequestProperty('Referer', REFERER)
+      connection.setConnectTimeout(15000)
+      connection.setReadTimeout(15000)
       connection.setDoInput(true)
+      connection.setInstanceFollowRedirects(true)
       connection.connect()
       const inputStream = connection.getInputStream()
-      const decoded = BitmapFactory.decodeStream(inputStream)
-      inputStream.close()
-      connection.disconnect()
-      if (decoded == null) return
-      let bmp = decoded
-      // 小部件封面只展示 42dp，超大图先缩，控制 RemoteViews 的 IPC 传输体积
-      if (bmp.getWidth() > 220 || bmp.getHeight() > 220) {
-        const h = Math.round((220.0 * bmp.getHeight()) / bmp.getWidth()).toInt()
-        const scaled = Bitmap.createScaledBitmap(bmp, 220, h, true)
-        if (scaled != null) bmp = scaled
+      try {
+        const decoded = BitmapFactory.decodeStream(inputStream)
+        if (decoded == null) return
+        let bmp = decoded
+        // 小部件封面只展示 42dp，超大图先缩，控制 RemoteViews 的 IPC 传输体积
+        if (bmp.getWidth() > 220 || bmp.getHeight() > 220) {
+          const h = Math.round((220.0 * bmp.getHeight()) / bmp.getWidth()).toInt()
+          const scaled = Bitmap.createScaledBitmap(bmp, 220, h, true)
+          if (scaled != null) bmp = scaled
+        }
+        getHandler().post(new WidgetApplyCoverRunnable(this.url, bmp))
+      } finally {
+        // R12-A：decodeStream 抛异常（非图/截断）时旧代码直接跳出 try，
+        // 流和连接都悬着直到 GC——循环下载封面时 fd 会攒
+        inputStream.close()
+        connection.disconnect()
       }
-      getHandler().post(new WidgetApplyCoverRunnable(this.url, bmp))
     } catch (e) {
       // 静默：下载/解码失败保持当前封面
     }

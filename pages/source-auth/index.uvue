@@ -308,7 +308,7 @@ import {
   autoSyncMissingAfterLogin,
   type AccountSyncRow,
 } from "@/services/source-playlist-sync";
-import { isHarmonyOs, saveImageToGallery } from "@/services/app-native";
+import { isAndroidOs, saveImageToGallery } from "@/services/app-native";
 import { WEB_LOGIN_DONE_EVENT } from "@/services/source-web-login";
 
 /**
@@ -410,7 +410,10 @@ const sourceCards = computed((): SourceCardRow[] => {
       nickname: entry != null ? entry.account.user.nickname : "",
       qr: auth != null && auth.methods.indexOf("qrcode") >= 0,
       cookie: auth != null && auth.methods.indexOf("cookie") >= 0,
-      web: auth != null && auth.webLogin != null && !isHarmonyOs(),
+      // R8：原生 WebView 取 cookie 只有安卓有实现（iOS 的 getWebCookies 恒空、
+      // 180s 超时死路；鸿蒙无实现）。按 isAndroidOs 显式判定（对齐 web-login:92），
+      // 不用排除法 —— 排除法会把 iOS 算成「有实现」给出一个必然超时的入口
+      web: auth != null && auth.webLogin != null && isAndroidOs(),
       // 短信/密码登录（v14 契约，目前只有酷我声明）：按 auth.methods 显隐
       sms: auth != null && auth.methods.indexOf("sms") >= 0,
       pwd: auth != null && auth.methods.indexOf("password") >= 0,

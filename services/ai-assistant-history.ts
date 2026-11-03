@@ -19,6 +19,7 @@
  */
 
 import type { AiBlock, AiChatMessage, AiConversation, AiMusicCandidate } from "@/types/ai";
+import { parseJsonToUtso } from "@/services/http";
 
 /** 本地历史存储键（与服务端会话完全分离，卸载重装/清缓存才会丢） */
 const LOCAL_HISTORY_KEY = "qt-ai-assistant.local";
@@ -62,8 +63,12 @@ function readRoot(): StoredRoot {
     if (typeof raw != "string") return empty;
     const text = raw as string;
     if (text.length == 0) return empty;
-    const parsed = JSON.parse(text) as any;
-    const convs = parsed != null ? (parsed.get("convs") as any) : null;
+    // 必须走 parseJsonToUtso：App 端 JSON.parse 的产物是普通对象、没有 .get
+    //（见 services/http.ts 的 parseJsonToUtso 与 ttl-store.ts 同款说明），
+    // 旧写法第一句就抛异常 → 每次读历史都按「空」处理，而写路径整 root 覆盖，
+    // 存量会话就这样被一轮一轮销毁（2026-11-03）
+    const parsed = parseJsonToUtso(text);
+    const convs = parsed.get("convs");
     if (convs == null) return empty;
     const arr = convs as any[];
     if (!Array.isArray(arr)) return empty;

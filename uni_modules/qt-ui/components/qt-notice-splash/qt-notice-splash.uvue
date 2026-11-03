@@ -1,8 +1,8 @@
 <template>
-  <view v-if="notice != null" class="nts-mask" @click="onMaskTap">
+  <view v-if="notice != null" class="nts-mask" :style="maskStyle" @click="onMaskTap">
     <view class="nts-card" :class="layout.isWide ? 'nts-card-wide' : ''" :style="cardStyle" @click.stop>
       <view v-if="hasTitle" class="nts-title-wrap" :class="layout.isWide ? 'nts-title-wrap-wide' : ''">
-        <text class="nts-title" :class="layout.isWide ? 'nts-title-wide' : ''" :style="qtFontDual(34, 20)">{{ notice!.title }}</text>
+        <text class="nts-title" :class="layout.isWide ? 'nts-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(34, 20)">{{ notice!.title }}</text>
       </view>
       <scroll-view
         v-if="hasContent"
@@ -13,7 +13,7 @@
       >
         <QtRichText
           :html="notice!.content ?? ''"
-          color="#737b8e"
+          :color="themeStore.skin.textMuted"
           :font-size="26"
           :line-height="1.7"
           align="left"
@@ -22,12 +22,12 @@
       <view class="nts-btn nts-btn-primary" :class="layout.isWide ? 'nts-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @click="onKnow">
         <text class="nts-btn-text-primary" :class="layout.isWide ? 'nts-btn-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(26, 15)">我知道了</text>
       </view>
-      <view v-if="hasJump" class="nts-btn nts-btn-secondary" :class="layout.isWide ? 'nts-btn-wide' : ''" @click="onJump">
-        <text class="nts-btn-text-secondary" :class="layout.isWide ? 'nts-btn-text-wide' : ''" :style="qtFontDual(24, 15)">点击跳转</text>
+      <view v-if="hasJump" class="nts-btn nts-btn-secondary" :class="layout.isWide ? 'nts-btn-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';'" @click="onJump">
+        <text class="nts-btn-text-secondary" :class="layout.isWide ? 'nts-btn-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 15)">点击跳转</text>
       </view>
       <view v-if="hasClose" class="nts-check-row" :class="layout.isWide ? 'nts-check-row-wide' : ''" @click.stop="toggleHideToday">
         <QtCheckbox :checked="hideToday" :size="layout.isWide ? 'sm' : 'md'" @change="onHideTodayChange" />
-        <text class="nts-check-text" :class="layout.isWide ? 'nts-check-text-wide' : ''" :style="qtFontDual(24, 13)">今天不显示</text>
+        <text class="nts-check-text" :class="layout.isWide ? 'nts-check-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13)">今天不显示</text>
       </view>
     </view>
   </view>
@@ -57,10 +57,14 @@ const themeStore = useThemeStore();
  * 560px 的卡片会把标题和按钮同时挤到屏幕外 —— 所以上限必须跟窗口高走。
  */
 const cardStyle = computed((): string => {
-  if (!layout.isWide) return "width:620rpx;";
+  const bg = "background-color:" + themeStore.skin.sheetSurface + ";";
+  if (!layout.isWide) return bg + "width:620rpx;";
   const maxH = Math.max(260, layout.windowHeight - 32); // 32 = 上下各 16 的呼吸位
-  return "width:" + qtSheetWidth("modal") + "px;max-height:" + maxH + "px;";
+  return bg + "width:" + qtSheetWidth("modal") + "px;max-height:" + maxH + "px;";
 });
+
+/** 遮罩底色随主题（浅色 0.52 / 深色 0.64 的 scrim，深色下纯黑遮罩太闷） */
+const maskStyle = computed((): string => "background-color:" + themeStore.skin.scrim + ";");
 
 /**
  * 正文区尺寸：宽屏给**确定高度**（scroll-view 在 Vapor 宽屏下 max-height 不保证形成可滚动区块，
@@ -139,7 +143,7 @@ watch(
   top: 0;
   right: 0;
   bottom: 0;
-  background-color: rgba(0, 0, 0, 0.55);
+  /* 底色走 maskStyle（skin.scrim），深浅主题不同透明度 */
   justify-content: center;
   align-items: center;
   z-index: 999;
@@ -148,7 +152,7 @@ watch(
   width: 620rpx;
   max-height: 1100rpx;
   border-radius: 32rpx;
-  background-color: #ffffff;
+  /* 底色走 cardStyle（skin.sheetSurface），深色下不再是一块刺眼的纯白 */
   padding: 40rpx 40rpx 32rpx;
   overflow: hidden;
 }
@@ -157,7 +161,7 @@ watch(
   align-items: center;
 }
 .nts-title {
-  color: #191d26;
+  /* 颜色走行内（skin.text） */
   font-size: 34rpx;
   font-weight: 700;
   line-height: 48rpx;
@@ -182,10 +186,10 @@ watch(
 }
 .nts-btn-secondary {
   margin-top: 16rpx;
-  background-color: #f2f3f7;
+  /* 底色走行内（skin.surfaceMuted） */
 }
 .nts-btn-text-secondary {
-  color: #737b8e;
+  /* 颜色走行内（skin.textMuted） */
   font-size: 24rpx;
 }
 .nts-check-row {
@@ -196,7 +200,7 @@ watch(
 }
 .nts-check-text {
   margin-left: 14rpx;
-  color: #737b8e;
+  /* 颜色走行内（skin.textMuted） */
   font-size: 24rpx;
 }
 

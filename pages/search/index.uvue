@@ -992,27 +992,33 @@ async function runAllSections(text: string, seq: number): Promise<void> {
   // 展示门重置：本次聚合结束（四节齐了）才放开，中途切换标签重进也不会半截展示
   allReady.value = false;
   const src = sourceStore.current as Source;
+  // R8：四节各自 .catch 收编是为了单节失败不拖垮其他节，但失败不能全吞 ——
+  // 四节皆空且有失败时置 searchFailed，否则「全部」视图的失败重试空态永远不出现
+  let failed = false;
   const songTask = runSearch(text, 1, seq)
-    .catch(() => {});
+    .catch(() => { failed = true; });
   const playlistTask = musicApi
     .searchPlaylists(text, src, 1, 10)
     .then((list) => {
       if (seq == searchSeq) playlists.value = uniquePlaylists(list);
     })
-    .catch(() => {});
+    .catch(() => { failed = true; });
   const artistTask = musicApi
     .searchArtists(text, src, 1, 10)
     .then((list) => {
       if (seq == searchSeq) artists.value = uniqueArtists(list);
     })
-    .catch(() => {});
+    .catch(() => { failed = true; });
   const albumTask = musicApi
     .searchAlbums(text, src, 1, 10)
     .then((list) => {
       if (seq == searchSeq) albums.value = uniqueAlbums(list);
     })
-    .catch(() => {});
+    .catch(() => { failed = true; });
   await Promise.all([songTask, playlistTask, artistTask, albumTask]);
+  if (seq == searchSeq && failed && songs.value.length == 0 && playlists.value.length == 0 && artists.value.length == 0 && albums.value.length == 0) {
+    searchFailed.value = true;
+  }
   if (seq == searchSeq) allReady.value = true;
 }
 async function loadMoreResults(): Promise<void> {

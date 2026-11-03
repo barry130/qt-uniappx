@@ -19,7 +19,7 @@
         <view class="wide-left">
           <view class="cover-card" :style="coverFadeStyle + wideCoverBoxStyle + 'background-color:' + theme.skin.mediaControl + ';border-color:' + theme.skin.mediaBorder + ';box-shadow:0 18px 46px ' + theme.skin.shadow + ';'">
             <view class="disc-spin">
-              <image v-if="art() != ''" class="cover-img" :style="wideCoverImageStyle + 'background-color:' + theme.skin.mediaControl + ';'" :src="art()" mode="aspectFill" />
+              <image v-if="art() != ''" class="cover-img" :style="wideCoverImageStyle + 'background-color:' + theme.skin.mediaControl + ';'" :src="art()" mode="aspectFill" @error="onArtError" />
               <view v-else class="cover-img cover-empty" :style="wideCoverImageStyle + 'background-color:' + theme.skin.mediaControl + ';'"><QtIcon name="music" :size="Math.floor(wideCoverSize / 4)" :color="theme.skin.mediaMuted" /></view>
             </view>
           </view>
@@ -137,7 +137,7 @@
           <view class="disc-plate" :style="portraitDiscPlateStyle" @click="onDiscTap" @longpress="previewCover">
             <view class="disc-spin" ref="discSpinRef" :style="discSpinStyle">
               <image class="turntable-record" src="/uni_modules/qt-ui/static/player-turntable/record.png" mode="aspectFit" />
-              <image v-if="art() != ''" class="disc-img-round" :style="portraitDiscImgStyle" :src="art()" mode="aspectFill" />
+              <image v-if="art() != ''" class="disc-img-round" :style="portraitDiscImgStyle" :src="art()" mode="aspectFill" @error="onArtError" />
               <view v-else class="disc-img-round disc-img-empty" :style="portraitDiscImgStyle + 'background-color:' + theme.skin.coverPlaceholder + ';'"><QtIcon name="music" :size="Math.floor(portraitTurntable.coverRpx * 0.25)" :color="playerMuted" /></view>
             </view>
           </view>
@@ -2155,10 +2155,36 @@ function updateLyricScroll(force: boolean): void {
 function back(): void {
   uni.navigateBack({});
 }
+/**
+ * 封面地址的二级降级开关：真机上个别机型对 `file://` 绝对路径不认，而对裸绝对
+ * 路径认（反向也有）。`@error` 里翻一次，`art()` 下次渲染换另一种写法再试。
+ */
+const artBareFallback = ref(false);
+// 记录降级针对的封面地址（按地址降级而非页面级：一次 file:// 失败不能
+// 把本会话后续所有本地封面都剥成裸路径）。art() 换了 src 就自动解除。
+let artBareKey = "";
+
 function art(): string {
   const current = player.current;
-  // 在播本地文件有内嵌封面就用它（coverOf 内部回落到 song.picUrl）
-  return current != null ? player.coverOf(current) : "";
+  // 在播本地文件有内嵌封面就用它（coverOf 内部回落到 song.picUrl，并把本地
+  // 绝对路径补成 file:// —— 裸路径喂给 <image> 在真机上是静默空白）
+  const src = current != null ? player.coverOf(current) : "";
+  if (artBareFallback.value && src.indexOf("file://") == 0 && src == artBareKey) return src.substring(7);
+  return src;
+}
+
+/** 封面加载失败：本地 file:// 路径退回裸绝对路径再试一次（只对该地址降一次） */
+function onArtError(_event: any): void {
+  const current = player.current;
+  if (current == null) return;
+  const src = player.coverOf(current);
+  if (src.indexOf("file://") != 0) return;
+  // 同一地址已降级过就到此为止（裸路径再失败也不死循环）；换新地址重新登记
+  if (artBareFallback.value && src == artBareKey) return;
+  // 按地址登记：切歌/换封面后新地址不受旧失败牵连（R7：原来是页面级
+  // 永久降级，一次失败后所有 file:// 封面都被剥前缀）
+  artBareKey = src;
+  artBareFallback.value = true;
 }
 function name(): string {
   const current = player.current;
@@ -2379,7 +2405,7 @@ function progThumbLeft(): number {
   const width = progTrackWidth();
   if (width <= 0) return 0;
   const fillPx = (displayProgress.value / d) * width;
-  const size = layout.isWide ? 14 : 16 * progUnit; // 16rpx 小圆点（m18202 细化，参考图极细进度条），宽屏 14px
+  const size = layout.isWide ? 20 : 16 * progUnit; // 16rpx 小圆点（m18202 细化，参考图极细进度条），宽屏对齐 .prog-thumb-wide 的 20px（R7：原脚本 14px 与 CSS 不一致，圆心偏移）
   // 两端夹紧，保证圆点始终在轨道内且圆心贴住填充终点
   return Math.max(0, Math.min(width - size, fillPx - size / 2));
 }
@@ -2624,15 +2650,29 @@ async function switchQuality(): Promise<void> {
       return;
     } catch (_) {
       // 如果当前平台不支持该音质，尝试从其他平台搜索替换
+      // R7：跨源兜底先快照——原实现就地覆写 current 八字段，任何一环失败都
+      // 不回滚，脏元数据（url=""、别人的 id/平台）留在 current 上随 persist
+      // 落盘；且下一轮搜索关键词被上一轮覆写污染。现在探测期改写、每轮
+      // 收尾还原，只有换源成功那一刻的写入保留。
+      const snapId = current.id;
+      const snapName = current.name;
+      const snapSinger = current.singer;
+      const snapAlbum = current.album;
+      const snapPic = current.picUrl;
+      const snapPlatform = current.platform;
+      const snapUrl = current.url != null ? current.url : "";
+      const snapMusicId = current.musicId != null ? current.musicId : "";
+      const snapDuration = current.duration;
       const others = SOURCES.value.filter((s) => s != current.platform);
       for (let i = 0; i < others.length; i++) {
         const target = others[i];
         try {
-          const keyword = current.name + " " + current.singer;
+          const keyword = snapName + " " + snapSinger;
           const results = await musicApi.search(keyword, target as any, "song", 1, 1);
           if (results.length > 0) {
             const picked = results[0];
-            // 保留原歌曲元数据，替换为其他平台版本
+            // 保留原歌曲元数据，替换为其他平台版本（必须写回 current：
+            // playUrl/歌词预取按 current.platform 走新源；失败在轮尾统一回滚）
             current.id = picked.id;
             current.name = picked.name;
             current.singer = picked.singer;
@@ -2656,6 +2696,17 @@ async function switchQuality(): Promise<void> {
         } catch (_) {
           // 静默：取链失败落到下方「未找到可替代的歌曲」提示
         }
+        // 这一源没成：还原 current 再试下一源（关键词/展示不被污染）
+        current.id = snapId;
+        current.name = snapName;
+        current.singer = snapSinger;
+        current.album = snapAlbum;
+        current.picUrl = snapPic;
+        current.platform = snapPlatform;
+        current.url = snapUrl;
+        current.musicId = snapMusicId;
+        // 原歌没有 duration（可选字段）时保留 picked 的时长仅作展示，不回清
+        if (snapDuration != null) current.duration = snapDuration;
       }
       qtShowToast({ title: "未找到可替代的歌曲", icon: "none" });
     }
@@ -2839,10 +2890,9 @@ function removeAt(index: number): void {
   const queue = player.queue;
   if (index < 0 || index >= queue.length) return;
   const current = player.current;
-  const isRemovingCurrent =
-    current != null &&
-    queue[index].id == current.id &&
-    queue[index].platform == current.platform;
+  // R7：必须比对象引用（player.current 与队列条目同引用）。按 id+platform
+  // 判会把「同一首歌的重复条目」也当成当前曲，删掉它反而把播放切到相邻歌
+  const isRemovingCurrent = current != null && queue[index] === current;
   const next: Song[] = [];
   for (let i = 0; i < queue.length; i++) {
     if (i != index) next.push(queue[i]);

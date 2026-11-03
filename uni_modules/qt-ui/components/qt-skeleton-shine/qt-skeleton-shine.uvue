@@ -40,7 +40,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from "vue";
 import { SHINE_SRC } from "@/uni_modules/qt-ui/services/skeleton-shine";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 
@@ -57,6 +57,8 @@ const wrapRef = ref<UniElement | null>(null);
 const trackRef = ref<UniElement | null>(null);
 let anim: UniAnimation | null = null;
 let retryTimer: number = 0;
+// 宽度测量重试额度。本组件是 <script setup>，这里属于每实例作用域：
+// 每次挂载都是新的一份 4，不会跨实例耗尽（不要挪到模块级）。
 let retryLeft = 4;
 
 const shineSrc = SHINE_SRC;
@@ -178,11 +180,31 @@ function stopSweep(): void {
 }
 
 onMounted(() => {
-  // 等元素挂载完成后启动原生扫光
-  nextTick(() => {
-    startSweep();
-  });
+  // 等元素挂载完成后启动原生扫光。挂载即隐藏（visible 为 false）时不启动：
+  // 看不见的光带也在原生动画线程上空转，等 visible 变 true 再起
+  if (props.visible) {
+    nextTick(() => {
+      startSweep();
+    });
+  }
 });
+
+// visible 由父组件控制（骨架淡出淡入期间父组件往往只改 class 不卸载本节点），
+// 所以扫光的启停必须跟着 visible 走：隐藏时 cancel 原生动画，重新可见时再起。
+// 没有这个 watch 的话，iterations:Infinity 的动画只在卸载时才停，
+// 「加载完 → 骨架淡出但节点还在」的页面上光带会一直空转。
+watch(
+  () => props.visible,
+  (on) => {
+    if (on) {
+      nextTick(() => {
+        startSweep();
+      });
+    } else {
+      stopSweep();
+    }
+  }
+);
 
 onBeforeUnmount(() => {
   stopSweep();

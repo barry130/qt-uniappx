@@ -1,13 +1,13 @@
 <template>
-  <view v-if="visible" class="mg-mask" @click="onMaskTap">
+  <view v-if="visible" class="mg-mask" :style="maskStyle" @click="onMaskTap">
     <view class="mg-card" :class="layout.isWide ? 'mg-card-wide' : ''" :style="cardStyle" @click.stop>
-      <view class="mg-icon-wrap" :class="layout.isWide ? 'mg-icon-wrap-wide' : ''">
+      <view class="mg-icon-wrap" :class="layout.isWide ? 'mg-icon-wrap-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';'">
         <QtIcon name="disc" :size="layout.isWide ? 28 : 52" :color="themeStore.skin.accent" />
       </view>
-      <text class="mg-title" :class="layout.isWide ? 'mg-title-wide' : ''" :style="qtFontDual(34, 18)">安装数据包，启用在线功能</text>
-      <text class="mg-sub" :class="layout.isWide ? 'mg-sub-wide' : ''" :style="qtFontDual(24, 13)">在线搜索 · 歌单 · 歌词 · 封面</text>
-      <view class="mg-divider" :class="layout.isWide ? 'mg-divider-wide' : ''"></view>
-      <text class="mg-body" :class="layout.isWide ? 'mg-body-wide' : ''" :style="qtFontDual(26, 14)">应用未内置数据包：需在「音源包管理」页安装一次，支持从链接或本地文件安装。未安装时在线功能不可用（搜索/歌单/歌词/在线播放），本地音乐播放不受影响。</text>
+      <text class="mg-title" :class="layout.isWide ? 'mg-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(34, 18)">安装数据包，启用在线功能</text>
+      <text class="mg-sub" :class="layout.isWide ? 'mg-sub-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13)">在线搜索 · 歌单 · 歌词 · 封面</text>
+      <view class="mg-divider" :class="layout.isWide ? 'mg-divider-wide' : ''" :style="'background-color:' + themeStore.skin.border + ';'"></view>
+      <text class="mg-body" :class="layout.isWide ? 'mg-body-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(26, 14)">应用未内置数据包：需在「音源包管理」页安装一次，支持从链接或本地文件安装。未安装时在线功能不可用（搜索/歌单/歌词/在线播放），本地音乐播放不受影响。</text>
       <view class="mg-actions" :class="layout.isWide ? 'mg-actions-wide' : ''">
         <qt-button class="mg-btn" :class="layout.isWide ? 'mg-btn-wide' : ''" label="暂不" variant="ghost" size="md" @click="onDismiss" />
         <qt-button class="mg-btn" :class="layout.isWide ? 'mg-btn-wide' : ''" label="去安装" variant="primary" size="md" @click="onGo" />
@@ -45,9 +45,13 @@ const themeStore = useThemeStore();
  * 改造前写死 420px，在 640×360 之类窄横屏上会横出窗口。
  */
 const cardStyle = computed((): string => {
-  if (!layout.isWide) return "width:600rpx;";
-  return "width:" + qtSheetWidth("dialog") + "px;";
+  const bg = "background-color:" + themeStore.skin.sheetSurface + ";";
+  if (!layout.isWide) return bg + "width:600rpx;";
+  return bg + "width:" + qtSheetWidth("dialog") + "px;";
 });
+
+/** 遮罩底色随主题（skin.scrim），与 qt-notice-splash 同口径 */
+const maskStyle = computed((): string => "background-color:" + themeStore.skin.scrim + ";");
 
 const emit = defineEmits<{
   (e: "go"): void;
@@ -79,7 +83,7 @@ function onMaskTap(): void {
   top: 0;
   right: 0;
   bottom: 0;
-  background-color: rgba(0, 0, 0, 0.5);
+  /* 底色走 maskStyle（skin.scrim） */
   justify-content: center;
   align-items: center;
   z-index: 999;
@@ -87,7 +91,7 @@ function onMaskTap(): void {
 .mg-card {
   width: 600rpx;
   border-radius: 32rpx;
-  background-color: #ffffff;
+  /* 底色走 cardStyle（skin.sheetSurface），深色下不再是一块刺眼的纯白 */
   padding: 44rpx 40rpx 36rpx;
   flex-direction: column;
   align-items: center;
@@ -101,7 +105,7 @@ function onMaskTap(): void {
   width: 88rpx;
   height: 88rpx;
   border-radius: 24rpx;
-  background-color: #eef1f7;
+  /* 底色走行内（skin.surfaceMuted） */
   justify-content: center;
   align-items: center;
 }
@@ -112,7 +116,7 @@ function onMaskTap(): void {
 }
 .mg-title {
   margin-top: 24rpx;
-  color: #191d26;
+  /* 颜色走行内（skin.text） */
   font-size: 34rpx;
   font-weight: 700;
 }
@@ -122,7 +126,7 @@ function onMaskTap(): void {
 }
 .mg-sub {
   margin-top: 10rpx;
-  color: #737b8e;
+  /* 颜色走行内（skin.textMuted） */
   font-size: 24rpx;
 }
 .mg-sub-wide {
@@ -133,7 +137,7 @@ function onMaskTap(): void {
   margin-top: 28rpx;
   width: 520rpx;
   height: 1px;
-  background-color: #eef1f7;
+  /* 底色走行内（skin.border） */
 }
 .mg-divider-wide {
   margin-top: 16px;
@@ -141,7 +145,7 @@ function onMaskTap(): void {
 }
 .mg-body {
   margin-top: 24rpx;
-  color: #737b8e;
+  /* 颜色走行内（skin.textMuted） */
   font-size: 26rpx;
   line-height: 1.6;
 }

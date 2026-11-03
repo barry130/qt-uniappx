@@ -672,6 +672,7 @@ const {
   isSelected,
   toggle: toggleSelect,
   toggleAll,
+  keys: selectedKeys,
 } = useBatchSelect();
 const batch = useBatchActions();
 const batchPickerVisible = ref(false);
@@ -697,8 +698,10 @@ function openBatchCollect(): void {
 }
 function selectedKeysOf(): Song[] {
   const out: Song[] = [];
-  for (let i = 0; i < songs.value.length; i++) {
-    if (isSelected(qtSongKey(songs.value[i]))) out.push(songs.value[i]);
+  // R9：以可见集合为准 —— 遍历全量 songs 会把被筛选掉的已选歌也带进批量
+  // 下载/收藏（用户没看到的行被悄悄操作）；daily/artist 页同款口径
+  for (let i = 0; i < visibleSongs.value.length; i++) {
+    if (isSelected(qtSongKey(visibleSongs.value[i]))) out.push(visibleSongs.value[i]);
   }
   return out;
 }
@@ -725,6 +728,19 @@ function onBatchCreate(name: string): void {
 // 列表一旦有数据就量操作条位置（首帧没渲染出 #rc-head 时 measureHeadOffset 自带重试）
 watch(songs, (list: Song[]) => {
   if (list.length > 0) measureHeadOffset(0);
+});
+
+// R9 配套：被筛掉的歌退出批量范围（同 daily/artist 页 retainTrackSelection 口径），
+// 否则「已选 N」里混着看不见的歌、selectedKeysOf 与计数不一致
+watch(visibleSongs, (list: Song[]) => {
+  const keys = selectedKeys.value;
+  if (keys.length == 0) return;
+  const keep: string[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const key = qtSongKey(list[i]);
+    if (keys.indexOf(key) >= 0) keep.push(key);
+  }
+  if (keep.length != keys.length) selectedKeys.value = keep;
 });
 
 onMounted((): void => {

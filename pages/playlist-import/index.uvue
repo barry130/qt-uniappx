@@ -302,14 +302,19 @@ async function parseInput(): Promise<{ platform: Source; id: string } | null> {
 /** 解析链接 → 拉取歌单详情；导入歌曲做全量预览，收藏歌单做确认页 */
 async function onParse(): Promise<void> {
   if (parsing.value || importing.value) return;
+  // R8：busy 标志要在第一个 await 之前立起来，否则 parseInput 在途时按钮仍可
+  // 连点、并发两次解析；早退路径要复位， finally 只覆盖正常走完的路径
+  parsing.value = true;
   const parsed = await parseInput();
-  if (parsed == null) return;
+  if (parsed == null) {
+    parsing.value = false;
+    return;
+  }
   const sel = platValues.value[platIndex.value] ?? "";
   platNote.value =
     sel.length > 0 && parsed.platform != sel
       ? "已按链接识别为" + platLabel(parsed.platform) + "，未按手选的" + platLabel(sel) + "解析"
       : "";
-  parsing.value = true;
   detail.value = null;
   importDone.value = false;
   importProgress.value = "";

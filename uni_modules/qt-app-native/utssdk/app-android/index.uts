@@ -966,7 +966,12 @@ export const scanLocalAudio: ScanLocalAudio = function (onResult: (items: LocalA
 	}
 	// targetSdkVersion >= 33 时权限库强制要求 READ_MEDIA_* 细分权限，
 	// 即使设备系统低于 Android 13 也不能传 READ_EXTERNAL_STORAGE（会抛 IllegalArgumentException）
-	const perms = ["android.permission.READ_MEDIA_AUDIO"];
+	// 但 Android 13 以下设备根本没有 READ_MEDIA_AUDIO 这条权限（系统直接拒，扫描永远空），
+	// 所以必须按系统版本分流：33+ 申请 READ_MEDIA_AUDIO，32- 申请 READ_EXTERNAL_STORAGE
+	// （manifest 已按 AOSP 建议声明 maxSdkVersion=32）
+	const perms = Build.VERSION.SDK_INT >= 33
+		? ["android.permission.READ_MEDIA_AUDIO"]
+		: ["android.permission.READ_EXTERNAL_STORAGE"];
 	if (UTSAndroid.checkSystemPermissionGranted(activity, perms)) {
 		onResult(doScanAudio());
 		return;
@@ -1255,9 +1260,11 @@ export const pickJsFile: PickJsFile = function (onResult: (result: PickFileResul
 // Android 的权限分三类，查询方式完全不同，页面拿不到统一口径，所以在这里收敛：
 //   1) 普通权限（INTERNET / FOREGROUND_SERVICE* / WAKE_LOCK）：安装即授予，
 //      系统不提供（也不需要）运行时查询，恒 applicable + granted；
-//   2) 运行时权限（POST_NOTIFICATIONS / READ_MEDIA_AUDIO / WRITE_EXTERNAL_STORAGE）：
-//      走 UTSAndroid.checkSystemPermissionGranted，但各自有生效的版本区间
-//      （WRITE_EXTERNAL_STORAGE 只到 Android 9，另外两个从 Android 13 起）；
+//   2) 运行时权限（POST_NOTIFICATIONS / READ_MEDIA_AUDIO / READ_EXTERNAL_STORAGE /
+//      WRITE_EXTERNAL_STORAGE）：走 UTSAndroid.checkSystemPermissionGranted，
+//      但各自有生效的版本区间（WRITE_EXTERNAL_STORAGE 只到 Android 9，
+//      READ_EXTERNAL_STORAGE 只到 Android 12，READ_MEDIA_AUDIO / POST_NOTIFICATIONS
+//      从 Android 13 起）；
 //   3) 特殊权限（所有文件访问 / 悬浮窗 / 安装未知应用）：系统不把它们当运行时
 //      权限，checkSystemPermissionGranted 永远返回 false，必须走各自 API
 //      （Environment.isExternalStorageManager / Settings.canDrawOverlays /
@@ -1275,6 +1282,7 @@ const NORMAL_PERMISSIONS: string[] = [
 const RUNTIME_PERMISSIONS: string[] = [
 	"android.permission.POST_NOTIFICATIONS",
 	"android.permission.READ_MEDIA_AUDIO",
+	"android.permission.READ_EXTERNAL_STORAGE",
 	"android.permission.WRITE_EXTERNAL_STORAGE",
 ];
 
@@ -1351,6 +1359,9 @@ export const queryPermissionStates: QueryPermissionStates = function (ids: strin
 				applicable = sdk >= 33;
 			} else if (id == "android.permission.READ_MEDIA_AUDIO") {
 				applicable = sdk >= 33;
+			} else if (id == "android.permission.READ_EXTERNAL_STORAGE") {
+				// Android 13 以下扫描本机音乐走这条（READ_MEDIA_AUDIO 在这些系统上不存在）
+				applicable = sdk <= 32;
 			} else if (id == "android.permission.WRITE_EXTERNAL_STORAGE") {
 				// manifest 里声明了 maxSdkVersion=28：Android 10+ 走分区存储，此权限不再申请
 				applicable = sdk <= 28;
@@ -1840,8 +1851,15 @@ function embedAudioTagsSync(audioTempPath: string, opts: EmbedTagsOptions): stri
 // 内嵌标签「读取侧」（与上方写入侧对偶；解析逻辑在 ../read-embed.uts 纯字节层）
 // ---------------------------------------------------------------------------
 
-/** 上一次写出的封面缓存文件绝对路径：重复读取先删它，避免 cache 目录堆积 */
-let lastCoverCachePath = "";
+/**
+ * 封面缓存文件的环形保留队列（最多 24 个 = player.embeddedCache 的条目上限）。
+ * writeCoverCache 每写新文件会把队首最老的删掉，cache 目录里最多同时存在
+ * 这么多张内嵌封面；谁都不能只删「上一张」——player.embeddedCache 的
+ * 24 条记忆里随时可能有歌曲还指着旧文件，单删 lastCoverCachePath 会让
+ * 缓存命中的歌突然丢封面。
+ */
+const coverCacheKeep = 24;
+const coverCachePaths: string[] = [];
 
 /** 封面缓存自增序号：与 Date.now() 一起构成唯一文件名，防同毫秒覆盖 */
 let coverCacheSeq = 0;
@@ -1849,13 +1867,10 @@ let coverCacheSeq = 0;
 /** 封面字节 → cache 目录缓存文件，返回绝对路径（失败返回空串，调用方按无封面走） */
 function writeCoverCache(bytes: Uint8Array, mime: string): string {
 	try {
-		if (lastCoverCachePath.length > 0) {
-			try {
-				new File(lastCoverCachePath).delete();
-			} catch (e1) {
-				// 静默：旧封面缓存删除失败不阻塞新缓存写出
-			}
-			lastCoverCachePath = "";
+		while (coverCachePaths.length >= coverCacheKeep) {
+			const oldest = coverCachePaths.shift();
+			if (oldest == null) continue;
+			deleteCoverCacheFile(oldest);
 		}
 		const ctx = UTSAndroid.getAppContext();
 		if (ctx == null) return "";
@@ -1870,12 +1885,23 @@ function writeCoverCache(bytes: Uint8Array, mime: string): string {
 		} finally {
 			output.close();
 		}
-		lastCoverCachePath = path;
+		coverCachePaths.push(path);
 		return path;
 	} catch (e) {
 		console.log("[AppNative] writeCoverCache 失败: " + (e != null ? e.toString() : "unknown"));
 		return "";
 	}
+}
+
+/** 删除一个封面缓存文件（不存在/已删过返回 false，不入队） */
+function deleteCoverCacheFile(path: string): boolean {
+	if (path.length == 0) return false;
+	try {
+		new File(path).delete();
+	} catch (e1) {
+		// 静默：旧封面缓存删除失败不阻塞新缓存写出
+	}
+	return true;
 }
 
 /**

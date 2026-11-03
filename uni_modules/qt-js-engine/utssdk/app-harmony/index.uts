@@ -1405,6 +1405,13 @@ let gEvalQueue: EvalRequest[] = []
 let gEvalBusy = false
 let gOpQueue: OpEntry[] = []
 let gOpBusy = false
+/**
+ * 引擎代次令牌：releaseEngineState（stop/启动失败/重建）时 +1。
+ * 旧实例在飞的求值/操作回调（含看门狗超时）迟到时凭它作废——否则旧看门狗
+ * 超时后会把**新引擎**的队首当旧请求摘掉（新求值被静默丢出队列、JS 侧永久
+ * 挂起），gLastEvalError 也会被旧超时污染。
+ */
+let gEngineGen = 0
 
 /**
  * 排一次脚本求值。回调在求值完成后（主线程）触发；失败时 value='' 并把原因写进
@@ -1467,10 +1474,18 @@ function pumpEvalQueue(): void {
 	}
 	const req = gEvalQueue[0]
 	gEvalBusy = true
+	// 本次求值所属的引擎代次：结算回调（宿主回调 + 看门狗）只对同代次生效。
+	// stop 后 15s 内重启的场景：旧看门狗超时时引擎已换代，若不作废它，会摘掉
+	// 新队列的队首、覆盖新引擎的 gEvalBusy/gLastEvalError
+	const gen = gEngineGen
 	let settled = false
 	let timedOut = false
 	const finish = (value: string): void => {
 		if (settled) {
+			return
+		}
+		if (gen != gEngineGen) {
+			// 引擎已换代：本次结算整体作废，队列/忙标志归新引擎管
 			return
 		}
 		settled = true
@@ -1487,6 +1502,10 @@ function pumpEvalQueue(): void {
 	}
 	const watchdog = timerSet(() => {
 		if (settled) {
+			return
+		}
+		if (gen != gEngineGen) {
+			// 旧代次的迟到看门狗：引擎已被 stop 并可能重启，整体作废
 			return
 		}
 		// 看门狗与「runJavaScript 永不回调」是同一类故障（页面被销毁、渲染进程卡住），
@@ -1522,9 +1541,16 @@ function pumpOps(): void {
 	}
 	const entry = gOpQueue[0]
 	gOpBusy = true
+	// 与 pumpEvalQueue 同款代次护栏：stop 后重启，旧操作迟到的 done() 不许
+	// 摘新队列的队首、也不许覆盖新引擎的 gOpBusy
+	const gen = gEngineGen
 	let doneCalled = false
 	const done = (): void => {
 		if (doneCalled) {
+			return
+		}
+		if (gen != gEngineGen) {
+			// 引擎已换代：本次操作结算作废，队列归新引擎管
 			return
 		}
 		doneCalled = true
@@ -1549,6 +1575,12 @@ function releaseEngineState(): void {
 	gPumpScheduled = false
 	gEvalQueue = []
 	gOpQueue = []
+	// 代次 +1：旧实例在飞的求值/操作回调与看门狗整体作废。同时必须复位忙标志
+	// ——不复位的话新引擎的队列要等旧看门狗超时才动得了（最长 EVAL_TIMEOUT_MS
+	// 的无谓卡顿），而旧回调 settle 时又会覆盖新引擎的 gEvalBusy
+	gEngineGen++
+	gEvalBusy = false
+	gOpBusy = false
 }
 
 // ============================================================================

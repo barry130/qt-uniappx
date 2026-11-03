@@ -68,4 +68,4 @@ export function getVersionText(): string {
  * （避免拿旧包测新代码，报「改了没效果」）。
  * 编译脚本（.tmp-compile-with-stamp.sh）每次编译前会用 sed 刷新这一行。
  */
-export const APP_BUILD_STAMP = "2026-11-03 09:33";
+export const APP_BUILD_STAMP = "2026-11-03 18:16";

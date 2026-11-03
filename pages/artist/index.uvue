@@ -179,8 +179,10 @@
         v-for="song in renderSongs"
         :key="song.id + song.platform"
         class="song-item" :class="layout.isWide ? 'song-item-wide' : ''"
-        @click="onRowTap(song)"
       >
+        <!-- 行点击完全交给组件自己（@play / @select），宿主不在这层 list-item 上
+             再绑 @click：双层处理一次点击会把 play 触发两遍（组件发一次、冒泡到
+             list-item 再来一次），daily 页同款口径 -->
         <qt-song-row-lite :song="song" :use-picker="true" :selecting="selecting" :selected="isSelected(qtSongKey(song))" @play="play(song)" @more="openSheet" @pick="onPick" @select="onRowSelect(song)" />
       </list-item>
       </sticky-section>
@@ -423,8 +425,12 @@ function toggleWideSearch(): void {
   // 宽屏没有标题栏，左栏图标直接开关列表顶的搜索行
   searchOpen.value = !searchOpen.value;
 }
-function onHeaderSearchInput(e: InputEvent): void {
-  onSearchInput(e);
+/** 框架标题栏搜索框输入（窄屏）。frame 回传的是 string（R9-A：原签名按
+ *  InputEvent 收，Android 端在 string 上取 .detail 必抛 ClassCastException，
+ *  标题栏搜索整体坏死）；整组换血口径同 onSearchInput——先回顶再写词 */
+function onHeaderSearchInput(value: string): void {
+  backToTop();
+  searchQuery.value = value;
 }
 function onHeaderAction(name: string): void {
   if (name == "search") openSearch();
@@ -652,16 +658,6 @@ function enqueueAll(): void {
 }
 
 // ---------- 批量选择 ----------
-/**
- * 行点击：选择态下必须早退。
- * `qt-song-row-lite` 内部整行点击在 selecting 时会 emit('select')，而这次点击同时
- * 也会冒泡到 list-item 的 @click —— 两处都处理的话一次点击会「勾上又播放」。
- */
-function onRowTap(song: Song): void {
-  if (selecting.value) return;
-  play(song);
-}
-
 /** 行内勾选（组件 @select，含点中勾选框本身） */
 function onRowSelect(song: Song): void {
   toggleSelect(qtSongKey(song));

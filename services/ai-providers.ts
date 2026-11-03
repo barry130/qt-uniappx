@@ -6,11 +6,12 @@
  * 这一进程边界，Key 明文就存在 uni storage 里（key = AI_PROVIDERS_KEY），
  * 页面上展示时统一走 maskKey 掩码，不回显明文。
  *
- * 协议（与 qt-pc 同一套）：
- * - openai          POST {base}/chat/completions   （OpenAI 兼容，中转站主流）
- * - openai-responses POST {base}/responses          （新版官方 Responses API）
- * - anthropic       POST {base}/v1/messages + x-api-key
- * - gemini          POST {base}/models/{model}:generateContent + x-goog-api-key
+ * 协议（与 qt-pc 同一套，端点口径对齐 ai_local.rs：地址先归一回「根」，
+ * 端点尾巴 / 查询串 / 版本段（/v1、/v1beta）统一剥掉、由各协议按需补）：
+ * - openai          POST {root}/v1/chat/completions   （OpenAI 兼容，中转站主流）
+ * - openai-responses POST {root}/v1/responses          （新版官方 Responses API）
+ * - anthropic       POST {root}/v1/messages + x-api-key
+ * - gemini          POST {root}/v1beta/models/{model}:generateContent + x-goog-api-key
  *
  * aiLocalChat 是哑管道：提示词组装、候选池注入、结果硬校验全在
  * services/daily-recommend.ts，这里只负责把 messages 发出去、把 content 取回来。
@@ -140,15 +141,60 @@ function firstKeyOf(profile: AiProviderProfile): string {
   return "";
 }
 
-function trimBase(baseUrl: string): string {
+/** 地址归一（对齐 qt-pc ai_local.rs 的 base_root，2026-11-03 审阅 R6）：
+ * 用户可能填四种形态——根域名、带版本段（…/v1）、自建网关完整端点
+ * （…/openai/v1/chat/completions）、甚至把 Gemini 的
+ * …/v1beta/models/gemini-2.0-flash:generateContent?key=… 整段粘进来。
+ * 统一剥掉端点尾巴、查询串与版本段，版本段由各协议自己按需补，
+ * 四种形态都落到同一个请求地址上（老配置里的 /v1 地址行为不变）。
+ */
+function baseRootOf(baseUrl: string): string {
   let u = baseUrl.trim();
+  // 粘进来的完整端点可能带 ?key=…：查询串 / 锚点一律丢掉
+  const q = u.indexOf("?");
+  if (q >= 0) u = u.substring(0, q);
+  const h = u.indexOf("#");
+  if (h >= 0) u = u.substring(0, h);
+  while (u.length > 0 && u.charAt(u.length - 1) == "/") u = u.substring(0, u.length - 1);
+  // 常见端点尾巴（OpenAI 兼容的三种写法 + 模型列表）
+  const tails = ["/chat/completions", "/responses", "/messages", "/models"];
+  for (let i = 0; i < tails.length; i++) {
+    if (u.length > tails[i].length && u.substring(u.length - tails[i].length) == tails[i]) {
+      u = u.substring(0, u.length - tails[i].length);
+      break;
+    }
+  }
+  while (u.length > 0 && u.charAt(u.length - 1) == "/") u = u.substring(0, u.length - 1);
+  // Gemini 的端点尾巴是「动作段 + 模型段」：/models/<model>:generateContent
+  const actions = [":streamGenerateContent", ":generateContent"];
+  let hadAction = false;
+  for (let i = 0; i < actions.length; i++) {
+    const idx = u.lastIndexOf(actions[i]);
+    if (idx >= 0) {
+      u = u.substring(0, idx);
+      hadAction = true;
+      break;
+    }
+  }
+  if (hadAction) {
+    const m = u.lastIndexOf("/models/");
+    if (m >= 0) u = u.substring(0, m);
+  }
+  // 版本段交给各协议补：/v1（OpenAI / Anthropic）、/v1beta（Gemini）
+  const versions = ["/v1", "/v1beta"];
+  for (let i = 0; i < versions.length; i++) {
+    if (u.length > versions[i].length && u.substring(u.length - versions[i].length) == versions[i]) {
+      u = u.substring(0, u.length - versions[i].length);
+      break;
+    }
+  }
   while (u.length > 0 && u.charAt(u.length - 1) == "/") u = u.substring(0, u.length - 1);
   return u;
 }
 
-/** 去掉常见的前缀路径，统一拼 endpoint（OpenAI 家族 baseUrl 常带 /v1） */
+/** 归一后的根地址 + 协议自己的路径（版本段在这里补） */
 function joinUrl(baseUrl: string, path: string): string {
-  return trimBase(baseUrl) + path;
+  return baseRootOf(baseUrl) + path;
 }
 
 interface ChatHttpRequest {
@@ -166,7 +212,7 @@ function buildChatRequest(
   messages: AiLocalMessage[],
   temperature: number,
 ): ChatHttpRequest | null {
-  const base = trimBase(profile.baseUrl);
+  const base = baseRootOf(profile.baseUrl);
   if (base.length == 0) return null;
   if (profile.protocol == "anthropic") {
     // Anthropic：system 独立字段，messages 只收 user/assistant
@@ -189,7 +235,8 @@ function buildChatRequest(
         model,
         system: systemText,
         messages: bodyMessages,
-        max_tokens: 2048,
+        // 4096 对齐 qt-pc 口径：每日推荐要一次性回 50 首歌的 JSON，2048 容易截断
+        max_tokens: 4096,
         temperature,
       }),
     };
@@ -199,24 +246,36 @@ function buildChatRequest(
       "content-type": "application/json",
       "x-goog-api-key": key,
     };
-    // Gemini：system 并进 systemInstruction，轮次并进 contents
+    // Gemini：system 并进 systemInstruction，轮次并进 contents。
+    // parts 必须是 {text:"…"} 对象数组——传裸字符串官方必 400；连续同角色要
+    // 合并成一个 content 的多个 parts，官方要求 user/model 交替，平铺会被
+    // 「messages must alternate」拒掉（对齐 qt-pc ai_local.rs 的 Gemini 分支，
+    // 2026-11-03 审阅 R6：原先两处都错，gemini 协议整体不可用）。
     let systemText = "";
-    const contents: Record<string, string>[] = [];
+    interface GeminiPart { text: string }
+    interface GeminiContent { role: string; parts: GeminiPart[] }
+    const contents: GeminiContent[] = [];
     for (let i = 0; i < messages.length; i++) {
       const m = messages[i];
       if (m.role == "system") {
         systemText += (systemText.length > 0 ? "\n" : "") + m.content;
+        continue;
+      }
+      const role = m.role == "assistant" ? "model" : "user";
+      const last = contents.length > 0 ? contents[contents.length - 1] : null;
+      if (last != null && last.role == role) {
+        last.parts.push({ text: m.content });
       } else {
-        contents.push({ role: m.role == "assistant" ? "model" : "user", parts: m.content });
+        contents.push({ role, parts: [{ text: m.content }] });
       }
     }
     const payload: Record<string, Object> = {
       contents,
       generationConfig: { temperature },
     };
-    if (systemText.length > 0) payload["systemInstruction"] = { parts: systemText };
+    if (systemText.length > 0) payload["systemInstruction"] = { parts: [{ text: systemText }] };
     return {
-      url: joinUrl(base, "/models/" + encodeURIComponent(model) + ":generateContent"),
+      url: joinUrl(base, "/v1beta/models/" + encodeURIComponent(model) + ":generateContent"),
       method: "POST",
       header,
       data: JSON.stringify(payload),
@@ -226,7 +285,7 @@ function buildChatRequest(
     const header: Record<string, string> = { "content-type": "application/json" };
     if (key.length > 0) header["authorization"] = "Bearer " + key;
     return {
-      url: joinUrl(base, "/responses"),
+      url: joinUrl(base, "/v1/responses"),
       method: "POST",
       header,
       data: JSON.stringify({ model, input: messages, temperature }),
@@ -236,7 +295,7 @@ function buildChatRequest(
   const header: Record<string, string> = { "content-type": "application/json" };
   if (key.length > 0) header["authorization"] = "Bearer " + key;
   return {
-    url: joinUrl(base, "/chat/completions"),
+    url: joinUrl(base, "/v1/chat/completions"),
     method: "POST",
     header,
     data: JSON.stringify({ model, messages, temperature }),
@@ -261,17 +320,28 @@ function parseChatReply(protocol: AiProviderProtocol, bodyText: string): AiLocal
       return { content: text, model: (obj["model"] ?? "") as string, elapsedMs: 0 };
     }
     if (protocol == "gemini") {
+      // 官方形态 candidates[0].content.parts = [{text:"…"}] 对象数组，逐段拼
+      // 正文（对齐 qt-pc extract_gemini_reply；2026-11-03 审阅 R6：原先只认
+      // 字符串形态 parts，真实响应永远取不到正文，gemini 永远回空）。
       const cand = (obj["candidates"] ?? []) as any[];
       let text = "";
       if (cand.length > 0) {
-        const parts = ((cand[0] as any)["content"] ?? {}) as any;
-        const rawParts = (parts["parts"] ?? (cand[0] as any)["parts"]) as any[];
-        // parts 结构在 record 上，直接读字符串
-        const maybeStr = parts["parts"];
-        if (typeof maybeStr == "string") text = maybeStr;
-        else if (rawParts != null && rawParts.length > 0 && typeof rawParts[0] == "string") text = rawParts[0] as string;
+        const content = ((cand[0] as any)["content"] ?? {}) as any;
+        const parts = (content["parts"] ?? (cand[0] as any)["parts"]) as any[];
+        if (parts != null) {
+          for (let i = 0; i < parts.length; i++) {
+            const p = parts[i];
+            if (typeof p == "string") {
+              text += p;
+            } else if (p != null && typeof p == "object") {
+              text += ((p as any)["text"] ?? "") as string;
+            }
+          }
+        }
       }
-      return { content: text, model: (obj["modelVersion"] ?? "") as string, elapsedMs: 0 };
+      // 有的版本回 modelVersion，有的回 model（qt-pc 同口径）
+      const modelName = ((obj["modelVersion"] ?? obj["model"]) ?? "") as string;
+      return { content: text, model: modelName, elapsedMs: 0 };
     }
     if (protocol == "openai-responses") {
       const out = obj["output"] ?? [];
@@ -354,7 +424,8 @@ export function aiLocalChat(messages: AiLocalMessage[], temperature: number = 0.
   });
 }
 
-/** 拉模型列表（GET /models 或 /v1/models）。失败 reject，页面允许手填不阻断。 */
+/** 拉模型列表（openai 家族 GET {root}/v1/models；gemini GET {root}/v1beta/models）。
+ *  失败 reject，页面允许手填不阻断。 */
 export function listModels(
   baseUrl: string,
   key: string,
@@ -362,7 +433,7 @@ export function listModels(
   skipCertVerify: boolean,
 ): Promise<string[]> {
   return new Promise<string[]>((resolve, reject) => {
-    const base = trimBase(baseUrl);
+    const base = baseRootOf(baseUrl);
     if (base.length == 0) {
       reject(new Error("接口地址为空"));
       return;
@@ -374,10 +445,12 @@ export function listModels(
       if (key.length > 0) header["x-api-key"] = key;
       header["anthropic-version"] = "2023-06-01";
     } else if (protocol == "gemini") {
-      url = joinUrl(base, "/v1/models");
+      // Gemini 官方是 /v1beta/models（原先 /v1/models 与 chat 的前缀互相矛盾，
+      // 2026-11-03 审阅 R6 对齐 qt-pc models_endpoint）
+      url = joinUrl(base, "/v1beta/models");
       if (key.length > 0) header["x-goog-api-key"] = key;
     } else {
-      url = joinUrl(base, "/models");
+      url = joinUrl(base, "/v1/models");
       if (key.length > 0) header["authorization"] = "Bearer " + key;
     }
     uni.request({
@@ -398,8 +471,19 @@ export function listModels(
           const names: string[] = [];
           for (let i = 0; i < data.length; i++) {
             const item = data[i];
-            const id = item != null && typeof item == "object" ? ((item as any)["id"] ?? (item as any)["name"] ?? "") as string : "";
-            if (id.length > 0) names.push(id);
+            let id = "";
+            if (item != null && typeof item == "object") {
+              id = ((item as any)["id"] ?? (item as any)["name"] ?? "") as string;
+              // Gemini 的 name 带 models/ 前缀，拼 URL 时不能重复；缺失
+              // supportedGenerationMethods 按支持算，有则只留能 generateContent
+              // 的（对齐 qt-pc parse_gemini_models，2026-11-03 审阅 R6）。
+              if (protocol == "gemini") {
+                if (id.indexOf("models/") == 0) id = id.substring("models/".length);
+                const methods = (item as any)["supportedGenerationMethods"] as any[] | null;
+                if (methods != null && methods.indexOf("generateContent") < 0) continue;
+              }
+            }
+            if (id.length > 0 && names.indexOf(id) < 0) names.push(id);
           }
           resolve(names);
         } catch (e) {
