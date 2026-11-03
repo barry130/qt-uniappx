@@ -1,0 +1,32 @@
+<template>
+  <view class="qsw" :class="layout.isWide ? 'qsw-wide' : ''" :style="switchStyle" @click.stop="toggle">
+    <view class="qsw-thumb" :class="layout.isWide ? 'qsw-thumb-wide' : ''" :style="thumbStyle"></view>
+  </view>
+</template>
+<script setup lang="ts">
+import { computed } from "vue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtSelectionColor } from "@/uni_modules/qt-ui/composables/selection";
+const props = withDefaults(defineProps<{ modelValue?: boolean; disabled?: boolean }>(), { modelValue: false, disabled: false });
+const emit = defineEmits<{ "update:modelValue": [value: boolean]; change: [value: boolean] }>();
+const layout = useQtLayout();
+const theme = useThemeStore();
+const switchStyle = computed((): string => "background-color:" + (props.modelValue ? qtSelectionColor(theme.dark) : theme.skin.border) + ";opacity:" + (props.disabled ? "0.45" : "1") + ";");
+const thumbStyle = computed((): string => {
+  const unit = layout.isWide ? 0.5 : layout.windowWidth / 750;
+  return "left:" + ((props.modelValue ? 40 : 4) * unit) + "px;background-color:" + theme.skin.onAccent + ";";
+});
+function toggle(): void {
+  if (props.disabled) return;
+  const value = !props.modelValue;
+  emit("update:modelValue", value);
+  emit("change", value);
+}
+</script>
+<style>
+.qsw { width: 80rpx; height: 44rpx; border-radius: 22rpx; position: relative; flex-shrink: 0; }
+.qsw-wide { width: 40px; height: 22px; border-radius: 11px; }
+.qsw-thumb { position: absolute; top: 4rpx; width: 36rpx; height: 36rpx; border-radius: 18rpx; }
+.qsw-thumb-wide { top: 2px; width: 18px; height: 18px; border-radius: 9px; }
+</style>

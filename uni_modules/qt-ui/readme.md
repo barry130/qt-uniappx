@@ -2,6 +2,8 @@
 
 这是一个面向 uni-app x Vapor 模式的独立 UI 组件模块。
 
+**先查找、再复用**：[组件目录与复用契约](<docs/component-catalog.md>)覆盖全部组件及按场景选型。选择用共享红色状态，普通弹层、选项、多选、开关和分段复用公共族；页面不得私绘复制。新增组件必须同步目录、设计与 `check:ui-selection` 门禁。
+
 详细设计、CSS 约束、组件 API、换肤模型和宽屏策略请阅读：
 
 - `docs/design.md`
@@ -48,13 +50,19 @@
 - 宽屏 Parity（对齐网易云 / QQ 音乐 Pad）落在五处：底栏分档控件（收藏 / 播放模式 / 队列 / 音量，见上一条）、播放页**宽屏**歌词工具行的「桌面歌词」按钮（原来只有设置页一条路径；竖屏那行本就三颗药丸，加第四颗会在 375dp 上溢出，故只加宽屏）、rail 补上「每日推荐」（原来只有首页竖屏快捷药丸能进）、artist/playlist/daily/daily-recommend 左栏宽度改由 `qtContentWidth("detail")` 反算（不再写死 272/296px）、宽屏触达尺寸下限 32–36px 与浮层 `rpx` 尺寸的 `-wide` px 夹紧；改这些位置前先读 [`docs/design.md`](docs/design.md) §10.4；
 - 全站 `navigationStyle: "custom"`：宽屏不画顶部标题，窄屏画功能性「返回 + 标题」栏；
 - 设置子页与我的页族（收藏/本地/下载/最近播放/听歌报告/音乐助手/反馈/关于/个人信息）在桌面可用宽度足够时自动变成 `rail | 总览 | 子页内容` 三栏，中栏分别复用真实的设置总览（`qt-settings-overview`）与「我的」总览（`qt-profile-overview`）并高亮当前项；总览里的音乐助手入口按权限码 `user:ai:music:use` 显隐（无权限/未登录不显示，与 qt-pc 同一判定）；
-- 竖屏底部导航是 `qt-tab-bar` 悬浮胶囊：左右各缩 40rpx、离地 24rpx、高 120rpx、圆角 60rpx（375dp 基准下正好等于 20px / 12px / 60px / 30px），发现 / 我的 两个入口，当前项 accentSoft 圆角 chip 高亮；**尺寸一律用 rpx**，随窗口宽度与整页内容同步放大（写死 px 会在平板 / 折叠屏 / 大窗口模拟器上显得极小）；总占位是 `QT_TAB_BAR_HEIGHT_RPX`（144rpx），由 `qtTabBarHeightPx()` 折算成 px，toast 让位与悬浮球初始边距都按它取值；
+- 竖屏底部导航是 `qt-tab-bar` 悬浮胶囊：左右缩 40rpx、高 120rpx、圆角 60rpx，发现 / 我的两个入口，路由当前项仍用 accentSoft（不是设置选项）。手势档离地 `TAB_BOTTOM_RPX=64`，原生安全底边非零时贴安全区（偏移 0），由响应式窗口宽换算；总占位 `QT_TAB_BAR_HEIGHT_RPX=184rpx` 与 toast 让位保持同源。原生设备像素先换逻辑 px，页面不能重复叠底部避让；
 - 鸿蒙端四处平台差异已在组件内兜住：① 鸿蒙 **不注册 tabBar**（`pages.json` 的 `"tabBar"` 整块包进 `#ifndef APP-HARMONY`）——原生 Tabs 容器在追加第二个 tab 页时不生效，`switchTab` / `reLaunch` 到 tab 页都会回调 success、页面栈也变了，但原生视图不切换；切 tab 统一走 `qt-nav.ts` 的 `qtSwitchTab()`（鸿蒙 `reLaunch`，其它平台 `switchTab` + fail 兜底 `reLaunch`），不要再直接写 `uni.switchTab`；② 首页首帧 `getCurrentPages()` 可能还是空栈，`qt-mini-player` 改为 50ms 轮询补齐宿主注册（最多 1s）；③ 鸿蒙 **fixed 宿主里的 fixed 子节点收不到触摸**（点悬浮球没反应、事件穿透到下层），子级必须改 `position: absolute` 且 `left/top` 固定为 0（位置只由 fixed 宿主负责），否则会二次偏移、`clickable` 变 false；④ 鸿蒙 **`READ_WRITE_DOWNLOAD_DIRECTORY` 在手机上是 INVALID**（2in1 专属），系统 Download 目录写不进去，公共目录必须走 `DocumentViewPicker` 选目录 + `fileShare.persistPermission` 持久化 URI 授权，下载设置页「更改位置」与权限管理页对应条目都按此改写；
 - 沉浸式页面可通过 `full-width` 保持全宽。
 
 外观页（`pages/theme`）的自定义配色取色器：行内只展示色块 + 色码（整行可点），面板内三根色带（色相 24 / 饱和 16 / 明度 16 段纯色块）只做参照，精确取值用原生 `<slider>`（色相 `0–359`、饱和与明度 `0–100`，拖动实时预览），并支持直接输入 `#RRGGBB` 色码（省略 `#` 也接受，手输值不经 HSV 往返取整）。预置皮肤里的 `rgba()` 半透明令牌（卡片、描边）也照常可编辑：色块按原值显示、面板从实色起步、应用后保留原不透明度。契约见 [`docs/design.md`](docs/design.md) §7.5。
 
 业务页面根节点不要再写不透明背景色，也不要自行挂 `qt-side-nav`，否则会盖住皮肤背景、造成重复导航。
+
+## 歌名与歌手跑马灯
+
+`components/qt-marquee/qt-marquee.uvue` 是单文本往返跑马灯：必填 `text`、`size-rpx`、`size-px`、`color`、`width-px`（视口最大逻辑像素宽，不含兄弟按钮）；可选 `weight`、`active`（默认开，页面隐藏时必须传 false）。外层由原生布局按文字自然宽度收拢，只用计算好的 px `max-width` 限制长文：短文本完整静止，旁边的平台签和歌手箭头紧跟文字，不钉在行右侧；长文本按溢出距离往返，两端各停 1.2 秒。不渲染第二份文本，也不在首次测量、切歌或页面恢复后回写外层宽度造成横向拉动。组件随文字、可用宽、字号倍率和宽窄档重测，卸载取消定时器与动画。旧 `gap-rpx` / `gap-px` 属性已删除。
+
+手机播放页使用两个独立实例，歌名与歌手各占一行；行高随全局字号同步，唱片尺寸先扣掉两行、状态栏、安全区和底部控件预算，不能反过来挤掉歌手。纯几何回归由 `tools/check-player-presentation.mjs` 校验，视觉效果仍须设备验收。
 
 ## 约束
 
@@ -235,11 +243,11 @@ Vapor 禁用 CSS 变量且文字样式不继承，所以缩放只能逐 `<text>`
 播放设置是独立一页（`pages/play-settings/index`），包含默认倍速、定时关闭、均衡器、同时播放、无缝播放、播放默认音质、音乐缓存上限（含「自定义…」页内输入弹层）。
 
 - 这六项原来散在设置主页的两组里，现已整体搬走，设置主页只留一行入口（行尾摘要显示当前倍速与音质）；
-- 状态只有这一份：`currentRate` / `sleepMinutes` / `concurrentMode` / `cacheLimitMb` / `gapless` 与弹层状态都只在本页，设置主页不再保留副本；
+- 倍速 / 原生设置仍从播放层读；睡眠状态在 player，记录原请求 `sleepRequestedMinutes`，播放页与设置页共用 `services/player-setting-options.ts` 的清单和选中判定（90 为播完当前歌曲，不是 90 分钟）。各页只保展示 / 弹层状态，设置主页不复制副本；
 - 每次 `onShow` 都与原生层重新对账（`audioPlayer.rate` / `getConcurrentMode()` / `getCacheLimitMb()` / `getGapless()`），所以「清除全部缓存与数据」复位后进页面看到的是真实值；
 - 音质档位按当前音源收敛（`registry.sourceQualities`），切音源后重进页面自动生效；
 - 自定义缓存上限用页内输入弹层，不用 `uni.showModal({ editable: true })`（该输入框在 App 端不渲染）；
-- **无缝播放**（默认关闭，与 qt-pc 同名设置对齐）：只做「提前把下一首的播放地址取好」（写 `musicApi` 的 urlCache，切歌时取链直接命中），不改 current/时间线、不调原生 `resolveDone`（无挂起请求时会被丢弃）。Android 的 media3 时间线本就预缓冲下一条目，取链一快就无缝；鸿蒙是「一次只解析一首」的串行模型，只能缩短取链时间。开关只落 `qt-playback-gapless`，原生无对应配置；行内开关是自绘 `.toggle`（全仓未用过 `switch` 组件，范本 `pages/equalizer`）。
+- **无缝播放**（默认关闭，与 qt-pc 同名设置对齐）：只做「提前把下一首的播放地址取好」（写 `musicApi` 的 urlCache，切歌时取链直接命中），不改 current/时间线、不调原生 `resolveDone`（无挂起请求时会被丢弃）。Android 的 media3 时间线本就预缓冲下一条目，取链一快就无缝；鸿蒙是「一次只解析一首」的串行模型，只能缩短取链时间。开关只落 `qt-playback-gapless`，原生无对应配置；行内开关复用 `qt-switch` 的统一红色状态，不再复制 `.toggle`。绑定 `:model-value` + `@change` 原更新函数，避免 `v-model` 后再反转造成双翻。
 
 完整说明见 [`docs/design.md`](docs/design.md) §6.14。
 

@@ -1,138 +1,64 @@
 <template>
-  <!-- 播放包半屏直装引导（宿主组件，2026-10-27）。
-       宿主配方同 qt-confirm-host：读 services/pack-install-sheet.ts 的全局状态渲染，
-       App.uvue 的缺失引导（走启动弹窗队列）与首页「未安装播放音源包」横幅共用一份
-       状态。现挂在首页（pages/home/index.uvue）——qt-page-frame 正被 Lead 占用改
-       不了，宿主铺开到全局后（例如挂进 qt-page-frame）调用侧无需任何改动。
-       窄屏 = 底部半屏（紧凑，qt-sort-panel 配方）；宽屏 = 居中对话框（420px 档）。 -->
-  <view v-if="mount" class="qpis-mask" :class="layout.isWide ? 'qpis-mask-wide' : ''" :style="'background-color:' + theme.skin.scrim + ';'" @click="onClose">
-    <view class="qpis-sheet" :class="sheetClass" :style="sheetStyle" @click.stop>
-      <view class="qpis-head">
-        <text class="qpis-title" :style="'color:' + theme.skin.text + ';font-weight:600;' + qtFontDual(30, 16)">安装播放音源包</text>
-        <view class="qpis-close" :class="layout.isWide ? 'qpis-close-wide' : ''" @click="onClose">
-          <QtIcon name="close" :size="layout.isWide ? 16 : 18" :color="theme.skin.textMuted" />
+  <!-- 普通安装引导使用统一 Sheet；全局服务仍是唯一业务状态来源。 -->
+  <QtSheet :visible="st.visible.value" title="安装播放音源包" :dismissible="!st.installing.value" @update:visible="onVisibleChange">
+    <scroll-view direction="vertical" class="qpis-body" :style="bodyStyle" :show-scrollbar="false">
+      <view class="qpis-content" :class="layout.isWide ? 'qpis-content-wide' : ''">
+        <text class="qpis-desc" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(24, 13)">在线播放需要安装一次播放音源包。这里一键安装官方包，也可以到「音源包管理」手动安装。</text>
+        <view class="qpis-info" :class="layout.isWide ? 'qpis-info-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';border-color:' + theme.skin.border + ';'">
+          <text :style="'color:' + theme.skin.text + ';font-weight:600;' + qtFontDual(26, 14)">{{ offerTitleText }}</text>
+          <text v-if="st.offerNotes.value.length > 0" class="qpis-info-notes" :class="layout.isWide ? 'qpis-info-notes-wide' : ''" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)" :max-lines="4">{{ st.offerNotes.value }}</text>
         </view>
       </view>
-      <text class="qpis-desc" :class="layout.isWide ? 'qpis-desc-wide' : ''" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(24, 13)">在线播放需要安装一次播放音源包。这里一键安装官方包，也可以到「音源包管理」手动安装。</text>
-      <view class="qpis-info" :class="layout.isWide ? 'qpis-info-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';border-color:' + theme.skin.border + ';'">
-        <text class="qpis-info-name" :style="'color:' + theme.skin.text + ';font-weight:600;' + qtFontDual(26, 14)">{{ offerTitleText }}</text>
-        <text v-if="st.offerNotes.value.length > 0" class="qpis-info-notes" :class="layout.isWide ? 'qpis-info-notes-wide' : ''" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)" :max-lines="4">{{ st.offerNotes.value }}</text>
-      </view>
+    </scroll-view>
+    <template #footer>
       <view class="qpis-actions" :class="layout.isWide ? 'qpis-actions-wide' : ''">
-        <qt-button label="立即安装" variant="primary" size="lg" :disabled="st.installing.value" @click="onInstall" />
-        <qt-button class="qpis-manual-btn" :class="layout.isWide ? 'qpis-manual-btn-wide' : ''" label="手动管理" variant="outline" size="md" @click="onManual" />
+        <QtButton label="立即安装" variant="primary" size="lg" :disabled="st.installing.value" @click="onInstall" />
+        <view class="qpis-manual-btn" :class="layout.isWide ? 'qpis-manual-btn-wide' : ''"><QtButton label="手动管理" variant="outline" size="md" :disabled="st.installing.value" @click="onManual" /></view>
       </view>
-    </view>
-  </view>
+    </template>
+  </QtSheet>
 </template>
 <script setup lang="ts">
-import { ref, watch, onUnmounted, computed } from "vue";
-import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
-import qtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import { computed } from "vue";
+import QtSheet from "@/uni_modules/qt-ui/components/qt-sheet/qt-sheet.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
-import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
-import {
-  packInstallSheetState,
-  packInstallSheetClose,
-  packInstallSheetGoManual,
-  packInstallSheetInstall,
-} from "@/services/pack-install-sheet";
-
+import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { packInstallSheetState, packInstallSheetClose, packInstallSheetGoManual, packInstallSheetInstall } from "@/services/pack-install-sheet";
 const st = packInstallSheetState();
 const theme = useThemeStore();
 const layout = useQtLayout();
-
-// 面板动画（qt-sort-panel 配方）：挂载后 16ms 翻 shown 上滑淡入，收起先翻回再 220ms 卸载
-const mount = ref(false);
-const shown = ref(false);
-let openTimer = 0;
-let closeTimer = 0;
-
-watch(
-  () => st.visible.value,
-  (v: boolean) => {
-    if (v) {
-      mount.value = true;
-      openTimer = setTimeout(() => { shown.value = true; }, 16) as number;
-    } else if (mount.value) {
-      shown.value = false;
-      closeTimer = setTimeout(() => { mount.value = false; }, 220) as number;
-    }
-  },
-  { immediate: true }
-);
-onUnmounted((): void => {
-  if (openTimer != 0) clearTimeout(openTimer);
-  if (closeTimer != 0) clearTimeout(closeTimer);
-});
-
-/**
- * 面板 class：展开态用 .qpis-sheet-on 驱动窄屏上滑；宽屏换 .qpis-sheet-wide。
- * 宽屏淡入淡出走内联 opacity —— 组合选择器 .a.b 在本版 Vapor 下匹配不稳，
- * 而 -wide 与 -on 必然同时存在，靠类叠加拿不到样式（同 qt-sort-panel）。
- */
-const sheetClass = computed((): string => {
-  let c = shown.value ? "qpis-sheet-on" : "";
-  if (layout.isWide) c += " qpis-sheet-wide";
-  return c;
-});
-/** 面板底色/描边/尺寸走内联，避免被主题类覆盖（同 qt-sort-panel） */
-const sheetStyle = computed((): string => {
-  let s = "background-color:" + theme.skin.surfaceStrong + ";border-color:" + theme.skin.border + ";";
-  if (layout.isWide) s += "width:" + qtSheetWidth("dialog") + "px;opacity:" + (shown.value ? "1" : "0") + ";";
-  return s;
-});
-
-/** 版本行：有版本名给「官方播放包 v名字」，没有（旧后端空名）退到版本号 */
 const offerTitleText = computed((): string => {
   const name = st.offerName.value;
   return name.length > 0 ? "官方播放包 v" + name : "官方播放包（版本号 " + st.offerCode.value + "）";
 });
-
-function onClose(): void {
-  // 安装中不允许误关：服务侧 packInstallSheetClose 也有同款护栏，这里提前拦住
-  // 蒙层点击，避免动画先行
-  if (st.installing.value) return;
+const bodyStyle = computed((): string => {
+  const preferred = (layout.isWide ? 180 : qtRpx(310)) * fontScale.scale;
+  const available = Math.max(0, layout.windowHeight * 0.86 - layout.safeBottomPx - (layout.isWide ? 210 : qtRpx(360)) * fontScale.scale);
+  return "height:" + Math.min(preferred, available) + "px;";
+});
+function onVisibleChange(value: boolean): void {
+  // 双护栏：Sheet emit 前就 guard，这里在服务变更前再次校验。没有 v-model 先写 visible。
+  if (st.installing.value || value) return;
   packInstallSheetClose();
 }
-function onInstall(): void {
-  packInstallSheetInstall();
-}
+function onInstall(): void { packInstallSheetInstall(); }
 function onManual(): void {
+  if (st.installing.value) return;
   packInstallSheetGoManual();
 }
 </script>
 <style>
-/* 蒙层即根节点（qt-action-sheet 配方）：全屏 absolute + flex-end 把面板推到底部；
-   不能用 fixed：宽屏托管页里 fixed 被提升到窗口层，会被覆盖层压住、关闭后泄漏。
-   蒙层色用带透明度的 scrim 而不是 opacity —— opacity 动画会把子树一起变半透明。
-   z-index 990 = qt-action-sheet 同层：高于 qtConfirm(980)、低于 toast(999)。 */
-.qpis-mask { position: absolute; left: 0; right: 0; top: 0; bottom: 0; justify-content: flex-end; z-index: 990; }
-.qpis-sheet { margin: 12rpx; border-width: 1px; border-style: solid; border-radius: 24rpx; padding: 28rpx 28rpx 36rpx; transform: translateY(102%); transition-property: transform; transition-duration: 220ms; transition-timing-function: ease-out; }
-.qpis-sheet-on { transform: translateY(0); }
-.qpis-head { flex-direction: row; align-items: center; justify-content: space-between; }
-.qpis-close { width: 56rpx; height: 56rpx; border-radius: 28rpx; align-items: center; justify-content: center; background-color: rgba(127, 127, 127, 0.12); }
-.qpis-desc { margin-top: 16rpx; }
+.qpis-body { min-height: 0; }
+.qpis-content { padding: 24rpx 28rpx 0; }
+.qpis-content-wide { padding: 16px 20px 0; }
 .qpis-info { margin-top: 24rpx; border-width: 1px; border-style: solid; border-radius: 16rpx; padding: 20rpx 24rpx; }
-.qpis-info-notes { margin-top: 8rpx; }
-.qpis-actions { margin-top: 28rpx; }
-.qpis-manual-btn { margin-top: 16rpx; }
-/* 宽屏 px 覆盖（rpx 在大窗口会放大到不可用，见 design.md）：改成居中对话框
-   （底部贴边面板在 pad 上会拉成 1000px+ 长横幅），按钮行保持整宽堆叠。 */
-.qpis-mask-wide { justify-content: center; align-items: center; }
-.qpis-sheet-wide {
-  margin: 0;
-  padding: 20px 20px 24px;
-  border-radius: 16px;
-  transform: translateY(0);
-  transition-property: opacity;
-}
-.qpis-close-wide { width: 32px; height: 32px; border-radius: 16px; }
-.qpis-desc-wide { margin-top: 10px; }
 .qpis-info-wide { margin-top: 16px; border-radius: 10px; padding: 12px 14px; }
+.qpis-info-notes { margin-top: 8rpx; }
 .qpis-info-notes-wide { margin-top: 6px; }
-.qpis-actions-wide { margin-top: 20px; }
+.qpis-actions { padding: 28rpx 28rpx 24rpx; }
+.qpis-actions-wide { padding: 20px 20px 12px; }
+.qpis-manual-btn { margin-top: 16rpx; }
 .qpis-manual-btn-wide { margin-top: 10px; }
 </style>

@@ -1,0 +1,201 @@
+<template>
+  <view class="mq" ref="viewportRef" :style="rootStyle">
+    <view class="mq-track" ref="trackRef">
+      <text class="mq-text" ref="textRef" :style="textStyle">{{ text }}</text>
+      <!-- 首页公告栏同款无缝循环（m21532/m21548）：滚动时才挂载第二份同文副本，
+           它在 overflow:hidden 视口外，挂载本身不可见；平移恰好一份宽度后由
+           迭代边界无感复位 —— 不回扫、不停顿、不出现空白段。 -->
+      <text v-if="overflowing" class="mq-text" ref="copyRef" :style="textStyle">{{ text }}</text>
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+/** Long text loops seamlessly exactly like the home notice bar: two copies of one text,
+ *  the track slides one measured copy-width per iteration. Short text stays single-copy
+ *  and completely still. */
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtFontDual, useFontScaleStore } from "@/uni_modules/qt-ui/stores/font-scale";
+import { marqueeOverflows, marqueeLoopDuration } from "@/uni_modules/qt-ui/composables/marquee-motion";
+import { logMsgErr } from "@/services/logger";
+
+const props = defineProps<{
+  text: string;
+  sizeRpx: number;
+  sizePx: number;
+  color: string;
+  weight?: number;
+  /** Maximum viewport width in logical pixels; short text uses its native content width. */
+  widthPx: number;
+  /** Parent must disable this while its page is hidden. */
+  active?: boolean;
+}>();
+
+const layout = useQtLayout();
+const fontScale = useFontScaleStore();
+const viewportRef = ref<UniElement | null>(null);
+const trackRef = ref<UniElement | null>(null);
+const textRef = ref<UniElement | null>(null);
+const copyRef = ref<UniElement | null>(null);
+/** 副本是否挂载（= 文本溢出需要滚动）。放得下的短文永远单份静止。 */
+const overflowing = ref(false);
+let anim: UniAnimation | null = null;
+let timer = 0;
+let generation = 0;
+let mounted = false;
+let disposed = false;
+
+const lineHeightPx = computed((): number => {
+  const base = layout.isWide ? props.sizePx : props.sizeRpx * Math.max(layout.windowWidth, 1) / 750;
+  return Math.ceil(base * fontScale.scale * 1.4 + 4);
+});
+const rootStyle = computed((): string => {
+  // Native layout hugs short text from the first frame; siblings stay beside the text.
+  // Cap long text without an async full-width -> measured-width layout change.
+  const limit = Math.max(0, props.widthPx);
+  return "max-width:" + limit.toFixed(2) + "px;height:" + lineHeightPx.value + "px;";
+});
+/** 两份副本之间的间距（进入实测偏移，故平移一份宽度后衔接处即该间距，循环无缝）。 */
+const copyGapPx = computed((): number => layout.isWide ? 20 : 40 * Math.max(layout.windowWidth, 1) / 750);
+const textStyle = computed((): string =>
+  "color:" + props.color + ";font-weight:" + (props.weight == null ? 600 : props.weight) + ";" +
+  qtFontDual(props.sizeRpx, props.sizePx) + "line-height:1.4;padding-right:" + copyGapPx.value.toFixed(2) + "px;"
+);
+
+function enabled(): boolean {
+  return !disposed && mounted && props.active != false;
+}
+function cancelWork(): void {
+  generation++;
+  if (timer != 0) {
+    clearTimeout(timer);
+    timer = 0;
+  }
+  if (anim != null) {
+    try {
+      anim!.cancel();
+    } catch (_) {
+      // 静默：节点随父视图销毁时原生动画可能已被取消
+    }
+    anim = null;
+  }
+}
+
+function measure(token: number, attempts: number): void {
+  if (!enabled() || token != generation) return;
+  const viewport = viewportRef.value;
+  const textEl = textRef.value;
+  if (viewport == null || textEl == null) return;
+  let textWidth = 0;
+  let viewWidth = 0;
+  try {
+    textWidth = textEl.getBoundingClientRect().width;
+    viewWidth = viewport.getBoundingClientRect().width;
+  } catch (e) {
+    logMsgErr("[Marquee] measure error", e);
+  }
+  // 隐藏/零宽的测量不算「放得下」结论，有界重试
+  if (!(textWidth > 0) || !(viewWidth > 0)) {
+    if (attempts < 4) {
+      timer = setTimeout(() => {
+        timer = 0;
+        measure(token, attempts + 1);
+      }, 120) as unknown as number;
+    }
+    return;
+  }
+  if (!marqueeOverflows(textWidth, viewWidth)) {
+    // 放得下：撤掉副本（若有），完全静止
+    overflowing.value = false;
+    return;
+  }
+  if (!overflowing.value) {
+    // 先挂载副本，布局稳定后再量它的实际偏移
+    overflowing.value = true;
+    nextTick(() => {
+      if (enabled() && token == generation) measureCopyOffset(token, 0);
+    });
+    return;
+  }
+  measureCopyOffset(token, 0);
+}
+
+function measureCopyOffset(token: number, attempts: number): void {
+  if (!enabled() || token != generation) return;
+  const track = trackRef.value;
+  const copy = copyRef.value;
+  if (track == null || copy == null) {
+    if (attempts < 4) {
+      timer = setTimeout(() => {
+        timer = 0;
+        measureCopyOffset(token, attempts + 1);
+      }, 120) as unknown as number;
+    }
+    return;
+  }
+  let distance = 0;
+  try {
+    // 副本相对 track 起点的偏移 = 一份文本宽 + 副本间距；平移该距离后副本恰好
+    // 占据原文本位置，同屏像素完全一致，循环无缝 —— 与 qt-notice-bar 同口径。
+    distance = copy.getBoundingClientRect().left - track.getBoundingClientRect().left;
+  } catch (e) {
+    logMsgErr("[Marquee] measure copy error", e);
+  }
+  const duration = marqueeLoopDuration(distance);
+  if (duration <= 0) {
+    if (attempts < 4) {
+      timer = setTimeout(() => {
+        timer = 0;
+        measureCopyOffset(token, attempts + 1);
+      }, 120) as unknown as number;
+    }
+    return;
+  }
+  // 实测偏移直接作为 translateX 距离：与公告栏同款，不做任何设备缩放换算。
+  // 旧实现把逻辑距离再乘 ratio 会超射出文本尾部，真机症状就是
+  // 「滚出一段空白再回扫」（m21532），公告栏从未乘 ratio 也从未出过该症状。
+  try {
+    anim = track.animate([
+      { transform: "translateX(0)" },
+      { transform: "translateX(-" + distance + "px)" },
+    ], { duration, iterations: Infinity, easing: "linear" });
+  } catch (e) {
+    logMsgErr("[Marquee] animate error", e);
+  }
+}
+
+function restart(): void {
+  cancelWork();
+  if (!enabled() || props.text.length == 0) return;
+  const token = generation;
+  nextTick(() => {
+    if (!enabled() || token != generation) return;
+    timer = setTimeout(() => {
+      timer = 0;
+      measure(token, 0);
+    }, 100) as unknown as number;
+  });
+}
+
+onMounted(() => {
+  mounted = true;
+  restart();
+});
+onBeforeUnmount(() => {
+  disposed = true;
+  mounted = false;
+  cancelWork();
+});
+watch([
+  () => props.text, () => props.widthPx, () => props.active,
+  () => props.sizeRpx, () => props.sizePx, () => props.weight,
+  () => layout.isWide, () => layout.windowWidth, () => fontScale.scale,
+], () => restart());
+</script>
+
+<style>
+.mq { position: relative; overflow: hidden; flex-direction: row; align-items: center; flex-grow: 0; flex-shrink: 1; min-width: 0; }
+.mq-track { flex-direction: row; align-items: center; flex-shrink: 0; }
+.mq-text { white-space: nowrap; flex-shrink: 0; }
+</style>

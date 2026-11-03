@@ -1,5 +1,5 @@
 <template>
-  <view class="qt-page-frame" :style="rootStyle" @click="onFrameClick">
+  <view ref="frameElement" class="qt-page-frame" :style="rootStyle" @click="onFrameClick">
     <image
       v-if="backgroundImage.length > 0"
       class="qt-page-frame-wallpaper"
@@ -239,6 +239,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtSelectionColor } from "@/uni_modules/qt-ui/composables/selection";
+const frameElement = ref<UniElement | null>(null);
 import { useQtLayout, qtStatusBarPx, qtRpx, QT_PLAYER_BAR_HEIGHT_PX } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import {
   qtContentWidthRaw,
@@ -574,11 +576,11 @@ function chipOn(index: number): boolean {
 }
 function chipStyle(index: number): string {
   return chipOn(index)
-    ? "background-color:" + theme.skin.accent + ";border-color:" + theme.skin.accent + ";"
+    ? "background-color:" + qtSelectionColor(theme.dark) + ";border-color:" + qtSelectionColor(theme.dark) + ";"
     : "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";";
 }
 function chipTextStyle(index: number): string {
-  return "color:" + (chipOn(index) ? theme.skin.onAccent : theme.skin.textMuted) + ";";
+  return "color:" + (chipOn(index) ? "#ffffff" : theme.skin.textMuted) + ";";
 }
 
 /** 非搜索态标题栏的「文字 tab」样式（用户定稿，QQ 音乐那种：无底无框，
@@ -617,7 +619,7 @@ const chipRowInline = computed((): string => {
 
 function barChipTextStyle(index: number): string {
   const on = chipOn(index);
-  const base = "color:" + (on ? theme.skin.accent : theme.skin.textMuted)
+  const base = "color:" + (on ? qtSelectionColor(theme.dark) : theme.skin.textMuted)
     + ";font-weight:" + (on ? "600" : "400") + ";";
   // 宽屏走固定 px（rpx 在宽窗口膨胀数倍，真机 1920 宽下 28rpx ≈ 72px 巨字）；
   // 降档机制（CHIP_FONT_TIERS_RPX）是窄屏标题栏「塞进一行」的事，宽屏宽度富余不参与。
@@ -739,14 +741,21 @@ const chipRowStyle = computed((): string => {
   return "width:" + chipRowAvailPx.value + "px;height:" + chipRowRpx.value + "rpx;";
 });
 let chipMeasureTimer = 0;
-/**
- * 框架层存活标记。药丸行测量同样是「测量 → 失败 → 延时重测」的链式回调：
- * 只清 chipMeasureTimer 拦不住已经 exec() 出去的 selector 查询，那个回调落地时
- * 组件可能已卸载，回调里再排一次 timer 就会对已注销的页面实例继续调框架 API
- * （真机表现为 [uts] UTS instance N is not registered，栈来自定时器）。
- * 卸载后置 false，查询回调与重测排期统一短路。
- */
+let chipMeasureGeneration = 0;
+// 每轮内容/字号/窗口变化作废上一轮重测；查询只从本实例 ref 向下查找。
 let frameAlive = false;
+function scheduleChipMeasure(delay: number): void {
+  chipMeasureGeneration++;
+  if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
+  chipMeasureTimer = 0;
+  if (!frameAlive) return;
+  const generation = chipMeasureGeneration;
+  chipMeasureTimer = setTimeout(() => {
+    if (!frameAlive || generation != chipMeasureGeneration) return;
+    chipMeasureTimer = 0;
+    measureChipRow(0, generation);
+  }, delay) as unknown as number;
+}
 
 /** 单个 tab 的估算宽度（px）：按当前生效字号算（见 chipEstWidthAt），
  *  仅作实测前的初值，真实内容宽由 measureChipRow() 实测后覆盖 */
@@ -768,53 +777,39 @@ function onChipRowScroll(e: any): void {
 }
 
 /** 量出药丸行真实宽度（scroll-view 的显式 px 宽）+ 内行真实内容宽，随后把选中 tab 滚到行中央 */
-function measureChipRow(attempt: number): void {
-  if (!frameAlive) return;
-  if (headerChips.value.length == 0) return;
-  let rowLeft = -1;
-  const query = uni.createSelectorQuery();
-  query.select(".qt-page-frame-chip-row").boundingClientRect((rect: UniNodeInfo | null) => {
-    // 查询在途期间组件可能已卸载：此后再排重测就是对已回收的页面实例调框架 API
-    if (!frameAlive) return;
-    if (rect != null && rect.width > 0) {
-      chipRowWidth.value = rect.width;
-      rowLeft = Number(rect.left);
-      centerActiveChip(rect.width);
-      return;
-    }
+function measureChipRow(attempt: number, generation: number): void {
+  if (!frameAlive || generation != chipMeasureGeneration || headerChips.value.length == 0) return;
+  const root = frameElement.value;
+  const row = root != null ? root.querySelector(".qt-page-frame-chip-row") : null;
+  const rowRect = row != null ? row.getBoundingClientRect() : null;
+  const chips = row != null ? row.querySelectorAll(".qt-page-frame-barchip") : [];
+  if (rowRect == null || rowRect.width <= 0 || chips.length != headerChips.value.length) {
     if (attempt < 3) {
       chipMeasureTimer = setTimeout(() => {
+        if (!frameAlive || generation != chipMeasureGeneration) return;
         chipMeasureTimer = 0;
-        if (!frameAlive) return;
-        measureChipRow(attempt + 1);
+        measureChipRow(attempt + 1, generation);
       }, 150) as unknown as number;
     } else {
-      // 查询不可用时也保留正的可用宽；不能退回 0 再依赖同一个零宽节点自测。
       chipRowWidth.value = chipRowAvailPx.value;
       centerActiveChip(chipRowWidth.value);
     }
-  });
-  // 内行宽不能靠估算（字号缩放/字形宽度都会让估算偏小：尾部字符被裁 + scroll-view
-  // 以为装得下 → 滚不动），量最后一颗 tab 的右缘相对行左缘的距离；顺带记下每颗
-  // tab 的实测左缘，居中计算就不用按字数猜宽度了。
-  //
-  // 坐标换算必须加 scrollLeft：boundingClientRect 给的是**屏幕坐标**，行一旦滚动过，
-  // chip 的屏幕位置就整体左移，直接用 rect.left - row.left 当「内容坐标」会把每颗
-  // tab 的位置都算小一个 scrollLeft，居中越滚越偏（实测表现为选中第一项时左边被
-  // 裁掉半个 tab）。chipLeftNow 是 @scroll 里记的当前偏移，正好用来还原。
-  query.selectAll(".qt-page-frame-barchip").boundingClientRect((rects: UniNodeInfo[]) => {
-    if (!frameAlive) return;
-    if (rowLeft < 0 || rects.length == 0) return;
-    const offset = chipLeftNow;
-    const lefts: number[] = [];
-    for (let i = 0; i < rects.length; i++) lefts.push(Number(rects[i].left) - rowLeft + offset);
-    chipLefts.value = lefts;
-    const measured = Number(rects[rects.length - 1].right) - rowLeft + offset;
-    if (measured > 0) chipContentMeasured.value = measured + 2;
-    // 放不下就降一档字号再测（降档会改变实测值，靠 watch(chipFontRpx) 触发下一轮）
-    fitChipFont(measured, chipRowWidth.value, lefts.length);
-  });
-  query.exec();
+    return;
+  }
+  const lefts: number[] = [];
+  let measured = 0;
+  // 屏幕坐标转内容坐标必须还原真实 scrollLeft；先记录整组，再居中。
+  for (let i = 0; i < chips.length; i++) {
+    const rect = chips[i].getBoundingClientRect();
+    lefts.push(rect.left - rowRect.left + chipLeftNow);
+    measured = rect.right - rowRect.left + chipLeftNow;
+  }
+  if (!frameAlive || generation != chipMeasureGeneration || measured <= 0) return;
+  chipRowWidth.value = rowRect.width;
+  chipLefts.value = lefts;
+  chipContentMeasured.value = measured + 2;
+  fitChipFont(measured, rowRect.width, lefts.length);
+  centerActiveChip(rowRect.width);
 }
 
 /**
@@ -878,7 +873,7 @@ function centerChipIndex(index: number, rowWidthPx: number = 0): void {
       chipStart += w;
     }
   }
-  let target = chipStart + chipWidth / 2 - rowWidthPx / 2;
+  let target = chipWidth > rowWidthPx ? chipStart : chipStart + chipWidth / 2 - rowWidthPx / 2;
   const maxLeft = Math.max(0, chipContentWidth.value - rowWidthPx);
   if (target < 0) target = 0;
   if (target > maxLeft) target = maxLeft;
@@ -889,80 +884,43 @@ function centerChipIndex(index: number, rowWidthPx: number = 0): void {
   // 它会让「点左边的 tab 滚不回去」——只要用户手动滑过，点第一个 tab 后 target 归 0
   // 却被改回当前位置，左侧 tab 永远半截被裁。居中就是居中，用户的滑动不该否决它。
   // scroll-left 与当前值相同不会触发回滚（用户手动滑走后再选中同一项的场景），偏 0.1 兜底
-  const bound = target == chipScrollLeft.value ? target + 0.1 : target;
+  const bound = target == chipScrollLeft.value && Math.abs(chipLeftNow - target) > 0.5
+    ? (target + 0.1 <= maxLeft ? target + 0.1 : Math.max(0, target - 0.1)) : target;
   chipLeftNow = bound;
   chipScrollLeft.value = bound;
 }
 
 onMounted(() => {
   frameAlive = true;
-  chipMeasureTimer = setTimeout(() => {
-    chipMeasureTimer = 0;
-    if (!frameAlive) return;
-    measureChipRow(0);
-  }, 200) as unknown as number;
+  scheduleChipMeasure(200);
 });
-watch(() => props.headerChipActives, () => {
-  if (!frameAlive) return;
-  if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
-  chipMeasureTimer = setTimeout(() => {
-    chipMeasureTimer = 0;
-    if (!frameAlive) return;
-    measureChipRow(0);
-  }, 120) as unknown as number;
-}, { deep: true });
-// 标签集变化（包列表换源/换字体档）也要重测 + 重新居中
-watch(headerChips, () => {
-  // 换了源清单就作废上一组的实测降档结果（新名字可能更短），预测值会自动重算
+// 内容 key 会追踪数组原地修改；保持多 active，不把聚合开关挤成单选。
+watch(() => props.headerChipActives != null ? props.headerChipActives.join(",") : "", () => {
+  scheduleChipMeasure(120);
+});
+watch(() => headerChips.value.join("\u0001"), () => {
   chipFontMeasuredRpx.value = 0;
   chipContentMeasured.value = 0;
   chipLefts.value = [];
-  if (!frameAlive) return;
-  if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
-  chipMeasureTimer = setTimeout(() => {
-    chipMeasureTimer = 0;
-    if (!frameAlive) return;
-    measureChipRow(0);
-  }, 200) as unknown as number;
+  scheduleChipMeasure(200);
 });
-// 字号档变化（预测降档 / 实测兜底降档 / 全局字号档切换）后重测，直到放得下
 watch(chipFontRpx, () => {
   chipContentMeasured.value = 0;
   chipLefts.value = [];
-  if (!frameAlive) return;
-  if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
-  chipMeasureTimer = setTimeout(() => {
-    chipMeasureTimer = 0;
-    if (!frameAlive) return;
-    measureChipRow(0);
-  }, 120) as unknown as number;
+  scheduleChipMeasure(120);
 });
-// 全局字号档变了，实测兜底结论作废（预测值会随 fontScale 自动重算）
 watch(() => fontScale.scale, () => {
   chipFontMeasuredRpx.value = 0;
   chipContentMeasured.value = 0;
   chipLefts.value = [];
-  if (!frameAlive) return;
-  if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
-  chipMeasureTimer = setTimeout(() => {
-    chipMeasureTimer = 0;
-    if (!frameAlive) return;
-    measureChipRow(0);
-  }, 200) as unknown as number;
+  scheduleChipMeasure(200);
 });
-// 旋转/分屏后行宽变了，重测 + 重新居中（预测值也跟着 windowWidth 重算）
-watch(() => layout.windowWidth, () => {
+watch(() => layout.sizeEpoch + ":" + chipRowAvailPx.value + ":" + paneHeadText.value + ":" + paneHeadCount.value + ":" + props.headerSearching, () => {
   chipRowWidth.value = 0;
   chipFontMeasuredRpx.value = 0;
   chipContentMeasured.value = 0;
   chipLefts.value = [];
-  if (!frameAlive) return;
-  if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
-  chipMeasureTimer = setTimeout(() => {
-    chipMeasureTimer = 0;
-    if (!frameAlive) return;
-    measureChipRow(0);
-  }, 300) as unknown as number;
+  scheduleChipMeasure(300);
 });
 
 /**
@@ -1088,6 +1046,7 @@ onMounted((): void => {
 });
 onUnmounted((): void => {
   frameAlive = false;
+  chipMeasureGeneration++;
   qtClearContentWidthCap(paneCapToken.value);
   if (chipMeasureTimer != 0) {
     clearTimeout(chipMeasureTimer);

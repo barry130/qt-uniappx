@@ -4,11 +4,8 @@
     :hover-class="isWide ? 'row-hover' : 'none'"
     @click="emit('tap')"
   >
-    <view
-      v-if="selecting" class="checkbox" :class="isWide ? 'checkbox-wide' : ''"
-      :style="selected ? 'background-color:' + skin.accent + ';border-color:' + skin.accent + ';' : 'border-color:' + skin.border + ';'"
-    >
-      <QtIcon v-if="selected" name="check" :size="isWide ? 12 : 22" :color="skin.onAccent" />
+    <view v-if="selecting" class="checkbox" :class="isWide ? 'checkbox-wide' : ''">
+      <QtCheckbox :checked="selected" :size="isWide ? 'sm' : 'md'" @change="onCheckChange" />
     </view>
     <view v-if="!selecting && current" class="row-ind" :class="isWide ? 'row-ind-wide' : ''" :style="'background-color:' + skin.accent + ';'" />
     <view class="info" :class="isWide ? 'info-wide' : ''">
@@ -42,7 +39,9 @@
  * 选中态 / 播放中态 / 勾选态都只由 props 决定，组件自身无状态，因此 list-item 复用时
  * 不会残留上一个条目的视觉。
  */
+import { computed } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtCheckbox from "@/uni_modules/qt-ui/components/qt-checkbox/qt-checkbox.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
@@ -59,6 +58,8 @@ const props = defineProps<{
   current: boolean;
 }>();
 const emit = defineEmits<{ tap: []; more: [] }>();
+// QtCheckbox 自己 stop 点击；显式转发宿主选择入口，不能再冒泡第二次。
+function onCheckChange(_checked: boolean): void { emit("tap"); }
 
 const layout = useQtLayout();
 const theme = useThemeStore();
@@ -152,10 +153,7 @@ const skin = computed(() => theme.skin);
 .checkbox {
   width: 44rpx;
   height: 44rpx;
-  border-radius: 22rpx;
-  /* border-style 必须显式写，否则 Vapor 下边框不绘制（未选中态会完全看不见） */
-  border-style: solid;
-  border-width: 2px;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
 }

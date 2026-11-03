@@ -9,9 +9,9 @@
   >
     <view class="cover-wrap" :class="layout.isWide ? 'cover-wrap-wide' : ''">
       <image class="cover" :class="layout.isWide ? 'cover-wide' : ''" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
-      <view v-if="selected" class="select-mark" :style="'background-color:' + themeStore.skin.accentSoft + ';border-color:' + themeStore.skin.accent + ';'"
-        ><QtIcon name="check" :size="24" :color="themeStore.skin.accent" /></view
-      >
+      <view v-if="selecting || selected" class="select-mark">
+        <QtCheckbox :checked="selected == true" :size="layout.isWide ? 'sm' : 'md'" @change="onCheckChange" />
+      </view>
     </view>
     <view class="info" :class="layout.isWide ? 'info-wide' : ''">
       <!-- 平台小签跟在歌名后面（与 qt-song-row-lite 同款）：不再盖在封面左下角 -->
@@ -64,6 +64,7 @@ import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { platformShort, platformColor } from "@/services/platform";
 import { qtShowActionSheet } from "@/services/action-sheet";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtCheckbox from "@/uni_modules/qt-ui/components/qt-checkbox/qt-checkbox.uvue";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const props = defineProps<{
@@ -75,6 +76,8 @@ const props = defineProps<{
   selecting?: boolean;
 }>();
 const emit = defineEmits<{ play: [] }>();
+// 宿主已用 play 事件处理 selecting；不新增 select，不让 checkbox 冒泡双触发。
+function onCheckChange(_checked: boolean): void { emit("play"); }
 
 const player = usePlayerStore();
 const downloads = useDownloadsStore();
@@ -264,8 +267,7 @@ function shareSong(song: Song): void {
   height: 40rpx;
   justify-content: center;
   align-items: center;
-  border-radius: 20rpx;
-  border-width: 2rpx; border-style: solid;
+  /* 圆环与红点由共享 Checkbox 绘制，不再叠外层勾选边框。 */
 }
 .info {
   flex: 1;

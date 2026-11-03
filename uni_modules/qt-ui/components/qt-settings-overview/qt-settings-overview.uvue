@@ -44,7 +44,7 @@
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '', inPane ? 'cell-icon-pane' : '']" :name="c.icon" :size="inPane ? 22 : 36" :color="c.color" />
           <text class="cell-title" :class="[layout.isWide ? 'cell-title-wide' : '', inPane ? 'cell-title-pane' : '']" :style="('color:' + (cellActive(c.key) ? theme.skin.accent : theme.skin.text) + ';') + qtFontDual(28, 17)">{{ c.title }}</text>
           <view v-if="c.dot" class="cell-dot" />
-          <!-- 中间栏不显示行尾摘要：400px 宽下「倍速 1x · 音质 高品 320k」必然折行挤掉标题 -->
+          <!-- 中间栏不显示行尾摘要：400px 宽下「倍速 1x · 播完本曲关闭」这类串必然折行挤掉标题 -->
           <view v-if="!inPane" class="cell-right">
             <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ c.value }}</text>
             <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
@@ -117,7 +117,7 @@ const props = defineProps<{
    * 两个必须的分支差异：
    * 1. 强制单列 —— 中间栏里 `qtContentWidth` 已被压到右栏宽（约 600），
    *    按 sizeClass 判出来的 twoColumn 仍为 true，会算成两列各 320 直接溢出。
-   * 2. 不渲染行尾摘要 —— 「倍速 1x · 音质 高品 320k」这类串在 400px 里必然折行，
+   * 2. 不渲染行尾摘要 —— 「倍速 1x · 播完本曲关闭」这类串在 400px 里必然折行，
    *    挤掉标题。摘要在右栏（子页）和总览页里都能看到，中间栏只做导航。
    */
   inPane?: boolean;
@@ -356,7 +356,8 @@ function goAiSettings(): void {
 
 /**
  * 播放页展示设置已拆成独立页面（pages/player-bar/index）。
- * 设置页只留一行入口，右侧显示「已展示 N/5」，所以这里仍需保留计数口径。
+ * 设置页只留一行入口，右侧显示「已展示 N/4」，所以这里仍需保留计数口径。
+ * 上限 4 与「收藏/分享/歌手固定常驻、不占名额」的口径见 stores/player-bar.ts。
  */
 const maxVisible = PLAYER_BAR_MAX_VISIBLE;
 /** 计数口径：把当前不可能出现的项（非管理员的播放链接）排除 */
@@ -425,19 +426,20 @@ function goSubpage(url: string): void {
   uni.navigateTo({ url: url });
 }
 
-/** 打开「播放设置」页（倍速/定时关闭/均衡器/同时播放/默认音质/缓存上限，原来散在本页，现在独立） */
+/** 打开「播放设置」页（倍速/定时关闭/均衡器/同时播放/缓存上限，原来散在本页，现在独立） */
 function goPlaySettings(): void {
   goSubpage("/pages/play-settings/index");
 }
 
-/** 行尾摘要：只放最常改的两项，不用进页面就能看出播放行为 */
+/** 行尾摘要：只放最常改的项，不用进页面就能看出播放行为。
+ *  「音质 xxx」已去掉（m21711）：播放设置页早已没有默认音质行（只剩同码率听感开关），
+ *  摘要再报音质档位只会误导用户去这里找。 */
 function playSummaryText(): string {
   const parts: string[] = [];
   if (player.sleepStopAfterCurrent) {
     parts.push("播完本曲关闭");
   }
   parts.push("倍速 " + audioPlayer.rate + "x");
-  parts.push("音质 " + registry.qualityLabel(player.quality));
   return parts.join(" · ");
 }
 
@@ -523,7 +525,7 @@ function goSourceAuth(): void {
 }
 
 // ==================== 播放设置已整体拆分（独立页 pages/play-settings/index） ====================
-// 默认倍速 / 定时关闭 / 均衡器 / 同时播放 / 播放默认音质 / 音乐缓存上限（含自定义输入弹层）
+// 默认倍速 / 定时关闭 / 均衡器 / 同时播放 / 音乐缓存上限（含自定义输入弹层）
 // 全部搬到那里，本页只保留上面一行入口，不再保留任何副本与状态。
 // 播放音量已移除：音量与系统媒体音量重复，用户要求删除；静音态仍由系统音量键控制，
 // services/audio-player.uts 的 setVolume/setMuted 保留不动，播放页/通知栏若有需要仍可调用。

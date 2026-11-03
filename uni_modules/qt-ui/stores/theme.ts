@@ -47,6 +47,17 @@ export type QtSkin = {
   backgroundImage: string;
 };
 
+/** The compact player's cover and lyric views share this neutral material environment. */
+export type QtTurntablePalette = { surface: string; text: string; muted: string; rail: string };
+export function turntablePalette(skin: QtSkin, dark: boolean): QtTurntablePalette {
+  return {
+    surface: dark ? skin.background : "#dfe3eb",
+    text: dark ? skin.text : "#535c68",
+    muted: dark ? skin.textMuted : "#5d6673",
+    rail: dark ? skin.border : "rgba(83,92,104,0.18)",
+  };
+}
+
 export type QtSkinPreset = {
   id: string;
   name: string;

@@ -175,7 +175,7 @@
 | ② 硬编码浅色线 | 21 处 5 种灰 → **0** | 分隔线统一 `themeStore.skin.divider`（全库 48 处消费），`#eff1f5/#eef0f5/#e5e8ee/#e6e8ee/#e8ebf2` 清零 |
 | ③ 次要文字灰 | 14 个值 63 处 → **2 个值** | `#737b8e`（= linen `textMuted`）用于主副文字、`#969dad`（= `textSubtle`）用于弱说明；替换 47 处，与皮肤令牌精确相等，深色皮肤由内联覆盖 |
 | ⑤ 触控热区 | 红心/更多 20dp、播放工具键 19dp、进度条 15dp、首页搜索/铃铛 34dp → **34dp / 44dp** | 行内图标外套 `.row-hit`/`.lite-hit`（68rpx，宽屏 40px），图标本体尺寸不变；播放页 `.action-hit`/`.lyric-tool`/`.prog-range` 加高；首页 `.icon-btn`/`.search` 88rpx |
-| ⑥ 动效 | 6 个组件有 transition、播放页 0 个 → **播放页封面淡入 0.32s、底部面板 translateY 0.24s；面板 0.22s** | `qt-action-sheet`/`qt-playlist-picker`/批量排序面板/播放偏移面板统一「v-if 保留 + opacity/transform transition」；列表用既有 `useQtReveal`（chart、qt-skeleton-list）错峰淡入 |
+| ⑥ 动效（2026-10-29 历史实现） | 当时加入播放页封面淡入 0.32s、底部面板 0.24s、面板 0.22s | 2026-11 的选择族统一改用 QtSheet 显隐挂载，不再宣称 action-sheet / picker / sort 保留旧延时关闭动画；列表仍用 `useQtReveal` 错峰淡入，其他特殊业务面板以当前源码为准 |
 | ⑦ 错误态 | 失败吞成 toast / 空数组 / 静默（审计点名 10 处） | 复用 `qt-empty` 当错误卡（图标 alert + 说明 + 「重新加载」），与真空态区分；chart/home/daily/daily-recommend/search/artist 等页补 `action-text="重新加载"` |
 
 **④ 圆角未动的原因**：64 个取值里至少三种是合法家族——卡片 16/20/24rpx、底部面板 `32rpx 32rpx 0 0`、胶囊 999；其余 5/6/10/14/18/22 是随手值。全局一刀切会把面板顶部圆角压小、把胶囊变方块，比现状更乱。正确顺序是先立「元素家族 → 档位」契约再按家族批量替换，属独立一次改动。

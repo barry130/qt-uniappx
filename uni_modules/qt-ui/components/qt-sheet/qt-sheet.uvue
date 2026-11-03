@@ -1,0 +1,52 @@
+<template>
+  <view v-if="visible" class="qs-mask" :class="layout.isWide ? 'qs-mask-wide' : ''" :style="'background-color:' + theme.skin.scrim + ';'" @click="close">
+    <view class="qs-panel" :class="layout.isWide ? 'qs-panel-wide' : ''" :style="panelStyle" @click.stop>
+      <view v-if="title.length > 0" class="qs-header" :class="layout.isWide ? 'qs-header-wide' : ''" :style="'border-bottom-color:' + theme.skin.divider + ';'">
+        <view class="qs-heading">
+          <text class="qs-title" :class="layout.isWide ? 'qs-title-wide' : ''" :style="'color:' + theme.skin.text + ';' + qtFontDual(30, 16)">{{ title }}</text>
+          <text v-if="subtitle.length > 0" class="qs-subtitle" :class="layout.isWide ? 'qs-subtitle-wide' : ''" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 12)">{{ subtitle }}</text>
+        </view>
+        <view v-if="dismissible" class="qs-close" :class="layout.isWide ? 'qs-close-wide' : ''" @click="close"><QtIcon name="close" :size="layout.isWide ? 18 : 28" :color="theme.skin.iconMuted" /></view>
+      </view>
+      <view class="qs-body"><slot></slot></view>
+      <view class="qs-footer" :class="layout.isWide ? 'qs-footer-wide' : ''"><slot name="footer"></slot></view>
+    </view>
+  </view>
+</template>
+<script setup lang="ts">
+import { computed } from "vue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+const props = withDefaults(defineProps<{ visible: boolean; title?: string; subtitle?: string; dismissible?: boolean }>(), { title: "", subtitle: "", dismissible: true });
+const emit = defineEmits<{ "update:visible": [value: boolean]; close: [] }>();
+const layout = useQtLayout();
+const theme = useThemeStore();
+const panelStyle = computed((): string => {
+  const width = layout.isWide ? qtSheetWidth("drawer") : layout.windowWidth;
+  const bottom = layout.isWide ? 12 : Math.max(8 * layout.windowWidth / 750, layout.safeBottomPx);
+  return "width:" + width + "px;max-height:" + Math.max(0, layout.windowHeight * 0.86 - layout.safeBottomPx) + "px;background-color:" + theme.skin.sheetSurface + ";padding-bottom:" + bottom + "px;";
+});
+function close(): void { if (!props.dismissible) return; emit("update:visible", false); emit("close"); }
+</script>
+<style>
+/* One window-sized ancestor; never mount this inside a tiny trigger node. */
+.qs-mask { position: absolute; left: 0; right: 0; top: 0; bottom: 0; justify-content: flex-end; z-index: 999; }
+.qs-mask-wide { justify-content: center; align-items: center; }
+.qs-panel { border-radius: 32rpx 32rpx 0 0; overflow: hidden; }
+.qs-panel-wide { border-radius: 16px; }
+.qs-header { flex-direction: row; align-items: center; padding: 24rpx 32rpx; border-bottom-width: 1rpx; border-bottom-style: solid; flex-shrink: 0; }
+.qs-header-wide { padding: 14px 20px; border-bottom-width: 1px; }
+.qs-heading { flex: 1; min-width: 0; }
+.qs-title { font-size: 30rpx; font-weight: 600; }
+.qs-title-wide { font-size: 16px; }
+.qs-subtitle { font-size: 23rpx; margin-top: 6rpx; }
+.qs-subtitle-wide { font-size: 12px; margin-top: 3px; }
+.qs-close { width: 64rpx; height: 64rpx; margin-left: 16rpx; align-items: center; justify-content: center; }
+.qs-close-wide { width: 36px; height: 36px; margin-left: 10px; }
+.qs-body { min-height: 0; flex-shrink: 1; }
+.qs-footer { flex-shrink: 0; }
+.qs-footer-wide { flex-shrink: 0; }
+</style>

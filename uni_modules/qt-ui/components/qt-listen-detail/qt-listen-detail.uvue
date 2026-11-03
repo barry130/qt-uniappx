@@ -60,10 +60,7 @@
             </template>
             <view v-if="target == '' || kind != 'songs'" class="detail-list-head">
               <text class="detail-section detail-list-title" :style="textStyle(26, 15)">{{ target == '' ? '全部排行' : '听过的歌曲' }} · {{ rows.length }}</text>
-              <view class="detail-sort" :style="'background-color:' + theme.skin.surfaceMuted + ';'">
-                <view class="detail-sort-item" :style="order == 'count' ? 'background-color:' + theme.skin.accentSoft + ';' : ''" @click="setOrder('count')"><text :style="order == 'count' ? accentStyle : mutedStyle">次数</text></view>
-                <view class="detail-sort-item" :style="order == 'seconds' ? 'background-color:' + theme.skin.accentSoft + ';' : ''" @click="setOrder('seconds')"><text :style="order == 'seconds' ? accentStyle : mutedStyle">时长</text></view>
-              </view>
+              <view class="detail-sort"><QtSegmented :list="['次数', '时长']" :model-value="order == 'count' ? 0 : 1" @change="onOrderChange" /></view>
             </view>
             <template v-if="target == '' || kind != 'songs'">
               <view v-for="(entry, index) in visibleRows" :key="entry.id" class="detail-row" :style="rowStyle" @click="openEntry(entry)">
@@ -96,6 +93,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
@@ -182,7 +180,7 @@ function openEntry(entry: ReportEntry): void {
     if (tracks.length > 0) stats.ensureArtistPic(tracks[0].song);
   }
 }
-function setOrder(value: string): void { order.value = value; limit.value = 50; }
+function onOrderChange(index: number): void { order.value = index == 0 ? "count" : "seconds"; limit.value = 50; }
 function playEntry(entry: ReportEntry): void { if (entry.song != null && props.loadingKey == "") emit("play", entry.song!); }
 function openPermissions(): void { close(); uni.navigateTo({ url: "/pages/permissions/index" }); }
 function categoryIcon(category: string): string { return category == "artists" ? "mic" : category == "sources" ? "disc" : "music"; }
@@ -212,8 +210,7 @@ function categoryIcon(category: string): string { return category == "artists" ?
 .detail-primary { flex-direction:row; justify-content:center; align-items:center; padding:16px; border-radius:12px; margin-top:24px; }
 .detail-list-head { flex-direction:row; align-items:center; margin-top:16px; }
 .detail-list-title { flex:1; margin-top:0; margin-bottom:0; }
-.detail-sort { flex-direction:row; border-radius:10px; padding:3px; }
-.detail-sort-item { padding:6px 10px; border-radius:8px; }
+.detail-sort { width: 144px; flex-shrink: 0; margin-left: 8px; }
 .detail-row { flex-direction:row; align-items:center; border-bottom-width:1px; border-bottom-style:solid; }
 .detail-rank { width:20px; flex-shrink:0; }
 .detail-row-cover { flex-shrink:0; }

@@ -1,233 +1,169 @@
 <template>
-  <view
-    class="seg"
-    :class="[layout.isWide ? 'seg-wide' : '']"
-    :style="'background-color:' + theme.skin.surfaceMuted + ';'"
-  >
+  <view ref="rootRef" class="seg" :class="layout.isWide ? 'seg-wide' : ''" :style="rootStyle">
     <view v-if="!scrollable" class="seg-flex">
-      <view
-        v-for="(item, index) in list"
-        :key="index"
-        class="seg-item"
-        :class="layout.isWide ? 'seg-item-wide' : ''"
-        :style="itemStyle(index)"
-        @click="select(index)"
-      >
-        <text
-          class="seg-text"
-          :class="layout.isWide ? 'seg-text-wide' : ''"
-          :style="('color:' + (modelValue == index ? theme.skin.accent : theme.skin.textSubtle) + ';') + qtFontDual(26, 14)"
-          >{{ item }}</text
-        >
+      <view v-for="(item, index) in list" :key="index" class="seg-item" :class="layout.isWide ? 'seg-item-wide' : ''" :style="itemStyle(index)" @click="select(index)">
+        <text class="seg-text" :class="layout.isWide ? 'seg-text-wide' : ''" :style="textStyle(index)">{{ item }}</text>
       </view>
     </view>
-    <scroll-view
-      v-else
-      class="seg-scrolllist"
-      direction="horizontal"
-      :show-scrollbar="false"
-      :scroll-left="scrollLeftPx"
-      :style="'height:' + rowHeightPx + 'px;'"
-    >
+    <scroll-view v-else class="seg-scrolllist" direction="horizontal" :show-scrollbar="false" :scroll-left="scrollLeftPx" :style="'height:' + rowHeightPx + 'px;'" @scroll="onScroll">
       <view class="seg-auto" :style="'width:' + autoRowWidth + 'px;'">
-        <view
-          v-for="(item, index) in list"
-          :key="index"
-          class="seg-item seg-item-auto"
-          :class="layout.isWide ? 'seg-item-wide seg-item-auto-wide' : ''"
-          :style="itemStyle(index)"
-          @click="select(index)"
-        >
-          <text
-            class="seg-text"
-            :class="layout.isWide ? 'seg-text-wide' : ''"
-            :style="('color:' + (modelValue == index ? theme.skin.accent : theme.skin.textSubtle) + ';') + qtFontDual(26, 14)"
-            >{{ item }}</text
-          >
+        <view v-for="(item, index) in list" :key="index" class="seg-item seg-item-auto" :class="layout.isWide ? 'seg-item-wide seg-item-auto-wide' : ''" :style="itemStyle(index)" @click="select(index)">
+          <text class="seg-text" :class="layout.isWide ? 'seg-text-wide' : ''" :style="textStyle(index)">{{ item }}</text>
         </view>
       </view>
     </scroll-view>
   </view>
 </template>
-
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtSelectionColor, qtSelectionIndex, qtSelectionScrollOffset } from "@/uni_modules/qt-ui/composables/selection";
 const props = defineProps<{
   list: string[];
   modelValue: number;
-  /**
-   * 相邻 tag 之间的水平间隔（px），默认 0 保持原紧凑样式。
-   * 只有两个短标签时（如「歌曲卡片 / 歌词卡片」）文字会贴在一起，页面可把它调大。
-   */
+  /** Total horizontal padding in px when positive; replaces the default padding. */
   itemGap?: number;
-  /**
-   * 是否允许横向滚动。默认 false：各 tag 均分整行宽度（flex:1），适合 2-4 个固定短标签。
-   * true：容器横向可滑动、每项按内容自适应宽度（flex:none + 固定左右内边距），
-   * 适合标签数量不定、内容长度不固定的场景（如音源数量随数据包变化）。
-   */
+  /** false keeps equal-width segments; true uses native horizontal scrolling. */
   scrollable?: boolean;
 }>();
+const emit = defineEmits<{ "update:modelValue": [value: number]; change: [value: number] }>();
 const layout = useQtLayout();
 const theme = useThemeStore();
-const emit = defineEmits<{ "update:modelValue": [value: number]; change: [value: number] }>();
-
-const itemGap = computed((): number => props.itemGap != null ? props.itemGap! : 0);
-
-/** rpx → px 的窗口换算单位（与 uni-app x 的 rpx 定义一致） */
+const rootRef = ref<UniElement | null>(null);
+const selectedColor = computed((): string => qtSelectionColor(theme.dark));
+const selectedIndex = computed((): number => qtSelectionIndex(props.modelValue, props.list.length));
 const unit = computed((): number => layout.windowWidth / 750);
-/** 单个 tag 左右内边距合计（px）：窄屏 24rpx×2，宽屏 12px×2，与 .seg-item-auto 对齐 */
-const autoPadPx = computed((): number => layout.isWide ? 24 : Math.ceil(48 * unit.value));
-/** tag 行高（px）：必须与 .seg-item / .seg-item-wide 的 height 一致 */
+const itemGap = computed((): number => Math.max(0, props.itemGap ?? 0));
+// The inline itemGap padding overrides CSS; never add both in the estimate.
+const autoPadPx = computed((): number => itemGap.value > 0 ? itemGap.value : layout.isWide ? 24 : 48 * unit.value);
 const rowHeightPx = computed((): number => layout.isWide ? 36 : Math.ceil(60 * unit.value));
-
-/**
- * 预估单个标签的文字宽度（px）。中文按 1.06 字宽、非中文按 0.82 字宽估算。
- *
- * 系数来自真机实测反推（HarmonyOS Mate 90 Pro 1280px 宽、fontPx=44.37）：
- * 「网易云音乐」5 个汉字实测 233px → 1.05 em/字；「QQ音乐」2 汉字 + 2 字母
- * 实测 165px，扣掉汉字后每个字母 0.81 em。**刻意取略大的值**：估小了会让内容行
- * 比真实文字窄，滚到最右时最后一个 tag 仍会被裁掉（这正是本组件要修的问题）。
- */
+const viewportPx = ref(0);
+const boxStarts = ref<number[]>([]);
+const boxWidths = ref<number[]>([]);
+const measuredContent = ref(0);
+const scrollLeftPx = ref(0);
+let currentLeft = 0;
+let mounted = false;
+let generation = 0;
+let timer = 0;
 function labelWidthPx(text: string): number {
   const fontPx = (layout.isWide ? 14 : 26 * unit.value) * fontScale.scale;
-  let units = 0.0;
-  for (let index = 0; index < text.length; index++) {
-    units += text.charCodeAt(index) > 127 ? 1.06 : 0.82;
-  }
+  let units = 0;
+  for (let i = 0; i < text.length; i++) units += text.charCodeAt(i) > 127 ? 1.06 : 0.82;
   return Math.ceil(units * fontPx);
 }
-
-/**
- * 滚动模式的内容总宽（px）。
- *
- * 为什么必须显式算：原生端横向 scroll-view **不会按内容自动撑开**，而内容行
- * .seg-auto 是 flex:none，没有确定宽度时子项会被压回可视区宽度内 —— 实测
- * 6 个音源只渲染出 4 个，第 5 个被裁在卡片右边缘（同 playlists 页 cat-rows、
- * theme 页 skin-row 的既有处理）。
- */
+function estimatedBoxWidth(index: number): number { return labelWidthPx(props.list[index]) + autoPadPx.value; }
 const autoRowWidth = computed((): number => {
+  if (measuredContent.value > 0) return measuredContent.value;
   let sum = 0;
-  const items = props.list;
-  for (let index = 0; index < items.length; index++) {
-    sum += labelWidthPx(items[index]) + autoPadPx.value + itemGap.value;
-  }
-  // 尾部补一段内边距，滚到底时最后一个 tag 不会贴着右边缘
-  return sum + autoPadPx.value;
+  for (let i = 0; i < props.list.length; i++) sum += estimatedBoxWidth(i);
+  return sum;
 });
-
-/**
- * 选中项左边缘在内容行中的偏移（px），绑定到 scroll-view 的 scroll-left。
- *
- * 为什么需要：外部改选中项时（进页面从 sourceStore 恢复上次音源、异步换包后重算）
- * 内容行不会自己滚动，选中第 5/6 个音源时行仍停在起点 —— 用户看不到任何选中态，
- * 观感与「这个包只给了 4 个音源」完全一样，正是本组件要修的那个误解。
- *
- * 目标值超过最大滚动量时由原生 scroll-view 自动夹到末端，所以选中最后一项也不会
- * 在右侧留出空白。用户手动拖动不会改这个值，因此不会和手势互相打架。
- */
+// 非滚动模式的宽度下限。等分宽度的分段器靠父级拉伸拿宽度，一旦父级是 row 容器
+// （如统计页「歌曲/歌手/音源」那一行 `.daily-kinds`），`.seg-item` 的 flex:1 基准是 0，
+// 整条会被压到接近 0 宽、几个标签的文字互相压住（2026-11-02 反馈页同款坑）。
+// 这里按「最长标签宽 + 单项呼吸位」× 项数算出内容宽度，任何父容器下都不会缩没。
+const minContentPx = computed((): number => {
+  const count = props.list.length;
+  if (count <= 0) return 0;
+  let widest = 0;
+  for (let i = 0; i < count; i++) {
+    const width = labelWidthPx(props.list[i]);
+    if (width > widest) widest = width;
+  }
+  const breathing = itemGap.value > 0 ? itemGap.value : layout.isWide ? 28 : 56 * unit.value;
+  return Math.ceil(count * (widest + breathing) + (layout.isWide ? 8 : 12 * unit.value));
+});
+// 根节点样式：滚动模式交给 scroll-view 自己撑，不设下限（否则会顶掉横滑能力）
+const rootStyle = computed((): string => {
+  let style = 'background-color:' + theme.skin.surfaceMuted + ';';
+  if (!props.scrollable) style += 'min-width:' + minContentPx.value + 'px;';
+  return style;
+});
 const selectedOffset = computed((): number => {
-  const items = props.list;
-  const limit = Math.min(Math.max(props.modelValue, 0), items.length);
+  const index = selectedIndex.value;
+  if (index < 0) return -1;
+  if (boxStarts.value.length == props.list.length) return boxStarts.value[index];
   let sum = 0;
-  for (let index = 0; index < limit; index++) {
-    sum += labelWidthPx(items[index]) + autoPadPx.value + itemGap.value;
-  }
-  return Math.ceil(sum);
+  for (let i = 0; i < index; i++) sum += estimatedBoxWidth(i);
+  return sum;
 });
-
-/**
- * 绑定到 scroll-view 的 scroll-left。
- *
- * 用 scroll-left 而不是 scroll-into-view：本仓库已在 player 页记录过 scroll-into-view
- * 在原生端不可靠（list-item 复用会滚错位置、动画中途冻结），scroll-left / scroll-top
- * 才是 1:1 生效的机制。
- */
-const scrollLeftPx = ref(0);
-
-/**
- * 用户点击时记下目标 index，用于吃掉这次选中带来的滚动。
- *
- * 为什么不直接用一个布尔量：父组件若没接 v-model（非受控），点击后 selectedOffset
- * 不会变化，布尔量就永远卡在 true，把之后真正需要的外部对位也一起吞掉。记 index
- * 并与 modelValue 比对是自愈的 —— 没更新就保持不匹配，下次外部变更照常对位。
- */
-let userSelectedIndex = -1;
-
-// immediate：进页面时选中项可能已经是第 5/6 个（从 sourceStore 恢复上次音源），
-// 必须在首次渲染前就把 scroll-left 设成目标值，否则 scroll-view 挂载时读到 0，
-// 之后再没有外部变更来触发对位。
-watch(selectedOffset, (value: number) => {
-  if (userSelectedIndex >= 0 && userSelectedIndex == props.modelValue) {
-    userSelectedIndex = -1;
+function reveal(index: number): void {
+  if (!props.scrollable || index < 0 || index >= props.list.length) return;
+  let start = 0;
+  for (let i = 0; i < index; i++) start += estimatedBoxWidth(i);
+  let width = estimatedBoxWidth(index);
+  if (boxStarts.value.length == props.list.length) { start = boxStarts.value[index]; width = boxWidths.value[index]; }
+  const target = qtSelectionScrollOffset(start, start + width, viewportPx.value, currentLeft, autoRowWidth.value);
+  // Reassigning the old binding after a manual drag otherwise does nothing natively.
+  const max = Math.max(0, autoRowWidth.value - viewportPx.value);
+  const bound = target == scrollLeftPx.value && target != currentLeft && max > 0 ? (target < max ? Math.min(max, target + 0.1) : Math.max(0, target - 0.1)) : target;
+  currentLeft = bound;
+  scrollLeftPx.value = bound;
+}
+function cancelMeasure(): void { generation += 1; if (timer != 0) { clearTimeout(timer); timer = 0; } }
+function measure(token: number, attempt: number): void {
+  if (!mounted || token != generation || !props.scrollable) return;
+  const root = rootRef.value;
+  const viewport = root != null ? root.querySelector('.seg-scrolllist') : null;
+  const row = root != null ? root.querySelector('.seg-auto') : null;
+  const items = row != null ? row.querySelectorAll('.seg-item-auto') : [];
+  if (viewport == null || row == null || viewport.getBoundingClientRect().width <= 0 || items.length != props.list.length) {
+    if (attempt < 3) timer = setTimeout(() => { if (!mounted || token != generation) return; timer = 0; measure(token, attempt + 1); }, 80) as number;
     return;
   }
-  scrollLeftPx.value = value;
-}, { immediate: true });
-
-/**
- * 选中态底色 + tag 间隔。
- * Vapor 下不能用 `:first-child` / 兄弟选择器，只能按 index 绑内联样式；
- * 左右各留一半，则相邻两项之间正好是 itemGap，胶囊两端也不再贴着文字。
- */
-function itemStyle(index: number): string {
-  let style = props.modelValue == index ? "background-color:" + theme.skin.surface + ";" : "";
-  if (itemGap.value > 0) {
-    const half = itemGap.value / 2;
-    style += "padding-left:" + half + "px;padding-right:" + half + "px;";
+  viewportPx.value = viewport.getBoundingClientRect().width;
+  const origin = row.getBoundingClientRect().left;
+  const starts: number[] = [];
+  const widths: number[] = [];
+  let end = 0;
+  for (let i = 0; i < items.length; i++) {
+    const box = items[i].getBoundingClientRect();
+    if (box.width <= 0) return;
+    starts.push(box.left - origin); widths.push(box.width);
+    end = Math.max(end, box.right - origin);
   }
+  boxStarts.value = starts; boxWidths.value = widths;
+  measuredContent.value = end;
+  reveal(selectedIndex.value);
+}
+function scheduleMeasure(): void {
+  cancelMeasure();
+  if (!mounted || !props.scrollable) return;
+  const token = generation;
+  nextTick(() => { if (mounted && token == generation) timer = setTimeout(() => { if (!mounted || token != generation) return; timer = 0; measure(token, 0); }, 32) as number; });
+}
+watch((): string => props.list.join('\u0001') + ':' + itemGap.value + ':' + props.scrollable + ':' + layout.sizeEpoch + ':' + fontScale.scale, () => {
+  boxStarts.value = []; boxWidths.value = []; measuredContent.value = 0; viewportPx.value = 0;
+  scheduleMeasure();
+});
+// Selection, viewport, content and font changes all matter, even if start stays zero.
+watch((): string => selectedIndex.value + ':' + selectedOffset.value + ':' + viewportPx.value + ':' + autoRowWidth.value + ':' + fontScale.scale, () => { reveal(selectedIndex.value); scheduleMeasure(); }, { immediate: true });
+onMounted(() => { mounted = true; scheduleMeasure(); });
+onUnmounted(() => { mounted = false; cancelMeasure(); });
+function onScroll(e: any): void { if (e.detail != null) currentLeft = Number(e.detail.scrollLeft ?? 0); }
+function textStyle(index: number): string { return 'color:' + (selectedIndex.value == index ? selectedColor.value : theme.skin.textSubtle) + ';' + qtFontDual(26, 14); }
+function itemStyle(index: number): string {
+  let style = selectedIndex.value == index ? 'background-color:' + theme.skin.surface + ';' : '';
+  if (itemGap.value > 0) style += 'padding-left:' + itemGap.value / 2 + 'px;padding-right:' + itemGap.value / 2 + 'px;';
   return style;
 }
-
 function select(index: number): void {
-  if (index == props.modelValue) return;
-  userSelectedIndex = index;
-  emit("update:modelValue", index);
-  emit("change", index);
+  reveal(index);
+  if (index == selectedIndex.value) return;
+  emit('update:modelValue', index); emit('change', index);
 }
 </script>
-
 <style>
-.seg {
-  flex-direction: row;
-  border-radius: 999rpx;
-  padding: 6rpx;
-}
-/* 均分模式的内容行：铺满整行，子项 flex:1 等分 */
-.seg-flex {
-  flex-direction: row;
-  flex: 1;
-}
-/* 滚动模式外层：占满可用宽度，横向溢出交给内部 scroll-view */
-.seg-scrolllist {
-  flex: 1;
-}
-/* 滚动模式的内容行：按内容宽度铺开，不压缩子项 */
-.seg-auto {
-  flex-direction: row;
-  flex: none;
-}
-.seg-item {
-  flex: 1;
-  height: 60rpx;
-  justify-content: center;
-  align-items: center;
-  border-radius: 999rpx;
-}
-/* 滚动模式：每项按内容自适应宽度，用固定内边距留出胶囊左右留白 */
-.seg-item-auto {
-  flex: none;
-  padding-left: 24rpx;
-  padding-right: 24rpx;
-}
-.seg-text {
-  font-size: 26rpx;
-  font-weight: 500;
-}
-
-/* 宽屏 px 覆盖（rpx 会随窗口放大，见 design.md §6.6） */
+.seg { flex-direction: row; flex-shrink: 0; border-radius: 999rpx; padding: 6rpx; }
+.seg-flex { flex-direction: row; flex: 1; }
+.seg-scrolllist { flex: 1; }
+.seg-auto { flex-direction: row; flex: none; }
+.seg-item { flex: 1; height: 60rpx; justify-content: center; align-items: center; border-radius: 999rpx; }
+.seg-item-auto { flex: none; padding-left: 24rpx; padding-right: 24rpx; }
+.seg-text { font-size: 26rpx; font-weight: 500; }
 .seg-wide { padding: 4px; }
 .seg-item-wide { height: 36px; }
 .seg-item-auto-wide { padding-left: 12px; padding-right: 12px; }

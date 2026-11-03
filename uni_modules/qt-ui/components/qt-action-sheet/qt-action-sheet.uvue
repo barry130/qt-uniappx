@@ -1,248 +1,75 @@
 <template>
-  <view v-show="visible" class="as-mask" :class="layout.isWide ? 'as-mask-wide' : ''" :style="'background-color:' + theme.skin.scrim + ';'" @click="close">
-    <view class="as-sheet" :class="layout.isWide ? 'as-sheet-wide' : ''" :style="sheetStyle" @click.stop>
-      <view v-if="title.length > 0" class="as-title" :class="layout.isWide ? 'as-title-wide' : ''" :style="'border-bottom-color:' + theme.skin.divider + ';'">
-        <text class="as-title-text" :class="layout.isWide ? 'as-title-text-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(24, 13)">{{ title }}</text>
+  <QtSheet :visible="visible" :title="title" @close="close">
+    <scroll-view class="as-list" direction="vertical" :show-scrollbar="false" :scroll-into-view="reveal.anchor.value" :style="listStyle">
+      <view v-for="(action, index) in actions" :key="index" :id="reveal.itemId(index)">
+        <QtOption :label="action.name" :selected="index == selectedIdx" :disabled="action.disabled == true" :color="action.color != null ? action.color : ''" :dense="true" @select="pick(index)" />
       </view>
-      <scroll-view
-        class="as-list"
-        :class="layout.isWide ? 'as-list-wide' : ''"
-        direction="vertical"
-        :show-scrollbar="false"
-        :scroll-into-view="scrollAnchor"
-        @click.stop
-      >
-        <view
-          v-for="(action, index) in actions"
-          :key="index"
-          :id="'as-item-' + index"
-          class="as-item"
-          :class="[action.disabled ? 'as-item-disabled' : '', layout.isWide ? 'as-item-wide' : '']"
-          :style="'border-bottom-color:' + theme.skin.divider + ';'"
-          @click="pick(index)"
-        >
-          <text
-            class="as-item-text"
-            :class="layout.isWide ? 'as-item-text-wide' : ''"
-            :style="('color:' + actionColor(action, index) + ';') + qtFontDual(29, 15)"
-            >{{ actionLabel(action, index) }}</text
-          >
-        </view>
-      </scroll-view>
+    </scroll-view>
+    <template #footer>
       <view class="as-cancel" :class="layout.isWide ? 'as-cancel-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'" @click="close">
-        <text class="as-cancel-text" :class="layout.isWide ? 'as-cancel-text-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(29, 15)">取消</text>
+        <text class="as-cancel-text" :class="layout.isWide ? 'as-cancel-text-wide' : ''" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(28, 15)">取消</text>
       </view>
-    </view>
-  </view>
+    </template>
+  </QtSheet>
 </template>
-
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed } from "vue";
+import QtSheet from "@/uni_modules/qt-ui/components/qt-sheet/qt-sheet.uvue";
+import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
-import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtSelectionIndex } from "@/uni_modules/qt-ui/composables/selection";
+import { useQtSelectionReveal } from "@/uni_modules/qt-ui/composables/use-qt-selection-reveal";
 
-export type SheetAction = {
-  name: string;
-  color?: string;
-  disabled?: boolean;
-};
-
-const layout = useQtLayout();
-const theme = useThemeStore();
-const props = defineProps<{
+export type SheetAction = { name: string; color?: string; disabled?: boolean };
+const props = withDefaults(defineProps<{
   visible: boolean;
   title?: string;
   actions: SheetAction[];
-  /** 当前选中项下标（-1 = 无选中）。打开时若它在折叠区外，列表自动滚到它。 */
   selectedIndex?: number;
-}>();
+}>(), { title: "", selectedIndex: -1 });
 const emit = defineEmits<{
   "update:visible": [value: boolean];
   select: [action: SheetAction, index: number];
   close: [];
 }>();
-const title = computed((): string => props.title != null ? props.title! : "");
-
-// 动作项文字颜色：自定义色优先；否则选中项用主题色（selectedIndex 只负责滚动
-// 不够——列表短时既不滚也无标记，用户看不出当前是哪项，2026-10-25 真机反馈），
-// 缺省退主题文字色。守卫收进脚本——模板里 && 不保证短路（两边都求值），
-// color 为 undefined 时内联读 action.color.length 会炸
-function actionColor(action: SheetAction, index: number): string {
-  if (action.color != null && action.color.length > 0) return action.color;
-  if (index == selectedIdx.value) return theme.skin.accent;
-  return theme.skin.text;
-}
-// 选中项在文字后面补一个勾，和颜色标记互为冗余（色弱下也能认）
-function actionLabel(action: SheetAction, index: number): string {
-  return index == selectedIdx.value ? action.name + " ✓" : action.name;
-}
-
-/**
- * 打开弹窗时把选中项滚进视口：列表上限停在「半行」，选中项一旦在折叠区里
- * 用户既看不到高亮也想不到下面还能滑，所以打开瞬间用 scroll-into-view 定位。
- * 只在选中项落在整行视口之外时才滚（前几项时把选中行顶到顶部反而显得跳）。
- *
- * 门限是 fullRows 而不是 fullRows+1：窄屏 572rpx/104rpx、宽屏 494px/52px 都只
- * 容得下 5 / 9 个整行，第 6（10）项是被截掉半行的那个——它已经在「第一屏下方」，
- * 不滚过去用户只能看到半截文字（用户 2026-10-25 反馈「选中项在下方时要自动滚下去」）。
- */
-const scrollAnchor = ref("");
-// 打开时上滑入场：根节点是 v-show（常驻挂载），所以有可靠的「从无到有」起点。
-// 480 行列表滚起来要跟手，24、240ms 是仓库里最短的一档（pages/playlists transform 0.2s）。
-const slideIn = ref(false);
-const selectedIdx = computed((): number => props.selectedIndex != null ? props.selectedIndex! : -1);
-watch(() => props.visible, (v: boolean) => {
-  slideIn.value = false;
-  if (v) {
-    setTimeout(() => {
-      slideIn.value = true;
-    }, 16);
-  }
-  if (!v) {
-    scrollAnchor.value = "";
-    return;
-  }
-  const idx = selectedIdx.value;
-  if (idx < 0) return;
-  // 整行视口数 = max-height ÷ 行高 向下取整（窄屏 572rpx/104rpx，宽屏 494px/52px）
-  const fullRows = layout.isWide ? 9 : 5;
-  if (idx < fullRows) return;
-  const target = "as-item-" + idx;
-  nextTick(() => {
-    scrollAnchor.value = target;
-  });
+const layout = useQtLayout();
+const theme = useThemeStore();
+const selectedIdx = computed((): number => qtSelectionIndex(props.selectedIndex, props.actions.length));
+const reveal = useQtSelectionReveal((): boolean => props.visible, (): number => selectedIdx.value, (): string => JSON.stringify(props.actions));
+// 一行的实际高度：紧凑行不设 min-height，高度=上下内边距 + 一行文字
+// （见 qt-option 的 .qo-row-dense：手机 22rpx*2，宽屏 11px*2）。
+const rowHeight = computed((): number => {
+  if (layout.isWide) return 22 + 15 * fontScale.scale * 1.35;
+  const unit = layout.windowWidth / 750;
+  return (44 + 28 * fontScale.scale * 1.35) * unit;
 });
-
-/**
- * 抽屉宽度走统一契约（use-qt-widths 的 QT_SHEET_WIDTH.drawer = 420），
- * 宽屏下还要夹到窗口内（窄窗口 420 会顶到 rail 或窗口边缘）。
- * 高度/圆角仍由 .as-sheet-wide 管，这里只补宽度与底色。
- */
-const sheetStyle = computed((): string => {
-  let style =
-    "background-color:" +
-    theme.skin.sheetSurface +
-    ";transform:translateY(" +
-    (slideIn.value ? "0" : "40px") +
-    ");transition:transform 0.24s ease-out;";
-  if (layout.isWide) {
-    const w = qtSheetWidth("drawer");
-    style += "width:" + w + "px;";
-  }
-  return style;
+const listStyle = computed((): string => {
+  const unit = layout.isWide ? 1 : layout.windowWidth / 750;
+  const header = props.title.length > 0 ? (layout.isWide ? 64 : 112 * unit) : 0;
+  const footer = layout.isWide ? 60 : 112 * unit;
+  const available = Math.max(0, layout.windowHeight * 0.86 - layout.safeBottomPx - header - footer);
+  const need = props.actions.length * rowHeight.value;
+  const row = rowHeight.value;
+  // Native scroll-view needs an explicit bounded viewport, including for a one-row menu.
+  // 放得下就贴合内容（不留空白拖尾）；放不下时留半行露头，让人一眼看出还能下滑 ——
+  // 直接按可用高度截断，下一行会被整行盖住，看不出列表还能滚。
+  const height = need <= available ? need : Math.max(row * 2, available - row * 0.45);
+  return "height:" + Math.round(Math.min(need, available, height)) + "px;";
 });
-
-function close(): void {
-  emit("update:visible", false);
-  emit("close");
-}
+function close(): void { emit("update:visible", false); emit("close"); }
 function pick(index: number): void {
   const action = props.actions[index];
-  if (action == null || action.disabled) return;
+  if (action == null || action.disabled == true) return;
   emit("update:visible", false);
   emit("select", action, index);
 }
 </script>
-
 <style>
-/*
- * 必须 absolute 而不是 fixed（2026-10-25 真机实锤：宽屏托管「每日新歌」里点歌曲
- * 操作没反应，切到「我的」后弹层反而漏在那页上）。Vapor 把 fixed 节点提升到窗口层
- * 参与 z 序：托管时蒙层(z999) 被覆盖层(z1000、不透明) 压住 → 看不见；而覆盖层
- * visibility:hidden 又管不到提升到窗口层的 fixed 后代 → 切 tab 后漏在别的页上。
- * absolute 锚到最近定位祖先（qt-page-frame 根，position:relative；普通页与托管 pane
- * 的原点都是窗口原点），四边全屏视觉与 fixed 一致，且随所在页面子树一起显隐。
- */
-.as-mask {
-  position: absolute;
-  left: 0;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  justify-content: flex-end;
-  z-index: 999;
-}
-.as-mask-wide {
-  flex-direction: row;
-  /* 2026-10-25 用户反馈宽屏「切换音源」显示不全：此前沿用 flex-end，宽屏
-     row 轴把它推成贴右缘的 100% 高侧抽屉，顶部压进状态栏、底部被常驻播放条
-     盖住（取消键不可见）。改成居中对话框（对齐网易云 Pad 弹层），高度随内容，
-     上下都不再出界。 */
-  justify-content: center;
-  align-items: center;
-}
-.as-sheet {
-  border-radius: 32rpx 32rpx 0 0;
-  overflow: hidden;
-  padding-bottom: 24rpx;
-  padding-bottom: env(safe-area-inset-bottom);
-}
-.as-sheet-wide {
-  /* 宽度改由 sheetStyle 内联给出（走 qtSheetWidth 契约，窄窗口自动夹紧）。
-     高度随内容（标题 + 最多 9 行半列表 + 取消），居中展示不再整列贴边。 */
-  border-radius: 12px;
-}
-.as-title {
-  padding: 30rpx 32rpx 18rpx;
-  border-bottom-width: 1rpx; border-bottom-style: solid;
-}
-.as-title-wide {
-  padding: 16px 20px 10px;
-  border-bottom-width: 1px; border-bottom-style: solid;
-}
-.as-title-text {
-  font-size: 24rpx;
-  text-align: center;
-}
-.as-title-text-wide {
-  text-align: left;
-  font-size: 13px;
-}
-.as-list {
-  /* 上限故意停在「5 行半」：下半截露出的下一行就是「底下还能滑」的暗示，
-     整行对齐时用户看不出列表被截断（572 = 104 × 5.5）。 */
-  max-height: 572rpx;
-}
-.as-list-wide {
-  /* 同 .as-list：9 行半，半行做可滚动暗示（494 = 52 × 9.5） */
-  max-height: 494px;
-}
-.as-item {
-  height: 104rpx;
-  justify-content: center;
-  align-items: center;
-  border-bottom-width: 1rpx; border-bottom-style: solid;
-}
-.as-item-wide {
-  height: 52px;
-  border-bottom-width: 1px; border-bottom-style: solid;
-}
-.as-item-disabled {
-  opacity: 0.45;
-}
-.as-item-text {
-  font-size: 29rpx;
-  font-weight: 500;
-}
-.as-item-text-wide {
-  font-size: 15px;
-}
-.as-cancel {
-  height: 108rpx;
-  margin-top: 12rpx;
-  justify-content: center;
-  align-items: center;
-}
-.as-cancel-wide {
-  height: 54px;
-  margin-top: 6px;
-}
-.as-cancel-text {
-  font-size: 29rpx;
-}
-.as-cancel-text-wide {
-  font-size: 15px;
-}
+.as-list { flex-shrink: 1; min-height: 0; }
+.as-cancel { height: 96rpx; align-items: center; justify-content: center; margin-top: 8rpx; }
+.as-cancel-wide { height: 48px; margin-top: 4px; }
+.as-cancel-text { font-size: 28rpx; }
+.as-cancel-text-wide { font-size: 15px; }
 </style>
