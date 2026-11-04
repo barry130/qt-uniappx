@@ -51,6 +51,8 @@ import { qtLayout } from "./use-qt-layout";
 export const QT_WIDE_TOOL_ROUTES: string[] = [
   "/pages/search/index",
   "/pages/daily-recommend/index",
+  "/pages/radio/index",
+  "/pages/podcast/index",
   "/pages/daily/index",
   "/pages/playlists/index",
   "/pages/chart/index",

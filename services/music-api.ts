@@ -1752,6 +1752,14 @@ export class MusicApi {
    * 注意用缓存条目自身的时间戳而非当前时间，否则反复命中缓存会把有效期无限延长。
    */
   async playUrl(song: Song, quality: string = "320"): Promise<string> {
+    // 播客 / 有声书单集：song.id 就是 RSS 里的 enclosure 直链，不经过音源引擎。
+    // 这类曲目没有对应的音源包（也不该有），走下面那条链路只会报「没有可用的
+    // 音源」；同时跳过歌词预取——播客没有版权歌词，去问引擎是白跑一趟。
+    if (song.platform == "podcast") {
+      song.url = song.id;
+      song.urlFetchedAt = Date.now();
+      return song.id;
+    }
     // v11：官方清单生效时旧档名归一到官方 level（存量 player.quality 可能还是
     // flac/flac24bit），否则请求档不在官方清单里、按最高档起试
     const effQuality = this.normalizeOfficialQuality(song.platform, quality);

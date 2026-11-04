@@ -248,6 +248,16 @@ export const DAILY_TASTE_LABEL: Record<DailyTaste, string> = {
 /** 页面上口味按钮的固定顺序（对象 key 顺序不可靠，显式列出来） */
 export const DAILY_TASTE_ORDER: DailyTaste[] = ["heart", "familiar", "explore"];
 
+/**
+ * 三个口味的说明文案（qt-pc 同名常量，2026-11-03 随之移植到私人 FM 页）。
+ * 用户点之前就能看出三档的区别在「风格」而不是「歌手」上。
+ */
+export const DAILY_TASTE_HINT: Record<DailyTaste, string> = {
+  heart: "按你的口味画像（语种、风格、常听专辑）找同款，收藏过的优先",
+  familiar: "在已经熟悉的风格里挑，熟悉感优先，不跳到陌生口味",
+  explore: "换风格、换歌手，挑你没怎么听过的味道",
+};
+
 /** 口味对应的挑歌方向（写进模型提示词） */
 const TASTE_PROMPT: Record<DailyTaste, string> = {
   heart:

@@ -61,6 +61,12 @@
             </view>
           </view>
           <view v-if="tileCount > 0" class="quick-grid">
+            <!-- 顺序：每日推荐（常驻，纯本地推荐 + 全源搜索，不挑音源能力），其后 每日新歌 / 歌单 / 排行榜
+                 （随当前源功能面增减），最后 私人 FM / 播客（常驻，2026-11-03 / 2026-11-04 移植自 qt-pc）。
+                 六枚同一个 flex-wrap 网格按 2 枚/行动态换行：前四枚显隐由音源决定，私人 FM/播客 始终跟在
+                 它们后面（用户 2026-11-04：不要固定占第三行，跟着动态的排在最后即可）。
+                 FM 按口味连播、播客按订阅连播，都是「一直听下去」的流，候选来自本地/收藏/歌单/最近播放
+                 + 全部已装音源，不挑当前源能力，所以不挂 show* 开关 -->
             <view class="quick-pill" :style="'width:' + quickPillWidth + 'px;background-color:' + themeStore.skin.accentSoft + ';'" @click="goDailyRecommend">
               <QtIcon name="sparkles" :size="24" :color="themeStore.skin.accent" /><text class="quick-label" :style="('color:' + themeStore.skin.text + ';') + qtFont(24)">每日推荐</text>
             </view>
@@ -72,6 +78,12 @@
             </view>
             <view v-if="showChartTile" class="quick-pill" :style="'width:' + quickPillWidth + 'px;background-color:' + themeStore.skin.accentSoft + ';'" @click="showChart">
               <QtIcon name="trending" :size="24" :color="themeStore.skin.accent" /><text class="quick-label" :style="('color:' + themeStore.skin.text + ';') + qtFont(24)">排行榜</text>
+            </view>
+            <view class="quick-pill" :style="'width:' + quickPillWidth + 'px;background-color:' + themeStore.skin.accentSoft + ';'" @click="goRadio">
+              <QtIcon name="music" :size="24" :color="themeStore.skin.accent" /><text class="quick-label" :style="('color:' + themeStore.skin.text + ';') + qtFont(24)">私人 FM</text>
+            </view>
+            <view class="quick-pill" :style="'width:' + quickPillWidth + 'px;background-color:' + themeStore.skin.accentSoft + ';'" @click="goPodcast">
+              <QtIcon name="mic" :size="24" :color="themeStore.skin.accent" /><text class="quick-label" :style="('color:' + themeStore.skin.text + ';') + qtFont(24)">播客</text>
             </view>
           </view>
           <view v-if="showLocalMixes" class="section" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
@@ -243,6 +255,8 @@
            composables/qt-wide-workspace.ts 的 qtPaneOn 注释。 -->
       <view v-if="qtPaneOn('/pages/search/index')" class="qtww-pane"><SearchPage /></view>
       <view v-if="qtPaneOn('/pages/daily-recommend/index')" class="qtww-pane"><DailyRecommendPage /></view>
+      <view v-if="qtPaneOn('/pages/radio/index')" class="qtww-pane"><RadioPage /></view>
+      <view v-if="qtPaneOn('/pages/podcast/index')" class="qtww-pane"><PodcastPage /></view>
       <view v-if="qtPaneOn('/pages/daily/index')" class="qtww-pane"><DailyPage /></view>
       <view v-if="qtPaneOn('/pages/playlists/index')" class="qtww-pane"><PlaylistsPage /></view>
       <view v-if="qtPaneOn('/pages/chart/index')" class="qtww-pane"><ChartPage /></view>
@@ -257,6 +271,8 @@ import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-fr
 import QtWideWorkspace from "@/uni_modules/qt-ui/components/qt-wide-workspace/qt-wide-workspace.uvue";
 import SearchPage from "@/pages/search/index.uvue";
 import DailyRecommendPage from "@/pages/daily-recommend/index.uvue";
+import RadioPage from "@/pages/radio/index.uvue";
+import PodcastPage from "@/pages/podcast/index.uvue";
 import DailyPage from "@/pages/daily/index.uvue";
 import PlaylistsPage from "@/pages/playlists/index.uvue";
 import ChartPage from "@/pages/chart/index.uvue";
@@ -364,9 +380,10 @@ const showLatest = computed<boolean>(() => sourceRegistry.supports(sourceStore.c
  *  只要还有任何一个源有榜单，磁贴就保留 */
 const showChartTile = computed<boolean>(() => sourceRegistry.anySupports("charts"));
 /** 可见磁贴数（quickPillWidth 按它折算列宽，隐藏后剩余磁贴平分一行）。
- *  每日推荐磁贴常驻（2026-10-24 新增，纯本地推荐 + 全源搜索，不挑音源能力） */
+ *  每日推荐 / 私人 FM / 播客 三枚常驻（后两枚 2026-11-03 / 2026-11-04 移植自 qt-pc，纯本地推荐 + 全源搜索，
+ *  不挑音源能力），其余按当前源功能面增减；私人 FM / 播客 始终排在最末（用户 2026-11-04 指定）。 */
 const tileCount = computed<number>(() => {
-  let n = 1;
+  let n = 3;
   if (showLatest.value) n++;
   if (showPlaylists.value) n++;
   if (showChartTile.value) n++;
@@ -735,6 +752,8 @@ async function play(song: Song): Promise<void> {
 function goSearch(): void { uni.navigateTo({ url: "/pages/search/index" }); }
 function showDaily(): void { uni.navigateTo({ url: "/pages/daily/index" }); }
 function goDailyRecommend(): void { uni.navigateTo({ url: "/pages/daily-recommend/index" }); }
+function goRadio(): void { uni.navigateTo({ url: "/pages/radio/index" }); }
+function goPodcast(): void { uni.navigateTo({ url: "/pages/podcast/index" }); }
 function showChart(): void { uni.navigateTo({ url: "/pages/chart/index" }); }
 function goPlaylists(): void { uni.navigateTo({ url: "/pages/playlists/index" }); }
 function openPlaylist(list: Playlist): void {
@@ -913,7 +932,8 @@ const heroStyle = computed<string>(() => {
   return "background-color:" + acc + ";background-image:linear-gradient(135deg," + acc + " 0%," + qtAccentRgba(themeStore.skin, 0.72) + " 100%);";
 });
 /** 快捷磁贴宽：每行固定 2 枚（2026-10-24 起 4 枚改 2 行 2 列，用户嫌一行 4 枚太挤）。
- *  磁贴带 margin-right 14rpx（含行尾），因此每行减 2 份间距；flex-wrap 换行成 2 行。 */
+ *  磁贴带 margin-right 14rpx（含行尾），因此每行减 2 份间距；flex-wrap 按 2 枚换行
+ *  （2026-11-04 起磁贴共 6 枚常显时排 3 行：原四枚在前，私人 FM / 播客 随后换行）。 */
 const quickPillWidth = computed<number>(() => {
   const win = layout.windowWidth;
   const pad = win * (24 / 750);
@@ -973,6 +993,8 @@ const formatCount = formatBigCount;
 .hero-play { margin-top: 24rpx; align-self: flex-start; height: 64rpx; padding: 0 28rpx; flex-direction: row; align-items: center; background-color: #ffffff; border-radius: 32rpx; }
 .hero-play-text { margin-left: 8rpx; font-size: 24rpx; font-weight: 700; }
 .quick-grid { margin-top: 20rpx; flex-direction: row; flex-wrap: wrap; }
+/* 私人 FM / 播客磁贴与其余磁贴同一套 .quick-pill 样式、参与同一个 flex-wrap 换行，
+   只是排在最末（用户 2026-11-04：跟着前面的动态磁贴排到最后） */
 .quick-pill { height: 76rpx; margin-bottom: 14rpx; margin-right: 14rpx; padding: 0 22rpx; flex-direction: row; align-items: center; border-radius: 38rpx; }
 .quick-label { margin-left: 12rpx; font-size: 24rpx; font-weight: 600; }
 .section { margin-top: 18rpx; padding: 26rpx;  border-width: 1px; border-style: solid; border-radius: 26rpx; }

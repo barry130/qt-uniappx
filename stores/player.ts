@@ -2899,7 +2899,12 @@ class PlayerStore {
     this.persist();
   }
 
-  enqueueMany(songs: Song[]): void {
+  /**
+   * 批量追加到队列末尾（不打断当前曲目）。
+   * `silent`：后台补歌（私人 FM）不该弹「已加入 N 首」的 toast，传 true 静音。
+   * 返回真正加进去的首数：调用方据此判断是不是一首都没加（曲库/屏蔽把候选吃光了）。
+   */
+  enqueueMany(songs: Song[], silent: boolean = false): number {
     let added = 0;
     let blocked = 0;
     let next = this.queue;
@@ -2937,7 +2942,8 @@ class PlayerStore {
     } else if (blocked > 0) {
       title = "这些歌曲都已屏蔽";
     }
-    qtShowToast({ title, icon: "none" });
+    if (!silent) qtShowToast({ title, icon: "none" });
+    return added;
   }
 
   /**

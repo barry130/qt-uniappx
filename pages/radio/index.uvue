@@ -1,0 +1,387 @@
+<template>
+  <!-- 私人 FM（2026-11-03 移植自 qt-pc RadioPage.tsx，m04914）：
+       状态机与选曲全在 stores/radio.ts（队列就是 player.queue，不建影子队列），
+       本页只负责三件事：口味切换 / 开始停止 / 把「正在播放 + 接下来」画出来。 -->
+  <qt-page-frame width-kind="list" :max-width="720" title="私人 FM">
+    <view class="page" :class="layout.isWide ? 'page-wide' : ''">
+      <list-view id="radio-scroll" class="scroll" direction="vertical" :scroll-top="scrollTop" @scroll="onListScroll">
+        <!-- 头部卡：标题（窄屏框架标题栏已有，这里再做一张卡承接副标题/口味/启停，
+             宽屏时它就是整页的主操作区） -->
+        <list-item class="hero-item">
+          <view class="hero" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
+            <view class="hero-title-row">
+              <QtIcon name="sparkles" :size="layout.isWide ? 20 : 40" :color="themeStore.skin.accent" />
+              <text class="hero-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(36, 22)">私人 FM</text>
+            </view>
+            <text class="hero-desc" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(25, 14)">
+              按「{{ tasteLabel }}」一直听下去：每听几首自动补一批，同一位歌手一轮最多 3 首。
+            </text>
+            <!-- 口味与每日推荐正交：切换只影响**下一批**，已经在队列里的歌不打断 -->
+            <view class="hero-tastes">
+              <QtOption v-for="(t, ti) in DAILY_TASTE_ORDER" :key="'rt-' + ti" kind="chip" :label="DAILY_TASTE_LABEL[t]" :selected="radio.taste == t" @select="pickTaste(t)" />
+            </view>
+            <text class="hero-hint" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(22, 12)">{{ tasteHint }}</text>
+            <view class="hero-actions">
+              <view
+                v-if="!radio.active"
+                class="hero-btn"
+                :style="'background-color:' + themeStore.skin.accent + ';'"
+                @click="onStart"
+              >
+                <QtIcon name="play" :size="layout.isWide ? 16 : 30" :color="themeStore.skin.onAccent" />
+                <text class="hero-btn-text" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(26, 14)">{{ radio.loading ? "正在准备…" : "开始收听" }}</text>
+              </view>
+              <view
+                v-else
+                class="hero-btn"
+                :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'"
+                @click="onStop"
+              >
+                <QtIcon name="pause" :size="layout.isWide ? 16 : 30" :color="themeStore.skin.iconMuted" />
+                <text class="hero-btn-text" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 14)">停止 FM</text>
+              </view>
+            </view>
+          </view>
+        </list-item>
+
+        <!-- 提示条：error（起播/补歌失败）与 exhausted（池子排空）都不打断收听 -->
+        <list-item v-if="radio.error.length > 0" class="notice-item">
+          <view class="notice" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'">
+            <QtIcon name="alert" :size="layout.isWide ? 14 : 26" :color="themeStore.skin.danger" />
+            <text class="notice-text" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(23, 13)">{{ radio.error }}</text>
+          </view>
+        </list-item>
+        <list-item v-if="radio.active && radio.exhausted" class="notice-item">
+          <view class="notice" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'">
+            <QtIcon name="info" :size="layout.isWide ? 14 : 26" :color="themeStore.skin.textMuted" />
+            <text class="notice-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 13)">曲库里的歌都排完了，这一轮听到底就换个口味吧</text>
+          </view>
+        </list-item>
+
+        <!-- 当前曲卡：FM 队列里 current 就是这首（让位后 radio.active=false，卡也不画） -->
+        <list-item v-if="radio.active && currentSong != null" class="now-item">
+          <view class="now" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
+            <view class="now-main">
+              <image class="now-cover" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="currentPic" mode="aspectFill" />
+              <view class="now-info">
+                <text class="now-flag" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(21, 11)">正在播放</text>
+                <text class="now-name" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(32, 18)" :max-lines="1">{{ currentName }}</text>
+                <text class="now-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 13)" :max-lines="1">{{ currentMeta }}</text>
+              </view>
+            </view>
+            <view class="now-acts">
+              <view class="now-act" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="onDislike">
+                <QtIcon name="ban" :size="layout.isWide ? 14 : 26" :color="themeStore.skin.iconMuted" />
+                <text class="now-act-text" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(23, 13)">不感兴趣</text>
+              </view>
+              <view class="now-act" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="onNext">
+                <QtIcon name="chevron-right" :size="layout.isWide ? 14 : 26" :color="themeStore.skin.iconMuted" />
+                <text class="now-act-text" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(23, 13)">下一首</text>
+              </view>
+              <view class="now-act" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="onRefill">
+                <QtIcon name="refresh" :size="layout.isWide ? 14 : 26" :color="themeStore.skin.iconMuted" />
+                <text class="now-act-text" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(23, 13)">换一批</text>
+              </view>
+            </view>
+          </view>
+        </list-item>
+
+        <!-- 未开始：一句说明，避免空白页 -->
+        <list-item v-if="!radio.active && radio.error.length == 0" class="empty-item">
+          <view class="empty">
+            <QtIcon name="music" :size="layout.isWide ? 22 : 46" :color="themeStore.skin.textSubtle" />
+            <text class="empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(24, 13)">点「开始收听」，会按你的口味一直排下去</text>
+          </view>
+        </list-item>
+
+        <!-- 接下来：直接读播放器队列（FM 持有队列期间队列即 FM 队列） -->
+        <list-item v-if="upcoming.length > 0" class="sec-head">
+          <text class="sec-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 16)">接下来</text>
+        </list-item>
+        <list-item v-for="(song, index) in upcoming" :key="'ru-' + index" class="song-item">
+          <qt-song-row-lite :song="song" @play="playInRadio(song)" @more="openSheet" />
+        </list-item>
+
+        <list-item class="foot-space" :class="layout.isWide ? 'foot-space-wide' : ''" />
+      </list-view>
+      <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+      <QtActionSheet v-model:visible="sheetVisible" :title="sheetTitle()" :actions="sheetActions" @select="onSheetSelect" />
+    </view>
+  </qt-page-frame>
+</template>
+
+<script setup lang="ts">
+import { ref, computed } from "vue";
+import type { Song } from "@/types/music";
+import type { DailyTaste } from "@/services/recommend-types";
+import { DAILY_TASTE_HINT, DAILY_TASTE_LABEL, DAILY_TASTE_ORDER } from "@/services/daily-recommend";
+import { radioTrackKey } from "@/services/radio-queue";
+import { useRadioStore } from "@/stores/radio";
+import { usePlayerStore } from "@/stores/player";
+import { useSongSheet } from "@/composables/use-song-sheet";
+import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
+import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
+import QtSongRowLite from "@/uni_modules/qt-ui/components/qt-song-row-lite/qt-song-row-lite.uvue";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtShowToast } from "@/services/toast";
+
+/** 「接下来」最多展示几首（qt-pc 同款 5 项） */
+const UPCOMING_LIMIT = 5;
+
+const radio = useRadioStore();
+const player = usePlayerStore();
+const themeStore = useThemeStore();
+const layout = useQtLayout();
+const { sheetVisible, sheetActions, openSheet, onSheetSelect, sheetTitle } = useSongSheet();
+
+const scrollTop = ref(0);
+const showBackToTop = ref(false);
+
+const tasteLabel = computed((): string => DAILY_TASTE_LABEL[radio.taste]);
+const tasteHint = computed((): string => DAILY_TASTE_HINT[radio.taste]);
+
+const currentSong = computed((): Song | null => player.current);
+// 模板只读字符串：uni-app x 的模板编译器不做可空收窄，直接渲染 currentSong.name 会报
+// 「Object is possibly null」；所有展示字段都在这里折成安全值（onXxx 里再取 currentSong）。
+const currentName = computed((): string => {
+  const song = currentSong.value;
+  return song == null ? "" : song.name;
+});
+const currentPic = computed((): string => {
+  const song = currentSong.value;
+  return song == null ? "" : song.picUrl;
+});
+const currentMeta = computed((): string => {
+  const song = currentSong.value;
+  if (song == null) return "";
+  const album = song.album.length > 0 ? " · " + song.album : "";
+  return song.singer + album;
+});
+
+/**
+ * 接下来 5 首：从 current 之后按队列顺序取，且只取 FM 自己推过的（key ∈ usedKeys）。
+ * 队列一旦被换走（用户双击别的歌单），心跳会立刻 stop(false)，这里也就自然空了。
+ */
+const upcoming = computed((): Song[] => {
+  const out: Song[] = [];
+  if (!radio.active) return out;
+  const queue = player.queue;
+  const index = player.currentIndex();
+  for (let i = index + 1; i < queue.length && out.length < UPCOMING_LIMIT; i++) {
+    const song = queue[i];
+    if (song == null) continue;
+    if (!radio.usedKeys.has(radioTrackKey(song))) continue;
+    out.push(song);
+  }
+  return out;
+});
+
+function onListScroll(e: any): void {
+  const st = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
+  showBackToTop.value = st > 600;
+}
+
+function backToTop(): void {
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  showBackToTop.value = false;
+}
+
+function pickTaste(taste: DailyTaste): void {
+  if (radio.taste == taste) return;
+  radio.setTaste(taste);
+  if (radio.active) qtShowToast({ title: "已切到「" + DAILY_TASTE_LABEL[taste] + "」，下一批按新口味排", icon: "none" });
+}
+
+function onStart(): void {
+  if (radio.loading) return;
+  void radio.start(null);
+}
+
+function onStop(): void {
+  // 停止 = 退出 FM：radio.stop() 会把进入前那份播放列表放回去（见 stores/radio.ts 头注释）
+  radio.stop(true);
+}
+
+function onDislike(): void {
+  const song = currentSong.value;
+  if (song == null) return;
+  void radio.dislike(song);
+}
+
+function onNext(): void {
+  player.next();
+}
+
+function onRefill(): void {
+  void radio.refill();
+}
+
+/** 点「接下来」里的某首：队列保持不变，只换 current（play 传同一份队列即原地跳） */
+function playInRadio(song: Song): void {
+  void player.play(song, player.queue);
+}
+</script>
+
+<style>
+.page {
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+.page-wide {
+  padding: 0 20px;
+}
+.scroll {
+  flex: 1;
+  min-height: 0;
+}
+.hero-item {
+  padding: 24rpx 26rpx 0 26rpx;
+}
+.hero {
+  border-width: 1rpx;
+  border-style: solid;
+  border-radius: 28rpx;
+  padding: 28rpx 30rpx 30rpx 30rpx;
+  flex-direction: column;
+}
+.hero-title-row {
+  flex-direction: row;
+  align-items: center;
+}
+.hero-title {
+  margin-left: 12rpx;
+  font-weight: 600;
+}
+.hero-desc {
+  margin-top: 12rpx;
+  line-height: 1.5;
+}
+.hero-tastes {
+  flex-direction: row;
+  flex-wrap: wrap;
+  margin-top: 18rpx;
+}
+.hero-hint {
+  margin-top: 14rpx;
+  line-height: 1.4;
+}
+.hero-actions {
+  flex-direction: row;
+  margin-top: 22rpx;
+}
+.hero-btn {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  height: 76rpx;
+  padding: 0 34rpx;
+  border-radius: 38rpx;
+  border-width: 1rpx;
+  border-style: solid;
+  border-color: rgba(0, 0, 0, 0);
+}
+.hero-btn-text {
+  margin-left: 10rpx;
+  font-weight: 500;
+}
+.notice-item {
+  padding: 16rpx 26rpx 0 26rpx;
+}
+.notice {
+  flex-direction: row;
+  align-items: center;
+  border-width: 1rpx;
+  border-style: solid;
+  border-radius: 20rpx;
+  padding: 16rpx 20rpx;
+}
+.notice-text {
+  margin-left: 10rpx;
+  flex: 1;
+  line-height: 1.4;
+}
+.now-item {
+  padding: 20rpx 26rpx 0 26rpx;
+}
+.now {
+  border-width: 1rpx;
+  border-style: solid;
+  border-radius: 28rpx;
+  padding: 24rpx 26rpx 26rpx 26rpx;
+  flex-direction: column;
+}
+.now-main {
+  flex-direction: row;
+  align-items: center;
+}
+.now-cover {
+  width: 108rpx;
+  height: 108rpx;
+  border-radius: 18rpx;
+}
+.now-info {
+  flex: 1;
+  min-width: 0;
+  margin-left: 20rpx;
+  flex-direction: column;
+}
+.now-flag {
+  font-weight: 500;
+}
+.now-name {
+  margin-top: 4rpx;
+  font-weight: 600;
+}
+.now-meta {
+  margin-top: 4rpx;
+}
+.now-acts {
+  flex-direction: row;
+  margin-top: 22rpx;
+}
+.now-act {
+  flex-direction: row;
+  align-items: center;
+  border-width: 1rpx;
+  border-style: solid;
+  border-radius: 30rpx;
+  height: 64rpx;
+  padding: 0 22rpx;
+  margin-right: 14rpx;
+}
+.now-act-text {
+  margin-left: 8rpx;
+}
+.empty-item {
+  padding: 30rpx 26rpx 0 26rpx;
+}
+.empty {
+  flex-direction: row;
+  align-items: center;
+  padding: 24rpx 6rpx;
+}
+.empty-text {
+  margin-left: 14rpx;
+}
+.sec-head {
+  padding: 30rpx 26rpx 10rpx 26rpx;
+}
+.sec-title {
+  font-weight: 600;
+}
+.song-item {
+  margin: 0 26rpx;
+}
+.foot-space {
+  height: 140rpx;
+}
+.foot-space-wide {
+  height: 80px;
+}
+</style>
