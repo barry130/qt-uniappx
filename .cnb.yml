@@ -1,21 +1,25 @@
 # 轻听 UniAppX 客户端 —— CNB 云原生构建
 #
-# UniAppX 出包必须走 HBuilderX（本仓库没有打包脚本），CNB 上只做静态检查，
-# 与 GitHub 侧一致：推 master 即跑一次 `npm run check`。
+# UniAppX 出包必须走 HBuilderX（本仓库没有打包脚本），CNB 运行静态检查与回归测试。
+# 推 master 即跑一次 `npm run check`，包含 FFmpeg 音频标签校验。
 #
 # 与 GitHub 并行：`git push` 会同时推到 GitHub 与 CNB（origin 配了双 pushurl）。
 
 master:
   push:
-    - name: 静态检查（uvue 语法 + 图标引用）
+    - name: 静态检查与回归测试
       docker:
         image: node:22
       stages:
+        - name: 安装媒体校验工具
+          script:
+            - apt-get update
+            - apt-get install -y --no-install-recommends ffmpeg
         - name: 安装依赖
           script:
             # 本仓库只有 npm 锁文件（package-lock.json, registry.npmmirror.com），
-            # 不能用 pnpm。@vue/compiler-sfc 作为 peer 依赖由 npm ci 一并装入。
-            - npm ci
-        - name: 检查 uvue
+            # 安装锁定的开发依赖；UTS 源码回归需要 TypeScript，不依赖兄弟仓库或全局安装。
+            - npm ci --include=dev
+        - name: 完整检查
           script:
             - npm run check

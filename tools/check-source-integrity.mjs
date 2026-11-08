@@ -4,13 +4,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tsPath = [path.join(root, 'node_modules/typescript/lib/typescript.js'), path.join(root, '../qt-pc/node_modules/typescript/lib/typescript.js')].find(fs.existsSync);
-assert.ok(tsPath, 'TypeScript is required for actual UTS source execution');
-const ts = createRequire(import.meta.url)(tsPath);
 const quiet = new Proxy({}, { get: () => () => {} });
 const parseUtso = text => JSON.parse(text, (k, v) => {
   if (v && typeof v === 'object' && !Array.isArray(v)) {

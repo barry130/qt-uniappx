@@ -4,7 +4,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import { runInNewContext } from 'node:vm';
 import { reactive, ref, computed, watch, nextTick } from 'vue';
 
-const read = path => readFileSync(new URL('../' + path, import.meta.url), 'utf8');
+const read = path => readFileSync(new URL('../' + path, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 const code = source => stripTypeScriptTypes(source.replace(/^import[\s\S]*?from\s+["'][^"']+["'];?\s*/gm, '').replace(/\bexport\s+/g, ''), {mode:'strip'});
 const storage = new Map();
 const uni = { getStorageSync:key=>storage.get(key) ?? '', setStorageSync:(key,value)=>storage.set(key,value) };

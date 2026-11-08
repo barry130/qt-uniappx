@@ -101,6 +101,8 @@
 
 首次运行前，可在终端执行 `npm install` 安装 Pinia 等依赖。
 
+代码检查使用 Node.js 22.23 或更高版本：先运行 `npm ci --include=dev`，再运行 `npm run check`。TypeScript 已作为开发依赖锁定在本仓库，用于执行 UTS 源码回归；本地和 CNB 均无需借用 `qt-pc` 或全局安装的编译器。音频标签测试自动编译当前源码，要求 `ffmpeg` 和 `ffprobe` 在 PATH 中（Debian/Ubuntu 可通过 `apt-get install ffmpeg` 安装）；CNB 已配置安装步骤，无需预先生成 `out-tmp` 文件。
+
 > ⚠️ 本项目含多个 UTS 原生插件（播放内核、悬浮窗歌词、音源包引擎等），**必须使用自定义基座或云端打包**运行；
 > HBuilderX 标准基座不含这些插件，会出现「找不到悬浮窗授权入口」这类假故障。改动 UTS 后需重新编译插件并重建基座。
 

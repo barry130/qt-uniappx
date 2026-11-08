@@ -8,7 +8,7 @@ import { ref, computed, reactive, watch, nextTick } from 'vue';
 import * as VueRuntime from 'vue';
 import { parse as parseSfc, compileScript, compileTemplate } from '@vue/compiler-sfc';
 
-const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 class UTSJSONObject {
   constructor(value = {}) { Object.assign(this, value); }
   get(key) { return Object.hasOwn(this, key) ? this[key] : null; }

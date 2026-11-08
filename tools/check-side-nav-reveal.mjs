@@ -12,7 +12,7 @@ import { parse as parseSfc, compileScript } from '@vue/compiler-sfc';
 // column/px/flex host consumes actual styles; it contains no copied nav formula.
 // Row rectangles are source-derived host geometry, NOT Native Yoga, text/SVG
 // paint, actual touch, screenshot or device measurements.
-const read = (path) => readFileSync(new URL('../' + path, import.meta.url), 'utf8');
+const read = (path) => readFileSync(new URL('../' + path, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 const navPath = 'uni_modules/qt-ui/components/qt-side-nav/qt-side-nav.uvue';
 const iconPath = 'uni_modules/qt-ui/components/qt-icon/qt-icon.uvue';
 const source = read(navPath);

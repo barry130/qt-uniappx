@@ -5,26 +5,15 @@
  * ensureDataEngine / ensureEngine，观察 stop/start/装载 的调用序列。
  *
  * 用法：node tools/check-engine-revive.mjs
- * 依赖：本仓库未安装 typescript，默认借 qt-pc/node_modules 里的那份。
+ * 依赖：本仓库 devDependencies 中的 typescript，先运行 npm ci --include=dev。
  */
-import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.join(here, "..");
-const repoRoot = path.join(appRoot, "..");
-
-/** 依次在 qt-uniappx / qt-pc 里找 typescript（本仓库未安装，qt-pc 有） */
-function loadTypeScript() {
-  for (const base of [appRoot, path.join(repoRoot, "qt-pc")]) {
-    const p = path.join(base, "node_modules", "typescript", "lib", "typescript.js");
-    if (fs.existsSync(p)) return createRequire(path.join(base, "noop.js"))(p);
-  }
-  throw new Error("找不到 typescript：请在 qt-pc 或本仓库安装依赖后再跑本检查");
-}
-const ts = loadTypeScript();
 const FILE = path.join(appRoot, "services", "source-engine.uts");
 const src = fs.readFileSync(FILE, "utf8");
 const js = ts.transpileModule(src, {

@@ -22,7 +22,7 @@ const toUtso = (value) => {
   return value;
 };
 const parseJsonToUtso = (text) => toUtso(JSON.parse(text));
-const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 const noop = () => {};
 const norm = (value) => JSON.parse(JSON.stringify(value));
 

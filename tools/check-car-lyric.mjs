@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
-const read=p=>readFileSync(new URL('../'+p,import.meta.url),'utf8');
+const read=p=>readFileSync(new URL('../'+p,import.meta.url),'utf8').replaceAll('\r\n','\n');
 const compile=s=>stripTypeScriptTypes(s.replace(/^import[\s\S]*?from\s*["'][^"']+["'];?\s*/gm,'').replace(/^export /gm,''),{mode:'strip'});
 const between=(s,a,b)=>{const start=s.indexOf(a),end=s.indexOf(b,start+a.length);assert.ok(start>=0&&end>start,a);return s.slice(start,end);};
 const core=compile(read('uni_modules/qt-audio-player/utssdk/car-lyric.uts'));

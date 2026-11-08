@@ -5,7 +5,7 @@ import { runInNewContext } from 'node:vm';
 
 // Run the public production APIs with synthetic window/timer boundaries only.
 // A tiny cached consumer models reactive invalidation; this is not a Vapor build.
-const read = path => readFileSync(new URL('../' + path, import.meta.url), 'utf8');
+const read = path => readFileSync(new URL('../' + path, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 const runnable = source => stripTypeScriptTypes(source.replace(/^import .*;$/gm, '').replace(/\bexport\s+/g, ''), { mode: 'strip' });
 function harness() {
   let window = { windowWidth: 400, windowHeight: 800, screenHeight: 800, screenTop: 0, safeAreaInsets: { bottom: 0 } };

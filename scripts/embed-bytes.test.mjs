@@ -1,14 +1,14 @@
 /**
- * embed-bytes.uts 的 node 自测（不进构建产物，仅本机验证字节层正确性）
+ * embed-bytes.uts 的 node 自测（不进 App 构建产物，本地/CI 验证字节层正确性）
  * 运行: node scripts/embed-bytes.test.mjs
- *   前置: npx esbuild uni_modules/qt-app-native/utssdk/embed-bytes.uts --loader:.uts=ts --format=esm --outfile=out-tmp/embed-bytes.mjs
- * 校验器: ffprobe / ffmpeg（本机 PATH 中, 与真机解析器独立互证）
+ * 自动编译当前 UTS 源码，无需预生成临时模块。
+ * 校验器: ffprobe / ffmpeg（PATH 中，与真机解析器独立互证）
  */
 import { execFileSync } from 'node:child_process';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert';
-import { planMp3, planFlac, utf16leEncode, utf8Encode, base64Encode, base64Decode } from '../out-tmp/embed-bytes.mjs';
+import { planMp3, planFlac, utf16leEncode, utf8Encode, base64Encode, base64Decode } from './embed-source.mjs';
 
 const TMP = fileURLToPath(new URL('../out-tmp/', import.meta.url));
 mkdirSync(TMP, { recursive: true });

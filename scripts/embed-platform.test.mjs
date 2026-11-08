@@ -5,13 +5,14 @@
  * 校验器: ffprobe/ffmpeg（与真机解析器独立互证）
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync } from 'node:fs';
+import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { planMp3, planFlac } from '../out-tmp/embed-bytes.mjs';
+import { planMp3, planFlac } from './embed-source.mjs';
 
-const TMP = fileURLToPath(new URL('../out-tmp/platform/', import.meta.url));
-rmSync(TMP, { recursive: true, force: true });
-mkdirSync(TMP, { recursive: true });
+const outputDir = fileURLToPath(new URL('../out-tmp/', import.meta.url));
+mkdirSync(outputDir, { recursive: true });
+const TMP = mkdtempSync(outputDir + 'platform-') + sep;
 let pass = 0;
 const fail = [];
 function ok(name) { pass++; console.log('  ✓ ' + name); }
