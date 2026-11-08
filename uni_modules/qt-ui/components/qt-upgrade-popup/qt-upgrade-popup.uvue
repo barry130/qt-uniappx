@@ -1,51 +1,51 @@
 <template>
-  <view v-if="visible" class="up-mask" @click="onMaskTap">
+  <view v-if="visible && info != null" class="up-mask" :style="maskStyle" @click="onMaskTap">
     <view class="up-card" :class="layout.isWide ? 'up-card-wide' : ''" :style="cardStyle" @click.stop>
-      <view class="up-header" :class="layout.isWide ? 'up-header-wide' : ''">
+      <view class="up-header" :class="[layout.isWide ? 'up-header-wide' : '', shortWide ? 'up-header-short' : '']">
         <image class="up-icon" :class="layout.isWide ? 'up-icon-wide' : ''" src="/static/icon/xxxhdpi.png" mode="aspectFill" />
-        <text class="up-title" :class="layout.isWide ? 'up-title-wide' : ''" :style="qtFontDual(34, 19)">发现新版本</text>
-        <view v-if="isBeta" class="up-badge" :class="layout.isWide ? 'up-badge-wide' : ''"><text class="up-badge-text" :class="layout.isWide ? 'up-badge-text-wide' : ''" :style="qtFontDual(20, 12)">测试版</text></view>
+        <view class="up-heading" :class="[layout.isWide ? 'up-heading-wide' : '', shortWide ? 'up-heading-short' : '']">
+          <text class="up-title" :class="layout.isWide ? 'up-title-wide' : ''" :style="'color:' + themeStore.skin.text + ';' + qtFontDual(30, 19)">发现新版本</text>
+          <view class="up-meta" :class="[layout.isWide ? 'up-meta-wide' : '', shortWide ? 'up-meta-short' : '']">
+            <text class="up-version" :class="layout.isWide ? 'up-version-wide' : ''" :style="'color:' + themeStore.skin.accent + ';' + qtFontDual(24, 14)">{{ info.versionName }}</text>
+            <view v-if="isBeta" class="up-badge" :class="layout.isWide ? 'up-badge-wide' : ''" :style="'background-color:' + themeStore.skin.successSoft + ';'">
+              <text class="up-badge-text" :class="layout.isWide ? 'up-badge-text-wide' : ''" :style="'color:' + themeStore.skin.success + ';' + qtFontDual(19, 11)">测试版</text>
+            </view>
+            <text v-if="sizeText.length > 0" class="up-size" :class="layout.isWide ? 'up-size-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';' + qtFontDual(22, 13)">{{ sizeText }}</text>
+          </view>
+        </view>
       </view>
-      <view class="up-version-row" :class="layout.isWide ? 'up-version-row-wide' : ''">
-        <text class="up-version" :class="layout.isWide ? 'up-version-wide' : ''" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(40, 23)">{{ info.versionName }}</text>
-        <text v-if="sizeText.length > 0" class="up-size" :class="layout.isWide ? 'up-size-wide' : ''" :style="qtFontDual(24, 13)">{{ sizeText }}</text>
-      </view>
-      <scroll-view class="up-content" :class="layout.isWide ? 'up-content-wide' : ''" direction="vertical" :show-scrollbar="false">
-        <!-- 更新说明富文本：与公告内容同一渲染方式（支持 HTML/纯文本） -->
-        <QtRichText
-          :html="info.versionInfo"
-          color="#737b8e"
-          :font-size="26"
-          :line-height="1.7"
-          align="left"
-        />
+      <scroll-view :key="info.versionCode" class="up-content" :style="'border-top-color:' + themeStore.skin.divider + ';border-bottom-color:' + themeStore.skin.divider + ';'" direction="vertical" :show-scrollbar="true">
+        <view class="up-content-inner" :class="layout.isWide ? 'up-content-inner-wide' : ''">
+          <QtRichText
+            :html="info.versionInfo"
+            :color="themeStore.skin.text"
+            :font-size="26"
+            :line-height="1.7"
+            align="left"
+          />
+        </view>
       </scroll-view>
-      <view v-if="downloading || probing" class="up-progress" :class="layout.isWide ? 'up-progress-wide' : ''">
-        <view class="up-progress-track">
-          <view class="up-progress-bar" :style="'width:' + progress + '%;background-color:' + themeStore.skin.accent + ';'"></view>
+      <view class="up-footer" :class="[layout.isWide ? 'up-footer-wide' : '', shortWide ? 'up-footer-short' : '']">
+        <view v-if="downloading || probing" class="up-progress" :class="layout.isWide ? 'up-progress-wide' : ''">
+          <view class="up-progress-track" :class="layout.isWide ? 'up-progress-track-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';'">
+            <view class="up-progress-bar" :class="layout.isWide ? 'up-progress-bar-wide' : ''" :style="'width:' + progress + '%;background-color:' + themeStore.skin.accent + ';'"></view>
+          </view>
+          <text class="up-progress-text" :class="layout.isWide ? 'up-progress-text-wide' : ''" :style="'color:' + themeStore.skin.textMuted + ';' + qtFontDual(22, 13)">{{ progressText }}</text>
         </view>
-        <text class="up-progress-text" :class="layout.isWide ? 'up-progress-text-wide' : ''" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(24, 13)">{{ progressText }}</text>
-      </view>
-      <view class="up-actions" :class="layout.isWide ? 'up-actions-wide' : ''">
-        <!-- 双链接规则（UPDATE_DESIGN.md §3.1）：双链接 = 直接下载(主) + 浏览器下载(次)；
-             单链接 = 只显示对应按钮；强制更新同样展示全部按钮 -->
-        <view
-          v-if="showCancelBtn"
-          class="up-btn up-btn-cancel" :class="[layout.isWide ? 'up-btn-wide' : '', layout.isWide ? 'up-btn-cancel-wide' : '']"
-          @click="cancel"
-        >
-          <text class="up-btn-text-cancel" :class="layout.isWide ? 'up-btn-text-wide' : ''" :style="qtFontDual(28, 15)">以后再说</text>
+        <!-- 手机双下载入口并排，稍后操作独占次行；宽屏三项同排，为矮横窗留出正文空间。 -->
+        <view class="up-actions">
+          <view v-if="showCancelBtn && !separateCancel" class="up-action" :class="[showDirectBtn || showBrowserBtn ? 'up-action-gap' : '', (showDirectBtn || showBrowserBtn) && layout.isWide ? 'up-action-gap-wide' : '']">
+            <QtButton label="以后再说" variant="outline" size="sm" @click="cancel" />
+          </view>
+          <view v-if="showDirectBtn" class="up-action" :class="[showBothDownloads ? 'up-action-gap' : '', showBothDownloads && layout.isWide ? 'up-action-gap-wide' : '']">
+            <QtButton :label="primaryBtnText" size="sm" :disabled="downloading || probing" @click="update" />
+          </view>
+          <view v-if="showBrowserBtn && !downloading && !probing" class="up-action">
+            <QtButton label="浏览器下载" variant="outline" size="sm" @click="updateByBrowser" />
+          </view>
         </view>
-        <view
-          v-if="showDirectBtn"
-          class="up-btn up-btn-primary" :class="layout.isWide ? 'up-btn-wide' : ''"
-          :style="(showBrowserBtn ? (layout.isWide ? 'margin-right:12px;' : 'margin-right:20rpx;') : '') + 'background-color:' + themeStore.skin.accent + ';'"
-          @click="update"
-        >
-          <text class="up-btn-text-primary" :class="layout.isWide ? 'up-btn-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(28, 15)">{{ primaryBtnText }}</text>
-        </view>
-        <view v-if="showBrowserBtn && !downloading && !probing" class="up-btn up-btn-browser" :class="layout.isWide ? 'up-btn-wide' : ''" :style="'border-color:' + themeStore.skin.accent + ';'" @click="updateByBrowser">
-          <text class="up-btn-text-browser" :class="layout.isWide ? 'up-btn-text-wide' : ''" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(28, 15)">浏览器下载</text>
+        <view v-if="showCancelBtn && separateCancel" class="up-later">
+          <QtButton label="以后再说" variant="ghost" size="sm" @click="cancel" />
         </view>
       </view>
     </view>
@@ -55,27 +55,33 @@
 <script setup lang="ts">
 import { qtShowToast } from "@/services/toast";
 import { ref, computed, onUnmounted } from "vue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import QtRichText from "@/uni_modules/qt-ui/components/qt-rich-text/qt-rich-text.uvue";
 import type { AppUpdateInfo } from "@/services/upgrade";
 import { formatFileSize, resolveDownloadUrl } from "@/services/upgrade";
-import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtLayout, qtStatusBarPx, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 
 const layout = useQtLayout();
 const themeStore = useThemeStore();
+const shortWide = computed(() => layout.isWide && layout.isShort);
 
-/**
- * 宽屏宽度走统一浮层契约（QT_SHEET_WIDTH.modal = 560），并夹到窗口内。
- * 改造前写死 560px，在 640×360 之类窄横屏上会横出窗口。
- *
- * 高度同理：卡片里是「图标 + 版本号 + 更新说明(180px) + 进度 + 三颗按钮」的固定堆叠，
- * 横屏矮窗（如 780×360，会落进 isWide）整窗才 360px，必须把卡片夹进窗口高，
- * 否则按钮被挤出屏幕、用户没法更新也没法关闭。
- */
+/** 专用升级弹窗保持居中与强制更新契约；正文占据标题和固定操作区之间的剩余空间。 */
+const dialogSpace = computed(() => {
+  const gap = layout.isWide ? 16 : qtRpx(24);
+  const top = qtStatusBarPx() + gap;
+  const bottom = layout.safeBottomPx + gap;
+  const available = Math.max(0, layout.windowHeight - top - bottom);
+  return { top, bottom, height: Math.floor(layout.isShort ? available : Math.min(800, available * 0.9)) };
+});
+const maskStyle = computed((): string => {
+  const space = dialogSpace.value;
+  return "padding-top:" + space.top + "px;padding-bottom:" + space.bottom + "px;background-color:" + themeStore.skin.scrim + ";";
+});
 const cardStyle = computed((): string => {
-  if (!layout.isWide) return "width:600rpx;";
-  return "width:" + qtSheetWidth("modal") + "px;max-height:" + Math.max(260, layout.windowHeight - 32) + "px;";
+  const width = layout.isWide ? qtSheetWidth("modal") : Math.max(0, layout.windowWidth - qtRpx(48));
+  return "width:" + width + "px;height:" + dialogSpace.value.height + "px;background-color:" + themeStore.skin.sheetSurface + ";";
 });
 import { downloadApk, installApk, openInBrowser } from "@/services/app-native";
 import { saveToPublicMedia, ensurePublicDirPermission } from "@/uni_modules/qt-app-native";
@@ -122,6 +128,8 @@ const sizeText = computed(() =>
 /** 按钮显隐规则：downloadUrl 有显示「直接下载」；browserUrl 有显示「浏览器下载」 */
 const showDirectBtn = computed(() => props.info != null && props.info.downloadUrl.length > 0);
 const showBrowserBtn = computed(() => props.info != null && props.info.browserUrl.length > 0);
+const showBothDownloads = computed(() => showDirectBtn.value && showBrowserBtn.value && !downloading.value && !probing.value);
+const separateCancel = computed(() => showBothDownloads.value && !layout.isWide);
 /** 「以后再说」：非强制更新常显；强制更新仅在下载失败后作为逃生入口出现 */
 const showCancelBtn = computed(
   () =>
@@ -252,192 +260,178 @@ async function update(): Promise<void> {
   top: 0;
   right: 0;
   bottom: 0;
-  background-color: rgba(0, 0, 0, 0.5);
   justify-content: center;
   align-items: center;
   z-index: 999;
 }
 .up-card {
-  width: 600rpx;
-  border-radius: 32rpx;
-  background-color: #ffffff;
-  padding: 44rpx 40rpx 36rpx;
+  border-radius: 28rpx;
+  flex-shrink: 0;
   overflow: hidden;
 }
 .up-header {
   flex-direction: row;
   align-items: center;
+  padding: 28rpx 32rpx;
+  flex-shrink: 0;
 }
 .up-icon {
-  width: 88rpx;
-  height: 88rpx;
-  border-radius: 24rpx;
+  width: 72rpx;
+  height: 72rpx;
+  border-radius: 18rpx;
+  flex-shrink: 0;
+}
+.up-heading {
+  flex: 1;
+  min-width: 0;
+  margin-left: 20rpx;
 }
 .up-title {
-  margin-left: 20rpx;
-  color: #191d26;
-  font-size: 34rpx;
+  font-size: 30rpx;
   font-weight: 700;
 }
-.up-badge {
-  margin-left: 16rpx;
-  padding: 6rpx 14rpx;
-  background-color: #4fb186;
-  border-radius: 20rpx;
-}
-.up-badge-text {
-  color: #ffffff;
-  font-size: 20rpx;
-}
-.up-version-row {
-  margin-top: 28rpx;
+.up-meta {
   flex-direction: row;
+  flex-wrap: wrap;
   align-items: center;
+  margin-top: 6rpx;
 }
 .up-version {
-  font-size: 40rpx;
-  font-weight: 700;
+  font-size: 24rpx;
+  font-weight: 600;
+}
+.up-badge {
+  margin-left: 14rpx;
+  padding: 3rpx 10rpx;
+  border-radius: 8rpx;
+}
+.up-badge-text {
+  font-size: 19rpx;
 }
 .up-size {
-  margin-left: 16rpx;
-  color: #737b8e;
-  font-size: 24rpx;
+  margin-left: 14rpx;
+  font-size: 22rpx;
 }
 .up-content {
-  margin-top: 20rpx;
-  max-height: 260rpx;
+  flex: 1;
+  min-height: 0;
+  border-top-width: 1px;
+  border-top-style: solid;
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
 }
-.up-info {
-  color: #737b8e;
-  font-size: 26rpx;
-  line-height: 1.6;
+.up-content-inner {
+  padding: 24rpx 32rpx;
+}
+.up-footer {
+  padding: 24rpx 32rpx 28rpx;
+  flex-shrink: 0;
 }
 .up-progress {
-  margin-top: 28rpx;
+  margin-bottom: 20rpx;
   flex-direction: row;
   align-items: center;
 }
 .up-progress-track {
   flex: 1;
-  height: 14rpx;
-  background-color: #eef1f7;
-  border-radius: 7rpx;
+  height: 8rpx;
+  border-radius: 4rpx;
   overflow: hidden;
 }
 .up-progress-bar {
-  height: 14rpx;
-  border-radius: 7rpx;
+  height: 8rpx;
+  border-radius: 4rpx;
 }
 .up-progress-text {
   margin-left: 16rpx;
-  font-size: 24rpx;
-  width: 90rpx;
-  text-align: right;
+  font-size: 22rpx;
 }
 .up-actions {
-  margin-top: 36rpx;
   flex-direction: row;
-  justify-content: space-between;
 }
-.up-btn {
-  height: 88rpx;
+.up-action {
   flex: 1;
-  justify-content: center;
-  align-items: center;
-  border-radius: 44rpx;
+  min-width: 0;
 }
-.up-btn-cancel {
-  margin-right: 20rpx;
-  background-color: #f0f2f6;
+.up-action-gap {
+  margin-right: 16rpx;
 }
-.up-btn-primary {
+.up-later {
+  margin-top: 12rpx;
 }
-.up-btn-text-cancel {
-  color: #737b8e;
-  font-size: 28rpx;
-}
-.up-btn-text-primary {
-  font-size: 28rpx;
-  font-weight: 600;
-}
-/* 浏览器下载（次按钮，双链接时与主按钮并排） */
-.up-btn-browser {
-  background-color: #ffffff;
-  border-style: solid;
-  border-width: 1px;
-}
-.up-btn-text-browser {
-  font-size: 28rpx;
-  font-weight: 600;
-}
-
-/* Vapor 宽屏：px 覆盖 rpx。弹窗限宽 560px 居中，
-   避免 600rpx 在 1600x900 / 2560x1440 上被放大到 900dp+ 占满整屏 */
 .up-card-wide {
-  /* 宽度改由 cardStyle 内联给出（走 qtSheetWidth 契约，窄窗口自动夹紧） */
   border-radius: 16px;
-  padding: 24px 24px 20px;
 }
 .up-header-wide {
-  flex-direction: row;
-  align-items: center;
+  padding: 18px 24px;
 }
 .up-icon-wide {
-  width: 48px;
-  height: 48px;
-  border-radius: 14px;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+}
+.up-heading-wide {
+  margin-left: 12px;
 }
 .up-title-wide {
-  margin-left: 12px;
   font-size: 19px;
 }
-.up-badge-wide {
-  margin-left: 10px;
-  padding: 3px 9px;
-  border-radius: 11px;
-}
-.up-badge-text-wide {
-  font-size: 12px;
-}
-.up-version-row-wide {
-  margin-top: 16px;
-  flex-direction: row;
-  align-items: center;
+.up-meta-wide {
+  margin-top: 4px;
 }
 .up-version-wide {
-  font-size: 23px;
+  font-size: 14px;
+}
+.up-badge-wide {
+  margin-left: 8px;
+  padding: 2px 7px;
+  border-radius: 5px;
+}
+.up-badge-text-wide {
+  font-size: 11px;
 }
 .up-size-wide {
-  margin-left: 10px;
+  margin-left: 8px;
   font-size: 13px;
 }
-.up-content-wide {
-  margin-top: 12px;
-  max-height: 180px;
+.up-content-inner-wide {
+  padding: 18px 24px;
+}
+.up-footer-wide {
+  padding: 16px 24px;
 }
 .up-progress-wide {
-  margin-top: 16px;
-  flex-direction: row;
-  align-items: center;
+  margin-bottom: 12px;
+}
+.up-progress-track-wide {
+  height: 4px;
+  border-radius: 2px;
+}
+.up-progress-bar-wide {
+  height: 4px;
+  border-radius: 2px;
 }
 .up-progress-text-wide {
   margin-left: 10px;
   font-size: 13px;
-  width: 56px;
 }
-.up-actions-wide {
-  margin-top: 20px;
-  flex-direction: row;
-  justify-content: space-between;
-}
-.up-btn-wide {
-  height: 46px;
-  border-radius: 23px;
-}
-.up-btn-cancel-wide {
+.up-action-gap-wide {
   margin-right: 12px;
 }
-.up-btn-text-wide {
-  font-size: 15px;
+.up-header-short {
+  padding: 12px 24px;
+}
+.up-heading-short {
+  flex-direction: row;
+  align-items: center;
+}
+.up-meta-short {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
+  margin-left: 16px;
+}
+.up-footer-short {
+  padding: 12px 24px;
 }
 </style>

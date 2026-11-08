@@ -64,7 +64,7 @@
 | [qt-confirm-host](<../components/qt-confirm-host/qt-confirm-host.uvue>) | 危险确认 true / false 服务 |
 | [qt-first-run-disclaimer](<../components/qt-first-run-disclaimer/qt-first-run-disclaimer.uvue>) | 首启读秒门禁，非普通可取消 sheet |
 | [qt-notice-splash](<../components/qt-notice-splash/qt-notice-splash.uvue>) | 公告关闭 / exit 与今日隐藏选择 |
-| [qt-upgrade-popup](<../components/qt-upgrade-popup/qt-upgrade-popup.uvue>) | 升级、强制模式与下载状态 |
+| [qt-upgrade-popup](<../components/qt-upgrade-popup/qt-upgrade-popup.uvue>) | 升级专用居中外壳；窗口自适应长正文、固定操作区；复用 RichText / Button，保留强制模式与下载状态 |
 | [qt-meta-pack-guide](<../components/qt-meta-pack-guide/qt-meta-pack-guide.uvue>) | 缺包引导，仅 go / dismiss |
 | [qt-pack-install-sheet](<../components/qt-pack-install-sheet/qt-pack-install-sheet.uvue>) | 安装确认 / 安装中关闭锁 |
 | [qt-listen-detail](<../components/qt-listen-detail/qt-listen-detail.uvue>) | 报告详情、trail、排序与每批 50 项 |
