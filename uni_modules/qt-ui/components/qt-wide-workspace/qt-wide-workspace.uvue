@@ -7,7 +7,7 @@
        在 hidden pane 上 onScrollStart SIGSEGV）。
        工具页组件不在这里 import：由宿主 tab 根页（发现/我的）经默认插槽传入
        （2026-10-27 槽位解耦，qt-ui 零反向依赖业务页面）。 -->
-  <view v-if="ws.route.length > 0" class="qt-wide-workspace">
+  <view v-if="ws.route.length > 0 && ws.hostRoute == props.hostRoute" class="qt-wide-workspace">
     <!-- 显隐全部落在这个非 fixed 的内层 stage 上：真机实测 fixed 根节点的动态
          visibility 关不下去（12:52 logcat：route 已清、rail current 已回落，
          搜索页仍盖屏），而非 fixed 节点（pane 互切）一直可靠。根节点只负责
@@ -25,6 +25,7 @@
          qt-page-frame 的 showRail 注释），这条是托管期间唯一可见的 rail。
          放在 pane 之后渲染 = 同级后绘者在上，压住 pane 里工具页让给 rail 的左条。 -->
     <qt-side-nav
+      v-if="layout.isWide"
       :docked="true"
       :current="ws.route.length > 0 ? ws.route : props.hostRoute"
       :dots="railDots"
@@ -37,20 +38,26 @@
          放在 rail 之后渲染：同级后绘者在上，底栏与 rail 在横向上不重叠
          （底栏 left 让开 rail 宽度），顺序只影响万一的层叠边界。
          工具页的 qt-page-frame 仍会为它留出 64px 内边距（见 reservePlayerBar）。 -->
-    <qt-player-bar :docked="true" />
+    <qt-player-bar v-if="layout.isWide && miniSettings.mode == 'docked'" :docked="true" @queue="queueOpen = true" />
+    <qt-mini-player />
+    <qt-playback-queue v-if="queueOpen" @close="queueOpen = false" />
     </view>
   </view>
 </template>
 
 <script setup lang="ts">
-import { computed, watch } from "vue";
-import { qtWideWorkspace, qtCloseWideTool, qtWideWorkspaceRefreshTick } from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
+import { computed, ref, watch } from "vue";
+import { onHide } from "@dcloudio/uni-app";
+import { qtWideWorkspace, qtWideWorkspaceRefreshTick } from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
 import { qtTopRoute } from "@/uni_modules/qt-ui/composables/qt-page-chrome";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useSourceUpdateStore } from "@/stores/source-update";
 import QtSideNav from "@/uni_modules/qt-ui/components/qt-side-nav/qt-side-nav.uvue";
+import QtMiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
+import { useMiniPlayerSettings } from "@/uni_modules/qt-ui/stores/mini-player";
 import QtPlayerBar from "@/uni_modules/qt-ui/components/qt-player-bar/qt-player-bar.uvue";
+import QtPlaybackQueue from "@/uni_modules/qt-ui/components/qt-playback-queue/qt-playback-queue.uvue";
 
 /**
  * 宽屏工具页「就地托管」的渲染层。由两个 tab 根页（发现 / 我的）各挂一份。
@@ -74,8 +81,12 @@ const props = defineProps<{
 }>();
 
 const ws = qtWideWorkspace();
+const queueOpen = ref(false);
+watch((): string => ws.hostRoute + ":" + ws.route, () => { queueOpen.value = false; });
+onHide(() => { queueOpen.value = false; });
 const theme = useThemeStore();
 const layout = useQtLayout();
+const miniSettings = useMiniPlayerSettings();
 const sourceUpdateStore = useSourceUpdateStore();
 
 /** 与 qt-page-frame 的 railDots 同源：音源包有新包待生效时给「我的」亮红点 */
@@ -84,13 +95,10 @@ const railDots = computed((): string[] => sourceUpdateStore.updatePending ? ["/p
 /** 单活动 pane 后 alive/保活已无渲染作用（见 paneOn 注释），随预挂载一并移除。 */
 
 /**
- * 宽屏失效（窗口收窄 / 转竖屏）时清掉托管状态。
- * 覆盖层本体随 rootStyle 隐藏，但 route 若不清，宿主页的返回键会被
- * qtCloseWideTool 白吞一次（「关掉」一个看不见的覆盖层）。
+ * 窗口收窄只切换同一个活动 pane 的密度，不关路由、不重挂载、不自动导航。
+ * 窄屏继续全屏展示当前工具；新入口仍走原生导航，返回键正常关闭可见的工具。
+ * 仅保留当前 pane，不能恢复多个隐藏列表常驻的旧保活方案。
  */
-watch((): boolean => layout.isWide, (wide: boolean): void => {
-  if (!wide && ws.route.length > 0) qtCloseWideTool();
-});
 
 // （2026-10-27 页面槽位解耦：pane 链移入宿主页，本组件不再持 pane 的 v-if；
 //  单活动 pane 谓词 qtPaneOn 及真机翻车史注释移至 composables/qt-wide-workspace.ts。）
@@ -101,11 +109,9 @@ watch((): boolean => layout.isWide, (wide: boolean): void => {
 
 /**
  * 覆盖层整体可见性：
- *   - 没有正在托管的工具（点了 tab / 按返回键，qtCloseWideTool 只清路由）就隐藏，
- *     已创建的工具页全部保留，下次打开瞬时恢复；
- *   - 栈顶不是本宿主（另一个 tab 顶上来 / 从托管页跳进了深页）就隐藏本宿主这份；
- *   - 宽屏失效就隐藏（窄屏回到整页导航语义，rail 本来也不渲染）。
- * 关闭一律是「藏」而不是「拆」—— 拆掉重建正是每次点击频闪的来源。
+ *   - 没有正在托管的工具就隐藏；根 v-if 卸载当前 pane，下次打开重新挂载；
+ *   - 栈顶不是本宿主（另一个 tab / 工具的深页）就隐藏本宿主这份；
+ *   - 跨宽窄断点不改变 route 与 pane 身份，仅隐藏宽屏停靠导航及播放栏。
  *
  * qtTopRoute() 非响应式：从托管页 navigateTo 深页再返回宿主时栈变了但没有响应式
  * 依赖变化，这里不会自己重算 —— 读一下刷新号（宿主页 onShow 时递增）强制订阅，
@@ -114,7 +120,7 @@ watch((): boolean => layout.isWide, (wide: boolean): void => {
 const stageStyle = computed((): string => {
   const base = "background-color:" + theme.skin.background + ";";
   qtWideWorkspaceRefreshTick();
-  if (ws.route.length == 0 || !layout.isWide || qtTopRoute() != props.hostRoute) {
+  if (ws.route.length == 0 || qtTopRoute() != props.hostRoute) {
     return base + "visibility:hidden;";
   }
   return base;

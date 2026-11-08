@@ -12,7 +12,7 @@
 import { apiRequest, parseJsonToUtso, resolveUrl } from "./http";
 import { getPlayUrlByEngineResult, invokeSource } from "./source-engine";
 import type { PlayUrlLine } from "./source-engine";
-import { activeMetaPack, ensureLocalStateRestored, packs } from "./source-bundle-fs";
+import { activeMetaPack, ensureLocalStateRestored, localState, packs } from "./source-bundle-fs";
 import type { SourcePackMeta } from "./source-bundle-fs";
 import { ttlRead, ttlReadUtso, ttlWrite } from "./ttl-store";
 import { isLoggedIn } from "./auth";
@@ -22,7 +22,10 @@ import type { Playlist, Song, Artist, Album } from "@/types/music";
 import { mergeAggregateSongs } from "./aggregate-merge";
 import type { AggregateSongBatch } from "./aggregate-merge";
 import { sourcePlayLoginActive, sourceVipTierOf } from "./source-auth";
-import { cachedQualityProfileOf, PROFILE_MODE_OFFICIAL } from "./source-quality";
+import { cachedQualityProfileOf, PROFILE_MODE_OFFICIAL, sourcePlayQualityOf } from "./source-quality";
+import { readSongEmbedded } from "./local-media";
+import { preferredSource } from "./preferred-source";
+import { readLyricDisk, writeLyricDisk, removeLyricDisk, clearLyricDisk } from "./lyric-disk-cache";
 
 
 /**
@@ -265,18 +268,18 @@ function gateway(
 export class MusicApi {
   /** 同键在飞请求合并：首页 onMounted/onShow/换包事件会前后脚触发同一轮数据，
    *  重复的 400KB 新歌响应会在唯一引擎线程上再压 ~1.2s（settleOp 逐字符转义），
-   *  这里保证同一键同时最多只有一个请求真正发出去 */
+   *  普通同键请求合并；榜单 force 可替换 owner，旧请求不再写缓存或清理新 flight。 */
   private inflight = new Map<string, Promise<any>>();
-  private dedupe<T>(key: string, run: () => Promise<T>): Promise<T> {
+  private dedupe<T>(key: string, run: () => Promise<T>, force: boolean = false): Promise<T> {
     const flying = this.inflight.get(key);
-    if (flying != null) return flying as Promise<T>;
-    const p = run().then(
+    if (!force && flying != null) return flying as Promise<T>;
+    const p: Promise<T> = run().then(
       (v) => {
-        this.inflight.delete(key);
+        if (this.inflight.get(key) == p) this.inflight.delete(key);
         return v;
       },
       (e) => {
-        this.inflight.delete(key);
+        if (this.inflight.get(key) == p) this.inflight.delete(key);
         throw e;
       }
     );
@@ -295,6 +298,9 @@ export class MusicApi {
    * 内存态即可——重启后 player 会重新取一次地址（恢复播放那条路径），届时重新记录。
    */
   private urlLine = new Map<string, string>();
+  /** 同一原歌/音质的缓存属于哪个手选音源；选择改变时不能复用旧地址。 */
+  private urlSelection = new Map<string, string>();
+  private urlCrossTarget = new Map<string, Song>();
   /**
    * 每条播放地址的**实测档位**（cacheKey 同 urlCache；空串 = 未测出/老包）。
    *
@@ -436,6 +442,26 @@ export class MusicApi {
     return parts.join(",");
   }
 
+  /** 换包/清缓存的进程纪元，不进入跨启动的持久键。 */
+  private chartCacheEpoch = 0;
+
+  /** 排行榜持久身份包含两个生效位及全部安装包版本；JSON 编码避免 ID 分隔符碰撞。 */
+  private chartPackIdentity(): string {
+    const state = localState();
+    const parts: string[] = [];
+    for (let i = 0; i < state.packs.length; i++) {
+      const p = state.packs[i] as SourcePackMeta;
+      parts.push(JSON.stringify([p.id, p.versionCode.toString()]));
+    }
+    parts.sort();
+    return JSON.stringify({ activeMetaId: state.activeMetaId, activeId: state.activeId, packs: parts });
+  }
+
+  /** 页面/loader 与 API 共用的 opaque 身份；调用方先等待本地状态恢复。 */
+  chartCacheIdentity(): string {
+    return this.chartPackIdentity() + "|epoch:" + this.chartCacheEpoch.toString();
+  }
+
   /** 读持久缓存并同步回填内存层（命中持久层时内存层也秒开）；调用方自行 as 收窄 */
   private ttlHit(key: string, ttlMs: number, memoryKey: string): any | null {
     const stored = ttlRead(key, ttlMs);
@@ -445,11 +471,18 @@ export class MusicApi {
 
   private cacheGet(cache: UTSJSONObject, key: string): string {
     const value = cache.get(key);
-    return value != null ? (value as string) : "";
+    if (value != null && (value as string).length > 0) return value as string;
+    if (cache == this.lyricCache) {
+      const disk = readLyricDisk(key);
+      if (disk.length > 0) cache.set(key, disk);
+      return disk;
+    }
+    return "";
   }
 
   private cacheSet(cache: UTSJSONObject, key: string, value: string): void {
     if (value.length > 0) cache.set(key, value);
+    if (cache == this.lyricCache) writeLyricDisk(key, value);
   }
 
   /**
@@ -467,6 +500,7 @@ export class MusicApi {
    */
   private lyricCacheRemove(key: string): void {
     this.lyricCache.set(key, "");
+    removeLyricDisk(key);
   }
 
   /** 读播放地址缓存：超过 PLAY_URL_TTL 视为未命中（链接带时效签名，过期会播放失败） */
@@ -507,6 +541,8 @@ export class MusicApi {
     this.urlLine.set(key, "");
     this.urlActualQuality.set(key, "");
     this.urlSize.delete(key);
+    this.urlSelection.delete(key);
+    this.urlCrossTarget.delete(key);
     const at = this.urlCacheKeys.indexOf(key);
     if (at >= 0) this.urlCacheKeys.splice(at, 1);
   }
@@ -519,9 +555,12 @@ export class MusicApi {
    * latestUsesOffset 可能与旧包不同，必须重取才生效（旧值先留着兜底，见 registryStale）。
    */
   clearPlayUrlCache(): void {
+    this.chartCacheEpoch += 1;
     this.urlCache = new UTSJSONObject();
     this.urlCacheAt = new Map<string, number>();
     this.urlLine = new Map<string, string>();
+    this.urlSelection.clear();
+    this.urlCrossTarget.clear();
     this.urlActualQuality = new Map<string, string>();
     this.urlSize = new Map<string, number>();
     this.urlCacheKeys = [];
@@ -541,6 +580,29 @@ export class MusicApi {
     const base = song.platform + ":" + song.id;
     this.urlCacheRemove(base + ":" + quality);
     this.urlCacheRemove(base + ":native:" + quality);
+  }
+
+  /**
+   * 用户手动换源后，原歌的歌词缓存必须一起失效。
+   * 歌词的消费键仍然是原歌 `platform:id`，如果只清播放地址，磁盘歌词会在
+   * `ensureLyric` 的第一行直接命中，导致画面继续显示旧音源的词。
+   */
+  invalidatePreferredSource(song: Song): void {
+    if (song == null || song.id.length == 0 || song.platform.length == 0) return;
+    const key = song.platform + ":" + song.id;
+    this.lyricCacheRemove(key);
+    this.lyricCacheRemove(key + ":tr");
+    this.lyricCacheRemove(key + ":wbw");
+    this.lyricCacheRemove(key + ":roma");
+    this.lyricAsked.delete(key);
+  }
+
+  /** 手选播放源有独立的歌词缓存命名空间，重启和 A→B→C 都不会读回旧源的词。 */
+  private lyricKeyOf(song: Song): string {
+    const key = song.platform + ":" + song.id;
+    if (this.pickedLyricOf(song) != null) return key;
+    const preferred = preferredSource(song);
+    return preferred != null ? key + ":source:" + preferred.platform + ":" + preferred.id : key;
   }
 
   // ==================== 引擎调用与契约映射 ====================
@@ -1121,29 +1183,38 @@ export class MusicApi {
     return gateway("wyy/banner") as Promise<Banner[]>;
   }
 
-  async charts(source?: Source): Promise<Chart[]> {
+  async charts(source?: Source, force: boolean = false): Promise<Chart[]> {
+    await ensureLocalStateRestored();
     const currentSource = sourceName(source);
-    const cacheKey = "charts:" + currentSource;
-    const hit = this.dataGet(cacheKey);
-    if (hit != null) return hit as Chart[];
-    return this.dedupe(cacheKey, async (): Promise<Chart[]> => {
-    // 排行榜列表：本地持久缓存 12 小时（键带音源包指纹，换包即失效）
-    const ttlKey = "charts:" + this.packFp() + ":" + currentSource;
-    const stored = this.ttlHit(ttlKey, MusicApi.TTL_12H, cacheKey) as Chart[] | null;
-    if (stored != null && stored.length > 0) return stored;
-    const args = new UTSJSONObject();
-    args.set("source", currentSource);
-    const response = await this.engineInvoke("charts", args);
-    const raw = response.get("list") as UTSJSONObject[] | null;
-    const charts: Chart[] = [];
-    if (raw == null) return charts;
-    for (let i = 0; i < raw.length; i++) {
-      charts.push(this.chartFromContract(raw[i] as UTSJSONObject));
-    }
-    this.dataSet(cacheKey, charts);
-    if (charts.length > 0) ttlWrite(ttlKey, charts);
-    return charts;
-    });
+    const identity = this.chartCacheIdentity();
+    const ttlKey = "charts:" + this.chartPackIdentity() + ":" + currentSource;
+    const cacheKey = "charts:" + identity + ":" + currentSource;
+    const flying = this.inflight.get(cacheKey);
+    if (!force && flying != null) return flying as Promise<Chart[]>;
+    const hit = !force ? this.dataGet(cacheKey) as Chart[] | null : null;
+    if (hit != null) return hit;
+    const pending: Promise<Chart[]> = this.dedupe(cacheKey, async (): Promise<Chart[]> => {
+      // 排行榜列表：12 小时持久键与进程内 scope 分离，force 绕过两层缓存。
+      const stored = !force ? this.ttlHit(ttlKey, MusicApi.TTL_12H, cacheKey) as Chart[] | null : null;
+      if (stored != null && stored.length > 0) return stored;
+      const args = new UTSJSONObject();
+      args.set("source", currentSource);
+      const response = await this.engineInvoke("charts", args);
+      const raw = response.get("list") as UTSJSONObject[] | null;
+      const charts: Chart[] = [];
+      if (raw == null) return charts;
+      for (let i = 0; i < raw.length; i++) {
+        charts.push(this.chartFromContract(raw[i] as UTSJSONObject));
+      }
+      if (this.chartCacheIdentity() == identity && this.inflight.get(cacheKey) == pending) {
+        this.dataSet(cacheKey, charts);
+        if (charts.length > 0) ttlWrite(ttlKey, charts);
+        // 空的强刷新废止旧持久值，后续允许重新请求而非复活旧榜。
+        else if (force) ttlWrite(ttlKey, null);
+      }
+      return charts;
+    }, force);
+    return pending;
   }
 
   /** 四源榜单合并（单源失败 bundle 内跳过） */
@@ -1539,25 +1610,40 @@ export class MusicApi {
     return `${what}不存在`;
   }
 
-  async chartDetail(chart: Chart): Promise<Song[]> {
+  async chartDetail(chart: Chart, force: boolean = false): Promise<Song[]> {
+    await ensureLocalStateRestored();
     const s = chart.platform;
-    // 榜单全部歌曲：本地持久缓存 12 小时（预览/详情共用一份；键带包指纹）
-    const ttlKey = "chartdetail:" + this.packFp() + ":" + s + ":" + chart.id;
-    const stored = ttlRead(ttlKey, MusicApi.TTL_12H) as Song[] | null;
-    if (stored != null && stored.length > 0) return stored;
-    const chartArg = new UTSJSONObject();
-    chartArg.set("id", chart.id);
-    chartArg.set("platform", chart.platform);
-    chartArg.set("name", chart.name);
-    chartArg.set("picUrl", chart.picUrl);
-    chartArg.set("description", chart.description);
-    const args = new UTSJSONObject();
-    args.set("source", s);
-    args.set("chart", chartArg);
-    const response = await this.engineInvoke("chartDetail", args);
-    const songs = this.songsOf(response, s);
-    if (songs.length > 0) ttlWrite(ttlKey, songs);
-    return songs;
+    const identity = this.chartCacheIdentity();
+    const ttlKey = "chartdetail:" + this.chartPackIdentity() + ":" + s + ":" + chart.id;
+    const cacheKey = "chartdetail:" + identity + ":" + s + ":" + chart.id;
+    const flying = this.inflight.get(cacheKey);
+    if (!force && flying != null) return flying as Promise<Song[]>;
+    const hit = !force ? this.dataGet(cacheKey) as Song[] | null : null;
+    if (hit != null) return hit;
+    const pending: Promise<Song[]> = this.dedupe(cacheKey, async (): Promise<Song[]> => {
+      // 榜单全部歌曲：12 小时持久键不含进程 epoch，force 绕过两层缓存。
+      const stored = !force ? this.ttlHit(ttlKey, MusicApi.TTL_12H, cacheKey) as Song[] | null : null;
+      if (stored != null && stored.length > 0) return stored;
+      const chartArg = new UTSJSONObject();
+      chartArg.set("id", chart.id);
+      chartArg.set("platform", chart.platform);
+      chartArg.set("name", chart.name);
+      chartArg.set("picUrl", chart.picUrl);
+      chartArg.set("description", chart.description);
+      const args = new UTSJSONObject();
+      args.set("source", s);
+      args.set("chart", chartArg);
+      const response = await this.engineInvoke("chartDetail", args);
+      const songs = this.songsOf(response, s);
+      if (this.chartCacheIdentity() == identity && this.inflight.get(cacheKey) == pending) {
+        this.dataSet(cacheKey, songs);
+        if (songs.length > 0) ttlWrite(ttlKey, songs);
+        // 空的强刷新废止旧持久值，不把空数组缓存十二小时。
+        else if (force) ttlWrite(ttlKey, null);
+      }
+      return songs;
+    }, force);
+    return pending;
   }
 
   /**
@@ -1760,11 +1846,15 @@ export class MusicApi {
       song.urlFetchedAt = Date.now();
       return song.id;
     }
+    const requestedSource = preferredSource(song) ?? song;
+    const sourceKey = requestedSource.platform + ":" + requestedSource.id;
     // v11：官方清单生效时旧档名归一到官方 level（存量 player.quality 可能还是
     // flac/flac24bit），否则请求档不在官方清单里、按最高档起试
     const effQuality = this.normalizeOfficialQuality(song.platform, quality);
     const cacheKey = song.platform + ":" + song.id + ":" + effQuality;
     const resolved = await this.resolvePlayUrl(song, effQuality, cacheKey);
+    const latestSource = preferredSource(song) ?? song;
+    if (latestSource.platform + ":" + latestSource.id != sourceKey) return this.playUrl(song, quality);
     const url = resolved.url;
     if (url.length > 0) {
       const at = this.urlCacheAt.get(cacheKey);
@@ -1794,6 +1884,11 @@ export class MusicApi {
     quality: string,
     cacheKey: string
   ): Promise<{ url: string; crossTarget: Song | null }> {
+    const preferred = preferredSource(song);
+    const target = preferred != null ? preferred : song;
+    const selectedQuality = preferred != null ? sourcePlayQualityOf(target.platform, quality) : quality;
+    const selection = preferred != null ? preferred.platform + ":" + preferred.id + ":" + selectedQuality : "";
+    if ((this.urlSelection.get(cacheKey) ?? "") != selection) this.urlCacheRemove(cacheKey);
     const cached = this.urlCacheGet(cacheKey);
     if (cached.length > 0) {
       // 老音源包污染过的加密缓存：不交付，清掉让下面的取链重新跑（新包已在
@@ -1801,7 +1896,7 @@ export class MusicApi {
       if (isEncryptedMediaUrl(cached)) {
         this.urlCacheRemove(cacheKey);
       } else {
-        return { url: cached, crossTarget: null };
+        return { url: cached, crossTarget: this.urlCrossTarget.get(cacheKey) ?? null };
       }
     }
     // 取链只走音源引擎：仓库不内置任何音源包（数据包/播放包都由用户在设置页
@@ -1810,7 +1905,7 @@ export class MusicApi {
     // 且原型链会让「链路热更新失效」这类问题被旧实现掩盖（方案 §2.6）。
     // 失败性质、命中线路与跨源目标歌都随这次调用的返回值带回，不经全局标记：
     // 取链是并发的，全局标记会被别的调用串味（见 isContentFailError 的说明）。
-    const result = await getPlayUrlByEngineResult(song, quality);
+    const result = await getPlayUrlByEngineResult(target, selectedQuality);
     // 加密档兜底：老音源包会直接给出 mflac/mgg/qmc 加密地址（新包已在 play-guard
     // 拦截），宿主无解密契约——不缓存、按内容失败处理（store 换下一首）。
     if (isEncryptedMediaUrl(result.url)) {
@@ -1818,6 +1913,7 @@ export class MusicApi {
     }
     if (result.url.length > 0) {
       this.urlCacheSet(cacheKey, result.url);
+      this.urlSelection.set(cacheKey, selection);
       // 实测档位与地址同生命周期（空串 = 未重标，保持原值不清空）
       if (result.actualQuality.length > 0) {
         this.urlActualQuality.set(cacheKey, result.actualQuality);
@@ -1838,7 +1934,9 @@ export class MusicApi {
       // 命中线路与地址一起记：管理端要看「这条地址是音源包里哪条源取到的」，
       // 而地址会被复用 10 分钟，线路必须跟着地址走
       const crossTarget = this.rememberUrlLine(cacheKey, result.line);
-      return { url: result.url, crossTarget: crossTarget };
+      const lyricTarget = crossTarget != null ? crossTarget : preferred;
+      if (lyricTarget != null) this.urlCrossTarget.set(cacheKey, lyricTarget);
+      return { url: result.url, crossTarget: lyricTarget };
     }
     // 弱网（整链无响应）与「音源没这首」在此分流（2026-10-03 弱网修复）：
     // 弱网抛错（store 视作环境问题 → 原地重试、不计熔断），
@@ -1874,6 +1972,14 @@ export class MusicApi {
   playUrlLine(song: Song, quality: string = "320"): string {
     const v = this.urlLine.get(song.platform + ":" + song.id + ":" + quality);
     return v != null ? v : "";
+  }
+
+  /** 当前地址实际命中源的 Referer；投屏代理与取链使用同一份注册表声明。 */
+  playRefererOf(song: Song, quality: string = "320"): string {
+    const normalized = this.normalizeOfficialQuality(song.platform, quality);
+    const key = song.platform + ":" + song.id + ":" + normalized;
+    const target = this.urlCrossTarget.get(key) ?? preferredSource(song) ?? song;
+    return this.refererOf(target.platform as Source);
   }
 
   /**
@@ -1960,34 +2066,44 @@ export class MusicApi {
    * 同一次 invoke（见 ensureLyric），所以这里只读缓存。
    */
   async lyrics(song: Song): Promise<string> {
+    const embedded = await readSongEmbedded(song);
+    if (embedded != null && embedded.lrcText.length > 0) return embedded.lrcText;
     await this.ensureLyric(song, false);
-    const text = this.cacheGet(this.lyricCache, song.platform + ":" + song.id);
+    const text = this.cacheGet(this.lyricCache, this.lyricKeyOf(song));
     qtDiag("[QT Lyric] lyrics() 返回 " + text.length + " 字符：" + song.name);
     return text;
   }
 
   /** 拿到空结果后的强制重取（桌面歌词服务用）：忽略「已问过」标记，重新 invoke 一次 */
   async retryLyrics(song: Song): Promise<string> {
+    const embedded = await readSongEmbedded(song);
+    if (embedded != null && embedded.lrcText.length > 0) return embedded.lrcText;
     await this.ensureLyric(song, true);
-    return this.cacheGet(this.lyricCache, song.platform + ":" + song.id);
+    return this.cacheGet(this.lyricCache, this.lyricKeyOf(song));
   }
 
   /** 取翻译。与歌词共用同一次 invoke（见 ensureLyric），这里只读缓存。 */
   async lyricTranslation(song: Song): Promise<string> {
+    const embedded = await readSongEmbedded(song);
+    if (embedded != null && embedded.lrcText.length > 0) return "";
     await this.ensureLyric(song, false);
-    return this.cacheGet(this.lyricCache, song.platform + ":" + song.id + ":tr");
+    return this.cacheGet(this.lyricCache, this.lyricKeyOf(song) + ":tr");
   }
 
   /** 取逐字歌词（QRC 行内格式）。与歌词共用同一次 invoke，这里只读缓存；老包返回空串。 */
   async lyricWordByWord(song: Song): Promise<string> {
+    const embedded = await readSongEmbedded(song);
+    if (embedded != null && embedded.lrcText.length > 0) return "";
     await this.ensureLyric(song, false);
-    return this.cacheGet(this.lyricCache, song.platform + ":" + song.id + ":wbw");
+    return this.cacheGet(this.lyricCache, this.lyricKeyOf(song) + ":wbw");
   }
 
   /** 取罗马音（普通 LRC）。与歌词共用同一次 invoke，这里只读缓存；中文歌/老包返回空串。 */
   async lyricRomanization(song: Song): Promise<string> {
+    const embedded = await readSongEmbedded(song);
+    if (embedded != null && embedded.lrcText.length > 0) return "";
     await this.ensureLyric(song, false);
-    return this.cacheGet(this.lyricCache, song.platform + ":" + song.id + ":roma");
+    return this.cacheGet(this.lyricCache, this.lyricKeyOf(song) + ":roma");
   }
 
   /**
@@ -1996,7 +2112,7 @@ export class MusicApi {
    * 空结果由 LYRIC_EMPTY_TTL_MS 兜住，与播放页共用同一份缓存/并发去重/已问标记。
    */
   private prefetchLyric(song: Song): void {
-    const key = song.platform + ":" + song.id;
+    const key = this.lyricKeyOf(song);
     if (this.cacheGet(this.lyricCache, key).length > 0) return;
     this.ensureLyric(song, false).catch(() => {});
   }
@@ -2007,7 +2123,13 @@ export class MusicApi {
    * 不看「问过为空」标记（那是原平台取词的结果，不该拦跨源这次）。
    */
   private async ensureCrossLyric(targetSong: Song, original: Song): Promise<void> {
-    const key = original.platform + ":" + original.id;
+    const embedded = await readSongEmbedded(original);
+    if (embedded != null && embedded.lrcText.length > 0) return;
+    if (this.pickedLyricOf(original) != null) {
+      await this.ensureLyric(original, false);
+      return;
+    }
+    const key = this.lyricKeyOf(original);
     const trKey = key + ":tr";
     if (this.cacheGet(this.lyricCache, key).length > 0) return;
     const running = this.lyricInflight.get(key);
@@ -2029,12 +2151,12 @@ export class MusicApi {
    * 让首次打开播放页直接出词，而不是先空一拍再补上。
    */
   cachedLyric(song: Song): string {
-    return this.cacheGet(this.lyricCache, song.platform + ":" + song.id);
+    return this.cacheGet(this.lyricCache, this.lyricKeyOf(song));
   }
 
   /** 同步读已缓存的翻译（与 cachedLyric 配套，同一次 invoke 写入） */
   cachedLyricTranslation(song: Song): string {
-    return this.cacheGet(this.lyricCache, song.platform + ":" + song.id + ":tr");
+    return this.cacheGet(this.lyricCache, this.lyricKeyOf(song) + ":tr");
   }
 
   /**
@@ -2042,14 +2164,14 @@ export class MusicApi {
    * 与 cachedLyric 同款：只在非空时写入，老包没有这个字段时恒为空串 → 走普通 LRC 路径。
    */
   cachedLyricWordByWord(song: Song): string {
-    return this.cacheGet(this.lyricCache, song.platform + ":" + song.id + ":wbw");
+    return this.cacheGet(this.lyricCache, this.lyricKeyOf(song) + ":wbw");
   }
 
   /**
    * 同步读已缓存的罗马音（普通 LRC 文本）。中文歌恒为空串。
    */
   cachedLyricRomanization(song: Song): string {
-    return this.cacheGet(this.lyricCache, song.platform + ":" + song.id + ":roma");
+    return this.cacheGet(this.lyricCache, this.lyricKeyOf(song) + ":roma");
   }
 
   /**
@@ -2063,7 +2185,9 @@ export class MusicApi {
    * `force` 为 true 时忽略「已问过」标记（供空结果重试），但仍然先看非空缓存。
    */
   private async ensureLyric(song: Song, force: boolean): Promise<void> {
-    const key = song.platform + ":" + song.id;
+    const embedded = await readSongEmbedded(song);
+    if (embedded != null && embedded.lrcText.length > 0) return;
+    const key = this.lyricKeyOf(song);
     const trKey = key + ":tr";
     if (!force) {
       if (this.cacheGet(this.lyricCache, key).length > 0) return;
@@ -2082,7 +2206,7 @@ export class MusicApi {
     // 缓存键仍是原歌（播放页/桌面歌词都按原歌键读），所以消费方无需知道有手选这回事。
     // 没有手选时 picked == null，行为与改动前逐字一致。
     const picked = this.pickedLyricOf(song);
-    const task = this.fetchLyricFor(picked != null ? picked : song, key, trKey);
+    const task = this.fetchLyricFor(picked != null ? picked : preferredSource(song) ?? song, key, trKey);
     this.lyricInflight.set(key, task);
     try {
       await task;
@@ -2380,8 +2504,8 @@ export class MusicApi {
    * local 歌曲按旧实现优先匹配酷我；其余走原平台搜索 + 网易云兜底（bundle 侧自带缓存）。
    * 返回 "" 表示未取到（不抛错，与旧实现一致）。
    */
-  async songCover(song: Song): Promise<string> {
-    if (song.picUrl != null && song.picUrl.length > 0) return song.picUrl;
+  async songCover(song: Song, refresh: boolean = false): Promise<string> {
+    if (!refresh && song.picUrl != null && song.picUrl.length > 0) return song.picUrl;
     // 本地歌曲没有源站主键（id 是本地路径派生出来的），cover 入口拿它去问必空手：
     // 与取词同一口径 —— 按「歌手 歌名」搜索命中，再用命中项取封面
     //（2026-11-03 真机「本地歌没有内嵌封面时也不联网取图」）。
@@ -2389,7 +2513,7 @@ export class MusicApi {
     const source: Source = song.platform as Source;
     const args = new UTSJSONObject();
     args.set("source", source);
-    args.set("song", this.songArgsOf(song));
+    args.set("song", this.songArgsOf(refresh ? { ...song, picUrl: "" } : song));
     try {
       const response = await this.engineInvoke("cover", args);
       const url = this.strOf(response.get("url"));
@@ -2404,19 +2528,27 @@ export class MusicApi {
   /**
    * 按「歌手 歌名」搜一首同名曲，拿它的封面地址（本地歌与单源取图失败的兜底）。
    *
-   * 先酷我后网易云：与 fetchLyricFor 的本地取词顺序一致，酷我命中率更高且更省字节。
-   * 搜索结果的 picUrl 就是现成的网络封面，不再回问 cover 入口，省一次 invoke。
+   * 文件下载重名后缀不参与查询；前五条中核对歌名、歌手与已知时长，
+   * 避免直接拿首条搜索结果的翻唱/演唱会封面。保留 Live 等实际版本信息。
    */
   private async coverByKeyword(song: Song): Promise<string> {
-    const keyword = song.singer.length > 0 ? song.singer + " " + song.name : song.name;
+    const title = song.platform == "local" ? song.name.replace(/\s+[（(]\d+[）)]$/, "").trim() : song.name.trim();
+    const normalize = (value: string): string => value.toLowerCase().replace(/[\s.·,，、/&＆_\-()（）《》]/g, "");
+    const wantTitle = normalize(title);
+    const wantSinger = normalize(song.singer);
+    const keyword = song.singer.length > 0 ? song.singer + " " + title : title;
     if (keyword.trim().length == 0) return "";
     const sources: Source[] = ["kw", "wyy"];
     for (let i = 0; i < sources.length; i++) {
       try {
-        const hits = await this.search(keyword, sources[i], "song", 1, 1);
-        if (hits.length == 0) continue;
-        const hit = hits[0] as Song;
-        if (hit.picUrl != null && hit.picUrl.length > 0) return hit.picUrl;
+        const hits = await this.search(keyword, sources[i], "song", 1, 5);
+        for (let j = 0; j < hits.length; j++) {
+          const hit = hits[j] as Song;
+          if (normalize(hit.name) != wantTitle) continue;
+          if (wantSinger.length > 0 && normalize(hit.singer) != wantSinger) continue;
+          if (song.duration != null && song.duration > 0 && hit.duration != null && hit.duration > 0 && Math.abs(song.duration - hit.duration) > 8) continue;
+          if (hit.picUrl != null && hit.picUrl.length > 0) return hit.picUrl;
+        }
       } catch (_) {
         // 静默：单源搜索失败换下一个源
       }
@@ -2435,6 +2567,7 @@ export class MusicApi {
    *    新调用方。两张表都是 Map，直接 delete 即可。
    */
   clearLyricCache(): void {
+    clearLyricDisk();
     this.lyricCache = new UTSJSONObject();
     this.lyricAsked.clear();
     this.lyricInflight.clear();

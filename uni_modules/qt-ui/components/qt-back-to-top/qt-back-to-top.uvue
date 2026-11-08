@@ -18,13 +18,16 @@
     :style="posStyle"
     @click="$emit('tap')"
   >
-    <QtIcon name="rocket" :size="64" color="#3f4756" />
+    <QtIcon name="rocket" :size="layout.isWide ? 28 : 56" :color="theme.skin.icon" />
   </view>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from "vue";
-import { qtRpx, useQtLayout, QT_PLAYER_BAR_HEIGHT_PX } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { computed } from "vue";
+import { qtRpx, useQtLayout, qtPlayerBarHeightPx, qtTabBarHeightPx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useMiniPlayerSettings } from "@/uni_modules/qt-ui/stores/mini-player";
+import { qtMiniDockReservePx } from "@/uni_modules/qt-ui/composables/mini-player-layout";
 import { usePlayerStore } from "@/stores/player";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 
@@ -34,46 +37,24 @@ defineProps<{
 
 const layout = useQtLayout();
 const player = usePlayerStore();
+const miniSettings = useMiniPlayerSettings();
+const theme = useThemeStore();
 
 defineEmits<{
   (e: "tap"): void;
 }>();
 
-/** 图标尺寸与右边距/底边距（rpx） */
-const SIZE = 80;
-const MARGIN_RIGHT = 24;
-const MARGIN_BOTTOM = 150;
-
-const left = ref(0);
-const top = ref(0);
-const posStyle = computed((): string => "left:" + left.value + "px;top:" + top.value + "px;");
-
-function reposition(): void {
-  const win = uni.getWindowInfo();
-  // 宽屏有常驻底栏时上抬 64px，否则按钮贴在底栏右端、和进度条重叠。
-  // 屏幕上抬量用 px（桌面不随 rpx 缩放），手机仍走 rpx。
-  // 手机档再叠加底部安全区：三键导航 / 虚拟导航条压在窗口底边（见 use-qt-layout
-  // 的 safeBottomPx），不让位的话按钮埋在触控键后面。
-  const lift = layout.isWide && player.current != null ? QT_PLAYER_BAR_HEIGHT_PX : 0;
-  const safe = layout.isWide ? 0 : layout.safeBottomPx;
-  left.value = win.windowWidth - qtRpx(MARGIN_RIGHT) - qtRpx(SIZE);
-  top.value = win.windowHeight - qtRpx(MARGIN_BOTTOM) - qtRpx(SIZE) - lift - safe;
-}
-
-onMounted(() => {
-  reposition();
+// No per-instance window query or resize watcher: use the shared reactive snapshot.
+const posStyle = computed((): string => {
+  const size = layout.isWide ? 40 : qtRpx(80);
+  const right = layout.isWide ? 24 : qtRpx(24);
+  const bottom = miniSettings.mode == "docked" && player.current != null
+    ? qtMiniDockReservePx(!layout.isWide) + (layout.isWide ? 20 : qtRpx(16))
+    : (layout.isWide ? layout.safeBottomPx + 20 : qtTabBarHeightPx() + qtRpx(16));
+  const left = Math.max(0, layout.windowWidth - right - size);
+  const top = Math.max(0, layout.windowHeight - bottom - size);
+  return "left:" + left + "px;top:" + top + "px;";
 });
-
-// 旋转/分屏后窗口尺寸变化，fixed 的 px 定位必须重算，
-// 否则竖转横后 top 超出新 windowHeight，按钮消失在屏幕外。
-// 同时监听「是否有当前歌曲」（底栏的出现/消失会改变可用的底部空间）与
-// 底部安全区（系统里切换三键导航 ↔ 手势导航时窗口尺寸不变、安全区变）。
-watch(
-  () => [layout.windowWidth, layout.windowHeight, player.current != null, layout.safeBottomPx],
-  () => {
-    reposition();
-  }
-);
 </script>
 
 <style>

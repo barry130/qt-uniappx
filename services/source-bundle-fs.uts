@@ -50,10 +50,12 @@ import {
   remove as nativeRemove,
   mkdirs as nativeMkdirs,
   listDir as nativeListDir,
+  renamePath as nativeRenamePath,
 } from "@/uni_modules/qt-js-engine";
 // #endif
 
 import { logInfo, logWarnV } from "@/services/logger";
+import { parseJsonToUtso } from "@/services/http";
 
 const UNSUPPORTED = "当前平台不支持音源包存储";
 const ROOT_NAME = "source-bundle";
@@ -167,6 +169,12 @@ function fsWrite(path: string, text: string): Promise<boolean> {
   });
 }
 
+function fsRename(from: string, to: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    nativeRenamePath(from, to, (ok: boolean, value: string, error: string) => resolve(ok));
+  });
+}
+
 function fsExists(path: string): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     nativeExists(path, (ok: boolean, value: string, error: string) => {
@@ -203,6 +211,10 @@ function fsRead(path: string): Promise<string> {
 
 function fsWrite(path: string, text: string): Promise<boolean> {
   return Promise.reject(new Error(UNSUPPORTED));
+}
+
+function fsRename(from: string, to: string): Promise<boolean> {
+  return Promise.resolve(false);
 }
 
 function fsExists(path: string): Promise<boolean> {
@@ -347,11 +359,10 @@ export async function restoreLocalState(): Promise<SourceLocalState> {
   try {
     const raw = await fsRead(statePath());
     if (raw.length > 0) {
-      const o = JSON.parse(raw) as UTSJSONObject;
+      const o = parseJsonToUtso(raw);
       const schema = numOf(o, "schema");
       if (schema >= 3) {
         const state = stateFromJson(o);
-        await validateOnDisk(state);
         gState = state;
       } else {
         await migrateLegacy(o, schema);
@@ -359,7 +370,11 @@ export async function restoreLocalState(): Promise<SourceLocalState> {
     }
   } catch (_) {
     // 静默：读不到/解析不了 state.json 就当空状态（未安装）
+    gState = emptyState();
   }
+  // First installation may have crashed before state.json was created.
+  if (!(await recoverPackInstall())) throw new Error("音源包文件恢复未完成，请检查存储后重启");
+  await validateOnDisk(gState);
   return gState;
 }
 
@@ -455,9 +470,72 @@ export function ensureLocalStateRestored(): Promise<SourceLocalState> {
 }
 
 /** 写本地状态（同时更新内存副本） */
+let gWriteSequence = 0;
+
+/** Same-directory staging keeps a failed write from truncating the published file.
+ * Never delete the destination as a rename fallback: retain the old file on failure. */
+async function fsWriteAtomic(path: string, text: string): Promise<boolean> {
+  const stage = path + ".stage-" + Date.now() + "-" + (++gWriteSequence);
+  try {
+    if (!(await fsWrite(stage, text))) return false;
+    if (await fsRead(stage) != text) return false;
+    return await fsRename(stage, path);
+  } catch (_) {
+    // A write/rename failure leaves the published file intact; callers decide recovery.
+    return false;
+  } finally {
+    await fsRemove(stage);
+  }
+}
+
+/** Journal bridges the artifact rename and registry rename. Backups are durable
+ * before beginPackInstall; a restart restores them unless that exact revision committed. */
+export async function beginPackInstall(id: string, kind: string, revision: number, hadMain: boolean, hadChain: boolean): Promise<boolean> {
+  if (!(await recoverPackInstall())) return false;
+  const journal = new UTSJSONObject();
+  journal.set("id", id);
+  journal.set("kind", kind);
+  journal.set("revision", revision);
+  journal.set("hadMain", hadMain);
+  journal.set("hadChain", hadChain);
+  return fsWriteAtomic(packageRoot() + "/install-transaction.json", JSON.stringify(journal));
+}
+
+export async function finishPackInstall(): Promise<boolean> {
+  return fsRemove(packageRoot() + "/install-transaction.json");
+}
+
+export async function recoverPackInstall(): Promise<boolean> {
+  const journalPath = packageRoot() + "/install-transaction.json";
+  if (!(await fsExists(journalPath))) return true;
+  try {
+    const journal = parseJsonToUtso(await fsRead(journalPath));
+    const id = strOf(journal, "id");
+    const kind = strOf(journal, "kind");
+    if (!/^[a-z0-9-]{2,32}$/.test(id) || (kind != PACK_KIND_PLAY && kind != PACK_KIND_META)) return false;
+    const committed = packById(id);
+    if (committed != null && committed.updatedAt == numOf(journal, "revision")) return finishPackInstall();
+    const main = artifactPath(id, artifactOfKind(kind));
+    const prev = main + ".prev";
+    if (journal.get("hadMain") == true) {
+      const text = await fsRead(prev);
+      if (text.length == 0 || !(await fsWriteAtomic(main, text))) return false;
+    } else if (!(await fsRemove(main))) return false;
+    if (kind == PACK_KIND_PLAY) {
+      if (journal.get("hadChain") == true) {
+        if (!(await fsWriteAtomic(artifactPath(id, ARTIFACT_CHAIN), await fsRead(prev + ".chain")))) return false;
+      } else if (!(await fsRemove(artifactPath(id, ARTIFACT_CHAIN)))) return false;
+    }
+    return finishPackInstall();
+  } catch (_) {
+    // Keep journal/backups for the next attempt; never prune an incomplete recovery.
+    return false;
+  }
+}
+
 export async function saveLocalState(state: SourceLocalState): Promise<boolean> {
   try {
-    await fsWrite(statePath(), JSON.stringify(stateToJson(state)));
+    if (!(await fsWriteAtomic(statePath(), JSON.stringify(stateToJson(state))))) return false;
     gState = state;
     return true;
   } catch (_) {
@@ -513,7 +591,7 @@ export function clonePack(p: SourcePackMeta): SourcePackMeta {
  * 新增或替换一个包记录（同 id 覆盖 = 原地更新）。
  * 列表顺序：meta 包在前、play 包在后，各组内 updatedAt 新→旧（设置页展示序）。
  */
-export async function putPack(meta: SourcePackMeta): Promise<boolean> {
+export async function putPack(meta: SourcePackMeta, activate: boolean = false): Promise<boolean> {
   const next = cloneState(gState);
   const list: SourcePackMeta[] = [];
   let replaced = false;
@@ -533,6 +611,20 @@ export async function putPack(meta: SourcePackMeta): Promise<boolean> {
     .filter((p) => p.kind != PACK_KIND_META)
     .sort((a, b) => (a.updatedAt > b.updatedAt ? -1 : 1));
   next.packs = metas.concat(plays);
+  if (activate) {
+    if (meta.kind == PACK_KIND_META) next.activeMetaId = meta.id;
+    else next.activeId = meta.id;
+  }
+  return saveLocalState(next);
+}
+
+/** Restore the package record and both original activation slots in one commit. */
+export async function restorePackRecord(old: SourcePackMeta | null, id: string, activeId: string, activeMetaId: string): Promise<boolean> {
+  const next = cloneState(gState);
+  next.packs = next.packs.filter((p) => p.id != id);
+  if (old != null) next.packs.push(clonePack(old));
+  next.activeId = activeId;
+  next.activeMetaId = activeMetaId;
   return saveLocalState(next);
 }
 
@@ -605,12 +697,16 @@ export async function removePack(id: string): Promise<boolean> {
   next.packs = list;
   if (next.activeId == id) next.activeId = "";
   if (next.activeMetaId == id) next.activeMetaId = "";
+  if (!(await saveLocalState(next))) return false;
+  // Registry removal commits first. Failed cleanup is a harmless orphan, not a live
+  // record pointing at a deleted package; pruneOrphans can retry it later.
   await fsRemove(packDirOf(id));
-  return saveLocalState(next);
+  return true;
 }
 
 /** 清理孤儿目录：install/ 下不在 packs 里的目录（上次卸载/落盘中断的残留） */
 export async function pruneOrphans(): Promise<void> {
+  if (!(await recoverPackInstall())) return;
   const names = await fsListNames(installDir());
   for (let i = 0; i < names.length; i++) {
     if (packById(names[i]) == null) {
@@ -627,7 +723,7 @@ export function ensurePackDir(id: string): Promise<boolean> {
 
 /** 写一个产物到包目录（调用前先 ensurePackDir） */
 export function writePackArtifact(id: string, path: string, text: string): Promise<boolean> {
-  return fsWrite(artifactPath(id, path), text);
+  return fsWriteAtomic(artifactPath(id, path), text);
 }
 
 /** 读一个产物；读不到返回 "" */
@@ -655,7 +751,7 @@ export async function readTextFileAt(path: string): Promise<string> {
 
 /** 按绝对路径写文本 */
 export function writeTextFileAt(path: string, text: string): Promise<boolean> {
-  return fsWrite(path, text);
+  return fsWriteAtomic(path, text);
 }
 
 /** 按绝对路径删除文件/目录 */

@@ -1,12 +1,12 @@
 <template>
   <view
-    v-if="player.current != null && !layout.isWide"
+    v-if="player.current != null && (settings.mode != 'docked' || !layout.isWide)"
     class="mini-player-host"
     :style="hostStyle"
   >
     <view
       class="fab-right"
-      :class="miniExpanded ? (layout.isWide ? 'mini-player-wide' : 'mini-player') : (layout.isWide ? 'fab-right-wide' : '')"
+      :class="showStrip ? (layout.isWide ? 'mini-player-wide' : 'mini-player') : (layout.isWide ? 'fab-right-wide' : '')"
       :style="containerStyle"
       @touchstart="onTouchStart"
       @touchmove="onTouchMove"
@@ -15,19 +15,19 @@
       @click.stop="onContainerClick"
     >
     <view
-      v-if="!miniExpanded"
+      v-if="!showStrip"
       class="fab-inner"
       :class="layout.isWide ? 'fab-inner-wide' : ''"
       :style="'background-color:' + theme.skin.mediaSurface + ';border-color:' + theme.skin.mediaBorder + ';'"
     >
       <view class="fab-cover-spin" :class="layout.isWide ? 'fab-cover-spin-wide' : ''" :style="discStyle">
-        <image class="fab-cover" :class="layout.isWide ? 'fab-cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="currentCover()" mode="aspectFill" />
+        <image class="fab-cover" :class="layout.isWide ? 'fab-cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="currentCover()" mode="aspectFill" @error="onCoverError" />
       </view>
       <view
         class="fab-state"
         :class="layout.isWide ? 'fab-state-wide' : ''"
         :style="'background-color:' + (player.playing ? theme.skin.mediaControl : theme.skin.mediaScrim) + ';'"
-        @click.stop="togglePlayback"
+        @click.stop="onBallStateClick"
       >
         <QtIcon :name="player.playing ? 'pause' : 'play'" :size="layout.isWide ? 20 : 26" :color="theme.skin.mediaText" />
       </view>
@@ -36,40 +36,44 @@
     <view
       v-else
       class="mini-player-inner"
-      :class="[layout.isWide ? 'mini-player-inner-wide' : '', miniEdgeSide == 'right' ? (layout.isWide ? 'mini-player-inner-right-wide' : 'mini-player-inner-right') : '']"
-      :style="'background-color:' + theme.skin.mediaSurface + ';border-color:' + theme.skin.mediaBorder + ';'"
+      :class="isDocked ? 'mini-player-inner-docked' : (layout.isWide ? 'mini-player-inner-wide' : '')"
+      :style="stripStyle"
     >
-      <view class="mini-cover-wrap" :class="layout.isWide ? 'mini-cover-wrap-wide' : ''" :style="discStyle">
-        <image class="mini-cover" :class="layout.isWide ? 'mini-cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="currentCover()" mode="aspectFill" />
+      <view class="mini-cover-wrap" :class="isDocked ? 'mini-cover-wrap-docked' : (layout.isWide ? 'mini-cover-wrap-wide' : '')" :style="discStyle">
+        <image v-if="currentCover().length > 0" class="mini-cover" :class="isDocked ? 'mini-cover-docked' : (layout.isWide ? 'mini-cover-wide' : '')" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="currentCover()" mode="aspectFill" @error="onCoverError" />
+        <view v-else class="mini-cover-fallback" :style="'background-color:' + theme.skin.accentSoft + ';'"><QtIcon name="music" :size="layout.isWide ? 22 : 36" :color="theme.skin.accent" /></view>
       </view>
-      <view class="mini-copy" :class="layout.isWide ? 'mini-copy-wide' : ''">
+      <view class="mini-copy" :class="layout.isWide ? 'mini-copy-wide' : ''" :style="copyHeightStyle">
         <text class="mini-title" :class="layout.isWide ? 'mini-title-wide' : ''" :style="miniTitleStyle" :max-lines="1">{{ currentName() }}</text>
         <text class="mini-artist" :class="layout.isWide ? 'mini-artist-wide' : ''" :style="miniArtistStyle" :max-lines="1">{{ currentArtist() }}</text>
       </view>
-      <view
-        class="mini-action"
-        :class="layout.isWide ? 'mini-action-wide' : ''"
-        :style="'background-color:' + theme.skin.mediaControl + ';'"
-        @click.stop="togglePlayback"
-      >
-        <QtIcon :name="player.playing ? 'pause' : 'play'" :size="layout.isWide ? 18 : 24" :color="theme.skin.mediaText" />
+      <view v-if="isDocked" class="mini-action mini-action-docked" @click.stop="previousTrack">
+        <QtIcon name="skip-back" :size="32" :color="theme.skin.text" />
       </view>
       <view
         class="mini-action"
-        :class="layout.isWide ? 'mini-action-wide' : ''"
-        :style="'background-color:' + theme.skin.mediaControl + ';'"
+        :class="isDocked ? 'mini-action-docked' : (layout.isWide ? 'mini-action-wide' : '')"
+        :style="'background-color:' + (isDocked ? theme.skin.accent : theme.skin.surfaceMuted) + ';'"
+        @click.stop="togglePlayback"
+      >
+        <QtIcon :name="player.playing ? 'pause' : 'play'" :size="layout.isWide ? 18 : (isDocked ? 30 : 24)" :color="isDocked ? theme.skin.onAccent : theme.skin.text" />
+      </view>
+      <view
+        class="mini-action"
+        :class="isDocked ? 'mini-action-docked' : (layout.isWide ? 'mini-action-wide' : '')"
+        :style="'background-color:' + (isDocked ? 'transparent' : theme.skin.surfaceMuted) + ';'"
         @click.stop="nextTrack"
       >
-        <QtIcon name="skip-forward" :size="layout.isWide ? 18 : 24" :color="theme.skin.mediaText" />
+        <QtIcon name="skip-forward" :size="layout.isWide ? 18 : (isDocked ? 32 : 24)" :color="theme.skin.text" />
       </view>
       <view
         class="mini-progress-track"
-        :class="layout.isWide ? 'mini-progress-track-wide' : ''"
+        :class="isDocked ? 'mini-progress-track-docked' : (layout.isWide ? 'mini-progress-track-wide' : '')"
         :style="progressTrackStyle"
       >
         <view
           class="mini-progress-fill"
-          :class="layout.isWide ? 'mini-progress-fill-wide' : ''"
+          :class="isDocked ? 'mini-progress-fill-docked' : (layout.isWide ? 'mini-progress-fill-wide' : '')"
           :style="progressStyle"
         ></view>
       </view>
@@ -79,7 +83,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, watch, onMounted, onUnmounted } from "vue";
+import { computed, ref, watch, onMounted, onUnmounted } from "vue";
+import { onShow, onHide } from "@dcloudio/uni-app";
 import { usePlayerStore } from "@/stores/player";
 import { useQtLayout, qtRailWidth } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
@@ -98,15 +103,27 @@ import {
   miniPlayerMount,
   miniPlayerUnmount,
   miniPlayerSetPlaying,
+  miniPlayerSetVisible,
   ensureMiniPositioned,
-  onMiniWindowResize,
-  onMiniPlayerHidden,
   miniSyncRenderSize,
   miniSnapToNearestEdge,
   miniExpandFromFab,
   miniCollapse,
 } from "@/uni_modules/qt-ui/services/mini-player-singleton";
 import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { useMiniPlayerSettings } from "@/uni_modules/qt-ui/stores/mini-player";
+import { qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtMiniDockTopPx, qtMiniDockBarHeightPx } from "@/uni_modules/qt-ui/composables/mini-player-layout";
+
+const props = defineProps<{ aboveTab?: boolean }>();
+const settings = useMiniPlayerSettings();
+const isDocked = computed((): boolean => settings.mode == "docked");
+const joinedDock = computed((): boolean => isDocked.value && props.aboveTab == true);
+const showStrip = computed((): boolean => isDocked.value || settings.mode == "bar" || miniExpanded.value);
+const renderWidth = computed((): number => isDocked.value ? layout.windowWidth - qtRpx(48) : miniRenderWidth.value);
+const renderHeight = computed((): number => isDocked.value ? qtMiniDockBarHeightPx() : miniRenderHeight.value);
+const stripStyle = computed((): string => "width:" + renderWidth.value + "px;height:" + renderHeight.value + "px;background-color:" + (joinedDock.value ? "transparent" : theme.skin.surface) + ";border-color:" + theme.skin.border + ";" + (joinedDock.value ? "border-width:0;border-radius:28rpx 28rpx 0 0;" : ""));
+const copyHeightStyle = computed((): string => "height:" + (layout.isWide ? Math.max(42, 37 * fontScale.scale) : qtRpx(isDocked.value ? 60 * fontScale.scale : Math.max(72, 68 * fontScale.scale))) + "px;");
 
 /**
  * 歌名/歌手字号跟全局缩放（class 里的 27/22rpx、14/12px 只是基准值）。
@@ -117,19 +134,19 @@ const miniTitleStyle = computed((): string => {
   const s = fontScale.scale;
   const line = layout.isWide
     ? "line-height:" + Math.round(20 * s * 100) / 100 + "px;"
-    : "line-height:" + Math.round(38 * s * 100) / 100 + "rpx;";
-  return ("color:" + theme.skin.mediaText + ";") + qtFontDual(27, 14) + line;
+    : "line-height:" + Math.round((isDocked.value ? 34 : 38) * s * 100) / 100 + "rpx;";
+  return ("color:" + theme.skin.text + ";") + qtFontDual(isDocked.value ? 26 : 27, 14) + line;
 });
 const miniArtistStyle = computed((): string => {
   const s = fontScale.scale;
   const line = layout.isWide
     ? "line-height:" + Math.round(17 * s * 100) / 100 + "px;"
-    : "line-height:" + Math.round(30 * s * 100) / 100 + "rpx;";
-  return ("color:" + theme.skin.mediaMuted + ";") + qtFontDual(22, 12) + line;
+    : "line-height:" + Math.round((isDocked.value ? 26 : 30) * s * 100) / 100 + "rpx;";
+  return ("color:" + theme.skin.textMuted + ";") + qtFontDual(isDocked.value ? 20 : 22, 12) + line;
 });
 
 /**
- * 悬浮播放器（紧凑/medium 视口）。
+ * 四模式迷你播放器（宽窄屏共享偏好与位置）。
  *
  * 2026-10-24 改造：本组件在**每个页面**的 qt-page-frame 里都挂一份，但全部
  * 实例渲染 mini-player-singleton.ts 里的同一份共享状态（位置/展开/吸附侧/
@@ -147,33 +164,42 @@ const miniArtistStyle = computed((): string => {
 const player = usePlayerStore();
 const layout = useQtLayout();
 const theme = useThemeStore();
+const pageVisible = ref(true);
+const failedCover = ref("");
+let lastRotation = 0;
 
 const progressRatio = computed((): number => {
   const duration = player.duration;
   if (duration <= 0) return 0;
   return Math.max(0, Math.min(1, player.progress / duration));
 });
-const progressTrackStyle = computed((): string => "background-color:" + theme.skin.mediaScrim + ";");
+const progressTrackStyle = computed((): string => "background-color:" + theme.skin.divider + ";" + (isDocked.value && !joinedDock.value ? "bottom:8rpx;" : ""));
 const progressStyle = computed((): string => "width:" + Math.round(progressRatio.value * 100) + "%;background-color:" + theme.skin.accent + ";");
 
 const hostStyle = computed((): string => {
+  if (isDocked.value) return "left:" + qtRpx(24) + "px;top:" + qtMiniDockTopPx(props.aboveTab == true) + "px;right:auto;bottom:auto;width:" + renderWidth.value + "px;height:" + renderHeight.value + "px;";
   // 宿主始终只覆盖球或展开条本身；展开时不能铺满窗口，否则会截获页面滚动。
   return "left:" + miniFabX.value + "px;top:" + miniFabY.value + "px;right:auto;bottom:auto;width:" + miniRenderWidth.value + "px;height:" + miniRenderHeight.value + "px;pointer-events:auto;";
 });
 
 const containerStyle = computed((): string => {
-  const width = miniRenderWidth.value;
-  const height = miniRenderHeight.value;
-  const radius = height / 2;
-  const transition = miniEdgeAnimating.value
+  const width = renderWidth.value;
+  const height = renderHeight.value;
+  const radius = isDocked.value ? qtRpx(28) : height / 2;
+  const transition = !isDocked.value && miniEdgeAnimating.value
     ? "transition: left 0.22s ease-out, top 0.22s ease-out, width 0.22s ease-out, height 0.22s ease-out, border-radius 0.22s ease-out;"
     : "";
   // 子级用 absolute 铺满宿主（宿主已经 fixed 并带 left/top），这里不能再写 left/top，
   // 否则会在宿主偏移之上再偏移一次，命中测试区域与视觉错位（鸿蒙上表现为点不到）。
-  return "left:0;top:0;width:" + width + "px;height:" + height + "px;border-radius:" + radius + "px;" + transition;
+  const corners = joinedDock.value ? "border-radius:" + radius + "px " + radius + "px 0 0;" : "border-radius:" + radius + "px;";
+  return "left:0;top:0;width:" + width + "px;height:" + height + "px;" + corners + transition;
 });
 
-const discStyle = computed((): string => "transform: rotate(" + miniRotateDeg.value + "deg);");
+const discStyle = computed((): string => {
+  // Covered pages keep their last frame without subscribing to every animation tick.
+  if (pageVisible.value && settings.mode != "docked") lastRotation = miniRotateDeg.value;
+  return "transform: rotate(" + lastRotation + "deg);";
+});
 
 let startX = 0;
 let startY = 0;
@@ -182,7 +208,14 @@ let origY = 0;
 let dragging = false;
 let moved = false;
 
+watch(() => settings.mode, () => {
+  dragging = false;
+  moved = false;
+});
+
 function onTouchStart(event: UniTouchEvent): void {
+  moved = false;
+  if (isDocked.value) return;
   const touch = event.touches[0];
   startX = touch.clientX;
   startY = touch.clientY;
@@ -202,12 +235,11 @@ function onTouchMove(event: UniTouchEvent): void {
     moved = true;
   }
   if (!moved) return;
-  const win = uni.getWindowInfo();
   const minX = layout.isWide ? qtRailWidth() + 8 : 0;
   let nx = origX + dx;
   let ny = origY + dy;
-  nx = Math.max(minX, Math.min(nx, win.windowWidth - miniCurrentWidth.value));
-  ny = Math.max(0, Math.min(ny, win.windowHeight - miniCurrentHeight.value));
+  nx = Math.max(minX, Math.min(nx, layout.windowWidth - miniCurrentWidth.value));
+  ny = Math.max(0, Math.min(ny, layout.windowHeight - layout.safeBottomPx - miniCurrentHeight.value));
   miniFabX.value = nx;
   miniFabY.value = ny;
 }
@@ -226,7 +258,7 @@ function onContainerClick(): void {
     moved = false;
     return;
   }
-  if (!miniExpanded.value) {
+  if (settings.mode == "expandable" && !miniExpanded.value) {
     // 展开前先吸附到最近一侧；播放条从该侧向内容区展开（store 处理动画起点）
     miniExpandFromFab();
     return;
@@ -234,12 +266,24 @@ function onContainerClick(): void {
   openPlayer();
 }
 
+function onBallStateClick(): void {
+  if (settings.mode == "ball") { onContainerClick(); return; }
+  togglePlayback();
+}
+
 function togglePlayback(): void {
+  if (moved) { moved = false; return; }
   player.toggle();
 }
 
 function nextTrack(): void {
+  if (moved) { moved = false; return; }
   player.next(false);
+}
+
+function previousTrack(): void {
+  if (moved) { moved = false; return; }
+  player.previous();
 }
 
 function currentName(): string {
@@ -279,17 +323,37 @@ function openPlayer(): void {
 function currentCover(): string {
   const current = player.current;
   // 在播本地文件有内嵌封面就用它（coverOf 内部回落到 song.picUrl）
-  return current != null ? player.coverOf(current) : "";
+  const cover = current != null ? player.coverOf(current) : "";
+  return cover == failedCover.value ? "" : cover;
 }
+
+function onCoverError(): void {
+  const current = player.current;
+  const src = currentCover();
+  failedCover.value = src;
+  if (current != null && src.length > 0) player.recoverCover(current, src);
+}
+watch(() => player.current, () => { failedCover.value = ""; });
+watch(() => player.current != null ? player.coverOf(player.current) : "", () => { failedCover.value = ""; });
 
 function onOutsideClick(): void {
   miniCollapse();
 }
 
+let mountId = 0;
+onShow(() => {
+  pageVisible.value = true;
+  miniPlayerSetVisible(mountId, player.current != null);
+});
+onHide(() => {
+  pageVisible.value = false;
+  miniPlayerSetVisible(mountId, false);
+});
 onMounted(() => {
   // 登记渲染实例（旋转 rAF 的引用计数）+ 确保共享状态已初始化（幂等，
   // 只有全站第一次挂载才会真正初始化，后续页面零延迟直接渲染）
-  miniPlayerMount();
+  mountId = miniPlayerMount(pageVisible.value && player.current != null);
+  miniPlayerSetPlaying(player.playing);
   if (miniRenderWidth.value <= 0) miniSyncRenderSize();
   ensureMiniPositioned();
   uni.$on("qt-mini-player-outside-click", onOutsideClick);
@@ -299,14 +363,13 @@ watch(() => player.playing, (playing) => {
   miniPlayerSetPlaying(playing);
 });
 
-watch(() => [layout.windowWidth, layout.windowHeight], () => {
-  onMiniWindowResize();
+watch(() => player.current != null, (hasSong) => {
+  miniPlayerSetVisible(mountId, pageVisible.value && hasSong);
 });
 
 onUnmounted(() => {
   uni.$off("qt-mini-player-outside-click", onOutsideClick);
-  miniPlayerUnmount();
-  onMiniPlayerHidden();
+  miniPlayerUnmount(mountId);
 });
 </script>
 
@@ -379,13 +442,11 @@ onUnmounted(() => {
 .mini-player-wide { width: 360px; height: 56px; border-radius: 28px; }
 .mini-player-inner { position: relative; width: 620rpx; height: 112rpx; border-radius: 56rpx; border-width: 2rpx; border-style: solid; flex-direction: row; align-items: center; padding-left: 16rpx; padding-right: 14rpx; }
 .mini-player-inner-wide { position: relative; width: 360px; height: 56px; border-radius: 28px; border-width: 1px; padding-left: 8px; padding-right: 7px; }
-.mini-player-inner-right { flex-direction: row-reverse; padding-left: 14rpx; padding-right: 16rpx; }
-.mini-player-inner-right-wide { flex-direction: row-reverse; padding-left: 7px; padding-right: 8px; }
 .mini-cover-wrap { width: 80rpx; height: 80rpx; border-radius: 40rpx; overflow: hidden; flex-shrink: 0; }
 .mini-cover-wrap-wide { width: 42px; height: 42px; border-radius: 21px; }
 .mini-cover { width: 80rpx; height: 80rpx; border-radius: 40rpx; }
 .mini-cover-wide { width: 42px; height: 42px; border-radius: 21px; }
-.mini-copy { flex: 1; height: 72rpx; justify-content: center; padding-left: 16rpx; padding-right: 12rpx; overflow: hidden; }
+.mini-copy { flex: 1; min-width: 0; height: 72rpx; justify-content: center; padding-left: 16rpx; padding-right: 12rpx; overflow: hidden; }
 .mini-copy-wide { height: 42px; padding-left: 10px; padding-right: 6px; }
 .mini-title { font-size: 27rpx; line-height: 38rpx; font-weight: 600; }
 .mini-title-wide { font-size: 14px; line-height: 20px; }
@@ -397,4 +458,11 @@ onUnmounted(() => {
 .mini-progress-fill { height: 4rpx; border-radius: 2rpx; }
 .mini-progress-track-wide { left: 50px; right: 78px; bottom: 4px; height: 2px; border-radius: 1px; }
 .mini-progress-fill-wide { height: 2px; border-radius: 1px; }
+.mini-player-inner-docked { border-radius: 28rpx; padding-left: 20rpx; padding-right: 16rpx; }
+.mini-cover-wrap-docked { width: 76rpx; height: 76rpx; border-radius: 16rpx; }
+.mini-cover-docked { width: 76rpx; height: 76rpx; border-radius: 16rpx; }
+.mini-cover-fallback { width: 100%; height: 100%; align-items: center; justify-content: center; }
+.mini-action-docked { width: 64rpx; height: 64rpx; margin-left: 8rpx; border-radius: 32rpx; flex-shrink: 0; }
+.mini-progress-track-docked { left: 20rpx; right: 20rpx; bottom: 0; height: 2rpx; border-radius: 0; }
+.mini-progress-fill-docked { height: 2rpx; border-radius: 0; }
 </style>

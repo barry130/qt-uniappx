@@ -29,8 +29,11 @@ import type { PackUpdateOffer } from '@/services/source-update'
 import { exitApp, ensureNotificationPermission, openNotificationSettings, applyLegacyInsets, isIgnoringBatteryOptimizations, openBatteryOptimizationSettings, readBottomNavInset } from '@/services/app-native'
 import { beginLoading, finishLoading } from '@/services/ui-loading'
 import { refreshQtLayout, pauseQtLayoutWatcher, resumeQtLayoutWatcher, applyQtNativeSafeBottom } from '@/uni_modules/qt-ui/composables/use-qt-layout'
+import { installQtNavigationMotion } from '@/uni_modules/qt-ui/composables/qt-navigation-motion'
+import { miniPlayerSetForeground } from '@/uni_modules/qt-ui/services/mini-player-singleton'
 import { installBootGuard, notifyAppForeground, notifyAppBackground } from '@/services/boot-guard'
-import { refreshMe } from '@/services/user-cache'
+import { getCachedMe, refreshMe } from '@/services/user-cache'
+import { prepareCachedAvatar } from '@/services/avatar-cache'
 import { initLogger, flushLogs, logLine, logMsgErr, LOG_ERROR, LOG_INFO } from '@/services/logger'
 import { qtConfirm } from '@/services/confirm'
 import { enqueueBootModal, BOOT_MODAL_PRIORITY_PLAY_PACK, BOOT_MODAL_PRIORITY_BATTERY, BOOT_MODAL_PRIORITY_PACK_UPDATE, BOOT_MODAL_PRIORITY_NOTIFICATION } from '@/services/boot-modal-queue'
@@ -63,16 +66,15 @@ function describeBottomNavInset(raw: number): string {
 
 // 底部导航避让高度的统一读取入口（见 onLaunch 内注释）；抽成函数
 // 供启动与 onShow 两处复用。结果经回调写进 layout.safeBottomPx。
-// 取值约定见 qt-app-native interface.uts：正值才让位，负值=系统已让过位。
+// 保留正负号与栏高，由共享布局结合本次窗口几何计算剩余避让。
 function refreshBottomNavInset(): void {
-  readBottomNavInset((raw: number) => {
-    const px = raw > 0 ? raw : 0
+  readBottomNavInset((raw: number, navigationKeys: number) => {
     const diag = describeBottomNavInset(raw)
     if (diag != loggedBottomNavDiag) {
       loggedBottomNavDiag = diag
       logLine(LOG_INFO, 'App', diag)
     }
-    applyQtNativeSafeBottom(px)
+    applyQtNativeSafeBottom(raw, navigationKeys)
   })
 }
 
@@ -103,6 +105,7 @@ function stopBottomNavWatch(): void {
 }
 
 onLaunch(() => {
+  installQtNavigationMotion()
   // 三星 One UI 手势导航下 edge-to-edge 窗口会让运行时首屏挂载竞态（S24 Ultra
   // 全屏白屏），启动最早点强制窗口回归传统 inset 布局（等价三键导航），见 boot-guard.ts
   applyLegacyInsets()
@@ -162,6 +165,8 @@ onLaunch(() => {
   // 服务器没有的收藏自动补推（覆盖服务器整库重建/部分删数据后自愈）
   usePlayerStore().syncLikesOnLaunch().catch(() => {})
   // 已登录则后台拉一次 /me 写缓存：本次运行内「我的」相关页面只读缓存，不再每次 onShow 都请求
+  getCachedMe()
+  prepareCachedAvatar()
   refreshMe().catch(() => {})
   // 启动顺序：1.官方校验 → 2.检查更新 → 3.加载公告
   runStartup()
@@ -297,6 +302,7 @@ onShow(() => {
   useThemeStore().syncSystemTheme()
   // 回前台恢复窗口尺寸监听（后台期间系统可能改了窗口尺寸，如分屏 / 旋转）
   resumeQtLayoutWatcher(720)
+  miniPlayerSetForeground(true)
   // 后台期间用户可能切了导航模式（三键 ↔ 手势）：窗口尺寸不变、watcher
   // 不触发，回前台重读一次原生避让区，让 TabBar / 内容 padding 重新让位
   refreshBottomNavInset()
@@ -320,6 +326,7 @@ onHide(() => {
   usePlayerStore().persist()
   // 暂停宽窄屏窗口监听，避免后台空转
   pauseQtLayoutWatcher()
+  miniPlayerSetForeground(false)
   // 底部避让区轮询同理：后台不需要，回前台（onShow）重新拉起
   stopBottomNavWatch()
   qtStatFlush()

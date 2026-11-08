@@ -7,39 +7,44 @@
   本组件只在宽屏渲染，因此内部尺寸直接用 px。
 -->
 <template>
-  <view class="qsn" :class="compact ? 'qsn-compact' : ''" :style="railStyle">
+  <view ref="railElement" class="qsn" :class="compact ? 'qsn-compact' : ''" :style="railStyle">
     <!-- 2026-10-25 用户要求去掉左上角品牌 logo：rail 直接从「发现」开始
          （状态栏 padding 仍保留，防止菜单被状态栏文字压住）。 -->
-    <!-- 矮窗口（横屏手机 / 车机）下菜单项放不下，logo 固定在顶部，菜单区可滚动 -->
-    <scroll-view class="qsn-scroll" direction="vertical" :show-scrollbar="false">
-      <view class="qsn-group">
-        <view
-          v-for="tab in tabs"
-          :key="tab.page"
-          class="qsn-item"
-          :hover-class="compact ? 'none' : 'qsn-item-hover'"
-          :style="itemActive(tab.page) ? 'background-color:' + theme.skin.accentSoft + ';' : ''"
-          @click="goTab(tab.page)"
-        >
-          <QtIcon :name="tab.icon" :size="compact ? 24 : 21" :color="itemActive(tab.page) ? theme.skin.accent : theme.skin.iconMuted" />
-          <text
-            v-if="!compact"
-            class="qsn-label"
-            :style="('color:' + (itemActive(tab.page) ? theme.skin.accent : theme.skin.textSubtle) + ';') + qtFontPx(11)"
-          >{{ tab.label }}</text>
-          <view v-if="hasDot(tab.page)" class="qsn-dot" />
-        </view>
+    <!-- 两个主入口固定：揭示工具时不能把「发现 / 我的」滚出窗口。 -->
+    <view class="qsn-group qsn-primary">
+      <view
+        v-for="(tab, tabIndex) in tabs"
+        :key="tab.page"
+        :id="navigationScroll.itemId(tabIndex)"
+        class="qsn-item"
+        :class="compact ? 'qsn-item-compact' : ''"
+        :style="navItemStyle(tab.page)"
+        :hover-class="compact ? 'none' : 'qsn-item-hover'"
+        @click="goTab(tab.page)"
+      >
+        <QtIcon :name="tab.icon" :size="compact ? 24 : 21" :color="itemActive(tab.page) ? theme.skin.accent : theme.skin.iconMuted" />
+        <text
+          v-if="!compact"
+          class="qsn-label"
+          :style="('color:' + (itemActive(tab.page) ? theme.skin.accent : theme.skin.textSubtle) + ';') + qtFontPx(11)"
+        >{{ tab.label }}</text>
+        <view v-if="hasDot(tab.page)" class="qsn-dot" />
       </view>
+    </view>
 
-      <view class="qsn-divider" :style="'background-color:' + theme.skin.divider + ';'" />
+    <view class="qsn-divider" :style="'background-color:' + theme.skin.divider + ';'" />
 
-      <view class="qsn-group">
+    <scroll-view class="qsn-scroll" direction="vertical" :show-scrollbar="false"
+      :scroll-top="navigationScroll.top.value" :scroll-with-animation="false" @scroll="navigationScroll.onScroll">
+      <view class="qsn-group qsn-tools">
         <view
-          v-for="tool in tools"
+          v-for="(tool, toolIndex) in tools"
           :key="tool.page"
+          :id="navigationScroll.itemId(tabs.length + toolIndex)"
           class="qsn-item"
+          :class="compact ? 'qsn-item-compact' : ''"
           :hover-class="compact ? 'none' : 'qsn-item-hover'"
-          :style="itemActive(tool.page) ? 'background-color:' + theme.skin.accentSoft + ';' : ''"
+          :style="navItemStyle(tool.page)"
           @click="goPage(tool.page)"
         >
           <QtIcon :name="tool.icon" :size="compact ? 24 : 21" :color="itemActive(tool.page) ? theme.skin.accent : theme.skin.iconMuted" />
@@ -47,20 +52,27 @@
         </view>
       </view>
     </scroll-view>
+    <view class="qsn-footer" :style="'padding-bottom:' + layout.safeBottomPx + 'px;'">
+      <view class="qsn-item" :class="compact ? 'qsn-item-compact' : ''" :style="navItemStyle('/pages/settings/index')" hover-class="qsn-item-hover" @click="goPage('/pages/settings/index')">
+        <QtIcon name="settings" :size="21" :color="itemActive('/pages/settings/index') ? theme.skin.accent : theme.skin.iconMuted" />
+        <text v-if="!compact" class="qsn-label" :style="('color:' + (itemActive('/pages/settings/index') ? theme.skin.accent : theme.skin.textSubtle) + ';') + qtFontPx(11)">设置</text>
+      </view>
+    </view>
   </view>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { useQtLayout, qtStatusBarPx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useSourceStore } from "@/stores/source";
 import { useSourceRegistryStore } from "@/stores/source-registry";
-import { qtFontPx } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontPx, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtRailNavigate, qtRailSwitchTab } from "@/uni_modules/qt-ui/composables/qt-nav";
-import { qtWideToolActive } from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
-import { qtIsSettingsRoute, qtIsProfileRoute } from "@/uni_modules/qt-ui/composables/qt-page-chrome";
+import { qtWideToolActive, qtWideToolRoute, qtWideToolHostRoute } from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
+import { useQtNavScroll } from "@/uni_modules/qt-ui/composables/use-qt-nav-scroll";
+import { qtIsSettingsRoute, qtIsProfileRoute, qtTopRoute } from "@/uni_modules/qt-ui/composables/qt-page-chrome";
 
 const props = defineProps<{
   /** 当前 tab 页路由，用于高亮（如 /pages/home/index） */
@@ -137,7 +149,6 @@ const ALL_TOOLS: NavItem[] = [
   { page: "/pages/daily/index", label: "每日新歌", icon: "calendar" },
   { page: "/pages/playlists/index", label: "歌单广场", icon: "disc" },
   { page: "/pages/chart/index", label: "排行榜", icon: "trending" },
-  { page: "/pages/settings/index", label: "设置", icon: "settings" },
 ];
 const sourceRegistry = useSourceRegistryStore();
 const sourceStore = useSourceStore();
@@ -152,6 +163,10 @@ const tools = computed<NavItem[]>(() => {
   return out;
 });
 
+function navItemStyle(page: string): string {
+  const height = compact.value ? 44 : Math.ceil(46 + 14 * fontScale.scale);
+  return "height:" + height + "px;background-color:" + (itemActive(page) ? theme.skin.accentSoft : "transparent") + ";";
+}
 function itemActive(page: string): boolean {
   if (props.current == null) return false;
   if (props.current == page) return true;
@@ -162,6 +177,25 @@ function itemActive(page: string): boolean {
   if (page == "/pages/profile/index" && qtIsProfileRoute(props.current)) return true;
   return false;
 }
+/** Primary tabs and settings stay fixed; reveal only the current tool entry. */
+const navigationIndex = computed((): number => {
+  const items = tools.value;
+  for (let i = 0; i < items.length; i++) {
+    if (itemActive(items[i].page)) return tabs.length + i;
+  }
+  return -1;
+});
+const railElement = ref<UniElement | null>(null);
+const navigationScroll = useQtNavScroll(
+  railElement,
+  (): boolean => {
+    const route = qtTopRoute();
+    const visibleRoute = qtWideToolActive() && qtWideToolHostRoute() == route ? qtWideToolRoute() : route;
+    return layout.isWide && props.current == visibleRoute;
+  },
+  (): number => navigationIndex.value,
+  (): string => tools.value.map((item): string => item.page).join("|"),
+);
 function hasDot(page: string): boolean {
   if (props.dots == null) return false;
   const bare = page.charAt(0) == "/" ? page.substring(1) : page;
@@ -174,10 +208,7 @@ function hasDot(page: string): boolean {
   return false;
 }
 function goTab(page: string): void {
-  // 「目标=当前」直接吞掉的前提是没有托管页 —— 托管覆盖层开着时（dock 模式下
-  // props.current 是宿主页），点宿主 tab 的语义是「关掉托管回到这个 tab」，
-  // 必须放行给 qtRailSwitchTab 走关闭分支（2026-10-25 真机：吞掉=没反应）。
-  if (props.current == page && !qtWideToolActive()) return;
+  // 由共享导航判断真正的当前页；不能用过渡期间滞后的 props 吞掉回点。
   qtRailSwitchTab(page);
 }
 function goPage(page: string): void {
@@ -211,20 +242,24 @@ function goPage(page: string): void {
 .qsn-group {
   flex-direction: column;
 }
+.qsn-primary {
+  flex-shrink: 0;
+}
 /* 网易云 Pad 同款：图标居上、11px 小字标签居下，整项纵排居中。
    compact（medium 档）没有 label，纵排天然把单个图标居中。 */
 .qsn-item {
-  height: 58px;
-  margin-bottom: 2px;
+  margin-bottom: 4px;
   padding: 0 4px;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   border-radius: 10px;
 }
-/* 桌面指针反馈：收起成图标轨（compact）时不启用，只图标没有文字时整块变色反而显脏 */
+.qsn-item-compact { width: 48px; }
+.qsn-footer { padding-top: 8px; flex-shrink: 0; }
+/* 按压只改变透明度。背景始终由 current 路由绑定，避免原生 hover 结束还原旧底色。 */
 .qsn-item-hover {
-  background-color: rgba(255, 255, 255, 0.06);
+  opacity: 0.82;
 }
 .qsn-dot {
   position: absolute;

@@ -1,45 +1,75 @@
 <template>
   <qt-page-frame :full-width="true">
     <view class="page">
-      <!-- 手机封面与歌词共用背景和前景，切换视图不换底色；宽屏保留媒体配色。 -->
-      <view class="shade" :style="'background-color:' + (portraitPlayerMode ? portraitPalette.surface : theme.skin.mediaScrim) + ';'"></view>
+      <view class="shade" :style="'background-color:' + playerSurface + ';'"></view>
+      <image v-if="playerBackgroundImage.length > 0" class="shade" :style="'width:' + layout.windowWidth + 'px;height:' + layout.windowHeight + 'px;'" :src="playerBackgroundImage" mode="aspectFill" @error="backgroundFailed = playerBackgroundImage" />
+      <view v-if="playerBackgroundImage.length > 0" class="shade" :style="'background-color:' + (theme.dark ? 'rgba(12,18,27,0.85)' : 'rgba(255,255,255,0.86)') + ';'"></view>
 
       <view class="nav" :class="layout.isWide ? 'nav-wide' : ''" :style="navStyle">
-        <view class="nav-btn" :class="layout.isWide ? 'nav-btn-wide' : ''" @click="back"><QtIcon name="chevron-left" :size="layout.isWide ? 20 : 32" :color="playerInk" /></view>
-        <!-- 2026-10 用户定稿（m15536）：手机端导航中间不再显示「歌名 - 歌手 / 平台 + 码率」
-             （信息挪到封面下方的曲名块），右上角由「更多」改为分享；宽屏导航中间本来就留白，
-             标题在左列曲名块里，右栏整列给歌词，不需要导航标题。 -->
+        <view class="nav-btn" :class="layout.isWide ? 'nav-btn-wide' : ''" @click="back"><QtIcon name="chevron-left" :size="layout.isWide ? 20 : 32" :color="playerMuted" /></view>
+        <!-- 歌曲信息留在内容区；顶栏统一保留风格、投屏与分享/更多入口。 -->
         <view class="nav-title-area" :class="layout.isWide ? 'nav-title-area-wide' : ''"></view>
-        <view v-if="!layout.isWide" class="nav-btn" @click="shareCurrent"><QtIcon name="share" :size="32" :color="playerInk" /></view>
-        <view v-else class="nav-btn" :class="layout.isWide ? 'nav-btn-wide' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openMore"><QtIcon name="more" :size="20" :color="playerInk" /></view>
+        <view v-if="!layout.isWide && showLyric && playingStyle.style == 'gallery'" class="nav-btn" @click="toggleLyric"><QtIcon name="disc" :size="32" :color="playerMuted" /></view>
+        <view class="nav-btn" :class="layout.isWide ? 'nav-btn-wide' : ''" @click="styleOpen = true">
+          <QtIcon name="sliders" :size="layout.isWide ? 20 : 32" :color="playerMuted" />
+        </view>
+        <view v-if="dlnaSupported()" class="nav-btn" :class="layout.isWide ? 'nav-btn-wide' : ''" @click="openDlna"><QtIcon name="cast" :size="layout.isWide ? 20 : 32" :color="casting ? theme.skin.accent : playerMuted" /></view>
+        <view v-if="!layout.isWide" class="nav-btn" @click="shareCurrent"><QtIcon name="share" :size="32" :color="playerMuted" /></view>
+        <view v-else class="nav-btn" :class="layout.isWide ? 'nav-btn-wide' : ''" @click="openMore"><QtIcon name="more" :size="20" :color="playerMuted" /></view>
       </view>
 
       <view v-if="layout.isWide" class="wide-stage" :style="wideStageStyle">
         <view class="wide-body">
-        <view class="wide-left">
-          <view class="cover-card" :style="coverFadeStyle + wideCoverBoxStyle + 'background-color:' + theme.skin.mediaControl + ';border-color:' + theme.skin.mediaBorder + ';box-shadow:0 18px 46px ' + theme.skin.shadow + ';'">
-            <view class="disc-spin">
-              <image v-if="art() != ''" class="cover-img" :style="wideCoverImageStyle + 'background-color:' + theme.skin.mediaControl + ';'" :src="art()" mode="aspectFill" @error="onArtError" />
-              <view v-else class="cover-img cover-empty" :style="wideCoverImageStyle + 'background-color:' + theme.skin.mediaControl + ';'"><QtIcon name="music" :size="Math.floor(wideCoverSize / 4)" :color="theme.skin.mediaMuted" /></view>
+        <view v-if="!immersiveLyrics" class="wide-left" :style="'width:' + wideArtColumnPx + 'px;'">
+          <view v-if="playingStyle.style == 'classic'" class="wide-vinyl" :style="wideArtStyle" @longpress="previewCover">
+            <view class="disc-spin" ref="discSpinRef" :style="discSpinStyle">
+              <view v-for="ring in [0.08, 0.15, 0.22, 0.30]" :key="ring" class="vinyl-groove" :style="vinylRingStyle(ring)"></view>
+              <image v-if="art() != ''" class="vinyl-label" :style="wideVinylLabelStyle" :src="art()" mode="aspectFill" @error="onArtError" />
+              <QtIcon v-else name="music" :size="48" color="#b6b6b6" />
+              <view class="vinyl-spindle"></view>
             </view>
           </view>
-          <!-- 曲名块挪到封面下方（2026-10-25 用户定稿：参考网易云 Pad，左列 = 唱片 + 曲名，
-               右列整列给歌词）。宽度与封面卡同宽，标题/歌手/平台签随卡片左对齐 -->
-          <view class="track-head track-head-under" :style="'width:' + (wideCoverSize + 20) + 'px;'">
-            <view class="track-copy">
-              <!-- 两行口径（2026-10-25 用户定的）：第一行 歌名 - 歌手，第二行 平台 + 码率 -->
-              <text class="track-title" :style="('color:' + theme.skin.mediaText + ';') + qtFontPx(18)" :max-lines="1">{{ name() }} - {{ artistText() }}</text>
-              <!-- 宽屏同款「平台 + 码率」行（与竖屏 .nav-meta-row 同构，只是 px 口径） -->
-              <view v-if="hasMeta()" class="track-meta-row">
-                <text v-if="platformKey() != ''" class="track-meta-badge" :style="('background-color:' + platformColor(platformKey()) + ';color:#ffffff;') + qtFontPx(10)">{{ platformShortName() }}</text>
-                <text v-if="bitrateKbps > 0" class="track-meta-bitrate" :style="('color:' + theme.skin.mediaMuted + ';') + qtFontPx(11)">{{ bitrateKbps }} kbps</text>
-              </view>
-            </view>
+          <view v-else class="gallery-art" :style="wideArtStyle + coverFadeStyle" @click="previewCover">
+            <image v-if="art() != ''" class="gallery-image" :src="art()" mode="aspectFill" @error="onArtError" />
+            <QtIcon v-else name="music" :size="60" :color="playerMuted" />
           </view>
         </view>
 
-        <view class="wide-right mid" :style="'background-color:' + theme.skin.mediaSurface + ';border-color:' + theme.skin.mediaBorder + ';'" @touchstart="onTouchStart" @touchend="onTouchEnd">
-          <scroll-view class="lyric lyric-viewport" direction="vertical" :scroll-top="lyricScrollTop" :scroll-with-animation="lyricScrollAnimated" :show-scrollbar="false" @scroll="onLyricUserScroll" @touchstart="onLyricScrollTouchStart">
+        <view class="wide-right mid" @touchstart="onTouchStart" @touchend="onTouchEnd">
+          <view class="wide-track-head">
+            <text class="wide-track-name" :style="'color:' + playerInk + ';' + qtFontPx(wideShort ? 22 : 26)" :max-lines="2">{{ name() }}</text>
+            <view class="wide-track-meta" @click="openArtistPage">
+              <text class="wide-track-artist" :style="'color:' + playerMuted + ';' + qtFontPx(14)" :max-lines="1">{{ artistText() }}</text>
+              <text v-if="platformKey() != ''" class="track-meta-badge" :style="'background-color:' + playerRail + ';color:' + playerMuted + ';' + qtFontPx(10)">{{ platformShortName() }}</text>
+            </view>
+          </view>
+          <scroll-view direction="horizontal" class="lyric-tools-scroll" :style="wideLyricToolsStyle" :show-scrollbar="false">
+          <view class="lyric-tools-row-wide" :class="wideShort ? 'lyric-tools-row-short' : ''">
+          <view class="lyric-tool lyric-tool-wide" @click="openOffset">
+            <QtIcon name="sliders" :size="13" :color="currentOffsetMs != 0 ? theme.skin.accent : playerMuted" />
+            <text class="lyric-tool-text lyric-tool-text-wide" :style="('color:' + (currentOffsetMs != 0 ? theme.skin.accent : playerMuted) + ';') + qtFontDual(22, 11)">{{ offsetButtonText() }}</text>
+          </view>
+          <!-- 搜索歌词入口常驻偏移旁边（与 qt-pc LyricSearchButton / PlayingPage.tsx:172-183 同口径）：
+               原来的 v-else-if="noLyricYet" 门控只在「取不到词」时放行，而词挂错版本（有词但不对）
+               时压根没有入口，只能盯着错词。无词时仍用 accent 强调，保留原来的提示强度。 -->
+          <view v-if="lyricPicked" class="lyric-tool lyric-tool-wide" @click="resetLyricPick">
+            <QtIcon name="refresh" :size="13" :color="theme.skin.accent" />
+            <text class="lyric-tool-text lyric-tool-text-wide" :style="('color:' + theme.skin.accent + ';') + qtFontDual(22, 11)">恢复自动</text>
+          </view>
+          <view class="lyric-tool lyric-tool-wide" @click="openLyricSearch">
+            <QtIcon name="search" :size="13" :color="noLyricYet ? theme.skin.accent : playerMuted" />
+            <text class="lyric-tool-text lyric-tool-text-wide" :style="('color:' + (noLyricYet ? theme.skin.accent : playerMuted) + ';') + qtFontDual(22, 11)">搜索歌词</text>
+          </view>
+          <!-- 桌面歌词：参考网易云/QQ 音乐 Pad 播放页把「桌面歌词」放在歌词工具组里。
+               之前只有「设置 - 桌面歌词」一个入口，平板上翻两层才找得到，属于 Parity 缺口。 -->
+          <view class="lyric-tool lyric-tool-wide" @click="toggleDesktopLyric">
+            <QtIcon name="type" :size="13" :color="lyricOn ? theme.skin.accent : playerMuted" />
+            <text class="lyric-tool-text lyric-tool-text-wide" :style="('color:' + (lyricOn ? theme.skin.accent : playerMuted) + ';') + qtFontDual(22, 11)">桌面歌词</text>
+          </view>
+          </view>
+          </scroll-view>
+          <QtFocusLyrics v-if="playingStyle.style != 'classic'" :lines="lyricLines" :active-index="activeLyric" :position="displayProgress - lyricOffsetSec()" :rhythm="playingStyle.style == 'rhythm'" :ink="playerInk" :muted="playerMuted" :height-px="wideFocusHeight" :loading="lyricLoading" @copy="copyLyric" />
+          <scroll-view v-if="playingStyle.style == 'classic'" class="lyric lyric-viewport" direction="vertical" :scroll-top="lyricScrollTop" :scroll-with-animation="lyricScrollAnimated" :show-scrollbar="false" @scroll="onLyricUserScroll" @touchstart="onLyricScrollTouchStart">
             <view :style="'height:' + lyricPadStyle"></view>
             <view v-for="(line, index) in lyricLines" :key="index" class="lyric-line lyric-line-wide" :style="lineOpacityStyle(index)" @click.stop="onLyricLineTap(line, index)" @longpress.stop="copyLyric(line, index)">
               <!-- 逐行歌词顺序：词 / 罗马音 / 译文 / 滚动提示条。罗马音更贴近主行（与 PC PlayingPage.tsx:381 同口径） -->
@@ -54,98 +84,89 @@
               <text v-else class="lrc lrc-wide" :style="lrcStyle(index)" :class="index == activeLyric ? 'lrc-active' : ''" >{{ line.text }}</text>
               <text v-if="hasRoma(line)" class="lrc-roma lrc-roma-wide" :style="lrcRomaStyle(index)">{{ line.romanization }}</text>
               <text v-if="hasTr(line)" class="lrc-tr lrc-tr-wide" :style="lrcTrStyle(index)" :class="index == activeLyric ? 'lrc-tr-active' : ''" >{{ line.translation }}</text>
-              <view v-if="lyricTimesVisible && index == lyricTargetIndex" class="lrc-scroll-hint lrc-scroll-hint-wide" :style="'background-color:' + theme.skin.mediaControl + ';'">
-                <text class="lrc-hint-time lrc-hint-time-wide" :style="('color:' + theme.skin.mediaText + ';') + qtFontDual(24, 12)">{{ format(line.time) }}</text>
-                <QtIcon name="play" :size="14" :color="theme.skin.mediaText" />
+              <view v-if="lyricTimesVisible && index == lyricTargetIndex" class="lrc-scroll-hint lrc-scroll-hint-wide" :style="'background-color:' + playerRail + ';'">
+                <text class="lrc-hint-time lrc-hint-time-wide" :style="('color:' + playerInk + ';') + qtFontDual(24, 12)">{{ format(line.time) }}</text>
+                <QtIcon name="play" :size="14" :color="playerInk" />
               </view>
             </view>
-            <view v-if="lyricLines.length == 0" class="lyric-empty lyric-empty-wide"><text class="lrc-empty lrc-empty-wide" :style="qtFontDual(26, 15)">纯音乐，请欣赏</text></view>
+            <view v-if="lyricLines.length == 0" class="lyric-empty lyric-empty-wide"><text class="lrc-empty lrc-empty-wide" :style="'color:' + playerMuted + ';' + qtFontDual(26, 15)">纯音乐，请欣赏</text></view>
             <view :style="'height:' + lyricPadStyle"></view>
           </scroll-view>
         </view>
         </view>
 
-        <!-- 宽屏没有竖屏那条工具图标行，所以这一行只能落在进度条上方（右侧歌词面板与播放栏之间） -->
-        <view v-if="lyricVisible" class="lyric-tools-row lyric-tools-row-wide" :class="wideShort ? 'lyric-tools-row-short' : ''">
-          <view class="lyric-tool lyric-tool-wide" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openOffset">
-            <QtIcon name="sliders" :size="13" :color="currentOffsetMs != 0 ? theme.skin.accent : theme.skin.mediaMuted" />
-            <text class="lyric-tool-text lyric-tool-text-wide" :style="('color:' + (currentOffsetMs != 0 ? theme.skin.accent : theme.skin.mediaMuted) + ';') + qtFontDual(22, 11)">{{ offsetButtonText() }}</text>
-          </view>
-          <!-- 搜索歌词入口常驻偏移旁边（与 qt-pc LyricSearchButton / PlayingPage.tsx:172-183 同口径）：
-               原来的 v-else-if="noLyricYet" 门控只在「取不到词」时放行，而词挂错版本（有词但不对）
-               时压根没有入口，只能盯着错词。无词时仍用 accent 强调，保留原来的提示强度。 -->
-          <view v-if="lyricPicked" class="lyric-tool lyric-tool-wide" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="resetLyricPick">
-            <QtIcon name="refresh" :size="13" :color="theme.skin.accent" />
-            <text class="lyric-tool-text lyric-tool-text-wide" :style="('color:' + theme.skin.accent + ';') + qtFontDual(22, 11)">恢复自动</text>
-          </view>
-          <view class="lyric-tool lyric-tool-wide" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openLyricSearch">
-            <QtIcon name="search" :size="13" :color="noLyricYet ? theme.skin.accent : theme.skin.mediaMuted" />
-            <text class="lyric-tool-text lyric-tool-text-wide" :style="('color:' + (noLyricYet ? theme.skin.accent : theme.skin.mediaMuted) + ';') + qtFontDual(22, 11)">搜索歌词</text>
-          </view>
-          <!-- 桌面歌词：参考网易云/QQ 音乐 Pad 播放页把「桌面歌词」放在歌词工具组里。
-               之前只有「设置 - 桌面歌词」一个入口，平板上翻两层才找得到，属于 Parity 缺口。 -->
-          <view class="lyric-tool lyric-tool-wide" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="toggleDesktopLyric">
-            <QtIcon name="type" :size="13" :color="lyricOn ? theme.skin.accent : theme.skin.mediaMuted" />
-            <text class="lyric-tool-text lyric-tool-text-wide" :style="('color:' + (lyricOn ? theme.skin.accent : theme.skin.mediaMuted) + ';') + qtFontDual(22, 11)">桌面歌词</text>
-          </view>
-        </view>
-
-        <view class="progress-row progress-row-wide" :class="wideShort ? 'progress-row-short' : ''">
-          <text class="prog-time prog-time-wide" :style="qtFontDual(20, 11)">{{ format(displayProgress) }}</text>
+        <view class="wide-footer" :style="'background-color:' + playerFooter + ';border-top-color:' + playerRail + ';'">
+        <view class="progress-row-wide" :class="wideShort ? 'progress-row-short' : ''" :style="wideProgressStyle">
+          <text class="prog-time prog-time-wide" :style="'color:' + playerMuted + ';' + qtFontDual(20, 11)">{{ format(displayProgress) }}</text>
           <view class="prog-range" :class="layout.isWide ? 'prog-range-wide' : ''" @touchstart="onProgTouchStart" @touchmove="onProgTouchMove" @touchend="onProgTouchEnd" @touchcancel="onProgTouchCancel">
-            <view class="prog-track prog-track-wide" :style="'background-color:' + theme.skin.mediaControl + ';'"></view>
-            <view class="prog-fill prog-fill-wide" :style="'width:' + progPct() + '%;background-color:' + theme.skin.mediaText + ';'"></view>
-            <view class="prog-thumb prog-thumb-wide" :style="'left:' + progThumbLeft() + 'px;background-color:' + theme.skin.mediaText + ';'"></view>
+            <view class="prog-track prog-track-wide" :style="'background-color:' + playerRail + ';'"></view>
+            <view class="prog-fill prog-fill-wide" :style="'width:' + progPct() + '%;background-color:' + playerInk + ';'"></view>
+            <view class="prog-thumb prog-thumb-wide" :style="'left:' + progThumbLeft() + 'px;background-color:' + playerInk + ';'"></view>
           </view>
-          <text class="prog-time prog-time-wide" :style="qtFontDual(20, 11)">{{ format(player.duration) }}</text>
+          <text class="prog-time prog-time-wide" :style="'color:' + playerMuted + ';' + qtFontDual(20, 11)">{{ format(player.duration) }}</text>
         </view>
 
-          <!-- 横屏：左翼模式 / 中间播放键 / 右翼工具组，两翼等宽（flex:1）
-               才能让播放键落在正中；工具组按设置增减时也不会把播放键带偏 -->
-          <view class="controls controls-wide" :class="wideShort ? 'controls-short' : ''">
-            <view class="control-wing control-wing-left">
-              <view class="control-side" :class="wideShort ? 'control-side-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="cycleMode"><QtIcon :name="modeIconName()" :size="22" :color="theme.skin.mediaMuted" /></view>
+          <!-- Keep the centered transport and equal wings when they fit. Narrow wide windows
+               put all tools in a second row without hiding settings or shrinking hit targets. -->
+          <view class="controls-wide" :class="[wideShort ? 'controls-short' : '', wideControlsStacked ? 'controls-stacked' : '']" :style="wideControlsStyle">
+            <view class="control-wing control-wing-left" :class="wideControlsStacked ? 'control-wing-left-stacked' : ''" :style="wideTransportStyle">
+              <image v-if="!wideControlsStacked && art() != ''" class="footer-cover" :src="art()" mode="aspectFill" />
+              <view v-if="!wideControlsStacked" class="footer-copy">
+                <text :style="'color:' + playerInk + ';' + qtFontPx(13)" :max-lines="1">{{ name() }}</text>
+                <text :style="'color:' + playerMuted + ';' + qtFontPx(11)" :max-lines="1">{{ artistText() }}</text>
+              </view>
+              <view class="control-side" :class="wideShort ? 'control-side-short' : ''" @click="cycleMode"><QtIcon :name="modeIconName()" :size="22" :color="playerMuted" /></view>
             </view>
-            <view class="control-center-wide">
-              <view class="control-side" :class="wideShort ? 'control-side-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="player.previous()"><QtIcon name="skip-back" :size="24" :color="theme.skin.mediaMuted" /></view>
-              <view class="icon-main icon-main-wide center-play" :class="wideShort ? 'icon-main-short' : ''" :style="'background-color:' + theme.skin.mediaText + ';'" @click="player.toggle()"><QtIcon :name="player.playing ? 'pause' : 'play'" :size="24" :color="theme.skin.mediaSurface" /></view>
-              <view class="control-side" :class="wideShort ? 'control-side-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="player.next()"><QtIcon name="skip-forward" :size="24" :color="theme.skin.mediaMuted" /></view>
+            <view class="control-center-wide" :style="wideTransportStyle">
+              <view class="control-side" :class="wideShort ? 'control-side-short' : ''" @click="player.previous()"><QtIcon name="skip-back" :size="24" :color="playerMuted" /></view>
+              <view class="icon-main icon-main-wide center-play" :class="wideShort ? 'icon-main-short' : ''" :style="'background-color:' + playerInk + ';'" @click="player.toggle()"><QtIcon :name="player.playing ? 'pause' : 'play'" :size="24" :color="playerSurface" /></view>
+              <view class="control-side" :class="wideShort ? 'control-side-short' : ''" @click="player.next()"><QtIcon name="skip-forward" :size="24" :color="playerMuted" /></view>
             </view>
-            <view class="control-wing control-wing-right">
+            <view class="control-wing control-wing-right" :class="wideControlsStacked ? 'control-wing-right-stacked' : ''" :style="wideToolsWingStyle">
               <view class="control-tools-wide">
-                <view v-if="toolVisible('like')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openPicker($event)"><QtIcon :name="liked ? 'heart-fill' : 'heart'" :size="17" :color="liked ? theme.skin.danger : theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('download')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="doDownload"><QtIcon name="download" :size="17" :color="theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('artist')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openArtistPage"><QtIcon name="user" :size="17" :color="theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('quality')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="switchQuality"><QtIcon name="music" :size="17" :color="theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('dislike')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openDislikeSheet"><QtIcon name="ban" :size="17" :color="dislikedCurrent ? theme.skin.danger : theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('speed')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="cycleRate"><QtIcon name="gauge" :size="17" :color="theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('sleep')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openSleep"><QtIcon name="clock" :size="17" :color="sleepActive ? theme.skin.accent : theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('share')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="shareCurrent"><QtIcon name="share" :size="17" :color="theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('equalizer')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openEqualizer"><QtIcon name="sliders" :size="17" :color="theme.skin.mediaMuted" /></view>
-                <view v-if="toolVisible('source')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openSourceSwitch()"><QtIcon name="refresh" :size="17" :color="theme.skin.mediaMuted" /></view>
-                <view class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" :style="'background-color:' + theme.skin.mediaControl + ';'" @click="openQueue"><QtIcon name="list" :size="17" :color="theme.skin.mediaMuted" /></view>
+                <view v-if="toolVisible('like')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" @click="openPicker($event)"><QtIcon :name="liked ? 'heart-fill' : 'heart'" :size="17" :color="liked ? theme.skin.danger : playerMuted" /></view>
+                <view v-if="toolVisible('download')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" @click="doDownload"><QtIcon name="download" :size="17" :color="playerMuted" /></view>
+                <view v-if="toolVisible('artist')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" @click="openArtistPage"><QtIcon name="user" :size="17" :color="playerMuted" /></view>
+                <view v-if="toolVisible('quality')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" @click="switchQuality"><QtIcon name="music" :size="17" :color="playerMuted" /></view>
+                <view v-if="toolVisible('dislike')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" @click="openDislikeSheet"><QtIcon name="ban" :size="17" :color="dislikedCurrent ? theme.skin.danger : playerMuted" /></view>
+                <view v-if="toolVisible('speed')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" @click="cycleRate"><QtIcon name="gauge" :size="17" :color="playerMuted" /></view>
+                <view v-if="toolVisible('sleep')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" @click="openSleep"><QtIcon name="clock" :size="17" :color="sleepActive ? theme.skin.accent : playerMuted" /></view>
+                <view v-if="toolVisible('share')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" @click="shareCurrent"><QtIcon name="share" :size="17" :color="playerMuted" /></view>
+                <view v-if="toolVisible('equalizer')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" @click="openEqualizer"><QtIcon name="sliders" :size="17" :color="playerMuted" /></view>
+                <view v-if="toolVisible('source')" class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" @click="openSourceSwitch()"><QtIcon name="refresh" :size="17" :color="playerMuted" /></view>
+                <view class="tool-btn" :class="wideShort ? 'tool-btn-short' : ''" @click="openQueue"><QtIcon name="list" :size="17" :color="playerMuted" /></view>
               </view>
             </view>
           </view>
+        </view>
       </view>
 
-      <view v-else class="portrait-stage mid" @touchstart="onTouchStart" @touchend="onTouchEnd">
+      <view v-else class="portrait-stage mid" :style="portraitStageStyle" @touchstart="onTouchStart" @touchend="onTouchEnd">
         <!-- 参考唱机：底座/转轮/传动带与银白唱臂静止，只有圆盘和实际封面转动。
              材质为透明 PNG；全部部件落在同一预算画布内，无原生阴影命中区。 -->
-        <view v-if="!showLyric && portraitCoverSizeRpx > 0" class="disc-wrap" :style="portraitDiscWrapStyle">
-          <image class="turntable-layer" src="/uni_modules/qt-ui/static/player-turntable/deck.png" mode="aspectFit" />
+        <view v-if="playingStyle.style == 'classic' && !showLyric && portraitCoverSizeRpx > 0" class="disc-wrap" :style="portraitDiscWrapStyle">
+          <image class="turntable-layer" :style="portraitTurntableStyles.canvasSize" src="/uni_modules/qt-ui/static/player-turntable/deck.png" mode="aspectFit" />
           <view class="disc-plate" :style="portraitDiscPlateStyle" @click="onDiscTap" @longpress="previewCover">
-            <view class="disc-spin" ref="discSpinRef" :style="discSpinStyle">
-              <image class="turntable-record" src="/uni_modules/qt-ui/static/player-turntable/record.png" mode="aspectFit" />
+            <view class="disc-spin" ref="discSpinRef" :style="portraitTurntableStyles.recordSize + discSpinStyle">
+              <image class="turntable-record" :style="portraitTurntableStyles.recordSize" src="/uni_modules/qt-ui/static/player-turntable/record.png" mode="aspectFit" />
               <image v-if="art() != ''" class="disc-img-round" :style="portraitDiscImgStyle" :src="art()" mode="aspectFill" @error="onArtError" />
               <view v-else class="disc-img-round disc-img-empty" :style="portraitDiscImgStyle + 'background-color:' + theme.skin.coverPlaceholder + ';'"><QtIcon name="music" :size="Math.floor(portraitTurntable.coverRpx * 0.25)" :color="playerMuted" /></view>
             </view>
           </view>
-          <image class="turntable-layer" src="/uni_modules/qt-ui/static/player-turntable/arm.png" mode="aspectFit" />
+          <image class="turntable-layer" :style="portraitTurntableStyles.canvasSize" src="/uni_modules/qt-ui/static/player-turntable/arm.png" mode="aspectFit" />
         </view>
 
+        <view v-if="playingStyle.style == 'gallery' && !showLyric && portraitCoverSizeRpx > 0" class="gallery-art portrait-gallery" :style="portraitGalleryStyle" @click="toggleLyric" @longpress="previewCover">
+          <image v-if="art() != ''" class="gallery-image" :src="art()" mode="aspectFill" @error="onArtError" />
+          <QtIcon v-else name="music" :size="72" :color="playerMuted" />
+        </view>
+        <view v-if="immersiveLyrics || (playingStyle.style == 'gallery' && showLyric)" class="compact-focus-heading" :style="'margin-top:' + statusBarRpx + 'rpx;'">
+          <text class="compact-focus-name" :style="'color:' + playerInk + ';' + qtFontDual(34, 22)" :max-lines="2">{{ name() }}</text>
+          <text class="compact-focus-artist" :style="'color:' + playerMuted + ';' + qtFontDual(25, 14)" :max-lines="1" @click="openArtistPage">{{ artistText() }}</text>
+        </view>
+        <QtFocusLyrics v-if="immersiveLyrics || (playingStyle.style == 'gallery' && showLyric)" :lines="lyricLines" :active-index="activeLyric" :position="displayProgress - lyricOffsetSec()" :rhythm="playingStyle.style == 'rhythm'" :ink="playerInk" :muted="playerMuted" :height-px="compactFocusHeight" :loading="lyricLoading" @copy="copyLyric" />
         <!-- 两行高度优先于唱片尺寸；两个跑马灯实例各自测量和滚动，尾部控件不参与位移。 -->
-        <view v-if="!showLyric" class="track-block" :style="portraitTrackStyle">
+        <view v-if="!showLyric && !immersiveLyrics" class="track-block" :style="portraitTrackStyle">
           <view class="track-row" :style="portraitTitleRowStyle">
             <QtMarquee :text="name()" :size-rpx="38" :size-px="24" :weight="600" :color="playerInk" :width-px="portraitTitleWidthPx" :active="pageVisible" />
             <text v-if="platformKey() != ''" class="track-badge" :style="portraitBadgeStyle + qtFontDual(18, 11)">{{ platformShortName() }}</text>
@@ -165,7 +186,7 @@
           </view>
         </view>
 
-        <scroll-view v-if="showLyric" class="lyric lyric-viewport" :style="portraitLyricStyle" direction="vertical" :scroll-top="lyricScrollTop" :scroll-with-animation="lyricScrollAnimated" :show-scrollbar="false" @click="toggleLyric" @scroll="onLyricUserScroll" @touchstart="onLyricScrollTouchStart">
+        <scroll-view v-if="showLyric && playingStyle.style == 'classic'" class="lyric lyric-viewport" :style="portraitLyricStyle" direction="vertical" :scroll-top="lyricScrollTop" :scroll-with-animation="lyricScrollAnimated" :show-scrollbar="false" @click="toggleLyric" @scroll="onLyricUserScroll" @touchstart="onLyricScrollTouchStart">
           <view :style="'height:' + lyricPadStyle"></view>
           <view v-for="(line, index) in lyricLines" :key="index" class="lyric-line" :style="lineOpacityStyle(index)" @click.stop="onLyricLineTap(line, index)" @longpress.stop="copyLyric(line, index)">
             <!-- 同上顺序：词 / 罗马音 / 译文 / 滚动提示条 -->
@@ -193,17 +214,17 @@
 
         <!-- 歌词工具行：切到歌词视图才出现，位于工具图标行上方（原来常驻右上角太挤，
              放到进度条正上方又太贴近播放栏，所以再往上提一行） -->
-        <view v-if="lyricVisible" class="lyric-tools-row" :class="layout.isWide ? 'lyric-tools-row-wide' : ''">
-          <view class="lyric-tool" :class="layout.isWide ? 'lyric-tool-wide' : ''" :style="'background-color:' + playerRail + ';'" @click="openOffset">
+        <view v-if="showLyric || immersiveLyrics" class="lyric-tools-row" :class="layout.isWide ? 'lyric-tools-row-wide' : ''">
+          <view class="lyric-tool" :class="layout.isWide ? 'lyric-tool-wide' : ''" @click="openOffset">
             <QtIcon name="sliders" :size="layout.isWide ? 13 : 24" :color="currentOffsetMs != 0 ? theme.skin.accent : playerMuted" />
             <text class="lyric-tool-text" :class="layout.isWide ? 'lyric-tool-text-wide' : ''" :style="('color:' + (currentOffsetMs != 0 ? theme.skin.accent : playerMuted) + ';') + qtFontDual(22, 11)">{{ offsetButtonText() }}</text>
           </view>
-          <view v-if="lyricPicked" class="lyric-tool" :class="layout.isWide ? 'lyric-tool-wide' : ''" :style="'background-color:' + playerRail + ';'" @click="resetLyricPick">
+          <view v-if="lyricPicked" class="lyric-tool" :class="layout.isWide ? 'lyric-tool-wide' : ''" @click="resetLyricPick">
             <QtIcon name="refresh" :size="layout.isWide ? 13 : 24" :color="theme.skin.accent" />
             <text class="lyric-tool-text" :class="layout.isWide ? 'lyric-tool-text-wide' : ''" :style="('color:' + theme.skin.accent + ';') + qtFontDual(22, 11)">恢复自动</text>
           </view>
           <!-- 同上（宽屏那处）：搜索歌词常驻偏移旁边，不再只在无词时出现 -->
-          <view class="lyric-tool" :class="layout.isWide ? 'lyric-tool-wide' : ''" :style="'background-color:' + playerRail + ';'" @click="openLyricSearch">
+          <view class="lyric-tool" :class="layout.isWide ? 'lyric-tool-wide' : ''" @click="openLyricSearch">
             <QtIcon name="search" :size="layout.isWide ? 13 : 24" :color="noLyricYet ? theme.skin.accent : playerMuted" />
             <text class="lyric-tool-text" :class="layout.isWide ? 'lyric-tool-text-wide' : ''" :style="('color:' + (noLyricYet ? theme.skin.accent : playerMuted) + ';') + qtFontDual(22, 11)">搜索歌词</text>
           </view>
@@ -226,20 +247,20 @@
         </view>
 
         <view class="controls">
-          <view class="control-hit" @click="cycleMode"><QtIcon :name="modeIconName()" :size="36" :color="playerMuted" /></view>
-          <view class="control-hit" @click="player.previous()"><QtIcon name="skip-back" :size="44" :color="playerInk" /></view>
-          <view class="icon-main" @click="player.toggle()"><QtIcon :name="player.playing ? 'pause' : 'play'" :size="60" :color="playerInk" /></view>
-          <view class="control-hit" @click="player.next()"><QtIcon name="skip-forward" :size="44" :color="playerInk" /></view>
-          <view class="control-hit" @click="openQueue"><QtIcon name="list" :size="36" :color="playerMuted" /></view>
+          <view class="control-hit" @click="cycleMode"><view class="compact-icon-button"><QtIcon :name="modeIconName()" :size="36" :color="playerMuted" /></view></view>
+          <view class="control-hit" @click="player.previous()"><view class="compact-icon-button"><QtIcon name="skip-back" :size="44" :color="playerMuted" /></view></view>
+          <view class="icon-main" :style="'background-color:' + playerInk + ';'" @click="player.toggle()"><QtIcon :name="player.playing ? 'pause' : 'play'" :size="60" :color="playerSurface" /></view>
+          <view class="control-hit" @click="player.next()"><view class="compact-icon-button"><QtIcon name="skip-forward" :size="44" :color="playerMuted" /></view></view>
+          <view class="control-hit" @click="openQueue"><view class="compact-icon-button"><QtIcon name="list" :size="36" :color="playerMuted" /></view></view>
         </view>
 
         <!-- 最下面一行（用户 m17053）：展示项 + 三个点**等分整行宽度**（原来是左挤一堆、
              靠 spacer 顶到右边，用户嫌难看）。每一项 flex:1，四舍五入等宽。 -->
         <view class="bar-row">
           <view v-for="tool in barTools" :key="tool.id" class="bar-hit" @click="onBarTool(tool.id)">
-            <QtIcon :name="tool.icon" :size="34" :color="barIconColor(tool.id)" />
+            <view class="compact-icon-button"><QtIcon :name="tool.icon" :size="34" :color="barIconColor(tool.id)" /></view>
           </view>
-          <view class="bar-hit bar-more" @click="openBarSheet"><QtIcon name="more" :size="34" :color="playerMuted" /></view>
+          <view class="bar-hit bar-more" @click="openBarSheet"><view class="compact-icon-button"><QtIcon name="more" :size="34" :color="playerMuted" /></view></view>
         </view>
       </view>
 
@@ -260,71 +281,72 @@
       </QtSheet>
 
       <view v-if="queueOpen" class="mask" :style="'background-color:' + theme.skin.scrim + ';'" :class="layout.isWide ? 'mask-wide mask-queue-wide' : ''" @click="queueOpen = false">
-        <view class="sheet" :style="sheetSlideStyle + 'background-color:' + theme.skin.mediaSurface + ';border-color:' + theme.skin.mediaBorder + ';' + queueDrawerWideStyle" :class="layout.isWide ? 'sheet-wide sheet-queue-wide' : ''">
-          <view class="sheet-handle" :style="'background-color:' + theme.skin.mediaControl + ';'" :class="layout.isWide ? 'sheet-handle-wide sheet-handle-drawer-wide' : ''"></view>
+        <view class="sheet" :style="sheetSlideStyle + 'background-color:' + theme.skin.sheetSurface + ';border-color:' + theme.skin.border + ';' + queueDrawerWideStyle" :class="layout.isWide ? 'sheet-wide sheet-queue-wide' : ''">
+          <view class="sheet-handle" :style="'background-color:' + theme.skin.surfaceMuted + ';'" :class="layout.isWide ? 'sheet-handle-wide sheet-handle-drawer-wide' : ''"></view>
           <view class="sheet-head" :class="layout.isWide ? 'sheet-head-wide' : ''">
-            <text class="sheet-title" :style="('color:' + theme.skin.mediaText + ';') + qtFontDual(30, 17)" :class="layout.isWide ? 'sheet-title-wide' : ''">播放列表</text>
-            <text class="sheet-count" :style="('color:' + theme.skin.mediaMuted + ';') + qtFontDual(22, 12)" :class="layout.isWide ? 'sheet-count-wide' : ''">{{ player.queue.length }} 首</text>
+            <text class="sheet-title" :style="('color:' + theme.skin.text + ';') + qtFontDual(30, 17)" :class="layout.isWide ? 'sheet-title-wide' : ''">播放列表</text>
+            <text class="sheet-count" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)" :class="layout.isWide ? 'sheet-count-wide' : ''">{{ player.queue.length }} 首</text>
             <view class="sheet-actions">
-              <QtIcon class="sheet-act" name="trash" :size="layout.isWide ? 18 : 34" :color="theme.skin.mediaMuted" @click="clearQueue" />
-              <QtIcon class="sheet-act" name="close" :size="layout.isWide ? 18 : 34" :color="theme.skin.mediaMuted" @click="queueOpen = false" />
+              <QtIcon class="sheet-act" name="trash" :size="layout.isWide ? 18 : 34" :color="theme.skin.textMuted" @click="clearQueue" />
+              <QtIcon class="sheet-act" name="close" :size="layout.isWide ? 18 : 34" :color="theme.skin.textMuted" @click="queueOpen = false" />
             </view>
           </view>
-          <scroll-view class="sheet-list" direction="vertical" :show-scrollbar="false" :scroll-top="queueScrollTop" @scroll="onQueueScroll">
+          <scroll-view class="sheet-list queue-list-viewport" direction="vertical" :show-scrollbar="false" :scroll-top="queueScrollTop" @scroll="onQueueScroll">
             <view class="queue-spacer" :style="'height:' + queueContentHeight + 'px;'">
               <view
                 v-for="row in queueWindow"
                 :key="row.key"
                 class="queue-row"
-                :style="isCurrent(row.song) ? 'top:' + row.top + 'px;background-color:' + theme.skin.mediaControl + ';' : 'top:' + row.top + 'px;'"
+                :style="queueRowStyle + (isCurrent(row.song) ? 'top:' + row.top + 'px;background-color:' + theme.skin.surfaceMuted + ';' : 'top:' + row.top + 'px;')"
                 :class="[isCurrent(row.song) ? 'queue-row-active' : '', layout.isWide ? 'queue-row-wide' : '']"
                 @click="playAt(row.index)"
                 @longpress="queueActions(row.song)"
               >
-                <text class="queue-index" :style="('color:' + (isCurrent(row.song) ? theme.skin.danger : theme.skin.mediaMuted) + ';') + qtFontDual(22, 12)" :class="[isCurrent(row.song) ? 'queue-index-active' : '', layout.isWide ? 'queue-index-wide' : '']">{{ row.index + 1 }}</text>
+                <text class="queue-index" :style="('color:' + (isCurrent(row.song) ? theme.skin.danger : theme.skin.textMuted) + ';') + qtFontDual(22, 12)" :class="[isCurrent(row.song) ? 'queue-index-active' : '', layout.isWide ? 'queue-index-wide' : '']">{{ row.index + 1 }}</text>
                 <view class="queue-info" :class="layout.isWide ? 'queue-info-wide' : ''">
-                  <text class="queue-name" :style="('color:' + theme.skin.mediaText + ';') + qtFontDual(27, 15)" :class="[isCurrent(row.song) ? 'queue-name-active' : '', layout.isWide ? 'queue-name-wide' : '']" :max-lines="1">{{ row.song.name }}</text>
-                  <text class="queue-meta" :style="('color:' + theme.skin.mediaMuted + ';') + qtFontDual(21, 11)" :class="layout.isWide ? 'queue-meta-wide' : ''" :max-lines="1">{{ row.song.singer }}</text>
+                  <text class="queue-name" :style="('color:' + theme.skin.text + ';') + qtFontDual(27, 15)" :class="[isCurrent(row.song) ? 'queue-name-active' : '', layout.isWide ? 'queue-name-wide' : '']" :max-lines="1">{{ row.song.name }}</text>
+                  <text class="queue-meta" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 11)" :class="layout.isWide ? 'queue-meta-wide' : ''" :max-lines="1">{{ row.song.singer }}</text>
                 </view>
-                <QtIcon class="queue-move" name="arrow-up" :size="layout.isWide ? 18 : 30" :color="theme.skin.mediaMuted" @click.stop="moveUp(row.index)" />
-                <QtIcon class="queue-move" name="arrow-down" :size="layout.isWide ? 18 : 30" :color="theme.skin.mediaMuted" @click.stop="moveDown(row.index)" />
-                <QtIcon class="queue-move" name="close" :size="layout.isWide ? 18 : 30" :color="theme.skin.mediaMuted" @click.stop="removeAt(row.index)" />
+                <QtIcon class="queue-move" name="arrow-up" :size="layout.isWide ? 18 : 30" :color="theme.skin.textMuted" @click.stop="moveUp(row.index)" />
+                <QtIcon class="queue-move" name="arrow-down" :size="layout.isWide ? 18 : 30" :color="theme.skin.textMuted" @click.stop="moveDown(row.index)" />
+                <QtIcon class="queue-move" name="close" :size="layout.isWide ? 18 : 30" :color="theme.skin.textMuted" @click.stop="removeAt(row.index)" />
               </view>
             </view>
-            <view v-if="player.queue.length == 0" class="lyric-empty"><text :style="qtFontDual(26, 14)">队列为空</text></view>
+            <view v-if="player.queue.length == 0" class="lyric-empty"><text :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(26, 14)">队列为空</text></view>
           </scroll-view>
         </view>
       </view>
 
       <!-- 歌词偏移弹层：拖动只改草稿（offsetDraftMs），松手才写存储并通知桌面歌词 -->
       <QtSheet v-model:visible="offsetOpen" title="歌词偏移" :subtitle="offsetScopeText" @close="closeOffset">
+        <scroll-view class="offset-scroll" direction="vertical" :show-scrollbar="false" :style="offsetViewportStyle">
           <view class="offset-body" :class="layout.isWide ? 'offset-body-wide' : ''">
             <text class="offset-value" :style="('color:' + theme.skin.text + ';') + qtFontDual(46, 28)" :class="layout.isWide ? 'offset-value-wide' : ''">{{ offsetText(offsetDraftMs) }}</text>
-            <!-- 滑块：圆点用脚本算出的 left（仓内禁用 left:50% 那类写法），轨道高度/圆点
-                 尺寸与 .offset-track / .offset-thumb 严格同步，改样式要一起改 offsetThumbLeft() -->
-            <view class="offset-track" @touchstart="onOffsetTouchStart" @touchmove="onOffsetTouchMove" @touchend="onOffsetTouchEnd" @touchcancel="onOffsetTouchCancel">
-              <view class="offset-rail" :style="'background-color:' + theme.skin.surfaceStrong + ';'"></view>
+            <!-- Touch mapping and thumb geometry share the measured track, never window-scaled wide rpx. -->
+            <view class="offset-track" :class="layout.isWide ? 'offset-track-wide' : ''" @touchstart="onOffsetTouchStart" @touchmove="onOffsetTouchMove" @touchend="onOffsetTouchEnd" @touchcancel="onOffsetTouchCancel">
+              <view class="offset-rail" :class="layout.isWide ? 'offset-rail-wide' : ''" :style="'background-color:' + theme.skin.surfaceStrong + ';'"></view>
               <view class="offset-thumb" :class="layout.isWide ? 'offset-thumb-wide' : ''" :style="'left:' + offsetThumbLeft() + 'px;background-color:' + theme.skin.text + ';'"></view>
             </view>
-            <view class="offset-scale">
-              <text class="offset-scale-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(20, 11)">-10s</text>
-              <text class="offset-scale-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(20, 11)">0</text>
-              <text class="offset-scale-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(20, 11)">+10s</text>
+            <view class="offset-scale" :class="layout.isWide ? 'offset-scale-wide' : ''">
+              <text class="offset-scale-text" :class="layout.isWide ? 'offset-scale-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(20, 11)">-10s</text>
+              <text class="offset-scale-text" :class="layout.isWide ? 'offset-scale-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(20, 11)">0</text>
+              <text class="offset-scale-text" :class="layout.isWide ? 'offset-scale-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(20, 11)">+10s</text>
             </view>
-            <view class="offset-steps">
-              <view class="offset-step" :style="'background-color:' + theme.skin.surfaceStrong + ';'" @click="nudgeOffset(-LYRIC_OFFSET_STEP_MS)">
-                <text class="offset-step-text" :style="('color:' + theme.skin.text + ';') + qtFontDual(24, 14)">-100ms</text>
+            <view class="offset-steps" :class="layout.isWide ? 'offset-steps-wide' : ''">
+              <view class="offset-step" :class="layout.isWide ? 'offset-step-wide' : ''" :style="'background-color:' + theme.skin.surfaceStrong + ';'" @click="nudgeOffset(-LYRIC_OFFSET_STEP_MS)">
+                <text class="offset-step-text" :class="layout.isWide ? 'offset-step-text-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(24, 14)">-100ms</text>
               </view>
-              <view class="offset-step" :style="'background-color:' + theme.skin.surfaceStrong + ';'" @click="nudgeOffset(LYRIC_OFFSET_STEP_MS)">
-                <text class="offset-step-text" :style="('color:' + theme.skin.text + ';') + qtFontDual(24, 14)">+100ms</text>
+              <view class="offset-step" :class="layout.isWide ? 'offset-step-wide' : ''" :style="'background-color:' + theme.skin.surfaceStrong + ';'" @click="nudgeOffset(LYRIC_OFFSET_STEP_MS)">
+                <text class="offset-step-text" :class="layout.isWide ? 'offset-step-text-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(24, 14)">+100ms</text>
               </view>
-              <view class="offset-step" :style="'background-color:' + theme.skin.surfaceStrong + ';'" @click="resetOffset">
-                <text class="offset-step-text" :style="('color:' + theme.skin.text + ';') + qtFontDual(24, 14)">恢复默认</text>
+              <view class="offset-step" :class="layout.isWide ? 'offset-step-wide' : ''" :style="'background-color:' + theme.skin.surfaceStrong + ';'" @click="resetOffset">
+                <text class="offset-step-text" :class="layout.isWide ? 'offset-step-text-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(24, 14)">恢复默认</text>
               </view>
             </view>
-            <text class="offset-note" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 12)">歌词比声音快时调正（延后）；歌词比声音慢时调负（提前）。</text>
-            <text class="offset-note" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 12)">按曲目保存；调 0 即恢复继承全局默认。</text>
+            <text class="offset-note" :class="layout.isWide ? 'offset-note-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 12)">歌词比声音快时调正（延后）；歌词比声音慢时调负（提前）。</text>
+            <text class="offset-note" :class="layout.isWide ? 'offset-note-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 12)">按曲目保存；调 0 即恢复继承全局默认。</text>
           </view>
+        </scroll-view>
       </QtSheet>
 
       <!-- 「搜索歌词」弹层：候选来自四源聚合搜索，选中后把那首候选的歌词接到当前歌上。
@@ -350,22 +372,32 @@
           </scroll-view>
       </QtSheet>
 
+      <QtPlayingStyleSheet v-model:visible="styleOpen" :cover="art()" />
       <qt-action-sheet v-model:visible="sheetVisible" :title="sheetTitle" :actions="sheetActions" :selected-index="sheetSelectedIndex" @select="onSheetSelect" />
-      <QtPlaylistPicker v-model:visible="showPicker" :song="currentSong" :playlists="player.pickerPlaylists()" :selected-ids="getSelectedPlaylistIds(currentSong)" :anchor-top="pickerAnchorTop" title="加入 / 移出歌单" @confirm="handlePickerConfirm" />
+      <QtPlaylistPicker v-model:visible="showPicker" :song="currentSong" :playlists="player.pickerPlaylists()" :selected-ids="getSelectedPlaylistIds(currentSong)" :anchor-top="pickerAnchorTop" title="加入 / 移出歌单" :create-playlist="createPickerPlaylist" @confirm="handlePickerConfirm" />
     </view>
   </qt-page-frame>
 </template>
 <script setup lang="ts">
 import { qtShowToast } from "@/services/toast";
+import { dlnaSupported, openDlna, dlnaUiState } from "@/services/dlna";
+const castUi = dlnaUiState();
+const casting = computed((): boolean => castUi.state.value != null && castUi.state.value!.target == "dlna");
+const castCanSeek = computed((): boolean => !casting.value || castUi.state.value!.canSeek);
 import { qtConfirm } from "@/services/confirm";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { ref, computed, watch, nextTick, getCurrentInstance, onMounted, onUnmounted } from "vue";
 import { onLoad, onShow, onHide, onUnload } from "@dcloudio/uni-app";
+import QtPlayingStyleSheet from "@/uni_modules/qt-ui/components/qt-playing-style-sheet/qt-playing-style-sheet.uvue";
+import QtFocusLyrics from "@/uni_modules/qt-ui/components/qt-focus-lyrics/qt-focus-lyrics.uvue";
+import { usePlayingStyle } from "@/uni_modules/qt-ui/stores/playing-style";
+import { resolvePlayingBackground, playingBackgroundColor } from "@/uni_modules/qt-ui/composables/playing-style";
 import QtMarquee from "@/uni_modules/qt-ui/components/qt-marquee/qt-marquee.uvue";
-import { portraitPlayerMetrics } from "@/uni_modules/qt-ui/composables/player-presentation";
-import { turntableMetrics } from "@/uni_modules/qt-ui/composables/turntable-presentation";
+import { portraitPlayerMetrics, widePlayerMetrics, playerQueueMetrics, playerQueueWindow, playerQueueAnchorScroll, playerOffsetMetrics, playerOffsetThumbLeft, playerOffsetFromClientX } from "@/uni_modules/qt-ui/composables/player-presentation";
+import { turntableMetrics, turntableStyles } from "@/uni_modules/qt-ui/composables/turntable-presentation";
+import { lyricFocusAt, lyricTextFocusStyle } from "@/uni_modules/qt-ui/composables/lyric-presentation";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtSheet from "@/uni_modules/qt-ui/components/qt-sheet/qt-sheet.uvue";
@@ -379,7 +411,7 @@ import { useDislikesStore } from "@/stores/dislikes";
 import { useSourceRegistryStore } from "@/stores/source-registry";
 import { useShareCardStore } from "@/stores/share-card";
 import { findSourceCandidates, peekSourceCandidates } from "@/services/source-switch";
-import { useThemeStore, turntablePalette } from "@/uni_modules/qt-ui/stores/theme";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { audioPlayer } from "@/services/audio-player";
 import { musicApi, isQtAdmin, MusicApi } from "@/services/music-api";
 import { useLyricOffsetStore, LYRIC_OFFSET_MAX_MS, LYRIC_OFFSET_STEP_MS } from "@/stores/lyric-offset";
@@ -387,11 +419,11 @@ import { desktopLyric } from "@/services/desktop-lyric";
 import { platformShort, platformColor } from "@/services/platform";
 import { isHarmonyOs } from "@/services/app-native";
 import { localFileSizeOf, localFirstDiagnose } from "@/services/local-first";
-import { collectDupMessage, type CollectDupConflict } from "@/services/collect-dup";
+import { savePreferredSource } from "@/services/preferred-source";
 import { qtDiag } from "@/services/diag";
 import { beginLoading, finishLoading } from "@/services/ui-loading";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
-import type { Song, LyricLine } from "@/types/music";
+import type { Song, LyricLine, Playlist } from "@/types/music";
 
 const player = usePlayerStore();
 const downloads = useDownloadsStore();
@@ -404,12 +436,21 @@ const fontScale = useFontScaleStore();
 const pageVisible = ref(true);
 const showLyric = ref(false);
 const queueOpen = ref(false);
-// Cover and lyrics share one phone palette; wide mode and sheets retain their media colors.
-const portraitPlayerMode = computed((): boolean => !layout.isWide);
-const portraitPalette = computed(() => turntablePalette(theme.skin, theme.dark));
-const playerInk = computed((): string => portraitPlayerMode.value ? portraitPalette.value.text : theme.skin.mediaText);
-const playerMuted = computed((): string => portraitPlayerMode.value ? portraitPalette.value.muted : theme.skin.mediaMuted);
-const playerRail = computed((): string => portraitPlayerMode.value ? portraitPalette.value.rail : theme.skin.mediaControl);
+const playingStyle = usePlayingStyle();
+const styleOpen = ref(false);
+const backgroundFailed = ref("");
+const immersiveLyrics = computed((): boolean => playingStyle.style == "rhythm" || playingStyle.style == "focus");
+const backgroundKind = computed((): string => resolvePlayingBackground(playingStyle.style, playingStyle.background));
+const playerBackgroundImage = computed((): string => {
+  const image = backgroundKind.value == "image" ? playingStyle.image : backgroundKind.value == "cover" ? art() : backgroundKind.value == "theme" ? theme.skin.backgroundImage : "";
+  return image == backgroundFailed.value ? "" : image;
+});
+const playerDarkMood = computed((): boolean => ["burgundy", "midnight", "forest"].includes(backgroundKind.value));
+const playerSurface = computed((): string => playerDarkMood.value ? playingBackgroundColor(backgroundKind.value) : theme.skin.background);
+const playerInk = computed((): string => playerDarkMood.value ? "#fff8f4" : theme.skin.text);
+const playerMuted = computed((): string => playerDarkMood.value ? "#c9c4d0" : theme.skin.textMuted);
+const playerRail = computed((): string => playerDarkMood.value ? "rgba(255,255,255,0.12)" : theme.skin.surfaceMuted);
+const playerFooter = computed((): string => playerDarkMood.value || theme.dark ? "rgba(0,0,0,0.12)" : "rgba(255,255,255,0.72)");
 
 /**
  * 歌词偏移（页内弹层）。正数 = 歌词延后出现，与 qt-pc / utils/lrc.uts 的
@@ -491,6 +532,10 @@ function noop(): void {}
 
 /** 当前播放曲目的生效偏移（毫秒）：入口按钮上显示，用户一眼能看出这首歌是否设过 */
 const currentOffsetMs = computed((): number => lyricOffset.offsetMsFor(player.current));
+watch(currentOffsetMs, (offset: number) => {
+  const current = player.current;
+  if (current != null) audioPlayer.setCarLyricOffset(current.platform + ":" + current.id, offset);
+});
 /** 偏移弹层副标题：区分「这首歌的覆盖」与「全局默认」 */
 const offsetScopeText = computed((): string => (player.current != null ? "按曲目保存" : "全局默认"));
 /**
@@ -519,80 +564,51 @@ const lyricPicked = computed((): boolean => {
 /** 偏移轨道实测几何（px）；弹层是 v-if 动态创建的，测量必须等 nextTick */
 let offsetLeft = 0;
 let offsetTrackTimer: number | null = null;
-let offsetUnitPx = qtRpx(1);
-/** 量不到时的常量兜底，必须与 .offset-body / .offset-body-wide 的 padding 保持一致 */
-let offsetFallbackWidth = 0;
-let offsetFallbackLeft = 0;
-const OFFSET_BODY_PAD_RPX = 40;
-const OFFSET_BODY_PAD_PX = 28;
+let offsetTrackSeq = 0;
+const offsetGeometry = computed(() => playerOffsetMetrics(layout.windowWidth, layout.windowHeight, layout.isWide, qtSheetWidth("drawer"), layout.safeBottomPx, fontScale.scale));
+const offsetViewportStyle = computed((): string => "height:" + offsetGeometry.value.viewportPx + "px;");
 /** 滑块吸附粒度（毫秒）：比 ±100ms 按钮更细，但不足以让手指抖动产生 3ms 这种无意义值 */
 const OFFSET_SNAP_MS = 50;
 
-function refreshOffsetFallback(): void {
-  offsetUnitPx = qtRpx(1);
-  const info = uni.getWindowInfo();
-  if (layout.isWide) {
-    const sheetW = qtSheetWidth("drawer");
-    offsetFallbackWidth = Math.max(0, sheetW - OFFSET_BODY_PAD_PX * 2);
-    offsetFallbackLeft = (info.windowWidth - sheetW) / 2 + OFFSET_BODY_PAD_PX;
-  } else {
-    offsetFallbackWidth = Math.max(0, info.windowWidth - OFFSET_BODY_PAD_RPX * 2 * offsetUnitPx);
-    offsetFallbackLeft = OFFSET_BODY_PAD_RPX * offsetUnitPx;
-  }
-}
-/** 轨道宽度（px）：优先用实测值，未测到时按样式常量推算 */
+/** Always reactive fallback: same-mode resizes must not retain old width/left/unit caches. */
 function offsetTrackWidthPx(): number {
-  if (offsetTrackWidth.value > 0) return offsetTrackWidth.value;
-  if (offsetFallbackWidth <= 0) refreshOffsetFallback();
-  return offsetFallbackWidth;
+  return offsetTrackWidth.value > 0 ? offsetTrackWidth.value : offsetGeometry.value.trackWidthPx;
 }
-/** 轨道左边界（px）：优先用实测值，未测到时按样式常量推算 */
 function offsetTrackLeftPx(): number {
-  if (offsetTrackWidth.value > 0) return offsetLeft;
-  if (offsetFallbackWidth <= 0) refreshOffsetFallback();
-  return offsetFallbackLeft;
+  return offsetTrackWidth.value > 0 ? offsetLeft : offsetGeometry.value.trackLeftPx;
 }
-/** 圆点 left（px）：0ms 落在正中，-MAX 在左端、+MAX 在右端（尺寸与 .offset-thumb 同步） */
 function offsetThumbLeft(): number {
-  const width = offsetTrackWidthPx();
-  if (width <= 0) return 0;
-  const frac = (offsetDraftMs.value + LYRIC_OFFSET_MAX_MS) / (LYRIC_OFFSET_MAX_MS * 2);
-  const fill = Math.max(0, Math.min(1, frac)) * width;
-  const size = layout.isWide ? 22 : 36 * offsetUnitPx;
-  return Math.max(0, Math.min(width - size, fill - size / 2));
+  return playerOffsetThumbLeft(offsetDraftMs.value, LYRIC_OFFSET_MAX_MS, offsetTrackWidthPx(), offsetGeometry.value.thumbSizePx);
 }
-/** 手指横坐标 → 偏移毫秒（吸附到 OFFSET_SNAP_MS 档） */
 function offsetFromClientX(clientX: number): number {
-  const width = offsetTrackWidthPx();
-  if (width <= 0) return offsetDraftMs.value;
-  const frac = Math.max(0, Math.min(1, (clientX - offsetTrackLeftPx()) / width));
-  const snapped = Math.round(((frac * 2 - 1) * LYRIC_OFFSET_MAX_MS) / OFFSET_SNAP_MS) * OFFSET_SNAP_MS;
-  return Math.max(-LYRIC_OFFSET_MAX_MS, Math.min(LYRIC_OFFSET_MAX_MS, snapped));
+  return playerOffsetFromClientX(clientX, offsetTrackLeftPx(), offsetTrackWidthPx(), LYRIC_OFFSET_MAX_MS, OFFSET_SNAP_MS, offsetDraftMs.value);
+}
+function invalidateOffsetTrack(): void {
+  offsetTrackSeq++;
+  if (offsetTrackTimer != null) clearTimeout(offsetTrackTimer);
+  offsetTrackTimer = null;
+  offsetTrackWidth.value = 0;
+  offsetLeft = 0;
 }
 function measureOffsetTrack(): void {
-  measureOffsetTrackRetry(0);
+  offsetTrackSeq++;
+  if (offsetTrackTimer != null) clearTimeout(offsetTrackTimer);
+  offsetTrackTimer = null;
+  measureOffsetTrackRetry(0, offsetTrackSeq);
 }
-/** 同进度条轨道：弹层刚插入时量不到宽度，最多重试 3 次，期间先用常量兜底定位 */
-function measureOffsetTrackRetry(attempt: number): void {
-  if (!pageAlive) return;
-  refreshOffsetFallback();
-  const query = uni.createSelectorQuery();
-  query
-    .select(".offset-track")
-    .boundingClientRect((rect: UniNodeInfo) => {
-      if (rect != null && rect.width > 0) {
-        offsetLeft = rect.left;
-        offsetTrackWidth.value = rect.width;
-        return;
-      }
-      if (attempt < 3) {
-        offsetTrackTimer = setTimeout(() => {
-          measureOffsetTrackRetry(attempt + 1);
-        }, 120) as number;
-      }
-    })
-    .exec();
+function measureOffsetTrackRetry(attempt: number, seq: number): void {
+  if (!pageAlive || !offsetOpen.value || seq != offsetTrackSeq) return;
+  uni.createSelectorQuery().select(".offset-track").boundingClientRect((rect: UniNodeInfo) => {
+    if (!pageAlive || !offsetOpen.value || seq != offsetTrackSeq) return;
+    if (rect != null && isFinite(rect.width) && isFinite(rect.left) && rect.width > 0) {
+      offsetLeft = rect.left;
+      offsetTrackWidth.value = rect.width;
+      return;
+    }
+    if (attempt < 3) offsetTrackTimer = setTimeout(() => measureOffsetTrackRetry(attempt + 1, seq), 120) as number;
+  }).exec();
 }
+
 /**
  * 偏移提交后的统一收尾：通知桌面歌词 + 立即重算高亮。
  *
@@ -621,14 +637,13 @@ function openOffset(): void {
   // 传 null 会退化成编辑全局默认，那不是本入口的语义。
   lyricOffset.setActive(player.current);
   offsetDraftMs.value = lyricOffset.activeMs();
-  offsetTrackWidth.value = 0;
+  invalidateOffsetTrack();
   offsetOpen.value = true;
   armSheet();
-  nextTick(() => {
-    measureOffsetTrack();
-  });
 }
 function closeOffset(): void {
+  offsetDragging.value = false;
+  invalidateOffsetTrack();
   offsetOpen.value = false;
 }
 function onOffsetTouchStart(event: UniTouchEvent): void {
@@ -705,6 +720,7 @@ async function openLyricSearch(): Promise<void> {
  * 那条分支同一套写法），不发任何请求。
  */
 function applyAdoptedLyric(current: Song): void {
+  player.refreshCarLyric();
   const parsed = buildLyricLines(
     musicApi.cachedLyricWordByWord(current),
     musicApi.cachedLyric(current),
@@ -753,6 +769,7 @@ function resetLyricPick(): void {
   const current = player.current;
   if (current == null) return;
   musicApi.clearLyricPick(current);
+  player.refreshCarLyric();
   lyricPickVersion.value++;
   // clearLyricPick 已把原歌的四段缓存与「已问过」标记清掉（否则 ensureLyric 会命中
   // 手选源的词、或在 TTL 内被「问过」标记直接短路）。但 ensureLyric 第一行是
@@ -772,6 +789,7 @@ const showPlayUrlEntry = ref(isQtAdmin());
  * 「播放链接」还额外要求 qt_admin 权限，两者都满足才出现。
  */
 function toolVisible(id: string): boolean {
+  if (casting.value && (id == "speed" || id == "equalizer")) return false;
   if (id == "playUrl" && !showPlayUrlEntry.value) return false;
   return playerBar.isVisible(id);
 }
@@ -866,8 +884,13 @@ const queueScrollValue = ref(0);
 const queueWindow = ref<QueueRow[]>([]);
 /** 视口上下各多渲染的行数，吸收快速滑动的渲染延迟 */
 const QUEUE_WINDOW_MARGIN = 10;
-/** 粗略视口高度（px）：窗口覆盖用，不必精确 */
-const QUEUE_VIEWPORT_ESTIMATE = 800;
+/** Only a valid measurement for the current window may override the first-frame estimate. */
+const queueViewportMeasuredPx = ref(0);
+let queueMeasureSeq = 0;
+let queueMeasureTimer: number | null = null;
+let queueAnchorKey = "";
+let queueAnchorIndex = 0;
+let queueAnchorFraction = 0;
 
 type QueueRow = { index: number; song: Song; key: string; top: number };
 
@@ -875,44 +898,46 @@ type QueueRow = { index: number; song: Song; key: string; top: number };
 const statusBarRpx = ref(0);
 // 宽屏判定：qt-ui 布局状态（横屏/窗口 >= 720dp 视为宽屏）
 const layout = useQtLayout();
-const wideStageWidth = computed<number>(() => Math.min(layout.windowWidth - 36, 1120));
-/**
- * 横屏矮窗（手机横屏、车机矮窗等 windowHeight < 520，即 use-qt-layout 的 isShort）。
- *
- * 为什么必须单独处理：isWide 的判据是「宽 >= 900 或 横屏且宽 >= 600」，所以手机横屏
- * （如 780×360）也会落进宽屏分支，但宽屏舞台的留白是按 pad 设计的。原来封面尺寸写的是
- * `windowHeight - 108` 且下限 112 —— 780×360 时算出 240，而「顶部留白 + 底部三行控件」
- * 之后实际只剩一百多 px，封面卡（240+20）直接盖住进度行和控制行。
- * 现在的口径是「先扣掉顶部留白、底部三行、底部留白，剩下的才是封面卡能占的高度」，
- * 封面尺寸永远由这个剩余空间反算，窗再矮也不会溢出；矮窗额外收紧三行的外边距。
- */
+watch(() => layout.windowWidth + ":" + layout.windowHeight + ":" + layout.isWide + ":" + layout.safeBottomPx + ":" + fontScale.scale, () => {
+  invalidateOffsetTrack();
+  offsetDragging.value = false;
+  if (offsetOpen.value) nextTick(() => measureOffsetTrack());
+});
+watch(offsetOpen, (open: boolean) => {
+  invalidateOffsetTrack();
+  if (open) nextTick(() => measureOffsetTrack());
+});
 const wideShort = computed((): boolean => layout.isShort);
-/** 底部三行占位：歌词工具行 34+6 / 进度行 32+12 / 控制行 46+8 = 138 */
-const WIDE_BOTTOM_ROWS_PX = 138;
-/** 矮窗收紧后：歌词工具行 34+2 / 进度行 28+6 / 控制行 42+4 = 116（见 -short 规则） */
-const WIDE_SHORT_BOTTOM_ROWS_PX = 116;
-const WIDE_PAD_BOTTOM_PX = 14;
-const WIDE_SHORT_PAD_BOTTOM_PX = 8;
-const widePadBottom = computed<number>((): number => wideShort.value ? WIDE_SHORT_PAD_BOTTOM_PX : WIDE_PAD_BOTTOM_PX);
-/** 顶部留白：与 navStyle 的导航高度同源（矮窗导航也收窄，见 navStyle），否则封面会钻到按钮下面 */
-const widePadTop = computed<number>((): number => wideShort.value ? statusBarPx() + 44 : 60);
-/** 封面卡最大边长（含内边距 20）：pad 上维持原来的 240px 封面观感 */
-const WIDE_COVER_CARD_MAX_PX = 260;
-/** 封面卡最小边长：再小就没法看封面了，宁可让 wide-body 溢出（极矮窗的最后兜底） */
-const WIDE_COVER_CARD_MIN_PX = 108;
-/** 封面下方曲名块占位（两行口径：标题 24 + 平台行 16 + 间距 8 ≈ 48；矮窗字号不变取同值） */
-const WIDE_TRACK_HEAD_PX = 48;
-const wideBodyHeight = computed<number>((): number => {
-  const rows = wideShort.value ? WIDE_SHORT_BOTTOM_ROWS_PX : WIDE_BOTTOM_ROWS_PX;
-  return layout.windowHeight - widePadTop.value - widePadBottom.value - rows - WIDE_TRACK_HEAD_PX;
+/** Count exactly the tools rendered below; playUrl is a separate menu entry, queue is always present. */
+const wideToolCount = computed((): number => {
+  const ids = ["like", "download", "artist", "quality", "dislike", "speed", "sleep", "share", "equalizer", "source"];
+  let count = 1;
+  for (let i = 0; i < ids.length; i++) if (toolVisible(ids[i])) count++;
+  return count;
 });
-const wideCoverSize = computed<number>((): number => {
-  const card = Math.max(WIDE_COVER_CARD_MIN_PX, Math.min(WIDE_COVER_CARD_MAX_PX, wideBodyHeight.value));
-  return card - 20; // 20 = .cover-card 的 padding 10 × 2
-});
-const wideStageStyle = computed<string>((): string => "width:" + wideStageWidth.value + "px;padding-top:" + widePadTop.value + "px;padding-bottom:" + widePadBottom.value + "px;");
-const wideCoverBoxStyle = computed<string>(() => "width:" + (wideCoverSize.value + 20) + "px;height:" + (wideCoverSize.value + 20) + "px;");
-const wideCoverImageStyle = computed<string>(() => "width:" + wideCoverSize.value + "px;height:" + wideCoverSize.value + "px;");
+const wideMetrics = computed(() => widePlayerMetrics(
+  layout.windowWidth, layout.windowHeight, statusBarPx(), layout.safeBottomPx,
+  wideShort.value, wideToolCount.value, fontScale.scale
+));
+const wideStageWidth = computed((): number => wideMetrics.value.stageWidthPx);
+const wideControlsStacked = computed((): boolean => wideMetrics.value.stacked);
+const wideStageStyle = computed((): string => "width:" + wideStageWidth.value + "px;padding-top:" + wideMetrics.value.padTopPx + "px;padding-bottom:" + wideMetrics.value.padBottomPx + "px;");
+const wideLyricToolsStyle = computed((): string => "height:" + wideMetrics.value.lyricHeightPx + "px;margin-top:" + wideMetrics.value.lyricMarginPx + "px;");
+const wideProgressStyle = computed((): string => "height:" + wideMetrics.value.progressHeightPx + "px;margin-top:" + wideMetrics.value.progressMarginPx + "px;");
+const wideControlsStyle = computed((): string => "height:" + wideMetrics.value.controlsHeightPx + "px;margin-top:" + wideMetrics.value.controlsMarginPx + "px;");
+const wideTransportStyle = computed((): string => "height:" + wideMetrics.value.controlsRowPx + "px;");
+const wideToolsWingStyle = computed((): string => "height:" + (wideControlsStacked.value ? wideMetrics.value.toolsRowPx - 6 : wideMetrics.value.controlsRowPx) + "px;");
+const wideArtColumnPx = computed((): number => Math.floor(wideMetrics.value.stageWidthPx * 0.38));
+const wideArtPx = computed((): number => wideMetrics.value.coverCardPx);
+const wideArtStyle = computed((): string => "width:" + wideArtPx.value + "px;height:" + wideArtPx.value + "px;");
+const wideVinylLabelStyle = computed((): string => "width:" + wideArtPx.value * 0.56 + "px;height:" + wideArtPx.value * 0.56 + "px;border-radius:" + wideArtPx.value * 0.28 + "px;");
+function vinylRingStyle(inset: number): string {
+  const offset = wideArtPx.value * inset;
+  return "left:" + offset + "px;top:" + offset + "px;right:" + offset + "px;bottom:" + offset + "px;border-radius:" + wideArtPx.value / 2 + "px;";
+}
+const wideFocusHeight = computed((): number => Math.max(0, wideMetrics.value.bodyHeightPx - wideMetrics.value.lyricHeightPx - wideMetrics.value.lyricMarginPx - 110 * fontScale.scale));
+const compactFocusHeight = computed((): number => Math.max(0, layout.windowHeight - statusBarPx() - layout.safeBottomPx - (96 + 150 * fontScale.scale + 28 + 284 + 68 + portraitMetrics.value.metaRowRpx) * portraitUnit.value));
+const portraitGalleryStyle = computed((): string => "margin-top:" + (statusBarRpx.value + portraitMetrics.value.artTopRpx) + "rpx;width:" + portraitCoverSizeRpx.value + "rpx;height:" + portraitCoverSizeRpx.value + "rpx;");
 const coverFadeStyle = computed<string>(() => "opacity:" + (coverShown.value ? "1" : "0") + ";transition:opacity 0.32s ease-out;");
 const sheetSlideStyle = computed<string>(() => "transform:translateY(" + (sheetIn.value ? "0" : "40px") + ");transition:transform 0.24s ease-out;");
 /**
@@ -921,10 +946,10 @@ const sheetSlideStyle = computed<string>(() => "transform:translateY(" + (sheetI
  * 再居中压一块 560px 会同时遮住两栏，看起来像弹了无关窗口。
  * 居中弹窗（modal 档）留给歌词偏移、搜索歌词这类「短小确认」浮层。
  */
-const queueDrawerWideStyle = computed<string>(() => layout.isWide ? "width:" + qtSheetWidth("drawer") + "px;" : "");
+const queueDrawerWideStyle = computed((): string => (layout.isWide ? "width:" + qtSheetWidth("drawer") + "px;" : "") + "height:" + queueMetrics.value.panelHeightPx + "px;padding-bottom:" + layout.safeBottomPx + "px;");
 /** 歌词视口当前是否展示：宽屏右侧歌词面板常驻，竖屏看 showLyric。
     歌词的测量与自动跟随滚动一律以此为准 —— 之前错用竖屏的 showLyric 门控，宽屏歌词不跟随、定位错乱。 */
-const lyricVisible = computed((): boolean => layout.isWide || showLyric.value);
+const lyricVisible = computed((): boolean => playingStyle.style == "classic" && (layout.isWide || showLyric.value));
 
 /** 桌面歌词开关状态：与 services/desktop-lyric 的真相同步（onShow 里重读一次） */
 const lyricOn = ref(desktopLyric.isEnabled());
@@ -978,14 +1003,15 @@ const navStyle = computed((): string => {
 });
 /** Budget the song/singer/current-lyric rows and fixed controls first; only the disc can shrink. */
 const portraitUnit = computed((): number => Math.max(layout.windowWidth, 1) / 750);
+const portraitStageStyle = computed((): string => "margin-bottom:" + layout.safeBottomPx + "px;");
 const portraitMetrics = computed(() => portraitPlayerMetrics(
   layout.windowWidth, layout.windowHeight, statusBarRpx.value * portraitUnit.value,
   layout.safeBottomPx, fontScale.scale
 ));
 const portraitCoverSizeRpx = computed((): number => portraitMetrics.value.discRpx);
 const portraitTurntable = computed(() => turntableMetrics(portraitCoverSizeRpx.value));
-const portraitCoverStyle = computed((): string => "margin-top:" + (statusBarRpx.value + portraitMetrics.value.artTopRpx) + "rpx;width:" + portraitTurntable.value.widthRpx.toFixed(2) + "rpx;height:" + portraitTurntable.value.heightRpx.toFixed(2) + "rpx;");
-const portraitTrackStyle = computed((): string => "min-height:" + (portraitMetrics.value.titleRowRpx + portraitMetrics.value.artistRowRpx + portraitMetrics.value.lyricRowRpx + 16) + "rpx;");
+const portraitTurntableStyles = computed(() => turntableStyles(portraitTurntable.value, portraitUnit.value));
+const portraitTrackStyle = computed((): string => "min-height:" + (portraitMetrics.value.titleRowRpx + portraitMetrics.value.artistRowRpx + portraitMetrics.value.lyricRowRpx + 16) + "rpx;margin-top:" + portraitMetrics.value.trackTopRpx + "rpx;margin-bottom:" + portraitMetrics.value.trackBottomRpx + "rpx;");
 const portraitTitleRowStyle = computed((): string => "height:" + portraitMetrics.value.titleRowRpx + "rpx;");
 const portraitArtistRowStyle = computed((): string => "height:" + portraitMetrics.value.artistRowRpx + "rpx;");
 const portraitLyricRowStyle = computed((): string => "height:" + portraitMetrics.value.lyricRowRpx + "rpx;");
@@ -1014,16 +1040,9 @@ const playingLocalFile = computed((): boolean => {
 const portraitLocalBadgeWidthRpx = computed((): number => Math.ceil(4 * 20 * fontScale.scale + 20));
 const portraitLocalBadgeStyle = computed((): string => "width:" + portraitLocalBadgeWidthRpx.value + "rpx;background-color:" + playerRail.value + ";color:" + playerInk.value + ";");
 /** Native material images share one canvas; the rotating wrapper is record-sized and centered. */
-const portraitDiscWrapStyle = computed((): string => portraitCoverStyle.value + "position:relative;align-self:center;");
-const portraitDiscPlateStyle = computed((): string => {
-  const m = portraitTurntable.value;
-  return "position:absolute;left:" + m.recordLeftRpx.toFixed(2) + "rpx;top:" + m.recordTopRpx.toFixed(2) + "rpx;width:" + m.recordRpx.toFixed(2) + "rpx;height:" + m.recordRpx.toFixed(2) + "rpx;border-radius:" + (m.recordRpx / 2).toFixed(2) + "rpx;";
-});
-const portraitDiscImgStyle = computed((): string => {
-  const m = portraitTurntable.value;
-  const off = (m.recordRpx - m.coverRpx) / 2;
-  return "position:absolute;left:" + off.toFixed(2) + "rpx;top:" + off.toFixed(2) + "rpx;width:" + m.coverRpx.toFixed(2) + "rpx;height:" + m.coverRpx.toFixed(2) + "rpx;border-radius:" + (m.coverRpx / 2).toFixed(2) + "rpx;";
-});
+const portraitDiscWrapStyle = computed((): string => portraitTurntableStyles.value.canvasSize + "position:relative;align-self:center;margin-top:" + ((statusBarRpx.value + portraitMetrics.value.artTopRpx) * portraitUnit.value).toFixed(2) + "px;");
+const portraitDiscPlateStyle = computed((): string => portraitTurntableStyles.value.plate + "background-color:" + theme.skin.coverPlaceholder + ";");
+const portraitDiscImgStyle = computed((): string => portraitTurntableStyles.value.cover);
 /* 唱片慢转（2026-11 美化，用户 m18202）：播放中转、暂停即停，真实黑胶只有唱臂静止。
    animate API 与 qt-marquee.uvue 同款（UniElement.animate，项目内已验证），
    cancel 即停；恢复时重开一轮（角度归零，视觉差异可忽略）。
@@ -1063,7 +1082,7 @@ function startDiscSpin(): void {
 /* 转动中留空（transform 交给 animate 驱动），停转时强制归零 —— 见 stopDiscSpin 注释 */
 const discSpinStyle = computed((): string => (discSpinActive.value ? "" : "transform:none;"));
 function syncDiscSpin(): void {
-  if (pageVisible.value && player.playing && !showLyric.value && !layout.isWide) startDiscSpin();
+  if (pageVisible.value && player.playing && playingStyle.style == "classic" && (layout.isWide || !showLyric.value)) startDiscSpin();
   else stopDiscSpin();
 }
 // A mode/ref replacement must cancel the old node before starting the new record.
@@ -1093,54 +1112,83 @@ function statusBarPx(): number {
     return 0;
   }
 }
-/**
- * 队列行距：手机端 .queue-row 固定 104rpx，宽屏 60px。保留浮点精度；
- * 行的 top 全部由 index × 行距独立算出（绝对定位），不存在逐行累积误差。
- */
-function queueStridePx(): number {
-  if (layout.isWide) return 60;
-  try {
-    return qtRpx(104);
-  } catch (_) {
-    return 52;
-  }
-}
-/** 撑出真实内容高度的容器：几千条也只是一个数字，不产生节点 */
-const queueContentHeight = computed((): number => Math.ceil(player.queue.length * queueStridePx()));
+const queueMetrics = computed(() => playerQueueMetrics(layout.windowWidth, layout.windowHeight, layout.isWide, layout.safeBottomPx, fontScale.scale));
+const queueViewportPx = computed((): number => queueViewportMeasuredPx.value > 0 ? queueViewportMeasuredPx.value : queueMetrics.value.viewportPx);
+const queueRowStyle = computed((): string => "height:" + queueMetrics.value.stridePx + "px;");
+function queueStridePx(): number { return queueMetrics.value.stridePx; }
+/** Same geometry as the row height and absolute tops, including same-isWide width/font changes. */
+const queueContentHeight = computed((): number => Math.ceil(player.queue.length * queueMetrics.value.stridePx));
 
-/** 依据当前滚动位置重建窗口：只渲染可视区 ± QUEUE_WINDOW_MARGIN 的行 */
+function captureQueueAnchor(): void {
+  const stride = queueStridePx();
+  queueAnchorIndex = Math.max(0, Math.min(player.queue.length - 1, Math.floor(queueScrollValue.value / stride)));
+  const song = player.queue[queueAnchorIndex];
+  queueAnchorKey = song == null ? "" : song.platform + ":" + song.id;
+  queueAnchorFraction = Math.max(0, Math.min(1, queueScrollValue.value / stride - queueAnchorIndex));
+}
+function restoreQueueAnchor(): void {
+  const keys = player.queue.map((song: Song): string => song.platform + ":" + song.id);
+  const target = playerQueueAnchorScroll(keys, queueAnchorKey, queueAnchorIndex, queueAnchorFraction, queueStridePx(), queueViewportPx.value);
+  queueScrollValue.value = target;
+  queueScrollTop.value = target;
+  rebuildQueueWindow();
+}
+/** Only render the actual viewport plus the existing overscan margin. Every rebuild refreshes row.top. */
 function rebuildQueueWindow(): void {
   const queue = player.queue;
-  if (queue.length == 0) {
-    queueWindow.value = [];
-    return;
-  }
   const stride = queueStridePx();
-  const first = Math.max(0, Math.floor(queueScrollValue.value / stride) - QUEUE_WINDOW_MARGIN);
-  const last = Math.min(queue.length - 1, Math.ceil((queueScrollValue.value + QUEUE_VIEWPORT_ESTIMATE) / stride) + QUEUE_WINDOW_MARGIN);
+  const window = playerQueueWindow(queue.length, stride, queueViewportPx.value, queueScrollValue.value, QUEUE_WINDOW_MARGIN);
+  if (window.scrollPx != queueScrollValue.value) {
+    queueScrollValue.value = window.scrollPx;
+    queueScrollTop.value = window.scrollPx;
+  }
   const rows: QueueRow[] = [];
-  for (let i = first; i <= last; i++) {
+  for (let i = window.first; i <= window.last; i++) {
     const song = queue[i];
     if (song == null) continue;
     rows.push({ index: i, song: song, key: song.platform + ":" + song.id + ":" + i, top: Math.round(i * stride) });
   }
   queueWindow.value = rows;
+  captureQueueAnchor();
 }
+function measureQueueViewport(seq: number, attempt: number = 0): void {
+  if (!pageAlive || !queueOpen.value || seq != queueMeasureSeq) return;
+  uni.createSelectorQuery().select(".queue-list-viewport").boundingClientRect((rect: UniNodeInfo) => {
+    if (!pageAlive || !queueOpen.value || seq != queueMeasureSeq) return;
+    if (rect != null && isFinite(rect.height) && rect.height > 0) {
+      queueViewportMeasuredPx.value = rect.height;
+      restoreQueueAnchor();
+    } else if (attempt < 3) {
+      queueMeasureTimer = setTimeout(() => measureQueueViewport(seq, attempt + 1), 120) as number;
+    }
+  }).exec();
+}
+function resetQueueViewport(): void {
+  queueMeasureSeq++;
+  if (queueMeasureTimer != null) clearTimeout(queueMeasureTimer);
+  queueMeasureTimer = null;
+  queueViewportMeasuredPx.value = 0;
+  const seq = queueMeasureSeq;
+  if (!queueOpen.value) return;
+  restoreQueueAnchor();
+  nextTick(() => measureQueueViewport(seq));
+}
+// Do not key this only on isWide: compact→compact and wide→wide resizes also change geometry.
+watch(() => layout.windowWidth + ":" + layout.windowHeight + ":" + layout.isWide + ":" + layout.safeBottomPx + ":" + fontScale.scale, () => resetQueueViewport());
+watch(queueOpen, () => resetQueueViewport());
 
 function onQueueScroll(e: any): void {
-  const st = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
+  const raw = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
+  const st = Math.max(0, isFinite(raw) ? raw : 0);
   const prevFirst = Math.floor(queueScrollValue.value / queueStridePx());
   queueScrollValue.value = st;
-  // 窗口首行没变就不重建，避免高频 scroll 触发无意义的 diff
-  if (queueWindow.value.length == 0 || Math.floor(st / queueStridePx()) != prevFirst) {
-    rebuildQueueWindow();
-  }
+  captureQueueAnchor();
+  // Preserve sub-row user offsets even when no window rebuild is needed.
+  if (queueWindow.value.length == 0 || Math.floor(st / queueStridePx()) != prevFirst) rebuildQueueWindow();
 }
-
-/** 把列表滚到第 index 行（scroll-view 的 scroll-top 与视觉 1:1，纯数学定位） */
 function scrollQueueToIndex(index: number): void {
   if (index < 0 || index >= player.queue.length) return;
-  const target = Math.round(index * queueStridePx());
+  const target = playerQueueWindow(player.queue.length, queueStridePx(), queueViewportPx.value, index * queueStridePx(), 0).scrollPx;
   queueScrollValue.value = target;
   queueScrollTop.value = target;
   rebuildQueueWindow();
@@ -1162,7 +1210,7 @@ watch(
   (): Song[] => player.queue,
   () => {
     if (!queueOpen.value) return;
-    rebuildQueueWindow();
+    restoreQueueAnchor();
   }
 );
 const lyricViewportHeightPx = ref(0);
@@ -1281,13 +1329,13 @@ function openPicker(event: any): void {
   openPickerFor(player.current, event);
 }
 
-/** 点收藏类入口：没有自建歌单时提示，否则弹歌单选择器 */
+/** 歌单选择器也承接首次新建，空列表同样可以打开。 */
 function pickPlaylistFor(song: Song | null, event: any): void {
-  if (!player.canPickPlaylist()) {
-    qtShowToast({ title: "还没有歌单，请先新建", icon: "none" });
-    return;
-  }
   openPickerFor(song, event);
+}
+
+function createPickerPlaylist(name: string): Playlist | null {
+  return player.createLocalPlaylist(name);
 }
 
 function getSelectedPlaylistIds(song: Song | null): string[] {
@@ -1309,54 +1357,9 @@ function handlePickerConfirm(selectedIds: string[]): void {
  * 确认是异步的，所以这里先把最终要生效的 id 集合算出来再一次性 apply，
  * 避免中间态把歌加进去了又撤回来。
  */
-function applyPickerSelectionWithDupCheck(song: Song, selectedIds: string[]): void {
-  const currentIds = player.pickerSelectedIds(song);
-  const addIds: string[] = [];
-  for (let i = 0; i < selectedIds.length; i++) {
-    if (currentIds.indexOf(selectedIds[i]) < 0) addIds.push(selectedIds[i]);
-  }
-  const check = player.collectDupConflicts(song, addIds);
-  if (check.conflicts.length == 0) {
-    finishPickerSelection(song, selectedIds);
-    return;
-  }
-  const finalIds: string[] = [];
-  for (let i = 0; i < check.passed.length; i++) finalIds.push(check.passed[i]);
-  for (let i = 0; i < selectedIds.length; i++) {
-    const id = selectedIds[i];
-    if (addIds.indexOf(id) < 0 && check.passed.indexOf(id) < 0) finalIds.push(id);
-  }
-  confirmDups(song, check.conflicts, finalIds);
-}
-
-/** 依次弹冲突确认，用户确认的歌单 id 追加进 pendingIds，全部问完才提交 */
-function confirmDups(song: Song, conflicts: CollectDupConflict[], pendingIds: string[]): void {
-  if (conflicts.length == 0) {
-    finishPickerSelection(song, pendingIds);
-    return;
-  }
-  const first = conflicts[0];
-  const rest: CollectDupConflict[] = [];
-  for (let i = 1; i < conflicts.length; i++) rest.push(conflicts[i]);
-    qtConfirm({
-    title: '同名歌曲提示',
-    content: collectDupMessage(first.playlistName, first.dups),
-    confirmText: '继续收藏',
-    cancelText: '取消',
-  }).then((ok: boolean) => {
-      const ids: string[] = [];
-      for (let i = 0; i < pendingIds.length; i++) ids.push(pendingIds[i]);
-      if (ok) ids.push(first.playlistId);
-      confirmDups(song, rest, ids);
-  });
-}
-
-function finishPickerSelection(song: Song, selectedIds: string[]): void {
-  const changed = player.applyPickerSelection(song, selectedIds);
-  qtShowToast({
-    title: changed ? '已更新收藏' : '未做更改',
-    icon: 'none'
-  });
+async function applyPickerSelectionWithDupCheck(song: Song, selectedIds: string[]): Promise<void> {
+  const changed = await player.applyPickerSelectionWithChoices(song, selectedIds);
+  qtShowToast({ title: changed ? '已更新收藏' : '未做更改', icon: 'none' });
 }
 
 function openActionSheet(title: string, actions: SheetAction[], select: (action: SheetAction, index: number) => void, selectedIndex: number = -1): void {
@@ -1383,7 +1386,7 @@ function onSheetSelect(action: SheetAction, index: number): void {
  */
 const WIDE_LYRIC_FONT = 27;
 /** 竖屏歌词页字号；宽屏面板行高固定 44px，维持原字号避免双语行溢出 */
-const PORTRAIT_LYRIC_FONT = 38;
+const PORTRAIT_LYRIC_FONT = 44;
 let lyricCenter = 300;
 const lyricPadRpx = ref(300);
 let lyricUnit = 0.5;
@@ -1429,6 +1432,7 @@ const portraitCurrentLyric = computed((): string => {
 });
 
 function cycleRate(): void {
+  if (casting.value) return;
   rateIndex.value = (rateIndex.value + 1) % rates.length;
   const rate = rates[rateIndex.value];
   audioPlayer.changeRate(rate);
@@ -1522,6 +1526,9 @@ async function openSourceSwitch(force: boolean = false): Promise<void> {
   const current = player.current;
   if (current == null) return;
   if (sourceSwitchLoading.value) return;
+  // 同一首歌可能在 A→B→A 之间快速切换。仅比较 platform/id 不足以区分
+  // 旧搜索结果，必须把播放动作代次带进异步搜索的守卫。
+  const switchRevision = player.playbackRevision();
   // 命中缓存：同步弹列表，连 showLoading 都不弹（弹了会闪一下）
   if (!force) {
     const cached = peekSourceCandidates(current);
@@ -1530,7 +1537,7 @@ async function openSourceSwitch(force: boolean = false): Promise<void> {
         qtShowToast({ title: "其他音源没有找到匹配的歌曲", icon: "none" });
         return;
       }
-      showSourceCandidates(cached);
+      showSourceCandidates(current, cached);
       return;
     }
   }
@@ -1543,7 +1550,8 @@ async function openSourceSwitch(force: boolean = false): Promise<void> {
       qtShowToast({ title: "其他音源没有找到匹配的歌曲", icon: "none" });
       return;
     }
-    showSourceCandidates(candidates);
+    if (player.playbackRevision() != switchRevision || player.current == null || player.current.id != current.id || player.current.platform != current.platform) return;
+    showSourceCandidates(current, candidates);
   } catch (_) {
     finishLoading(switchToken);
     qtShowToast({ title: "搜索失败，请稍后再试", icon: "none" });
@@ -1553,11 +1561,13 @@ async function openSourceSwitch(force: boolean = false): Promise<void> {
 }
 
 /** 把候选铺成 ActionSheet：名称带歌手与平台短名，选中就地替换当前曲目 */
-function showSourceCandidates(candidates: Song[]): void {
+function showSourceCandidates(original: Song, candidates: Song[]): void {
+  const revision = player.playbackRevision();
   const actions: SheetAction[] = candidates.map((c) => ({
     name: c.name + " - " + c.singer + "（" + platformShort(c.platform) + "）",
   }));
   openActionSheet("换源", actions, (_action, index) => {
+    if (player.playbackRevision() != revision || player.current == null || player.current.id != original.id || player.current.platform != original.platform) return;
     applySourceCandidate(candidates[index]);
   });
 }
@@ -1566,46 +1576,54 @@ function showSourceCandidates(candidates: Song[]): void {
 function applySourceCandidate(candidate: Song): void {
   const current = player.current;
   if (current == null || candidate == null) return;
-  current.id = candidate.id;
-  current.name = candidate.name;
-  current.singer = candidate.singer;
-  current.album = candidate.album;
-  current.picUrl = candidate.picUrl;
-  current.platform = candidate.platform;
-  current.url = "";
-  current.musicId = candidate.musicId;
-  if (candidate.duration != null) current.duration = candidate.duration;
-  player.play(current, player.queue, true);
+  try {
+    savePreferredSource(current, candidate);
+    musicApi.invalidatePlayUrl(current, player.effQualityOf(current));
+    musicApi.invalidatePreferredSource(current);
+  } catch (_) {
+    qtShowToast({ title: "音源偏好保存失败，请重试", icon: "none" });
+    return;
+  }
+  const next: Song = { ...candidate, url: "" };
+  const index = player.currentIndex();
+  const queue = player.queue.slice();
+  if (index >= 0) queue[index] = next;
+  player.play(next, queue, true, false, player.radioActive);
+  qtShowToast({ title: "已保存该歌曲的播放音源", icon: "none" });
 }
 
+/** Paint-only focus never changes row geometry, so centering stays valid as playback advances. */
+function lyricBlurPx(index: number): number {
+  const blur = lyricLineBlur.value;
+  return index >= 0 && index < blur.length ? blur[index]! * fontScale.scale : 0;
+}
 function lrcStyle(index: number): string {
-  // 高亮行只加粗变色不放大：放大会让行高随高亮位置漂移，实测行高失效
+  // 高亮行只加粗变色不放大：放大会让行高随高亮位置漂移，实测行高失效。
   const base = layout.isWide ? WIDE_LYRIC_FONT : PORTRAIT_LYRIC_FONT;
-  // 宽屏下 rpx 被放大约 2.7 倍，改用绝对 px（按 750 设计稿折算：1rpx≈0.7px）
   const unit = layout.isWide ? "px" : "rpx";
   const scale = layout.isWide ? 0.7 : 1;
-  return "font-size:" + Math.round(base * scale * fontScale.scale) + unit + ";color:" + (index == activeLyric.value ? playerInk.value : playerMuted.value) + ";";
+  const color = index == activeLyric.value ? playerInk.value : playerMuted.value;
+  return "font-size:" + Math.round(base * scale * fontScale.scale) + unit + ";"
+    + lyricTextFocusStyle(color, lyricBlurPx(index));
 }
 function lrcTrStyle(index: number): string {
-  // 翻译行固定用弱色：主句高亮时翻译也不抢眼（双语主/译层级对照目标样式）。
-  // 翻译相对主句缩得更多（-12），对齐参考样式的主/译 0.7 比例
+  // 译文仍使用弱色；与主句共享距离柔焦，不抢当前行的视觉焦点。
   const base = layout.isWide ? WIDE_LYRIC_FONT : PORTRAIT_LYRIC_FONT;
   const size = base - 12;
   const unit = layout.isWide ? "px" : "rpx";
   const scale = layout.isWide ? 0.7 : 1;
-  return "font-size:" + Math.round(size * scale * fontScale.scale) + unit + ";color:" + playerMuted.value + ";";
+  return "font-size:" + Math.round(size * scale * fontScale.scale) + unit + ";"
+    + lyricTextFocusStyle(playerMuted.value, lyricBlurPx(index));
 }
-/** 罗马音：与译文同字号同色系（都排在主句之下的副文本），不再单独分一档 */
+/** 罗马音：与译文同字号；柔焦属性必须直接落在 text，不能依赖父 view 继承。 */
 function lrcRomaStyle(index: number): string {
   const base = layout.isWide ? WIDE_LYRIC_FONT : PORTRAIT_LYRIC_FONT;
   const size = base - 12;
   const unit = layout.isWide ? "px" : "rpx";
   const scale = layout.isWide ? 0.7 : 1;
-  // 手机读音提示跟随共享前景，不能把白色带入浅灰背景；宽屏高亮仍保持原色。
-  const color = layout.isWide && index == activeLyric.value
-    ? "rgba(255,255,255,0.60)"
-    : (index == activeLyric.value ? playerInk.value : playerMuted.value);
-  return "font-size:" + Math.round(size * scale * fontScale.scale) + unit + ";color:" + color + ";";
+  const color = index == activeLyric.value ? playerInk.value : playerMuted.value;
+  return "font-size:" + Math.round(size * scale * fontScale.scale) + unit + ";"
+    + lyricTextFocusStyle(color, lyricBlurPx(index));
 }
 
 // ===== 逐字卡拉 OK 渲染 =====
@@ -1631,7 +1649,7 @@ function isKaraokeLine(line: LyricLine, index: number): boolean {
  * 为什么必须写在**每个词的 <text>** 上，而不能像原来那样写在行容器 <view> 上：
  * app-uvue 的样式不继承（官方 CSS 文档「样式不继承」：父子组件属性隔离，父元素样式不影响子元素），
  * 写在 <view> 上的 font-size 对子 <text> 完全无效 —— 逐字行的每个词因此一直回落到
- * css reset 的默认 16px，比普通行（.lrc-wide 16px / 竖屏 38rpx）还小，这就是「逐字播放时字体很小」。
+ * css reset 的默认 16px，比普通行的动态基准字号还小，这就是「逐字播放时字体很小」。
  * 用 computed 缓存：字形串只在 layout/字号变化时重算，不再每次渲染给每个词拼一遍。
  */
 const karaokeFontSize = computed((): string => {
@@ -1647,11 +1665,12 @@ const karaokeFontSize = computed((): string => {
 function karaokeWordStyle(wordIndex: number): string {
   const sung = wordIndex < karaokeWordIndex.value;
   return "font-size:" + karaokeFontSize.value + ";"
-    + "color:" + (sung ? playerInk.value : playerMuted.value) + ";";
+    + lyricTextFocusStyle(sung ? playerInk.value : playerMuted.value, lyricBlurPx(activeLyric.value));
 }
-/** 填充层的高亮字样式：与底色层**同字号同字重**，否则字形宽度不等、裁剪边界会错位 */
+/** 双层字形同字号、字重与柔焦：手动浏览时不能让清晰的填充层盖住柔焦底层。 */
 function karaokeLitStyle(): string {
-  return "font-size:" + karaokeFontSize.value + ";color:" + playerInk.value + ";";
+  return "font-size:" + karaokeFontSize.value + ";"
+    + lyricTextFocusStyle(playerInk.value, lyricBlurPx(activeLyric.value));
 }
 /**
  * 填充层宽度：按当前词的已唱比例裁掉右侧。
@@ -1782,13 +1801,13 @@ let lyricCenterTimer: number | null = null;
 const LYRIC_CENTER_MAX_RETRY = 4;
 
 function measureLyricCenter(): void {
-  if (!pageAlive) return;
+  if (!pageAlive || !lyricVisible.value) return;
   lyricUnit = qtRpx(1);
   const query = uni.createSelectorQuery();
   query
     .select(".lyric-viewport")
     .boundingClientRect((rect: UniNodeInfo) => {
-      if (!pageAlive) return;
+      if (!pageAlive || !lyricVisible.value) return;
       if (rect != null && rect.height > 0) {
         lyricCenterRetry = 0;
         lyricViewportHeightPx.value = Math.round(rect.height);
@@ -1827,13 +1846,13 @@ const LYRIC_MEASURE_MAX_RETRY = 4;
 
 /** 实测每行高度：selectAll 拿所有 .lyric-line 的 rect，整批有效才采纳 */
 function measureLyricLineHeights(): void {
-  if (!pageAlive) return;
+  if (!pageAlive || !lyricVisible.value) return;
   const seq = ++lyricMeasureSeq;
   const query = uni.createSelectorQuery();
   query
     .selectAll(".lyric-line")
     .boundingClientRect((rects: UniNodeInfo[]) => {
-      if (seq != lyricMeasureSeq) return;
+      if (!pageAlive || !lyricVisible.value || seq != lyricMeasureSeq) return;
       const hs: number[] = [];
       let ok = rects.length > 0 && rects.length == lyricLines.value.length;
       for (let i = 0; i < rects.length; i++) {
@@ -1892,20 +1911,19 @@ function lyricLineMetrics(): { offsets: number[]; heights: number[] } {
   return { offsets, heights };
 }
 
-// 边缘渐隐：行中心距视口中心超过 LYRIC_FADE_FULL 开始变淡，到 LYRIC_FADE_ZERO 全透明。
-// 视口上缘贴标题栏、下缘贴操作栏，这两条边带（用户圈红的区域）不再停留可见歌词；
-// 中部照常展示。自动跟随和手动滚动都按原生回报的实际位置算，目标不代表已经滚到。
+// 中心清晰、远行渐淡：使用实际视口距离，而不是当前行的下标差。
+// 自动跟随和手动浏览共用同一展示曲线；未完成测量时不隐藏首帧歌词。
 const lyricLineOpacity = ref<number[]>([]);
+const lyricLineBlur = ref<number[]>([]);
 let lyricActualScrollTop = 0;
 let lyricOpacityTimer: number | null = null;
-const LYRIC_FADE_FULL = 0.68;
-const LYRIC_FADE_ZERO = 0.86;
 let lyricOpacityLastAt = 0;
 function computeLyricOpacity(scrollTop: number): void {
   const lines = lyricLines.value;
   // 估算行高只能用于定位；用它隐藏节点会把首帧中实际可见的后续歌词也隐藏。
   if (lines.length == 0 || lyricViewportHeightPx.value <= 0 || lyricLineHeightsPx.value.length != lines.length) {
     lyricLineOpacity.value = [];
+    lyricLineBlur.value = [];
     return;
   }
   const viewportHeight = lyricViewportHeightPx.value;
@@ -1913,17 +1931,16 @@ function computeLyricOpacity(scrollTop: number): void {
   const { offsets, heights } = lyricLineMetrics();
   // 与 lyricTargetFromScrollTop 相同的换算：scrollTop → 视口中心对应的内容坐标
   const viewCenter = scrollTop + viewportHeight / 2 - pad;
-  const full = viewportHeight / 2 * LYRIC_FADE_FULL;
-  const zero = viewportHeight / 2 * LYRIC_FADE_ZERO;
   const ops: number[] = [];
+  const blurs: number[] = [];
   for (let i = 0; i < lines.length; i++) {
     const d = Math.abs(offsets[i]! + heights[i]! / 2 - viewCenter);
-    let o = 1.0;
-    if (d >= zero) o = 0.0;
-    else if (d > full) o = 1.0 - (d - full) / (zero - full);
-    ops.push(Math.round(o * 100.0) / 100.0);
+    const focus = lyricFocusAt(d, viewportHeight);
+    ops.push(focus.opacity);
+    blurs.push(focus.blurPx);
   }
   lyricLineOpacity.value = ops;
+  lyricLineBlur.value = blurs;
 }
 function lineOpacityStyle(index: number): string {
   const arr = lyricLineOpacity.value;
@@ -2169,7 +2186,7 @@ function art(): string {
   // 在播本地文件有内嵌封面就用它（coverOf 内部回落到 song.picUrl，并把本地
   // 绝对路径补成 file:// —— 裸路径喂给 <image> 在真机上是静默空白）
   const src = current != null ? player.coverOf(current) : "";
-  if (artBareFallback.value && src.indexOf("file://") == 0 && src == artBareKey) return src.substring(7);
+  if (artBareFallback.value && src.indexOf("file://") == 0 && src == artBareKey) return decodeURI(src.substring(7));
   return src;
 }
 
@@ -2178,9 +2195,9 @@ function onArtError(_event: any): void {
   const current = player.current;
   if (current == null) return;
   const src = player.coverOf(current);
-  if (src.indexOf("file://") != 0) return;
+  if (src.indexOf("file://") != 0) { player.recoverCover(current, src); return; }
   // 同一地址已降级过就到此为止（裸路径再失败也不死循环）；换新地址重新登记
-  if (artBareFallback.value && src == artBareKey) return;
+  if (artBareFallback.value && src == artBareKey) { player.recoverCover(current, src); return; }
   // 按地址登记：切歌/换封面后新地址不受旧失败牵连（R7：原来是页面级
   // 永久降级，一次失败后所有 file:// 封面都被剥前缀）
   artBareKey = src;
@@ -2405,7 +2422,7 @@ function progThumbLeft(): number {
   const width = progTrackWidth();
   if (width <= 0) return 0;
   const fillPx = (displayProgress.value / d) * width;
-  const size = layout.isWide ? 20 : 16 * progUnit; // 16rpx 小圆点（m18202 细化，参考图极细进度条），宽屏对齐 .prog-thumb-wide 的 20px（R7：原脚本 14px 与 CSS 不一致，圆心偏移）
+  const size = layout.isWide ? 12 : 16 * progUnit; // 16rpx 小圆点（m18202 细化，参考图极细进度条），宽屏对齐 .prog-thumb-wide 的 20px（R7：原脚本 14px 与 CSS 不一致，圆心偏移）
   // 两端夹紧，保证圆点始终在轨道内且圆心贴住填充终点
   return Math.max(0, Math.min(width - size, fillPx - size / 2));
 }
@@ -2437,6 +2454,7 @@ function measureProgTrackRetry(attempt: number): void {
     .exec();
 }
 function onProgTouchStart(event: UniTouchEvent): void {
+  if (!castCanSeek.value) return;
   const touch = event.touches[0];
   if (touch == null) return;
   measureProgTrack();
@@ -2454,6 +2472,7 @@ function onProgTouchMove(event: UniTouchEvent): void {
   previewBySeconds(progFromClientX(touch.clientX));
 }
 function onProgTouchEnd(event: UniTouchEvent): void {
+  if (!castCanSeek.value) return;
   if (!dragging.value) return;
   const changed = event.changedTouches;
   const touch = changed != null && changed.length > 0 ? changed[0] : null;
@@ -2483,6 +2502,7 @@ function seekBy(seconds: number): void {
   updateLyricScroll(true);
 }
 function toggleLyric(): void {
+  if (immersiveLyrics.value) return;
   showLyric.value = !showLyric.value;
   if (showLyric.value) {
     // v-if 切换后再测量，直接测量会拿到封面节点的尺寸或 0 高度。
@@ -2495,6 +2515,7 @@ function toggleLyric(): void {
     lyricPadPx.value = 0;
     lyricLineHeightsPx.value = [];
     lyricLineOpacity.value = [];
+    lyricLineBlur.value = [];
     nextTick(() => {
       measureLyricCenter();
       measureLyricLineHeights();
@@ -2526,10 +2547,6 @@ function previewCover(): void {
 }
 function toggleLike(): void {
   // 不再有内置的「我喜欢的歌曲」，点红心就是挑一个自建歌单收进去
-  if (!player.canPickPlaylist()) {
-    qtShowToast({ title: "还没有歌单，请先新建", icon: "none" });
-    return;
-  }
   openPicker(null);
 }
 function doDownload(): void {
@@ -2613,104 +2630,59 @@ function modeIconName(): string {
   return "repeat";
 }
 
+let qualityRequestSeq = 0;
 async function switchQuality(): Promise<void> {
   const current = player.current;
   if (current == null) return;
-  // 音质档位来自数据包注册表，并按当前歌曲的平台收敛（v5 契约：包侧声明了
-  // 该源可用档位，如 B 站无真无损就不展示 flac；未声明 = 全部档位）
-  //（未装包为空 → 提示去设置页安装）
+  const revision = player.playbackRevision();
   const qualities = sourceRegistry.sourceQualities(current.platform);
   if (qualities.length == 0) {
-    qtShowToast({ title: "请先在 设置→音源包管理 安装数据包", icon: "none" });
+    qtShowToast({ title: "请先在设置中安装数据包", icon: "none" });
     return;
   }
-  // 红色选择对齐实际生效档位；未知档位不误选首项，命令索引仍对应 qualities。
-  const effQ = player.effQualityOf(current);
   const qActions: SheetAction[] = qualities.map((q) => ({ name: q.name }));
-  const qualitySelectedIndex = qualities.findIndex((q) => q.id == effQ);
   openActionSheet("选择音质", qActions, async (_action, index) => {
+    const request = ++qualityRequestSeq;
+    const valid = (): boolean => request == qualityRequestSeq && player.playbackRevision() == revision && player.current === current;
+    if (!valid() || index < 0 || index >= qualities.length) return;
     const quality = qualities[index].id;
     try {
-      // 直接为当前歌曲获取新音质，不修改全局 player.quality
-      const newUrl = await musicApi.playUrl(current, quality);
-      if (newUrl.length == 0) {
-        qtShowToast({ title: "该音质暂不可用", icon: "none" });
-        return;
-      }
+      const candidate = { ...current } as Song;
+      const newUrl = await musicApi.playUrl(candidate, quality);
+      if (!valid()) return;
+      if (newUrl.length == 0) throw new Error("该音质暂不可用");
       current.url = newUrl;
-      // 落地平台独立播放档位（v12）：这个源以后都用这档，后续取链（懒解析/
-      // 预热/地址失效重取）经 player.effQualityOf 自动取到它
-      player.setSourceQuality(quality);
-      qtShowToast({
-        title: "音质已切换为 " + qualities[index].name,
-        icon: "none",
-      });
-      // 重新播放当前歌曲（保持当前播放进度）
-      player.play(current, player.queue, true);
+      player.setSourceQuality(quality, current.platform);
+      void player.play(current, player.queue, true);
+      qtShowToast({ title: "音质已切换为 " + qualities[index].name, icon: "none" });
       return;
     } catch (_) {
-      // 如果当前平台不支持该音质，尝试从其他平台搜索替换
-      // R7：跨源兜底先快照——原实现就地覆写 current 八字段，任何一环失败都
-      // 不回滚，脏元数据（url=""、别人的 id/平台）留在 current 上随 persist
-      // 落盘；且下一轮搜索关键词被上一轮覆写污染。现在探测期改写、每轮
-      // 收尾还原，只有换源成功那一刻的写入保留。
-      const snapId = current.id;
-      const snapName = current.name;
-      const snapSinger = current.singer;
-      const snapAlbum = current.album;
-      const snapPic = current.picUrl;
-      const snapPlatform = current.platform;
-      const snapUrl = current.url != null ? current.url : "";
-      const snapMusicId = current.musicId != null ? current.musicId : "";
-      const snapDuration = current.duration;
-      const others = SOURCES.value.filter((s) => s != current.platform);
-      for (let i = 0; i < others.length; i++) {
-        const target = others[i];
-        try {
-          const keyword = snapName + " " + snapSinger;
-          const results = await musicApi.search(keyword, target as any, "song", 1, 1);
-          if (results.length > 0) {
-            const picked = results[0];
-            // 保留原歌曲元数据，替换为其他平台版本（必须写回 current：
-            // playUrl/歌词预取按 current.platform 走新源；失败在轮尾统一回滚）
-            current.id = picked.id;
-            current.name = picked.name;
-            current.singer = picked.singer;
-            current.album = picked.album;
-            current.picUrl = picked.picUrl;
-            current.platform = picked.platform;
-            current.url = "";
-            current.musicId = picked.musicId;
-            if (picked.duration != null) current.duration = picked.duration;
-            const newUrl = await musicApi.playUrl(current, quality);
-            if (newUrl.length > 0) {
-              current.url = newUrl;
-              // 换源成功：给**新**平台落独立档位（current.platform 已替换成
-              // 换源结果，setSourceQuality 写的就是新平台的表项）
-              player.setSourceQuality(quality);
-              qtShowToast({ title: "已切换至" + platformShortName() + " " + quality, icon: "none" });
-              player.play(current, player.queue, true);
-              return;
-            }
-          }
-        } catch (_) {
-          // 静默：取链失败落到下方「未找到可替代的歌曲」提示
-        }
-        // 这一源没成：还原 current 再试下一源（关键词/展示不被污染）
-        current.id = snapId;
-        current.name = snapName;
-        current.singer = snapSinger;
-        current.album = snapAlbum;
-        current.picUrl = snapPic;
-        current.platform = snapPlatform;
-        current.url = snapUrl;
-        current.musicId = snapMusicId;
-        // 原歌没有 duration（可选字段）时保留 picked 的时长仅作展示，不回清
-        if (snapDuration != null) current.duration = snapDuration;
-      }
-      qtShowToast({ title: "未找到可替代的歌曲", icon: "none" });
+      // 旧尝试不得探测或提交到新的播放上下文。
+      if (!valid()) return;
     }
-  }, qualitySelectedIndex);
+    const others = SOURCES.value.filter((s) => s != current.platform);
+    for (let i = 0; i < others.length; i++) {
+      try {
+        const results = await musicApi.search(current.name + " " + current.singer, others[i] as any, "song", 1, 1);
+        if (!valid()) return;
+        if (results.length == 0) continue;
+        const picked = { ...results[0], url: "" } as Song;
+        const url = await musicApi.playUrl(picked, quality);
+        if (!valid()) return;
+        if (url.length == 0) continue;
+        picked.url = url;
+        player.setSourceQuality(quality, picked.platform);
+        const queue = player.queue.map((s: Song): Song => s === current ? picked : s);
+        void player.play(picked, queue, true);
+        qtShowToast({ title: "音质已切换为 " + qualities[index].name, icon: "none" });
+        return;
+      } catch (_) {
+        // 单源不可用时继续，但旧尝试立即作废。
+        if (!valid()) return;
+      }
+    }
+    if (valid()) qtShowToast({ title: "未找到可替代的歌曲", icon: "none" });
+  }, qualities.findIndex((q) => q.id == player.effQualityOf(current)));
 }
 
 function onDiscTap(): void {
@@ -2752,6 +2724,8 @@ function onTouchEnd(event: UniTouchEvent): void {
   }
 }
 function seekToLine(line: LyricLine): void {
+  // Only the classic scrollable timeline offers seeking; ignore stale events after a style switch.
+  if (!lyricVisible.value) return;
   // 点行跳转要跳到「这行歌词真正该出现的那一刻」，所以是 line.time + 偏移
   // （与 PC 侧 PlayingPage.tsx:196 `seekTo(ms + lyricOffset.offsetMs)` 同口径）。
   // 注意：这与进度条 seek 的规则相反 —— onProgTouchEnd/seekBy 里绝不能加偏移，
@@ -2799,7 +2773,7 @@ function openMore(): void {
     { name: "加入播放队列" },
     { name: downloaded ? "已在下载列表" : "下载到本地", disabled: downloaded },
     { name: "分享" },
-    { name: "倍速: " + currentRate + "x" },
+    { name: "倍速: " + currentRate + "x", disabled: casting.value },
     { name: "定时关闭" },
     { name: "查看歌手" },
   ];
@@ -2825,6 +2799,7 @@ function shareSong(song: Song): void {
   shareCard.open(song);
 }
 function openQueue(): void {
+  queueViewportMeasuredPx.value = 0;
   const index = player.currentIndex();
   // 挂载前写死初始位置（歌词区同款时机）：scroll-view 首次布局即落在当前行，
   // 窗口也先按这个位置算好，弹层一打开当前行就在可视区内
@@ -2892,7 +2867,7 @@ function removeAt(index: number): void {
   const current = player.current;
   // R7：必须比对象引用（player.current 与队列条目同引用）。按 id+platform
   // 判会把「同一首歌的重复条目」也当成当前曲，删掉它反而把播放切到相邻歌
-  const isRemovingCurrent = current != null && queue[index] === current;
+  const isRemovingCurrent = current != null && (queue[index] === current || (!queue.some((s: Song): boolean => s === current) && index == player.currentIndex()));
   const next: Song[] = [];
   for (let i = 0; i < queue.length; i++) {
     if (i != index) next.push(queue[i]);
@@ -3010,6 +2985,8 @@ async function loadLyric(): Promise<void> {
   // 不再打在线取词 —— 文件里那份与音频是同一份词，最准也最省一次请求。
   // 内嵌词是切歌时同步读好的（syncSongExtras），进页即命中；本地优先是异步补读的，
   // 补到之后由 watch(player.embeddedLyric) 再触发一次本函数。
+  const localFirstText = await player.lyricsForSong(current);
+  if (!lyricRequestIsCurrent(key, generation)) return;
   const embeddedLrc = player.embeddedLyricOf(current);
   if (embeddedLrc.length > 0) {
     const parsedEmbedded = buildLyricLines("", embeddedLrc, "", "");
@@ -3039,7 +3016,7 @@ async function loadLyric(): Promise<void> {
   }
   let lines: LyricLine[] | null = null;
   try {
-    const text = await musicApi.lyrics(current);
+    const text = localFirstText;
     const translation = await musicApi.lyricTranslation(current);
     // 新字段（音源包 2026-10 起）：老包没有 → 空串 → buildLyricLines 走普通 LRC 路径
     const wordByWord = await musicApi.lyricWordByWord(current);
@@ -3074,6 +3051,7 @@ function applyLyricLines(lines: LyricLine[]): void {
   // 滚动目标越界被原生钳位，歌词就停在错误位置不再跟随（重启 App 才恢复）。
   lyricLineHeightsPx.value = [];
   lyricLineOpacity.value = [];
+  lyricLineBlur.value = [];
   lyricMeasureSeq++;
   lyricMeasureRetry = 0;
   lyricCenterRetry = 0;
@@ -3205,7 +3183,10 @@ onMounted(() => {
     loadedKey = c.id + ":" + c.platform;
     loadLyric();
   });
-  watch(() => layout.windowWidth + ":" + layout.windowHeight, () => {
+  watch(() => layout.windowWidth + ":" + layout.windowHeight + ":" + playingStyle.style, () => {
+    showLyric.value = false;
+    stopDiscSpin();
+    nextTick(() => syncDiscSpin());
     // 旋转/分屏后轨道几何与常量兜底都要重算，否则圆点会按旧宽度定位
     progWidth.value = 0;
     refreshProgFallback();
@@ -3217,6 +3198,7 @@ onMounted(() => {
     lyricPadPx.value = 0;
     lyricLineHeightsPx.value = [];
     lyricLineOpacity.value = [];
+    lyricLineBlur.value = [];
     nextTick(() => {
       measureLyricCenter();
       measureLyricLineHeights();
@@ -3226,7 +3208,11 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  qualityRequestSeq++;
   pageAlive = false;
+  queueMeasureSeq++;
+  if (queueMeasureTimer != null) clearTimeout(queueMeasureTimer);
+  queueMeasureTimer = null;
   stopDiscSpin();
   // 逐字填充的 rAF 必须显式取消：虽然回调进场会判 pageAlive 直接返回，但句柄留着会一直
   // 参加下一帧的回调队列，页面已经销毁还在空转（qt-mini-player.uvue:86-91 同款处理）。
@@ -3264,12 +3250,12 @@ onUnmounted(() => {
 <style>
 .page { flex: 1; min-height: 0; position: relative; flex-direction: column; }
 /* 唯一背景层：手机封面与歌词共用随明暗切换的配色，不叠加歌词专用压暗层；宽屏保留媒体背景。 */
-.shade { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
+.shade { position: absolute; left: 0; top: 0; right: 0; bottom: 0; pointer-events: none; }
 .nav { position: absolute; left: 0; top: 0; right: 0; height: 96rpx; padding-left: 24rpx; padding-right: 24rpx; flex-direction: row; align-items: center; z-index: 5; }
 /* 宽屏左右内边距必须换 px：24rpx 在 1138dp 上≈36px，按钮会离边缘太远 */
 .nav-wide { padding-left: 24px; padding-right: 24px; }
-.nav-btn { width: 68rpx; height: 68rpx; align-items: center; justify-content: center; border-radius: 20rpx; }
-.nav-btn-wide { width: 40px; height: 40px; border-radius: 12px; }
+.nav-btn { margin-left: 12rpx; width: 68rpx; height: 68rpx; align-items: center; justify-content: center; }
+.nav-btn-wide { margin-left: 8px; width: 38px; height: 38px; }
 /* 标题栏：area 必须 stretch，title/artist 才能拿到确定的宽度，text-overflow: ellipsis 才会生效。
    之前 align-items: center 下子节点按内容宽度撑开并居中，长标题整行比可用宽度还宽，
    溢出后被屏幕两端裁掉——既没有省略号，歌名开头也被切掉。 */
@@ -3286,7 +3272,7 @@ onUnmounted(() => {
 
 .lyric { flex: 1; min-height: 0; }
 /* 歌词行：正常播放只显示歌词；手动滚动时目标行覆盖一条高亮提示条（时间在左、播放图标在右） */
-.lyric-line { padding: 20rpx 0; align-items: center; justify-content: center; position: relative; }
+.lyric-line { padding: 28rpx 0; align-items: center; justify-content: center; position: relative; transition: opacity 0.18s ease-out; }
 .lrc { width: 100%; text-align: center; }
 .lrc-active { font-weight: 700; }
 /* 逐字行：一行 <view> 横向排列若干「词容器」，靠 flex-wrap 换行（不能用 Web-only 的渐变裁字） */
@@ -3307,26 +3293,23 @@ onUnmounted(() => {
 .lrc-empty { font-size: 26rpx; }
 
 /* 上下留白由 wideStageStyle 内联给出（矮窗要收紧），这里只管左右 */
-.wide-stage { flex: 1; min-height: 0; flex-direction: column; padding-left: 18px; padding-right: 18px; }
+.wide-stage { align-self: center; flex: 1; min-height: 0; flex-direction: column; padding-left: 18px; padding-right: 18px; }
 .wide-body { flex: 1; min-height: 0; flex-direction: row; align-items: stretch; justify-content: center; }
-.wide-left { align-items: center; justify-content: center; flex-shrink: 0; }
-.cover-card { padding: 10px; align-items: center; justify-content: center; border-width: 1px; border-style: solid; border-radius: 18px; }
-.cover-img { border-radius: 12px; }
-.cover-empty { align-items: center; justify-content: center; }
-.disc-spin { width: 100%; height: 100%; align-items: center; justify-content: center; }
-.wide-right { flex: 1; min-width: 0; height: 100%; margin-left: 18px; padding: 14px; flex-direction: column; border-width: 1px; border-style: solid; border-radius: 16px; overflow: hidden; }
+.wide-left { min-height: 0; overflow: hidden; align-items: center; justify-content: center; flex-shrink: 0; }
+.disc-spin { position: relative; width: 100%; height: 100%; flex-shrink: 0; align-items: center; justify-content: center; }
+.wide-right { flex: 1; min-width: 0; height: 100%; margin-left: 18px; padding: 0 24px; flex-direction: column; overflow: hidden; }
 .track-head { flex-direction: row; align-items: flex-start; }
 /* 曲名块在封面下方：左对齐卡宽（宽度由模板内联给出），与封面卡之间留 12px */
 .track-head-under { margin-top: 12px; }
 .track-copy { flex: 1; min-width: 0; }
-.track-title { font-size: 18px; line-height: 24px; font-weight: 700; }
+.track-title { font-size: 18px; font-weight: 700; }
 .track-artist { margin-top: 5px; font-size: 12px; }
 /* 宽屏「平台 + 码率」行：与竖屏 .nav-meta-row 同构，px 口径 */
 .track-meta-row { margin-top: 7px; flex-direction: row; align-items: center; }
 .track-meta-badge { flex-shrink: 0; padding: 2px 7px; border-radius: 5px; font-size: 10px; }
 .track-meta-bitrate { margin-left: 7px; flex-shrink: 0; font-size: 11px; }
 .control-tools-wide { flex-direction: row; align-items: center; }
-.tool-btn { width: 38px; height: 38px; margin-left: 8px; align-items: center; justify-content: center; border-radius: 10px; }
+.tool-btn { width: 38px; height: 38px; margin-left: 8px; align-items: center; justify-content: center; }
 .queue-preview { flex: 1; min-height: 0; margin-top: 12px; padding: 10px; background-color: rgba(255,255,255,0.05); border-radius: 11px; overflow: hidden; }
 .preview-head { flex-direction: row; align-items: center; justify-content: space-between; }
 .preview-title { color: rgba(255,255,255,0.82); font-size: 12px; font-weight: 700; }
@@ -3346,9 +3329,10 @@ onUnmounted(() => {
 
 /* 歌词工具行：竖屏时落在工具图标行上方（播放栏的上面的上面），只在歌词视图出现 */
 .lyric-tools-row { height: 60rpx; margin-top: 8rpx; padding: 0 24rpx; flex-direction: row; align-items: center; justify-content: flex-end; }
-.lyric-tools-row-wide { height: 34px; margin-top: 6px; padding: 0 8px; }
-.lyric-tool { height: 52rpx; padding: 0 22rpx; margin-left: 16rpx; flex-direction: row; align-items: center; border-radius: 26rpx; }
-.lyric-tool-wide { height: 32px; padding: 0 12px; margin-left: 8px; border-radius: 16px; }
+.lyric-tools-scroll { flex-shrink: 0; }
+.lyric-tools-row-wide { padding: 0; flex-shrink: 0; flex-direction: row; align-items: center; justify-content: flex-end; }
+.lyric-tool { height: 52rpx; padding: 0 22rpx; margin-left: 16rpx; flex-direction: row; align-items: center; }
+.lyric-tool-wide { height: 32px; padding: 0 12px; margin-left: 8px; flex-shrink: 0; }
 .lyric-tool-text { margin-left: 8rpx; font-size: 22rpx; }
 .lyric-tool-text-wide { margin-left: 4px; font-size: 11px; }
 
@@ -3376,11 +3360,10 @@ onUnmounted(() => {
    这里只留不随尺寸变的布局属性，避免两处各写一份数值又对不上 */
 .disc-wrap { align-self: center; flex-shrink: 0; }
 .disc-plate { align-items: center; justify-content: center; }
-.turntable-layer { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
-.turntable-record { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
-.disc-spin { width: 100%; height: 100%; align-items: center; justify-content: center; }
+.turntable-layer { position: absolute; left: 0; top: 0; flex-shrink: 0; pointer-events: none; }
+.turntable-record { position: absolute; left: 0; top: 0; flex-shrink: 0; pointer-events: none; }
 /* Text has a nonzero, scaled minimum height; disc geometry reserves it before growing. */
-.track-block { flex: 1; flex-shrink: 0; margin-top: 28rpx; margin-bottom: 16rpx; padding: 0 12rpx; justify-content: flex-end; }
+.track-block { flex-shrink: 0; margin-top: 28rpx; margin-bottom: 16rpx; padding: 0 12rpx; }
 .track-row { flex-direction: row; align-items: center; flex-shrink: 0; }
 .track-row-artist { margin-top: 8rpx; opacity: 0.8; }
 .track-row-lyric { margin-top: 8rpx; }
@@ -3392,6 +3375,7 @@ onUnmounted(() => {
 .prog-quality { flex: 1; text-align: center; }
 /* Secondary functions remain quieter than transport controls; hit areas stay large. */
 .bar-row { height: 88rpx; flex-shrink: 0; margin-top: 0rpx; padding: 0 12rpx; flex-direction: row; align-items: center; }
+.compact-icon-button { width: 68rpx; height: 68rpx; align-items: center; justify-content: center; }
 .bar-hit { flex: 1; height: 88rpx; align-items: center; justify-content: center; }
 /* 更多弹层：比通用 sheet 矮（一行行开关，最多 8 项） */
 .sheet-bar { height: 52%; }
@@ -3405,13 +3389,14 @@ onUnmounted(() => {
 /* 歌词预览区样式已删（用户 m16808） */
 .mask { position: fixed; left: 0; top: 0; right: 0; bottom: 0; justify-content: flex-end; z-index: 999; }
 .sheet { height: 70%; border-radius: 32rpx 32rpx 0 0; border-width: 1px; border-style: solid; }
-.sheet-handle { width: 72rpx; height: 8rpx; margin-top: 16rpx; margin-bottom: 12rpx; border-radius: 4rpx; align-self: center; }
-.sheet-head { height: 96rpx; padding: 0 34rpx; flex-direction: row; align-items: center; }
+.sheet-handle { width: 72rpx; height: 8rpx; margin-top: 16rpx; margin-bottom: 12rpx; border-radius: 4rpx; align-self: center; flex-shrink: 0; }
+.sheet-head { height: 96rpx; padding: 0 34rpx; flex-direction: row; align-items: center; flex-shrink: 0; }
 .sheet-title { font-size: 30rpx; font-weight: 700; }
 .sheet-count { margin-left: 14rpx; font-size: 22rpx; }
 .sheet-actions { margin-left: auto; flex-direction: row; align-items: center; }
 .sheet-act { margin-left: 22rpx; }
-.sheet-list { flex: 1; }
+.sheet-list { flex: 1; min-height: 0; }
+.queue-list-viewport { min-height: 0; }
 /* 偏移弹层：比通用 sheet 矮很多（只有一条滑块 + 一排按钮），宽屏下也收窄成对话框宽度 */
 .offset-body { padding: 10rpx 40rpx 40rpx; align-items: center; }
 .offset-value { font-size: 46rpx; font-weight: 700; }
@@ -3434,7 +3419,7 @@ onUnmounted(() => {
 .cand-meta { margin-top: 5rpx; font-size: 21rpx; text-overflow: ellipsis; }
 .cand-badge { margin-left: 14rpx; flex-shrink: 0; padding: 4rpx 12rpx; border-radius: 10rpx; font-size: 18rpx; }
 .queue-spacer { position: relative; width: 100%; }
-.queue-row { position: absolute; left: 0; right: 0; height: 104rpx; padding: 0 34rpx; flex-direction: row; align-items: center; }
+.queue-row { position: absolute; left: 0; right: 0; padding: 0 34rpx; flex-direction: row; align-items: center; }
 .queue-row-active { }
 .queue-index { width: 48rpx; font-size: 22rpx; text-align: center; }
 .queue-index-active { color: #f2b8ba; }
@@ -3463,29 +3448,31 @@ onUnmounted(() => {
 .lrc-tr-wide { margin-top: 1px; font-size: 12px; }
 .lyric-empty-wide { height: 160px; }
 .lrc-empty-wide { font-size: 15px; }
-.progress-row-wide { height: 32px; margin: 12px 8px 0; padding: 0 8px; }
+.progress-row-wide { margin-left: 8px; margin-right: 8px; padding: 0 8px; flex-shrink: 0; flex-direction: row; align-items: center; }
 .prog-time-wide { width: 46px; font-size: 11px; }
-.prog-track-wide { top: 13px; height: 5px; border-radius: 3px; }
-.prog-fill-wide { top: 13px; height: 5px; border-radius: 3px; }
-.prog-thumb-wide { width: 20px; height: 20px; top: 6px; border-radius: 10px; }
-.controls-wide { height: 46px; margin: 8px 8px 0; padding: 0 8px; }
-.control-side { width: 36px; height: 36px; align-items: center; justify-content: center; border-radius: 10px; }
+.prog-track-wide { top: 15px; height: 2px; border-radius: 3px; }
+.prog-fill-wide { top: 15px; height: 2px; border-radius: 3px; }
+.prog-thumb-wide { width: 12px; height: 12px; top: 10px; border-radius: 6px; }
+.controls-wide { margin-left: 8px; margin-right: 8px; padding: 0 8px; flex-shrink: 0; flex-direction: row; align-items: center; justify-content: space-between; }
+.control-side { width: 36px; height: 36px; align-items: center; justify-content: center; }
 /* 横屏两翼等宽（flex:1）+ 中间播放键固定宽度 → 播放键恒在正中 */
-.control-wing { flex: 1; flex-direction: row; align-items: center; }
-.control-wing-left { justify-content: flex-start; }
+.control-wing { flex: 1; min-width: 0; flex-direction: row; align-items: center; }
+.control-wing-left { justify-content: flex-start; padding-right: 18px; }
 .control-wing-right { justify-content: flex-end; }
-.control-center-wide { flex-direction: row; align-items: center; }
+.control-center-wide { flex-direction: row; align-items: center; flex-shrink: 0; }
+.controls-stacked { position: relative; flex-direction: column; justify-content: flex-start; }
+.control-wing-left-stacked { position: absolute; left: 8px; top: 0; width: 36px; flex: 0; }
+.control-wing-right-stacked { flex-grow: 0; flex-shrink: 0; flex-basis: auto; width: 100%; margin-top: 6px; justify-content: flex-end; }
 .center-play { margin: 0 14px; }
 .icon-main-wide { width: 42px; height: 42px; border-radius: 21px; }
-/* 横屏矮窗（windowHeight < 520，见 wideShort）：三行控件收紧，给封面腾出高度。
-   与 -wide 同级（单类选择器），靠书写顺序覆盖，所以必须排在上面那批 -wide 之后。
-   数值与 WIDE_SHORT_BOTTOM_ROWS_PX = 116 严格对应：34+2 / 28+6 / 42+4。 */
-.lyric-tools-row-short { height: 34px; margin-top: 2px; }
-.progress-row-short { height: 36px; margin-top: 6px; }
-.controls-short { height: 42px; margin-top: 4px; }
-.control-side-short { width: 36px; height: 36px; border-radius: 10px; }
+/* Wide row heights/margins come only from wideMetrics: normal138 / short124,
+   plus the overflow tools row. Class heights must not compete with bound geometry in Vapor. */
+.lyric-tools-row-short { }
+.progress-row-short { }
+.controls-short { }
+.control-side-short { width: 36px; height: 36px; }
 .icon-main-short { width: 38px; height: 38px; border-radius: 19px; }
-.tool-btn-short { width: 36px; height: 36px; margin-left: 6px; border-radius: 9px; }
+.tool-btn-short { width: 36px; height: 36px; margin-left: 6px; }
 .mask-wide { justify-content: center; align-items: center; }
 /* 播放列表在宽屏改成右侧抽屉：贴内容区右缘、整高、左侧直角。
    原来和偏移/搜索弹层一样居中 560px，播放页本身已经是左右双栏，
@@ -3494,9 +3481,18 @@ onUnmounted(() => {
 .sheet-wide { height: 76%; border-radius: 16px; }
 .sheet-queue-wide { height: 100%; border-radius: 0; border-width: 0; border-style: solid; border-left-width: 1px; }
 .sheet-handle-drawer-wide { display: none; }
+.offset-scroll { min-height: 0; }
 .offset-body-wide { padding: 8px 28px 26px; }
 .offset-value-wide { font-size: 28px; }
-.offset-thumb-wide { width: 22px; height: 22px; border-radius: 11px; }
+.offset-track-wide { height: 36px; margin-top: 18px; }
+.offset-rail-wide { top: 14px; height: 6px; border-radius: 3px; }
+.offset-thumb-wide { top: 6px; width: 22px; height: 22px; border-radius: 11px; }
+.offset-scale-wide { margin-top: 8px; }
+.offset-scale-text-wide { font-size: 11px; }
+.offset-steps-wide { margin-top: 18px; }
+.offset-step-wide { height: 42px; margin: 0 6px; padding: 0 12px; border-radius: 21px; }
+.offset-step-text-wide { font-size: 14px; }
+.offset-note-wide { margin-top: 12px; font-size: 12px; line-height: 22px; }
 .cand-row-wide { height: 62px; margin: 0 24px 8px; padding: 0 16px; border-radius: 12px; }
 .cand-name-wide { font-size: 15px; }
 .cand-meta-wide { margin-top: 3px; font-size: 11px; }
@@ -3504,9 +3500,26 @@ onUnmounted(() => {
 .sheet-head-wide { height: 56px; padding: 0 24px; }
 .sheet-title-wide { font-size: 17px; }
 .sheet-count-wide { margin-left: 10px; font-size: 12px; }
-.queue-row-wide { height: 60px; padding: 0 24px; }
+.queue-row-wide { padding: 0 24px; }
 .queue-index-wide { width: 28px; font-size: 12px; }
 .queue-info-wide { margin-left: 12px; }
 .queue-name-wide { font-size: 15px; }
 .queue-meta-wide { margin-top: 3px; font-size: 11px; }
+.wide-vinyl { position: relative; background-color: #171717; border-radius: 500px; }
+.vinyl-groove { position: absolute; border-width: 1px; border-style: solid; border-color: #292929; }
+.vinyl-label { background-color: #0a0a0a; }
+.vinyl-spindle { position: absolute; width: 8px; height: 8px; border-radius: 4px; background-color: #9b9b9b; }
+.gallery-art { border-radius: 18px; overflow: hidden; align-items: center; justify-content: center; background-color: rgba(127,127,127,0.10); }
+.gallery-image { width: 100%; height: 100%; }
+.portrait-gallery { align-self: center; flex-shrink: 0; }
+.wide-track-head { padding: 8px 0 14px; flex-shrink: 0; }
+.wide-track-name { font-weight: 700; line-height: 1.3; }
+.wide-track-meta { margin-top: 10px; flex-direction: row; align-items: center; }
+.wide-track-artist { flex-shrink: 1; margin-right: 10px; }
+.wide-footer { margin-top: 10px; margin-left: -18px; margin-right: -18px; padding: 0 18px; border-top-width: 1px; border-top-style: solid; flex-shrink: 0; }
+.footer-cover { width: 38px; height: 38px; margin-right: 10px; border-radius: 8px; flex-shrink: 0; }
+.footer-copy { flex: 1; min-width: 0; margin-right: 10px; }
+.compact-focus-heading { padding: 18rpx 12rpx; flex-shrink: 0; }
+.compact-focus-name { font-weight: 600; line-height: 1.3; }
+.compact-focus-artist { margin-top: 12rpx; }
 </style>

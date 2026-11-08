@@ -142,6 +142,33 @@ const ID_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 /** 上限：留余量防止脏数据把存储撑爆 */
 const MAX_ACCOUNTS = 16;
 
+const accountRevisions = new Map<string, number>();
+export function sourceAuthRevision(source: string): number {
+  return accountRevisions.get(source) ?? 0;
+}
+function invalidateSourceAuth(source: string): void {
+  accountRevisions.set(source, sourceAuthRevision(source) + 1);
+}
+
+/** Compare both lifetime and stored identity, including delete→relogin with the same cookie. */
+export function sourceAuthAccountMatches(source: string, expected: SourceAuthAccount, revision: number): boolean {
+  if (sourceAuthRevision(source) != revision) return false;
+  const entries = readSourceAuthEntries();
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (e.source == source) return e.account.cookie == expected.cookie && e.account.savedAt == expected.savedAt && e.account.extrasJson == expected.extrasJson && e.account.user.id == expected.user.id;
+  }
+  return false;
+}
+
+/** Refresh is a compare-and-set, never an upsert of a deleted account. */
+export async function rotateSourceAuthAccount(source: string, expected: SourceAuthAccount, revision: number, cookie: string, user: SourceAuthUser, extrasJson: string): Promise<boolean> {
+  if (!sourceAuthAccountMatches(source, expected, revision)) return false;
+  // saveSourceAuthAccount commits synchronously before its first await.
+  await saveSourceAuthAccount(source, cookie, user, extrasJson);
+  return true;
+}
+
 function storageText(key: string): string | null {
   try {
     const raw = uni.getStorageSync(key);
@@ -341,6 +368,7 @@ export async function saveSourceAuthAccount(
   user: SourceAuthUser,
   extrasJson: string,
 ): Promise<void> {
+  invalidateSourceAuth(source);
   const account: SourceAuthAccount = { cookie: cookie, user: user, savedAt: nowIso(), extrasJson: extrasJson };
   const entries = readSourceAuthEntries();
   const next: SourceAuthEntry[] = [];
@@ -371,6 +399,7 @@ export async function saveSourceAuthAccount(
 /** 退出一个源的登录：清凭据 + 两面都清掉该源的注入。开关表条目保留——
  *  重新登录后还原用户之前的开关习惯。 */
 export async function removeSourceAuthAccount(source: string): Promise<void> {
+  invalidateSourceAuth(source);
   const entries = readSourceAuthEntries();
   const next: SourceAuthEntry[] = [];
   let found = false;
@@ -385,8 +414,7 @@ export async function removeSourceAuthAccount(source: string): Promise<void> {
   writeEntries(next);
   uni.$emit(SOURCE_AUTH_CHANGED_EVENT);
   try {
-    await authClearCredential("meta", source);
-    await authClearCredential("play", source);
+    await applySourceAuthForSource(source);
   } catch (_) {
     // 静默：引擎未就绪/旧包缺入口，内存副本随下次注入自然对齐（库里已删）
   }
@@ -686,7 +714,19 @@ export function mergeCredentialExtras(prevJson: string, refreshToken: string): s
  * 清单源单面而不是整面，别的源不受牵连。无凭据时两面清干净（引擎里可能
  * 残留旧副本）。失败抛给调用方决定提示。
  */
-async function applySourceAuthForSource(source: string): Promise<void> {
+let authApplyTail: Promise<void> = Promise.resolve();
+function applySourceAuthForSource(source: string): Promise<void> {
+  // Serial reconciliation prevents a late setAuth from racing a newer clearAuth.
+  // Read the current account when the queued task runs, not when it is requested.
+  const task = authApplyTail.then(() => applyLatestSourceAuth(source));
+  authApplyTail = task.catch((_) => {
+    // Keep the queue usable; the caller still receives task's rejection.
+  });
+  return task;
+}
+
+async function applyLatestSourceAuth(source: string): Promise<void> {
+  const revision = sourceAuthRevision(source);
   const entries = readSourceAuthEntries();
   let account: SourceAuthAccount | null = null;
   for (let i = 0; i < entries.length; i++) {
@@ -697,12 +737,14 @@ async function applySourceAuthForSource(source: string): Promise<void> {
   }
   if (account == null) {
     await authClearCredential("meta", source);
+    if (sourceAuthRevision(source) != revision) return;
     await authClearCredential("play", source);
     return;
   }
   const toggles = readSourceAuthTogglesFor(source);
   if (toggles.useMeta) await authSetCredential("meta", source, account.cookie);
   else await authClearCredential("meta", source);
+  if (sourceAuthRevision(source) != revision) return;
   if (toggles.usePlay) await authSetCredential("play", source, account.cookie);
   else await authClearCredential("play", source);
 }
@@ -756,17 +798,19 @@ export function refreshAllSourceAccounts(reason: string): Promise<KeepaliveStats
 
 async function doRefreshAllSourceAccounts(reason: string): Promise<KeepaliveStats> {
   const entries = readSourceAuthEntries();
+  const revisions = entries.map((entry) => sourceAuthRevision(entry.source));
   let rotated = 0;
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
+    const revision = revisions[i];
+    if (!sourceAuthAccountMatches(entry.source, entry.account, revision)) continue;
     try {
       const r = await authCheckUser(entry.source, entry.account.cookie, entry.account.extrasJson);
       // 失效跳过不删 / 未轮换跳过不写
       if (!r.ok || r.credential.length == 0) continue;
       const user = r.user != null ? r.user : entry.account.user;
       const extrasJson = mergeCredentialExtras(entry.account.extrasJson, r.refreshToken);
-      await saveSourceAuthAccount(entry.source, r.credential, user, extrasJson);
-      rotated += 1;
+      if (await rotateSourceAuthAccount(entry.source, entry.account, revision, r.credential, user, extrasJson)) rotated += 1;
     } catch (_) {
       // 静默：单源失败（网络/旧包缺入口）跳过不打扰用户，不影响其余源
     }

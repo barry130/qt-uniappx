@@ -205,22 +205,20 @@
         </view>
       </view>
     </view>
-    <!-- 宽屏常驻底部播放栏：挂在框架层，10 个带 MiniPlayer 的页面一次覆盖。
-         改造前只有 72px 浮动圆球，桌面语义差（要先点球展开、再点条进页），
-         且逐页 import 导致 10 个挂载点各自维护位置状态。 -->
-    <qt-player-bar v-if="showPlayerBar" />
-    <!-- 紧凑/medium 悬浮播放球：挂在框架层，全站页面一次覆盖。
-         组件内部自带 v-if（有当前歌曲 + 非宽屏），沉浸页（播放页）由下面的
-         !fullWidth 排除。所有页面渲染 mini-player-singleton.ts 里的同一份
-         共享状态（位置/展开/旋转），页面进出不再有「显示权交接」的闪烁
-         （2026-10-24 改造，详见 mini-player-singleton.ts 头注释）。 -->
-    <qt-mini-player v-if="!fullWidth" />
+    <!-- Mode is shared across orientations. Workspace owns its overlay controls. -->
+    <qt-player-bar v-if="showPlayerBar" @queue="queueOpen = true" />
+    <qt-playback-queue v-if="queueOpen" @close="queueOpen = false" />
+    <view v-if="showDockTab && reservePlayerBar" class="qt-page-frame-dock" :style="dockSurfaceStyle" />
+    <qt-mini-player v-if="!fullWidth && hostedRoute.length == 0 && !workspaceCoversPlayer" :above-tab="hasBottomTab" />
+    <qt-tab-bar v-if="showDockTab" :current="currentRoute.substring(1)" :dots="railDots" :frame-dock="true" :joined="reservePlayerBar" />
     <!-- 底部居中轻提示：挂在框架层，全站带 pages 的页面一次覆盖（详见 qt-toast-host 注释） -->
     <qt-toast-host />
     <!-- 应用内确认弹窗：替代 uni.showModal（原生弹窗不跟字号缩放、不跟深色主题） -->
     <qt-confirm-host />
     <!-- 应用内底部操作表：替代 uni.showActionSheet（原生弹窗不跟字号缩放、不跟深色主题） -->
     <qt-action-sheet-host />
+    <qt-collect-choice-host />
+    <qt-dlna-sheet />
     <!-- 播放包半屏直装：qt-confirm-host 同配方，读 services/pack-install-sheet.ts
          的全局状态渲染。挂在框架层全站一份（2026-10-27 由首页挪入，App.uvue 缺失
          引导的路由门控随之移除：任何页面点歌缺包都能就地半屏直装）。 -->
@@ -237,11 +235,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch, getCurrentInstance } from "vue";
+import { onResize, onShow, onHide, onBackPress } from "@dcloudio/uni-app";
+import { closePlaybackQueue } from "@/uni_modules/qt-ui/composables/playback-queue-overlay";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { qtSelectionColor } from "@/uni_modules/qt-ui/composables/selection";
 const frameElement = ref<UniElement | null>(null);
-import { useQtLayout, qtStatusBarPx, qtRpx, QT_PLAYER_BAR_HEIGHT_PX } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtLayout, refreshQtLayout, qtStatusBarPx, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import {
   qtContentWidthRaw,
   qtContentPadLeft,
@@ -264,20 +264,30 @@ import {
 import {
   qtWideToolActive,
   qtWideToolRoute,
+  qtWideToolHostRoute,
+  qtWideWorkspaceRefreshTick,
   qtIsWideToolHost,
+  qtCloseWideTool,
 } from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
 import { qtSwitchTab } from "@/uni_modules/qt-ui/composables/qt-nav";
 import { qtFont, qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useSourceUpdateStore } from "@/stores/source-update";
 import { usePlayerStore } from "@/stores/player";
+import { useMiniPlayerSettings } from "@/uni_modules/qt-ui/stores/mini-player";
+import { qtMiniDockReservePx, qtMiniDockTopPx } from "@/uni_modules/qt-ui/composables/mini-player-layout";
+import { qtTabBarFloatGapPx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import QtTabBar from "@/uni_modules/qt-ui/components/qt-tab-bar/qt-tab-bar.uvue";
 import { useDisclaimerStore } from "@/stores/disclaimer";
 import QtToastHost from "@/uni_modules/qt-ui/components/qt-toast-host/qt-toast-host.uvue";
 import QtConfirmHost from "@/uni_modules/qt-ui/components/qt-confirm-host/qt-confirm-host.uvue";
 import QtActionSheetHost from "@/uni_modules/qt-ui/components/qt-action-sheet-host/qt-action-sheet-host.uvue";
+import QtCollectChoiceHost from "@/uni_modules/qt-ui/components/qt-collect-choice-host/qt-collect-choice-host.uvue";
+import QtDlnaSheet from "@/uni_modules/qt-ui/components/qt-dlna-sheet/qt-dlna-sheet.uvue";
 import QtPackInstallSheet from "@/uni_modules/qt-ui/components/qt-pack-install-sheet/qt-pack-install-sheet.uvue";
 import QtFirstRunDisclaimer from "@/uni_modules/qt-ui/components/qt-first-run-disclaimer/qt-first-run-disclaimer.uvue";
 import QtSideNav from "@/uni_modules/qt-ui/components/qt-side-nav/qt-side-nav.uvue";
 import QtPlayerBar from "@/uni_modules/qt-ui/components/qt-player-bar/qt-player-bar.uvue";
+import QtPlaybackQueue from "@/uni_modules/qt-ui/components/qt-playback-queue/qt-playback-queue.uvue";
 import QtMiniPlayer from "@/uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue";
 import QtSettingsOverview from "@/uni_modules/qt-ui/components/qt-settings-overview/qt-settings-overview.uvue";
 import QtProfileOverview from "@/uni_modules/qt-ui/components/qt-profile-overview/qt-profile-overview.uvue";
@@ -295,7 +305,7 @@ const props = defineProps<{
   widthKind?: string;
   /** 额外收紧上限（px）；仅在上限比档位上限更小时生效 */
   maxWidth?: number;
-  /** 沉浸式页面：不限宽，也不减 rail（由页面自己做布局） */
+  /** 沉浸式页面：不限宽、不减 rail，顶部和底部安全区由页面自己处理 */
   fullWidth?: boolean;
   /** 兼容旧调用方保留（全站 custom 后 rail 恒为状态栏让位） */
   insetTop?: boolean;
@@ -356,7 +366,7 @@ const emit = defineEmits<{
 }>();
 
 const theme = useThemeStore();
-const layout = useQtLayout(720);
+const layout = useQtLayout();
 
 /**
  * 首次启动免责声明。放在 store 里而不是组件里：`qt-page-frame` 在每个页面各挂一份，
@@ -393,7 +403,14 @@ const kind = computed((): string => props.widthKind != null && props.widthKind.l
  *   - 覆盖层里每个工具页挂载时（单活动 pane，切换即换挂）各自认领自己的路由
  *     （见 qt-wide-workspace.uvue）；同一次托管期间认领结果持续有效。
  */
-const hostedRoute = (qtWideToolActive() && qtIsWideToolHost(qtTopRoute())) ? qtWideToolRoute() : "";
+// 切 tab 时旧工具保留到目标成功；新宿主可能在旧工具仍活跃时 setup，不能认领旧工具身份。
+const hostedRoute = ((props.current == null || !qtIsWideToolHost(props.current)) && qtWideToolActive() && qtIsWideToolHost(qtTopRoute())) ? qtWideToolRoute() : "";
+// 页面生命周期监听宿主页；嵌入工具不重复注册，中央轮询仍作平台兜底。
+if (hostedRoute.length == 0) {
+  onResize((): void => {
+    refreshQtLayout();
+  });
+}
 // 托管内容两段式挂载的第二拍（见模板处注释）。只在托管态起步为 false。
 const hostedContentReady = ref(hostedRoute.length == 0);
 if (hostedRoute.length > 0) {
@@ -407,31 +424,28 @@ if (hostedRoute.length > 0) {
  * （见 qt-wide-workspace.uvue）—— 工具页再画自带的 fixed rail 会被覆盖层的不透明
  * 背景压住（Vapor 把 fixed 节点提升到窗口层参与 z 序，rail z900 < 覆盖层 z1000），
  * 覆盖层关闭后它又不随 visibility 收起、漏在宿主页上（四个工具入口同时亮红的
- * 根因）。两层都不要，rail 只画覆盖层那一条。
+ * 根因）。宿主页的 fixed rail 在托管期间也须卸载：仅靠覆盖层遮住画面，原生
+ * ScrollView 仍会命中下面那一条，导致可见的停靠工具区无法拖动。
  */
-const showRail = computed((): boolean => layout.isWide && !fullWidth.value && hostedRoute.length == 0);
+const showRail = computed((): boolean => layout.isWide && !fullWidth.value && hostedRoute.length == 0 && !workspaceCoversPlayer.value);
 
-/**
- * 宽屏常驻底栏。
- * 沉浸页（播放页）自己有一整套播放控制，再贴一条底栏是重复的；
- * 其余宽屏页面统一挂载，页面里原来的 qt-mini-player 在宽屏下不再渲染浮动球
- * （见 qt-mini-player.uvue 的 v-if 里 `!layout.isWide`），避免两套播放入口并存。
- * 没有当前歌曲时不挂、也不留底部空带 —— 否则每页底部都多出一条 64px 死区。
- */
+/** Immersive playback pages and empty queues have no mini-player reservation. */
 const player = usePlayerStore();
+const miniSettings = useMiniPlayerSettings();
+const workspaceCoversPlayer = computed((): boolean => hostedRoute.length == 0 && qtWideToolActive() && qtIsWideToolHost(currentRoute.value));
+const hasBottomTab = computed((): boolean => !layout.isWide && hostedRoute.length == 0 && (currentRoute.value == "/pages/home/index" || currentRoute.value == "/pages/profile/index"));
+const showDockTab = computed((): boolean => hasBottomTab.value && miniSettings.mode == "docked" && !workspaceCoversPlayer.value);
 // 被托管的工具页同样不画自带播放栏：宿主的底栏此刻被覆盖层盖住（z940 < z1000），
 // 工具页再画一条 fixed 底栏同样有「被盖住 + 关闭后漏显」的问题（同 showRail 注释）。
 // 托管期间的底栏由覆盖层自己以 docked 形态挂一份（qt-wide-workspace.uvue）。
-const showPlayerBar = computed((): boolean => layout.isWide && !fullWidth.value && player.current != null && hostedRoute.length == 0);
+const showPlayerBar = computed((): boolean => miniSettings.mode == "docked" && layout.isWide && !fullWidth.value && player.current != null && hostedRoute.length == 0 && !workspaceCoversPlayer.value);
 
-/**
- * 内容区要不要为底栏让出 64px —— 与「本框架层是否自己挂底栏」分开判定。
- *
- * 托管形态下本框架层不挂（会被 z1000 覆盖层压住），但**覆盖层自己挂了一条**
- * （见 qt-wide-workspace.uvue 的 docked 底栏）。所以让位条件只看「宽屏 + 有歌 +
- * 非沉浸页」，不看 hostedRoute；否则托管工具页的最后一行会被那条底栏盖住。
- */
-const reservePlayerBar = computed((): boolean => layout.isWide && !fullWidth.value && player.current != null);
+// Hosted tools reserve space too: their visible dock belongs to the workspace.
+const reservePlayerBar = computed((): boolean => miniSettings.mode == "docked" && !fullWidth.value && player.current != null);
+const dockSurfaceStyle = computed((): string => {
+  const bottom = qtTabBarFloatGapPx() + layout.safeBottomPx;
+  return "top:" + qtMiniDockTopPx(true) + "px;bottom:auto;height:" + (qtMiniDockReservePx(true) - bottom) + "px;background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";";
+});
 
 /**
  * 当前路由：优先用调用方传的，否则从页面栈推断。
@@ -458,6 +472,17 @@ const currentRoute = computed((): string => {
  * 这三页自己已经加了状态栏留白，框架再加一次会出现一条空白带。
  */
 const selfHeader = computed((): boolean => qtPageHasSelfHeader(currentRoute.value));
+
+const queueOpen = ref(false);
+watch(() => qtWideToolRoute(), () => { queueOpen.value = false; });
+onHide(() => { queueOpen.value = false; });
+
+// Tab hosts already dismiss the queue before their own exit/tool-back handling.
+// Other native pages register on the page instance, not this child component.
+if (hostedRoute.length == 0 && currentRoute.value != "/pages/home/index" && currentRoute.value != "/pages/profile/index") {
+  const instance = getCurrentInstance();
+  if (instance != null) onBackPress((options: OnBackPressOptions): boolean => options.from == "backbutton" && queueOpen.value && closePlaybackQueue(), instance.root);
+}
 
 /** 是否需要「限宽 + 居中」：沉浸页和手机档都不限宽 */
 const framed = computed((): boolean => !fullWidth.value && layout.isWide);
@@ -495,9 +520,12 @@ const overlayStyle = computed((): string => "background-color:" + theme.skin.ove
  * 时间/信号图标下面。窄屏由下面的标题栏自己让位，所以只在宽屏加。
  */
 const shellStyle = computed((): string => {
-  if (!layout.isWide) return "";
-  if (selfHeader.value) return "";
-  return "padding-top:" + qtStatusBarPx() + "px;";
+  // 原生根可能先扣掉系统导航栏，JS 稍后才收到新 windowHeight/safeBottom。
+  // shell 高度和 content 的 bottom padding 必须取同一快照，不能让 flex 再缩一次。
+  // 真正转屏、分屏和键盘 resize 仍由共享布局立即更新；不等待定时器/测量后再显示。
+  const height = "flex:none;height:" + layout.windowHeight + "px;";
+  if (fullWidth.value || !layout.isWide || selfHeader.value) return height;
+  return height + "padding-top:" + qtStatusBarPx() + "px;";
 });
 
 /** 手机档标题栏：宽屏不画；自带顶部区域的页面不画；沉浸页不画 */
@@ -936,6 +964,11 @@ watch(() => layout.sizeEpoch + ":" + chipRowAvailPx.value + ":" + paneHeadText.v
 const canGoBack = computed((): boolean => showBar.value);
 
 function onBack(): void {
+  // 转为窄屏后仍展示同一工具实例；标题栏返回与宿主页硬件返回都先关闭它。
+  if (hostedRoute.length > 0 && qtWideToolRoute() == hostedRoute && qtIsWideToolHost(qtTopRoute())) {
+    qtCloseWideTool();
+    return;
+  }
   if (qtPageStackDepth() > 1) {
     uni.navigateBack({});
     return;
@@ -949,23 +982,14 @@ function onFrameClick(): void {
 }
 
 const contentStyle = computed((): string => {
-  // 有底栏时把内容区上收 64px：内容是 flex:1 的竖向容器，padding-bottom 会让内部的
-  // scroll-view / list-view 变矮，滚动内容自然停在底栏上方，不会出现「最后一行被底栏盖住」。
-  // 不给滚动内容加 padding 的另一个原因：页面里已有 .foot-space 一类尾部占位，
-  // 两处都加会叠出一条空白带。
-  // 窄屏底部安全区（三键导航 / 虚拟导航条，2026-10-29 非全面屏用户反馈）：同理把内容
-  // 容器收短，全站滚动内容停在导航条上沿。
-  // 2026-10-31 安卓实测修正（原来这里写的是「绝对定位锚 border box、不受 padding 影响，
-  // 所以 TabBar 要自己叠 safeBottomPx」——错的）：`dumpsys activity top` 里本容器节点在
-  // safeBottom=42 时高度就是 1440x3011（=3168−157.5），悬浮胶囊节点 76,2577-1364,2807
-  // 相对该底边的偏移恰为 rpx(24)+42，说明**绝对定位的子节点锚的是收短后的容器底边**。
-  // 因此 pad 与子节点的 bottom 是同一方向叠加两次，TabBar 不能再叠 safeBottomPx
-  // （见 qt-tab-bar.uvue 的 bottomPx 注释）。这里保留 padding 仍是必需的：滚动内容
-  // 要停在导航条上沿。页面自己的底部 padding（.portrait-home 140rpx / .body 220rpx）
-  // 是相对滚动容器底边的，收短后与 TabBar 的相对几何自动保持不变。宽屏不叠（桌面/
-  // 平板极少三键导航，宽屏底部由常驻播放栏管理）。
-  const bottom = (reservePlayerBar.value ? "padding-bottom:" + QT_PLAYER_BAR_HEIGHT_PX + "px;" : "")
-    + (!layout.isWide && layout.safeBottomPx > 0 ? "padding-bottom:" + layout.safeBottomPx + "px;" : "");
+  // 沉浸播放器按完整窗口预算唱片/歌词和底部操作区，舞台自己消费 safeBottom。
+  // frame 再扣一次会把最后一行裁掉，显示底色；窗口已避让后 safeBottom 归零又消失。
+  if (fullWidth.value) return "padding-bottom:0px;";
+  // The frame and dock share one budget; safe area must never override dock padding.
+  const bottomPx = reservePlayerBar.value
+    ? qtMiniDockReservePx(hasBottomTab.value)
+    : (!layout.isWide ? layout.safeBottomPx : 0);
+  const bottom = "padding-bottom:" + bottomPx + "px;";
   if (!framed.value) return bottom;
   const width = contentWidthPx.value;
   // 内容列居中在「rail 右侧的可用区」，不是居中在整个窗口（否则窄内容列会压到 rail 上）。
@@ -1031,17 +1055,32 @@ const paneWidthPx = computed((): number => {
  * 框架自身读的是 qtContentWidthRaw（见 contentWidthPx），所以不会自我缩小。
  */
 const paneCapToken = ref<number>(0);
+const capPageShown = ref<boolean>(true);
+// 托管工具的身份固定在创建时；切 tab 不能把旧工具副本重绑定到新宿主。
+const capHostRoute = hostedRoute.length > 0 ? qtWideToolHostRoute() : "";
 function syncPaneCap(): void {
+  if (!frameAlive) return;
   const px = showSplit.value ? paneWidthPx.value : 0;
-  // 首次挂载 push 一层；之后只**就地更新**这层。窗口尺寸变化会反复触发 watch，
-  // 每次 push 会让上限栈无限增长（虽然生效值取最后一条，但内存与诊断都脏）。
+  const top = qtTopRoute();
+  const active = capPageShown.value && (hostedRoute.length > 0
+    ? top == capHostRoute && hostedRoute == qtWideToolRoute() && capHostRoute == qtWideToolHostRoute()
+    : top == currentRoute.value && !(qtIsWideToolHost(top) && qtWideToolActive() && qtWideToolHostRoute() == top));
+  // 保留 owner 与隐藏时的新宽度；只有逻辑可见页参与全局内容宽度判定。
   if (paneCapToken.value == 0) {
-    paneCapToken.value = qtPushContentWidthCap(px);
+    paneCapToken.value = qtPushContentWidthCap(px, active);
   } else {
-    qtUpdateContentWidthCap(paneCapToken.value, px);
+    qtUpdateContentWidthCap(paneCapToken.value, px, active);
   }
 }
 onMounted((): void => {
+  syncPaneCap();
+});
+onShow((): void => {
+  capPageShown.value = true;
+  syncPaneCap();
+});
+onHide((): void => {
+  capPageShown.value = false;
   syncPaneCap();
 });
 onUnmounted((): void => {
@@ -1053,7 +1092,8 @@ onUnmounted((): void => {
     chipMeasureTimer = 0;
   }
 });
-watch([showSplit, paneWidthPx], (): void => {
+// 原生栈非响应式：onShow 直接重读；托管开关和宿主刷新号负责工具显隐。
+watch([showSplit, paneWidthPx, () => qtWideToolRoute(), () => qtWideWorkspaceRefreshTick()], (): void => {
   syncPaneCap();
 });
 
@@ -1077,6 +1117,15 @@ const snavStyle = computed((): string => {
 </script>
 
 <style>
+.qt-page-frame-dock {
+  position: absolute;
+  left: 24rpx;
+  right: 24rpx;
+  border-radius: 28rpx;
+  border-width: 1px;
+  border-style: solid;
+  z-index: 899;
+}
 .qt-page-frame {
   flex: 1;
   width: 100%;

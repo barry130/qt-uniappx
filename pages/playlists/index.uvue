@@ -1,45 +1,41 @@
 <template>
   <qt-page-frame width-kind="grid" :header-actions="headerActions" @headerAction="onHeaderAction">
-  <view class="page">
-    <!-- 排序与分类都已收进标题栏宫格的下拉面板（手机档页首不再留独立操作行）；
-         宽屏端分类仍折行平铺，排序条也保留在页首 -->
+  <view ref="pageElement" class="page">
+    <view v-if="layout.isWide" class="category-toolbar">
+    <!-- 宽屏只保留紧凑预览；全部分类在工具条下方悬浮，不挤占列表高度。 -->
     <view v-if="sorts.length > 1 && layout.isWide" class="sort-bar" :class="layout.isWide ? 'sort-bar-wide' : ''">
       <QtOption v-for="s in sorts" :key="s.id" kind="chip" :label="s.name" :selected="selectedSort == s.id" @select="selectSort(s.id)" />
     </view>
 
-    <!-- 分类标签：手机端固定两行铺排、整体可左右滑动；
-         宽屏端标签按内容列宽自动折成若干行，不再横向滚动（桌面滚动条全局关闭，
-         溢出部分没有任何操作线索，等于把末尾分类藏起来） -->
     <view
       v-if="categories.length > 1 && layout.isWide"
-      class="cat-rows cat-rows-wide"
+      class="cat-rows-wide"
       :style="'width:' + rowsWidth + 'px;'"
     >
-      <view v-for="(row, rowIndex) in visibleCategoryRows" :key="rowIndex" class="cat-row cat-row-wide">
+      <view v-for="(row, rowIndex) in visibleCategoryRows" :key="rowIndex" class="cat-row-wide" :style="categoryRowStyle + 'width:' + previewWidth + 'px;'">
         <QtOption v-for="cell in row" :key="cell.id" class="cat-tag-wide" kind="chip" :label="cell.name" :selected="selectedCategory == cell.id" :style="'width:' + cell.width + 'px;'" @select="selectCategory(cell.id)" />
       </view>
-      <view v-if="categoryRows.length > CAT_WIDE_ROWS" class="cat-more-row">
+      <view class="cat-more-row">
         <view
           class="cat-more" :hover-class="'cat-tag-hover'"
-          :style="'border-color:' + theme.skin.divider + ';'"
-          @click="toggleCatExpand()"
+          :style="'border-color:' + theme.skin.divider + ';width:' + catMoreWidth + 'px;height:' + qtOptionChipMinHeightPx() + 'px;'"
+          @click="onHeaderAction('grid')"
         >
           <text
             class="cat-more-text" :max-lines="1"
             :style="qtFontDual(24, 13) + 'color:' + theme.skin.textMuted + ';'"
           >{{
-            catExpanded ? "收起分类" : "全部分类（" + categories.length + "）"
+            catPanelVisible ? "收起分类" : "全部分类（" + categories.length + "）"
           }}</text>
           <QtIcon
-            :name="catExpanded ? 'arrow-up' : 'arrow-down'"
+            :name="catPanelVisible ? 'arrow-up' : 'arrow-down'"
             :size="layout.isWide ? 12 : 22"
             :color="theme.skin.textMuted"
           />
         </view>
       </view>
     </view>
-    <!-- 分类（手机档）：标签两行占屏太狠，收进标题栏宫格图标的弹窗；
-         宽屏端仍按内容列宽折行平铺（那里空间够，且有「全部分类」展开） -->
+    </view>
 
     <!-- 用 list-view + list-item 承载卡片（App 端原生复用回收）：
          之前是整页 scroll-view + flex-wrap 网格，加载到 150+ 条时所有卡片
@@ -154,32 +150,43 @@
       </list-item>
     </list-view>
     <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
-    <!-- 全部分类面板：点标题栏宫格后从标题栏下方自上而下展开（不用底部弹窗）；
-         遮罩点击关闭，分类多时面板内部滚动，打开时自动滚到当前分类 -->
+    <!-- 保留分类专用的锚定浮层（不使用居中/底部 sheet）：宽屏对齐工具条，
+         手机从标题栏下方打开；显式高度的原生滚动区承载全部分类。 -->
     <view
       v-if="catPanelVisible"
-      class="cat-mask" :class="catPanelOpen ? 'cat-mask-open' : ''"
-      :style="'background-color:' + theme.skin.scrim + ';'"
+      class="cat-mask"
+      :style="'background-color:' + (layout.isWide ? 'transparent' : theme.skin.scrim) + ';'"
       @click="closeCatPanel"
     ></view>
     <view
       v-if="catPanelVisible"
-      class="cat-panel" :class="catPanelOpen ? 'cat-panel-open' : ''"
+      class="cat-panel" :class="layout.isWide ? 'cat-panel-wide' : ''"
       :style="catPanelStyle"
     >
-      <!-- 排序行：常驻面板顶部（切排序不打断选分类），多音源只声明一项时不显示 -->
-      <view v-if="sorts.length > 1" class="cat-sort-row" :class="layout.isWide ? 'cat-sort-row-wide' : ''">
-        <QtOption v-for="s in sorts" :key="s.id" kind="chip" :label="s.name" :selected="selectedSort == s.id" @select="selectSort(s.id)" />
-      </view>
+      <!-- 排序位于分类前（切排序不打断选分类），音源只声明一项时不显示。 -->
       <scroll-view
         class="cat-scroll-area"
         direction="vertical"
-        :style="'height:' + catPanelMaxHeight + 'px;'"
-        :scroll-into-view="catReveal.anchor.value"
-        :show-scrollbar="false"
+        :style="'height:' + catPanelHeight + 'px;'"
+        :scroll-into-view="catSelectedIndex == 0 && catReveal.anchor.value.length > 0 ? catReveal.itemId(-1) : catReveal.anchor.value"
+        :show-scrollbar="true"
       >
-        <view class="cat-grid" :style="'padding:' + (layout.isWide ? '16px 20px 20px' : '10px 14px 16px') + ';'">
-          <QtOption v-for="(cat, i) in categories" :key="cat.id" :id="catReveal.itemId(i)" kind="chip" :label="cat.name" :selected="selectedCategory == cat.id" :style="'width:' + catCellWidth + 'px;' + catCellLayout(i)" @select="onCatCellTap(cat.id)" />
+        <view v-if="sorts.length > 1 && !layout.isWide" class="cat-sort-row">
+          <view v-for="s in sorts" :key="s.id" class="cat-sort-slot">
+            <QtOption kind="chip" :label="s.name" :selected="selectedSort == s.id" @select="selectSort(s.id)" />
+          </view>
+        </view>
+        <view v-if="layout.isWide" :id="catReveal.itemId(-1)" class="cat-panel-grid-wide">
+          <view v-for="(row, rowIndex) in panelCategoryRows" :key="rowIndex" class="cat-panel-row-wide" :style="categoryRowStyle">
+            <QtOption v-for="cell in row" :key="cell.id" :id="catReveal.itemId(categoryIndex(cell.id))" class="cat-panel-chip-wide" kind="chip" :label="cell.name" :selected="selectedCategory == cell.id" :style="'width:' + cell.width + 'px;'" @select="onCatCellTap(cell.id)" />
+          </view>
+        </view>
+        <view v-else :id="catReveal.itemId(-1)" class="cat-grid">
+          <view v-for="(row, rowIndex) in compactCategoryRows" :key="rowIndex" class="cat-grid-row">
+            <view v-for="(cat, columnIndex) in row" :key="cat.id" :id="catReveal.itemId(rowIndex * catGridColumns + columnIndex)" class="cat-grid-cell" :style="catCellLayout(columnIndex)">
+              <QtOption class="cat-grid-option" kind="chip" :label="cat.name" :selected="selectedCategory == cat.id" @select="onCatCellTap(cat.id)" />
+            </view>
+          </view>
         </view>
       </scroll-view>
     </view>
@@ -189,7 +196,7 @@
 <script setup lang="ts">
 import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
-import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import { musicApi } from "@/services/music-api";
 import { formatBigCount } from "@/services/format";
@@ -209,7 +216,8 @@ import { qtContentWidth, qtColumnCount, QT_MIN_COLUMN_WIDTH } from "@/uni_module
 import { qtTrackError } from "@/uni_modules/qt-stat";
 import type { Playlist } from "@/types/music";
 import type { Source } from "@/services/music-api";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtOptionChipWidthPx, qtOptionChipMinHeightPx, qtOptionChipRows } from "@/uni_modules/qt-ui/composables/qt-option-metrics";
 import { logMsgErr } from "@/services/logger";
 
 type PlaylistCategory = {
@@ -224,14 +232,10 @@ type CategoryCell = {
   width: number;
 };
 
-const ROW_COUNT = 2;
 /** 头部条目承载的真实行数：与骨架行数一致，数据到达前后头部高度不变。
  *  取 4 是因为竖屏首屏实际能放下 4 行（3 列 + 封面 1:1）；取 2 时骨架只铺到
  *  首屏上四成，下面一大片空白，看上去不像「正在加载」而像「加载坏了」。 */
 const HEAD_ROWS = 4;
-const CAT_FONT_RPX = 25;
-const CAT_PAD_RPX = 56; // 左右内边距合计
-const CAT_GAP_RPX = 14;
 
 const playlists = ref<Playlist[]>([]);
 const categories = ref<PlaylistCategory[]>([]);
@@ -378,9 +382,6 @@ let loadedSource = "";
 /** 上次加载时的包态指纹：音源包安装/更新/卸载/启停后变化，分类+列表整页重拉 */
 let loadedPackFp = "";
 
-/** 1rpx 对应的 px 值 */
-const unit = computed((): number => screenWidth.value / 750);
-
 /** 栅格行可用宽（px）：宽屏取内容列宽减 `.grid-row-inner-wide` 的左右 20px */
 const gridInnerWidth = computed((): number => {
   if (!layout.isWide) return screenWidth.value - 24 * 2;
@@ -470,127 +471,18 @@ function tailItemStyle(_tailIndex: number): string {
   return cardStyle.value;
 }
 
-/**
- * 把分类按预估宽度贪心分配到固定行数里，让每行长度尽量接近。
- * 中文按一个字宽计算，非中文按 0.6 字宽估算。
- */
-const categoryRows = computed((): CategoryCell[][] => {
-  const items = categories.value;
-  if (layout.isWide) {
-    // 宽屏：一行铺满可用宽度就换行，行数由数据量决定。
-    // 不再横向滚动——桌面滚动条全局关闭，溢出等于把末尾分类藏起来，
-    // 而自动换行让「有多少分类」一眼可数。
-    const gap = 14;
-    const avail = catAvailWidth.value;
-    const wideRows: CategoryCell[][] = [];
-    let current: CategoryCell[] = [];
-    let used = 0;
-    for (let index = 0; index < items.length; index++) {
-      const item = items[index];
-      const cell: CategoryCell = {
-        id: item.id,
-        name: item.name,
-        width: textWidthPx(item.name),
-      };
-      if (current.length > 0 && used + cell.width > avail) {
-        wideRows.push(current);
-        current = [];
-        used = 0;
-      }
-      current.push(cell);
-      used += cell.width + gap;
-    }
-    if (current.length > 0) wideRows.push(current);
-    return wideRows;
-  }
-  const rows: CategoryCell[][] = [];
-  const widths: number[] = [];
-  for (let index = 0; index < ROW_COUNT; index++) {
-    rows.push([]);
-    widths.push(0);
-  }
-  for (let index = 0; index < items.length; index++) {
-    const item = items[index];
-    const cell: CategoryCell = {
-      id: item.id,
-      name: item.name,
-      width: Math.ceil(textWidthRpx(item.name) * unit.value),
-    };
-    // 选出当前最短的一行，保证两行长度均衡
-    let target = 0;
-    for (let r = 1; r < ROW_COUNT; r++) if (widths[r] < widths[target]) target = r;
-    rows[target].push(cell);
-    widths[target] += cell.width + Math.ceil(CAT_GAP_RPX * unit.value);
-  }
-  return rows;
-});
-
-/**
- * 宽屏下分类标签的折行阈值：内容列宽减去左右内边距（.cat-rows-wide 的 24px×2）。
- * 标签宽度按 textWidthPx 预估，折行时用这个值判断「还能不能再塞一个」。
- * 注意它只用于折行判断——容器宽度是 rowsWidth（= 内容列宽，padding 由 CSS 提供），
- * 两者混用会让每一行的最后一个标签被容器裁掉（真机实测裁掉约 72 物理 px）。
- */
-const catAvailWidth = computed((): number => {
-  const w = qtContentWidth("grid") - 48;
-  return w > 320 ? w : 320;
-});
-
-/** 宽屏默认展示的分类行数，超出部分折叠（真机 5 行会把首屏卡片挤到画面外） */
-const CAT_WIDE_ROWS = 3;
-const catExpanded = ref(false);
-
-/** 宽屏实际渲染的分类行：折叠态只取前 CAT_WIDE_ROWS 行 */
-const visibleCategoryRows = computed((): CategoryCell[][] => {
-  const rows = categoryRows.value;
-  if (!layout.isWide || catExpanded.value || rows.length <= CAT_WIDE_ROWS) return rows;
-  const out: CategoryCell[][] = [];
-  for (let index = 0; index < CAT_WIDE_ROWS; index++) out.push(rows[index]);
-  return out;
-});
-
-function toggleCatExpand() {
-  catExpanded.value = !catExpanded.value;
-}
-
-/** 两行中较长的一行决定滚动内容总宽 */
-const rowsWidth = computed((): number => {
-  // 宽屏：标签自动折行、容器就是内容列宽本身（左右 padding 24px 由 CSS 提供），
-  // 不能返回 catAvailWidth（那已经减过 padding，再叠加会裁掉行尾标签）
-  if (layout.isWide) {
-    const w = qtContentWidth("grid");
-    return w > 320 ? w : 320;
-  }
-  const gap = Math.ceil(CAT_GAP_RPX * unit.value);
-  let max = 0;
-  const rows = categoryRows.value;
-  for (let r = 0; r < rows.length; r++) {
-    let sum = 0;
-    for (let c = 0; c < rows[r].length; c++) sum += rows[r][c].width + gap;
-    if (sum > max) max = sum;
-  }
-  return max + Math.ceil(28 * unit.value);
-});
-
-/** 预估标签宽度（rpx），避免依赖 flex-wrap 在原生端的换行行为 */
-function textWidthRpx(text: string): number {
-  let units = 0.0;
-  for (let index = 0; index < text.length; index++) {
-    const code = text.charCodeAt(index);
-    units += code > 127 ? 1.0 : 0.6;
-  }
-  return Math.ceil(units * CAT_FONT_RPX) + CAT_PAD_RPX;
-}
-
-/** 宽屏专用标签宽度预估（px）：字号 15px + 左右内边距合计 20px */
-function textWidthPx(text: string): number {
-  let units = 0.0;
-  for (let index = 0; index < text.length; index++) {
-    const code = text.charCodeAt(index);
-    units += code > 127 ? 1.0 : 0.6;
-  }
-  return Math.ceil(units * 15) + 20;
-}
+/** Preview and floating panel use the same chip metrics, with bounded row gaps. */
+const CAT_WIDE_ROWS = 1;
+const rowsWidth = computed((): number => qtContentWidth("grid"));
+// Reserve the full action width before packing chips so it stays on the same line at every font tier.
+const catMoreWidth = computed((): number => qtOptionChipWidthPx("全部分类（" + categories.value.length + "）") + 12);
+const previewWidth = computed((): number => Math.max(1, rowsWidth.value - 40 - catMoreWidth.value));
+const categoryRows = computed((): CategoryCell[][] =>
+  qtOptionChipRows(categories.value, Math.max(1, previewWidth.value - 8), 8));
+const visibleCategoryRows = computed((): CategoryCell[][] => categoryRows.value.slice(0, CAT_WIDE_ROWS));
+// Native custom-component wrappers otherwise add extra row space beyond the chip.
+// Use the shared font-aware line box, never a phone rpx height or a fixed small cap.
+const categoryRowStyle = computed((): string => "height:" + (qtOptionChipMinHeightPx() + 8) + "px;");
 
 function categoryFromRaw(item: UTSJSONObject): PlaylistCategory {
   const id = item.get("id");
@@ -782,67 +674,92 @@ function selectCategory(category: string): void {
   load();
 }
 
-// ==================== 全部分类面板（标题栏宫格图标，自上而下展开） ====================
-
-/** 标题栏宫格图标：点开全部分类面板（手机档分类标签已收编到这里） */
+// ==================== 锚定工具条的全部分类浮层 ====================
 const headerActions = ["grid"];
+const pageElement = ref<UniElement | null>(null);
 const catPanelVisible = ref(false);
-/** 展开态：先挂载（收起位）再下一帧置 true，才有 translateY 的过渡 */
-const catPanelOpen = ref(false);
-let catPanelTimer: number | null = null;
+const toolbarHeight = ref(0);
+const pageHeight = ref(0);
+const panelTop = computed((): number => layout.isWide ? toolbarHeight.value + 4 : 0);
+// Compact page-frame fills the window; wide popovers keep the page's inner padding.
+const panelWidth = computed((): number => Math.max(1, layout.isWide ? qtContentWidth("grid") - 40 : layout.windowWidth));
+const panelCategoryRows = computed((): CategoryCell[][] =>
+  qtOptionChipRows(categories.value, Math.max(1, panelWidth.value - 34), 8));
 const catPanelStyle = computed((): string => {
-  return "background-color:" + theme.skin.surface + ";";
+  const wide = layout.isWide;
+  return "top:" + panelTop.value + "px;left:" + (wide ? 20 : 0) + "px;width:" + panelWidth.value
+    + "px;background-color:" + theme.skin.sheetSurface + ";border-color:" + theme.skin.border
+    + ";" + (wide ? "box-shadow:0 6px 20px " + theme.skin.shadow + ";" : "");
 });
-/** 面板内滚动区上限：留出遮罩下方能看见一点页面的余量（QQ 音乐同款观感） */
-const catPanelMaxHeight = computed((): number => {
-  return Math.floor(layout.windowHeight * 0.66);
+/** Bound to the actual page, which already reserves the fixed player and safe area. */
+const catPanelHeight = computed((): number => {
+  const available = (pageHeight.value > 0 ? pageHeight.value : layout.windowHeight * 0.75) - panelTop.value - 14;
+  const limit = Math.max(1, Math.min(available, layout.windowHeight * (layout.isWide ? 0.5 : 0.6)));
+  if (!layout.isWide) return Math.floor(limit);
+  const content = panelCategoryRows.value.length * (qtOptionChipMinHeightPx() + 8) + 24;
+  return Math.ceil(Math.min(content, limit));
 });
-const CAT_GRID_COLS = 3;
-const CAT_GRID_GAP_PX = 10;
-/** 三列等宽格子：内容宽 − 左右 padding − 两个列间距 */
-const catCellWidth = computed((): number => {
-  const padX = layout.isWide ? 20 : 14;
-  const inner = qtContentWidth("grid") - padX * 2 - CAT_GRID_GAP_PX * (CAT_GRID_COLS - 1);
-  return Math.floor(inner / CAT_GRID_COLS);
-});
-function catCellLayout(i: number): string {
-  // 间距走内联：每行末列去掉右间距，否则 3 列净宽算不下会被挤成 2 列
-  const mr = i % CAT_GRID_COLS == CAT_GRID_COLS - 1 ? 0 : CAT_GRID_GAP_PX;
-  return "margin-right:" + mr + "px;margin-bottom:" + CAT_GRID_GAP_PX + "px;";
+function measureCategoryPanel(): void {
+  const root = pageElement.value;
+  if (root == null) return;
+  const rect = root.getBoundingClientRect();
+  const toolbar = root.querySelector(".category-toolbar");
+  if (rect.height > 0) pageHeight.value = rect.height;
+  if (toolbar != null) {
+    const bar = toolbar.getBoundingClientRect();
+    toolbarHeight.value = Math.max(0, bar.bottom - rect.top);
+  }
 }
-const catSelectedIndex = computed((): number => {
+watch(() => String(layout.sizeEpoch) + ":" + fontScale.scale + ":" + categories.value.length,
+  () => { if (catPanelVisible.value) nextTick(measureCategoryPanel); });
+const CAT_GRID_MAX_COLS = 3;
+const CAT_GRID_GAP_PX = 10;
+// Match the panel's two 1px borders and the grid's 14px side padding exactly.
+const catGridInnerWidth = computed((): number => Math.max(1, panelWidth.value - 2 - 14 * 2));
+/** Keep up to three equal columns, reducing density when the actual labels or font tier need room. */
+const catGridColumns = computed((): number => {
+  const available = catGridInnerWidth.value;
+  let widest = 1;
+  const items = categories.value;
+  for (let i = 0; i < items.length; i++) {
+    widest = Math.max(widest, qtOptionChipWidthPx(items[i].name));
+  }
+  const count = Math.floor((available + CAT_GRID_GAP_PX) / (widest + CAT_GRID_GAP_PX));
+  return Math.max(1, Math.min(CAT_GRID_MAX_COLS, count));
+});
+const catCellWidth = computed((): number => {
+  const columns = catGridColumns.value;
+  const inner = catGridInnerWidth.value - CAT_GRID_GAP_PX * (columns - 1);
+  return Math.max(1, Math.floor(inner / columns));
+});
+const compactCategoryRows = computed((): PlaylistCategory[][] => {
+  const rows: PlaylistCategory[][] = [];
+  const columns = catGridColumns.value;
+  for (let i = 0; i < categories.value.length; i += columns) {
+    rows.push(categories.value.slice(i, i + columns));
+  }
+  return rows;
+});
+function catCellLayout(columnIndex: number): string {
+  // Native views own the grid geometry; custom-component wrappers must not trigger extra wrapping.
+  const mr = columnIndex == catGridColumns.value - 1 ? 0 : CAT_GRID_GAP_PX;
+  return "width:" + catCellWidth.value + "px;margin-right:" + mr + "px;";
+}
+function categoryIndex(id: string): number {
   for (let i = 0; i < categories.value.length; i++) {
-    if (categories.value[i].id == selectedCategory.value) return i;
+    if (categories.value[i].id == id) return i;
   }
   return -1;
-});
-const catReveal = useQtSelectionReveal(() => catPanelVisible.value && catPanelOpen.value, () => catSelectedIndex.value, () => categories.value.map((item) => item.id).join('|'));
+}
+const catSelectedIndex = computed((): number => categoryIndex(selectedCategory.value));
+const catReveal = useQtSelectionReveal(() => catPanelVisible.value, () => catSelectedIndex.value,
+  () => categories.value.map((item) => item.id).join("|"));
 function openCatPanel(): void {
-  if (catPanelTimer != null) {
-    clearTimeout(catPanelTimer);
-    catPanelTimer = null;
-  }
+  measureCategoryPanel();
   catPanelVisible.value = true;
-  catPanelOpen.value = false;
-  catPanelTimer = setTimeout(() => {
-    catPanelOpen.value = true;
-    catPanelTimer = null;
-  }, 16) as unknown as number;
 }
-function closeCatPanel(): void {
-  if (!catPanelVisible.value) return;
-  if (catPanelTimer != null) {
-    clearTimeout(catPanelTimer);
-    catPanelTimer = null;
-  }
-  catPanelOpen.value = false;
-  catPanelTimer = setTimeout(() => {
-    catPanelVisible.value = false;
-    catPanelTimer = null;
-  }, 220) as unknown as number;
-}
+function closeCatPanel(): void { catPanelVisible.value = false; }
 function onHeaderAction(_name: string): void {
-  // 宫格按钮 = 开关：第一次点展开全部分类，再点一次收起
   if (catPanelVisible.value) closeCatPanel();
   else openCatPanel();
 }
@@ -850,9 +767,6 @@ function onCatCellTap(id: string): void {
   selectCategory(id);
   closeCatPanel();
 }
-onUnmounted(() => {
-  if (catPanelTimer != null) clearTimeout(catPanelTimer);
-});
 
 /** 切换排序（v5 契约：id 原样透传给包侧 recommendations），重新拉第一页 */
 function selectSort(sortId: string): void {
@@ -931,60 +845,28 @@ onUnmounted(() => {
   border-width: 1px; border-style: solid;
   border-color: rgba(255, 255, 255, 0.6);
 }
-/* ===== 全部分类下拉面板（手机档，自上而下展开） ===== */
-.cat-mask {
-  position: absolute;
-  left: 0;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  opacity: 0;
-  transition: opacity 0.2s ease-out;
-  /* 与面板同一个 0.2s 节奏，淡入即可；点它关闭 */
-}
-.cat-mask-open { opacity: 1; }
+/* 分类浮层是页面内容区的同级覆盖层；透明遮罩拦截背景点击，不占列表高度。 */
+.category-toolbar { flex-shrink: 0; }
+.cat-mask { position: absolute; left: 0; top: 0; right: 0; bottom: 0; z-index: 30; }
 .cat-panel {
   position: absolute;
-  left: 0;
-  top: 0;
-  right: 0;
-  transform: translateY(-101%);
-  transition: transform 0.2s ease-out;
   border-radius: 0 0 24rpx 24rpx;
   overflow: hidden;
-  z-index: 20;
+  border-width: 1px;
+  border-style: solid;
+  z-index: 31;
 }
-.cat-panel-open { transform: translateY(0); }
+.cat-panel-wide { border-radius: 16px; }
 .cat-scroll-area { flex-grow: 0; flex-shrink: 0; }
-.cat-sort-row {
-  padding: 14px 14px 4px;
-  flex-direction: row;
-  flex-wrap: wrap;
-}
-.cat-sort-row-wide { padding: 16px 20px 6px; }
-.cat-grid {
-  flex-direction: row;
-  flex-wrap: wrap;
-}
-.cat-rows {
-  height: 190rpx;
-  padding: 16rpx 28rpx;
-  flex-direction: column;
-}
-.cat-row {
-  height: 72rpx;
-  margin-bottom: 14rpx;
-  flex-direction: row;
-  align-items: center;
-}
-.cat-tag {
-  height: 64rpx;
-  margin-right: 14rpx;
-  border-radius: 32rpx;
-  align-items: center;
-  justify-content: center;
-  border-width: 1px; border-style: solid;
-}
+.cat-sort-row { padding: 14px 14px 0; flex-direction: row; flex-wrap: wrap; }
+.cat-sort-slot { flex-shrink: 0; margin-right: 10px; margin-bottom: 4px; }
+.cat-grid { padding: 10px 14px 6px; flex-direction: column; }
+.cat-grid-row { flex-direction: row; flex-wrap: nowrap; align-items: stretch; flex-shrink: 0; margin-bottom: 10px; }
+.cat-grid-cell { flex-shrink: 0; min-width: 0; }
+.cat-grid-option { align-self: stretch; justify-content: center; }
+.cat-panel-grid-wide { padding: 16px 16px 8px; flex-direction: column; }
+.cat-panel-row-wide { flex-direction: row; align-items: flex-start; flex-shrink: 0; }
+.cat-panel-chip-wide { margin-right: 8px; margin-bottom: 8px; border-radius: 18px; }
 /* list-view 需要明确的高度小于内容高度才会滚动（flex:1 + min-height:0 限定在可视区内） */
 .scroll {
   flex: 1;
@@ -1095,37 +977,21 @@ onUnmounted(() => {
 
 .bar-wide { padding-top: 14px; padding-left: 24px; padding-right: 24px; padding-bottom: 10px; }
 .sort-bar-wide { padding: 10px 24px 0; }
-.cat-rows-wide {
-  /* 必须显式 height:auto：基础规则 .cat-rows 写死 height:190rpx（竖屏两行滚动区），
-     而宽屏下 1rpx 会被放大到 1.7 倍（windowWidth_dp/750），190rpx ≈ 324dp。
-     宽屏行数由数据决定，若继续继承这个固定高度，分类区下方会留一条 165dp 的死区，
-     正好把首屏卡片推到画面外。 */
-  height: auto;
-  padding-top: 14px;
-  padding-left: 24px;
-  padding-right: 24px;
-  padding-bottom: 10px;
-  flex-direction: column;
-}
-/* 分类折叠开关：只在宽屏且行数超限时出现 */
-.cat-more-row {
-  flex-direction: row;
-  justify-content: center;
-  padding-top: 2px;
-}
+.cat-rows-wide { padding: 12px 20px 4px; flex-direction: row; align-items: flex-start; flex-shrink: 0; }
+.cat-more-row { flex-direction: row; flex-shrink: 0; }
 .cat-more {
-  height: 32px;
-  padding-left: 14px;
-  padding-right: 14px;
+  padding-left: 12px;
+  padding-right: 12px;
   flex-direction: row;
   align-items: center;
+  justify-content: center;
   border-radius: 16px;
-  border-width: 1px; border-style: solid;
+  border-width: 1px;
+  border-style: solid;
 }
-/* 桌面指针反馈：只在宽屏渲染的这个分支上生效 */
 .cat-tag-hover { background-color: rgba(127, 127, 127, 0.16); }
-.cat-row-wide { height: 40px; margin-bottom: 0; flex-direction: row; align-items: center; }
-.cat-tag-wide { height: 32px; margin-right: 14px; margin-bottom: 8px; border-radius: 16px; }
+.cat-row-wide { flex-direction: row; align-items: flex-start; flex-shrink: 0; }
+.cat-tag-wide { margin-right: 8px; margin-bottom: 8px; border-radius: 18px; }
 .grid-row-inner-wide { padding-left: 20px; padding-right: 20px; }
 .foot-inner-wide { height: 52px; padding-bottom: 24px; }
 .pad-top-wide { height: 14px; }

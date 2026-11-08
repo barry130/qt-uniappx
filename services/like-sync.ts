@@ -10,7 +10,7 @@
  */
 import { likeBatch, fetchChanges, fetchAllLikes } from "@/services/like";
 import { parseJsonToUtso } from "@/services/http";
-import { getAccessToken } from "@/services/auth";
+import { getAccessToken, getSessionEpoch, getUserId, sessionIsCurrent } from "@/services/auth";
 import { logMsg } from "@/services/logger";
 import { generateGlobalPid } from "@/services/global-pid";
 import type { LikeChange, PendingLikeOp, Playlist, Song } from "@/types/music";
@@ -20,15 +20,12 @@ import type { PlayerStore } from "@/stores/player";
 const LIKE_CURSOR_KEY = "qt-like-cursor";
 /** 待推送收藏操作队列（断网时暂存，联网后按序重放） */
 const LIKE_OPS_KEY = "qt-like-pending-ops";
+/** 加载时被隔离的损坏条目；保留原始 envelope 供诊断/恢复，不阻塞健康队列。 */
+const LIKE_CORRUPT_OPS_KEY = "qt-like-corrupt-ops";
+/** 旧版全局键迁到 UID 分区时写一次；之后换号绝不回读上一个账号的全局队列。 */
+const LIKE_ACCOUNT_KEY = "qt-like-account";
 /** 收藏批量推送的单批上限（与后端 /like/batch 的 200 对齐，qt-stat 分片同款先例） */
 const LIKE_BATCH_LIMIT = 200;
-/**
- * 单条隔离重推的失败上限：探针证明网络通、单条仍连续失败这么多次，
- * 就认定为服务端不收的毒丸数据，剔除并记日志（2026-11-03 加）。
- * 取 3：一次失败可能是偶发，两次仍在概率上基本排除抖动，三次才动数据。
- */
-const LIKE_POISON_FAIL_LIMIT = 3;
-
 /**
  * 这个封面地址能不能同步给服务端。
  *
@@ -48,21 +45,90 @@ export class LikeSyncEngine {
   private pendingOps: PendingLikeOp[] = [];
   /** 收藏同步进行中标记（防止 flush 与 pull 并发交错） */
   private likeSyncBusy = false;
+  /** 当前同步操作所属的账号代次；换号后旧操作不能再提交或清新会话的 busy 标记。 */
+  private likeSyncEpoch = -1;
+  /** 主动 reset/cleanup 也会推进此代次，即使登录 epoch 尚未变化。 */
+  private likeSyncRevision = 0;
 
   constructor(host: PlayerStore) {
     this.host = host;
   }
 
-  load(): void {
+  private accountKey(base: string): string {
+    const uid = getUserId();
+    return uid.length > 0 ? base + ":" + uid : base;
+  }
+
+  private prepareAccountStorage(): void {
+    const uid = getUserId();
+    if (uid.length == 0) return;
+    const marker = uni.getStorageSync(LIKE_ACCOUNT_KEY) as string;
+    if (marker != null && marker.length > 0) return;
+    // 升级后首次读取：仅当尚无分区标记时把旧全局状态迁给当前 UID。
+    const migrations: string[] = [LIKE_CURSOR_KEY, LIKE_OPS_KEY, LIKE_CORRUPT_OPS_KEY];
+    for (let i = 0; i < migrations.length; i++) {
+      const base = migrations[i];
+      const scoped = this.accountKey(base);
+      const current = uni.getStorageSync(scoped) as string;
+      if (current != null && current.length > 0) continue;
+      const legacy = uni.getStorageSync(base) as string;
+      if (legacy != null && legacy.length > 0) uni.setStorageSync(scoped, legacy);
+    }
+    uni.setStorageSync(LIKE_ACCOUNT_KEY, uid);
+  }
+
+  private beginSync(): number | null {
+    const epoch = getSessionEpoch();
+    if (this.likeSyncBusy && this.likeSyncEpoch == epoch) return null;
+    // 旧会话仍可能在 await；新会话立即获得独立锁，旧 finally 不得释放它。
+    this.likeSyncBusy = true;
+    this.likeSyncEpoch = epoch;
+    return this.likeSyncRevision;
+  }
+
+  private syncIsCurrent(epoch: number, revision: number): boolean {
+    return sessionIsCurrent(epoch) && this.likeSyncEpoch == epoch && this.likeSyncRevision == revision;
+  }
+
+  private endSync(epoch: number, revision: number): void {
+    if (this.likeSyncEpoch == epoch && this.likeSyncRevision == revision) {
+      this.likeSyncBusy = false;
+      this.likeSyncEpoch = -1;
+    }
+  }
+
+  private quarantineOp(raw: string, reason: string): void {
     try {
-      const cursorRaw = uni.getStorageSync(LIKE_CURSOR_KEY) as string;
+      const storageKey = this.accountKey(LIKE_CORRUPT_OPS_KEY);
+      const previous = uni.getStorageSync(storageKey) as string;
+      let rows: string[] = [];
+      if (previous != null && previous.length > 0) {
+        const parsed = JSON.parse(previous) as string[];
+        if (Array.isArray(parsed)) rows = parsed;
+      }
+      const row = new UTSJSONObject();
+      row.set("raw", raw);
+      row.set("reason", reason);
+      row.set("at", Date.now());
+      rows.push(JSON.stringify(row));
+      if (rows.length > 50) rows = rows.slice(rows.length - 50);
+      uni.setStorageSync(storageKey, JSON.stringify(rows));
+    } catch (_) {
+      // 静默：隔离记录写失败时仍跳过坏项，健康队列优先恢复。
+    }
+  }
+
+  load(): void {
+    this.prepareAccountStorage();
+    try {
+      const cursorRaw = uni.getStorageSync(this.accountKey(LIKE_CURSOR_KEY)) as string;
       const cursor = cursorRaw.length > 0 ? parseFloat(cursorRaw) ?? 0 : 0;
       this.likeCursor = cursor > 0 ? cursor : 0;
     } catch (_) {
       this.likeCursor = 0;
     }
     try {
-      const raw = uni.getStorageSync(LIKE_OPS_KEY) as string;
+      const raw = uni.getStorageSync(this.accountKey(LIKE_OPS_KEY)) as string;
       if (raw.length == 0) {
         this.pendingOps = [];
         return;
@@ -70,8 +136,13 @@ export class LikeSyncEngine {
       const arr = JSON.parse(raw) as string[];
       const ops: PendingLikeOp[] = [];
       for (let i = 0; i < arr.length; i++) {
+        const envelope = arr[i];
+        if (typeof envelope != "string") {
+          this.quarantineOp(JSON.stringify(envelope), "envelope-not-string");
+          continue;
+        }
         try {
-          const obj = parseJsonToUtso(arr[i] as string);
+          const obj = parseJsonToUtso(envelope);
           const type = obj.get("type") as string | null;
           const action = obj.get("action") as string | null;
           const dataJson = obj.get("dataJson") as string | null;
@@ -80,25 +151,42 @@ export class LikeSyncEngine {
             (type == "song" || type == "playlist") &&
             (action == "add" || action == "remove")
           ) {
+            const data = parseJsonToUtso(dataJson);
+            const requiredKey = type == "song" ? "sid" : "platform";
+            const required = data.get(requiredKey) as string | null;
+            if (required == null || required.length == 0) {
+              this.quarantineOp(envelope, "data-schema");
+              continue;
+            }
             ops.push({
               type: type as "song" | "playlist",
               action: action as "add" | "remove",
               dataJson,
             });
+          } else {
+            this.quarantineOp(envelope, "envelope-schema");
           }
         } catch (_) {
-          // 静默：单条积压操作损坏时跳过该条，其余照常按序重放
+          this.quarantineOp(envelope, "invalid-json");
         }
       }
       this.pendingOps = ops;
     } catch (_) {
+      try {
+        const raw = uni.getStorageSync(this.accountKey(LIKE_OPS_KEY)) as string;
+        if (raw != null && raw.length > 0) this.quarantineOp(raw, "outbox-not-json-array");
+      } catch (_) {
+        // 静默：外层存储本身不可读时没有可保留的原始内容
+      }
       this.pendingOps = [];
     }
   }
 
   save(): void {
+    const uid = getUserId();
     try {
-      uni.setStorageSync(LIKE_CURSOR_KEY, this.likeCursor.toString());
+      if (uid.length > 0) uni.setStorageSync(LIKE_ACCOUNT_KEY, uid);
+      uni.setStorageSync(this.accountKey(LIKE_CURSOR_KEY), this.likeCursor.toString());
     } catch (_) {
       // 静默：游标写失败时下次 save 再试，重放语义幂等不会重复上送
     }
@@ -112,7 +200,7 @@ export class LikeSyncEngine {
         obj.set("dataJson", op.dataJson);
         arr.push(JSON.stringify(obj));
       }
-      uni.setStorageSync(LIKE_OPS_KEY, JSON.stringify(arr));
+      uni.setStorageSync(this.accountKey(LIKE_OPS_KEY), JSON.stringify(arr));
     } catch (_) {
       // 静默：积压队列写失败时内存队列仍在，下次落盘窗口重写
     }
@@ -188,12 +276,13 @@ export class LikeSyncEngine {
   async flushPendingOps(): Promise<void> {
     const token = getAccessToken();
     if (!token) return;
-    if (this.likeSyncBusy) return;
-    this.likeSyncBusy = true;
+    const epoch = getSessionEpoch();
+    const revision = this.beginSync();
+    if (revision == null) return;
     try {
-      await this.doFlushPendingOps();
+      await this.doFlushPendingOps(epoch, revision);
     } finally {
-      this.likeSyncBusy = false;
+      this.endSync(epoch, revision);
     }
   }
 
@@ -231,12 +320,11 @@ export class LikeSyncEngine {
 
   /**
    * 按序批量推送积压操作（/like/batch，单批上限 LIKE_BATCH_LIMIT）。
-   * 整批原子：成功整批出队并盖 seq，失败整批原样留在队首保序重放（断网不丢，
-   * upsert 幂等保证重放无害）；无效操作（本地歌无平台等）直接丢弃，
-   * 与旧单条路径 seq=0 视同成功的语义一致。
+   * 整批原子：成功整批出队并记录写 ACK，失败整批原样留在队首保序重放。
+   * 写 ACK 只更新本地冲突序号，绝不能推进读游标；读游标只由已应用的连续变更推进。
    */
-  private async doFlushPendingOps(): Promise<void> {
-    while (this.pendingOps.length > 0) {
+  private async doFlushPendingOps(epoch: number, revision: number): Promise<void> {
+    while (this.pendingOps.length > 0 && this.syncIsCurrent(epoch, revision)) {
       // 预扫队首组装一批：无效 op 记下标（成功失败都要剔除），有效 op 进批。
       // 组批过程中不改动队列，失败时整批原样保留
       const batch: PendingLikeOp[] = [];
@@ -244,6 +332,7 @@ export class LikeSyncEngine {
       const invalidIdx: number[] = [];
       let scan = 0;
       while (scan < this.pendingOps.length && batch.length < LIKE_BATCH_LIMIT) {
+        if (!this.syncIsCurrent(epoch, revision)) return;
         const op = this.pendingOps[scan];
         if (op != null) {
           const bodyJson = this.buildLikeOpBodyJson(op);
@@ -258,6 +347,7 @@ export class LikeSyncEngine {
         invalidIdx.push(scan);
         scan++;
       }
+      if (!this.syncIsCurrent(epoch, revision)) return;
       // 无效 op 从后往前剔除（不影响前面的下标），并落盘
       for (let i = invalidIdx.length - 1; i >= 0; i--) {
         this.pendingOps.splice(invalidIdx[i], 1);
@@ -267,26 +357,26 @@ export class LikeSyncEngine {
       let seq = 0;
       try {
         seq = await likeBatch(bodies);
+        if (!this.syncIsCurrent(epoch, revision)) return;
         logMsg("[Player] 收藏批量推送成功 " + batch.length + " 条 seq=" + seq);
       } catch (e) {
         logMsg("[Player] 收藏批量推送失败 " + batch.length + " 条 err=" + (e != null ? e.toString() : "unknown"));
-        // 整批留队保序重放是断网场景的正解；但若失败来自某条服务端不收的数据，
-        // 毒丸会永久堵住队首（游标停摆、defer 拉取死循环）——交给毒丸隔离判定：
-        // 探针证明网络通才拆批单发隔离，网络不通什么都不动（绝不丢数据）
-        await this.isolatePoisonOps(batch, bodies);
+        // 普通 Error 无法证明某一条永久不可重试。整批留队，避免拆条重推让
+        // 同实体的 remove 越过失败的 add；本地格式损坏已由 load/build 隔离。
         return;
       }
       // 成功：整批出队并盖章
-      this.retireOps(batch, seq);
+      this.retireOps(batch, seq, epoch, revision);
     }
   }
 
   /**
    * 一批操作成功上送后的收尾：整批出队并盖章。本批占用连续 seq 区段，
    * 统一盖整批最大 seq 不会误判 LWW（其他端这期间的变更 seq 必然更大）。
-   * 从整批成功路径抽出（2026-11-03），单条隔离重推成功后复用同一口径。
+   * 只移除确认成功的连续批次；普通失败不拆条，避免同实体操作乱序。
    */
-  private retireOps(batch: PendingLikeOp[], seq: number): void {
+  private retireOps(batch: PendingLikeOp[], seq: number, epoch: number, revision: number): void {
+    if (!this.syncIsCurrent(epoch, revision)) return;
     for (let i = 0; i < batch.length; i++) {
       const idx = this.pendingOps.indexOf(batch[i]);
       if (idx >= 0) this.pendingOps.splice(idx, 1);
@@ -298,57 +388,7 @@ export class LikeSyncEngine {
         else this.markPlaylistLikedSeq(op.dataJson, seq);
       }
     }
-    if (seq > this.likeCursor) this.likeCursor = seq;
     this.save();
-  }
-
-  /**
-   * 批量推送失败后的毒丸隔离（2026-11-03 加）。
-   *
-   * 背景：/like/batch 整批原子，一条服务端不收的 op 会让整批永远失败，
-   * 队列堵在队首、游标停摆、isDeferredLikeChange 的 defer 拉取死循环。
-   *
-   * 判定分两级，保守优先：
-   * 1. 先发一次增量拉取当**探针**——它和 /like/batch 同令牌同网络，
-   *    探针都失败说明是网络/鉴权问题，整批原样留队重放（不丢数据，直接返回）；
-   * 2. 探针通过后把整批拆成单条逐个推：成功的单条立即出队盖章，
-   *    失败的单条累计 failCount，连续失败 LIKE_POISON_FAIL_LIMIT 次才剔除。
-   *    剔除是最后手段——扔掉的是「服务器明确拒绝过的数据」，不是用户输入本身，
-   *    本地收藏表里的记录不受影响，只是这条变更不再上送。
-   */
-  private async isolatePoisonOps(batch: PendingLikeOp[], bodies: string[]): Promise<void> {
-    let probeOk = false;
-    try {
-      const probe = await fetchChanges(this.likeCursor);
-      probeOk = probe != null;
-    } catch (_) {
-      probeOk = false;
-    }
-    if (!probeOk) return;
-    logMsg("[Player] 收藏批量推送失败但网络探针通过，拆批单发隔离毒丸 " + batch.length + " 条");
-    for (let i = 0; i < batch.length; i++) {
-      const op = batch[i];
-      const body = bodies[i];
-      if (op == null || body == null) continue;
-      let singleSeq = 0;
-      try {
-        singleSeq = await likeBatch([body]);
-      } catch (_) {
-        const fails = (op.failCount != null ? op.failCount : 0) + 1;
-        op.failCount = fails;
-        if (fails >= LIKE_POISON_FAIL_LIMIT) {
-          const idx = this.pendingOps.indexOf(op);
-          if (idx >= 0) this.pendingOps.splice(idx, 1);
-          this.save();
-          logMsg("[Player] 收藏推送剔除毒丸条目 type=" + op.type + " action=" + op.action + " 连续失败 " + fails + " 次 dataJson=" + op.dataJson);
-        } else {
-          logMsg("[Player] 收藏单条重推失败 " + fails + "/" + LIKE_POISON_FAIL_LIMIT + " type=" + op.type + " action=" + op.action);
-        }
-        continue;
-      }
-      this.retireOps([op], singleSeq);
-      logMsg("[Player] 收藏单条重推成功 type=" + op.type + " action=" + op.action + " seq=" + singleSeq);
-    }
   }
 
   /**
@@ -363,7 +403,17 @@ export class LikeSyncEngine {
    * 整批建实例曾触发原生注册丢失（「UTS instance is not registered」）。
    */
   private buildLikeOpBodyJson(op: PendingLikeOp): string | null {
-    const obj = JSON.parse(op.dataJson) as any;
+    let obj: any;
+    try {
+      obj = JSON.parse(op.dataJson) as any;
+    } catch (_) {
+      this.quarantineOp(JSON.stringify(op), "data-json-build");
+      return null;
+    }
+    if (obj == null || typeof obj != "object" || Array.isArray(obj)) {
+      this.quarantineOp(JSON.stringify(op), "data-schema-build");
+      return null;
+    }
     const body: any = { type: op.type, action: op.action };
     if (op.type == "song") {
       const sid = obj["sid"] as string | null;
@@ -553,22 +603,25 @@ export class LikeSyncEngine {
   async pullChanges(): Promise<void> {
     const token = getAccessToken();
     if (!token) return;
-    if (this.likeSyncBusy) return;
-    this.likeSyncBusy = true;
+    const epoch = getSessionEpoch();
+    const revision = this.beginSync();
+    if (revision == null) return;
     try {
       // 「要不要全量拉取」必须在推送之前定下来：doFlushPendingOps 推成功后会把游标
       // 推到服务器新分配的 seq，若在推送后再判 likeCursor <= 0 就永远不成立，
       // 首次登录时账号里已有的云端收藏会被整批跳过（增量只取 seq 更大的变更），
       // 而且之后每次启动游标都 > 0，再也补不回来。
       const needFullPull = this.likeCursor <= 0;
-      await this.doFlushPendingOps();
+      await this.doFlushPendingOps(epoch, revision);
+      if (!this.syncIsCurrent(epoch, revision)) return;
       if (needFullPull) {
-        await this.doFullPull();
+        await this.doFullPull(epoch, revision);
         return;
       }
       let guard = 0;
-      while (guard++ < 50) {
+      while (guard++ < 50 && this.syncIsCurrent(epoch, revision)) {
         const res = await fetchChanges(this.likeCursor);
+        if (!this.syncIsCurrent(epoch, revision)) return;
         if (res == null) break;
         // 服务器 maxSeq 比本地游标还小说明数据库被重建过（seq 重新从 1 计）：
         // 旧游标已失效，对齐到新库，否则后续增量拉取会永远落在新库 maxSeq 之后
@@ -579,7 +632,6 @@ export class LikeSyncEngine {
           break;
         }
         if (res.changes.length == 0) {
-          if (res.maxSeq > this.likeCursor) this.likeCursor = res.maxSeq;
           break;
         }
         let maxApplied = this.likeCursor;
@@ -596,6 +648,7 @@ export class LikeSyncEngine {
           if (change.updatedSeq > maxApplied) maxApplied = change.updatedSeq;
           this.applyLikeChange(change);
         }
+        if (!this.syncIsCurrent(epoch, revision)) return;
         this.likeCursor = maxApplied;
         this.save();
         this.host.persistNow();
@@ -605,7 +658,7 @@ export class LikeSyncEngine {
     } catch (e) {
       logMsg("[Player] 收藏增量同步失败", e);
     } finally {
-      this.likeSyncBusy = false;
+      this.endSync(epoch, revision);
     }
   }
 
@@ -782,20 +835,28 @@ export class LikeSyncEngine {
   }
 
   /** 全量分页拉取（首次登录 / 游标丢失兜底，LIKE_SYNC_DESIGN.md §2.4/§5.6） */
-  private async doFullPull(): Promise<void> {
+  private async doFullPull(epoch: number, revision: number): Promise<void> {
     const serverSongs: Song[] = [];
     const serverPlaylists: Playlist[] = [];
     let maxSeq = 0;
     let page = 1;
-    while (page <= 100) {
+    let completed = false;
+    while (page <= 100 && this.syncIsCurrent(epoch, revision)) {
       const res = await fetchAllLikes(page, 500);
-      if (res == null) break;
+      if (!this.syncIsCurrent(epoch, revision)) return;
+      // 空页是唯一明确的“枚举完成”信号。null/异常、页数封顶都可能是
+      // 部分快照；此时应用“以服务器为准”的合并会误删本地收藏。
+      if (res == null) return;
       for (let i = 0; i < res.songs.length; i++) serverSongs.push(res.songs[i]);
       for (let i = 0; i < res.playlists.length; i++) serverPlaylists.push(res.playlists[i]);
       if (res.maxSeq > maxSeq) maxSeq = res.maxSeq;
-      if (res.songs.length == 0 && res.playlists.length == 0) break;
+      if (res.songs.length == 0 && res.playlists.length == 0) {
+        completed = true;
+        break;
+      }
       page++;
     }
+    if (!completed || !this.syncIsCurrent(epoch, revision)) return;
     // 一首歌属于多个歌单时，服务器会返回多条（同 sid、不同 pid），
     // 先按 id + platform 合并成一条，把各个 pid 收进 pids 数组
     const collapsedSongs: Song[] = [];
@@ -942,8 +1003,11 @@ export class LikeSyncEngine {
    * 补推把已删除的收藏"复活"），再与服务器做一次存在性对账补推。
    */
   async syncLikesOnLaunch(): Promise<void> {
+    const epoch = getSessionEpoch();
+    const revision = this.likeSyncRevision;
     await this.syncLikedFromServer();
-    const count = await this.reconcileLikesWithServer();
+    if (!sessionIsCurrent(epoch) || revision != this.likeSyncRevision) return;
+    const count = await this.reconcileLikesWithServer(epoch, revision);
     if (count > 0) logMsg('[Player] 启动对账补推收藏 ' + count + ' 项');
   }
 
@@ -957,15 +1021,19 @@ export class LikeSyncEngine {
    * 歌曲按 sid+platform 整档判断（不按 pid 行级判断，避免补出重复归属行）。
    * 服务器按 sid/pid upsert，重复执行幂等。返回补推条数。
    */
-  private async reconcileLikesWithServer(): Promise<number> {
+  private async reconcileLikesWithServer(epoch: number, revision: number): Promise<number> {
     const token = getAccessToken();
     if (!token) return 0;
+    if (!sessionIsCurrent(epoch) || revision != this.likeSyncRevision) return 0;
     const serverPlaylistKeys: string[] = [];
     const serverSongKeys: string[] = [];
     let page = 1;
-    while (page <= 100) {
+    let completed = false;
+    while (page <= 100 && sessionIsCurrent(epoch) && revision == this.likeSyncRevision) {
       const res = await fetchAllLikes(page, 500);
-      if (res == null) break;
+      if (!sessionIsCurrent(epoch) || revision != this.likeSyncRevision) return 0;
+      // 对账会删除“云端没有”的本地歌单，必须拿到同一个账号的完整快照。
+      if (res == null) return 0;
       for (let i = 0; i < res.playlists.length; i++) {
         const pl = res.playlists[i];
         const pid = pl.pid != null && pl.pid.length > 0 ? pl.pid! : pl.id;
@@ -975,9 +1043,13 @@ export class LikeSyncEngine {
         const s = res.songs[i];
         serverSongKeys.push(s.platform + "|" + s.id);
       }
-      if (res.songs.length == 0 && res.playlists.length == 0) break;
+      if (res.songs.length == 0 && res.playlists.length == 0) {
+        completed = true;
+        break;
+      }
       page++;
     }
+    if (!completed || !sessionIsCurrent(epoch) || revision != this.likeSyncRevision) return 0;
     let count = 0;
     let removedCount = 0;
     // 歌单按「云端确认点」（likeSeq，推送成功时由服务器分配回写）三分
@@ -1071,6 +1143,9 @@ export class LikeSyncEngine {
 
   /** 退出登录时重置收藏同步状态：清空游标与待推送队列，避免串到下一个账号 */
   resetLikeSync(): void {
+    this.likeSyncRevision++;
+    this.likeSyncBusy = false;
+    this.likeSyncEpoch = -1;
     this.likeCursor = 0;
     this.pendingOps = [];
     this.save();
@@ -1083,6 +1158,9 @@ export class LikeSyncEngine {
    * 不动播放历史、下载等设备级数据。
    */
   clearLocalLikeData(): void {
+    this.likeSyncRevision++;
+    this.likeSyncBusy = false;
+    this.likeSyncEpoch = -1;
     this.host.likedSongs = [];
     this.host.savedPlaylists = [];
     this.host.localPlaylists = [];
@@ -1090,7 +1168,8 @@ export class LikeSyncEngine {
     this.host.playlistsDirty = true;
     this.host.localPlaylistsDirty = true;
     this.host.persistNow();
-    this.resetLikeSync();
+    // 不清目标 UID 的游标/outbox：退出后同账号重登必须继续补推断网操作。
+    this.load();
     logMsg("[Player] 检测到切换账号，已清空本地收藏缓存");
   }
 }

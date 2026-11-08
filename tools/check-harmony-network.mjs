@@ -90,6 +90,7 @@ function environment() {
       env.requests.push(options);
       const reply = env.replies.shift();
       assert.ok(reply, 'unexpected request: ' + options.url);
+      if (reply.manual) return;
       // 保持真正 uni.request 的异步回调，避免同步替身掩盖刷新锁/Promise 的时序问题。
       queueMicrotask(() => {
         try {
@@ -123,7 +124,7 @@ function environment() {
       });
     },
   };
-  const auth = vm.runInNewContext(authCode + '\n({ getAccessToken, saveTokens, clearTokens, parseTokenResponse, shouldRefreshToken });', { uni, Date });
+  const auth = vm.runInNewContext(authCode + '\n({ getAccessToken, getRefreshToken, saveTokens, clearTokens, parseTokenResponse, shouldRefreshToken, captureAuthSession, renewTokensIfCurrent, clearTokensIfCurrent, getSessionEpoch, sessionIsCurrent });', { uni, Date });
   env.login = (token = 'old-token', expiresAt = Date.now() + 3600000) => {
     auth.saveTokens({ accessToken: token, refreshToken: 'refresh-secret', expiresAt });
     env.storage.set('qt-token', token);
@@ -144,7 +145,7 @@ function environment() {
       stringify: JSON.stringify,
     },
   });
-  env.http = vm.runInContext(httpCode + '\n({ apiRequest, tryRefreshToken, parseJsonToUtso, jsonValueToUtso, asUtso, state: () => ({ isRefreshing, pending: pendingRequests.length, refreshPromise }) });', context);
+  env.http = vm.runInContext(httpCode + '\n({ apiRequest, tryRefreshToken, parseJsonToUtso, jsonValueToUtso, asUtso, state: () => ({ pending: pendingRequests.length, refreshPromise, refreshEpoch }) });', context);
   // 与当前 Harmony UTS/JSON.ts 同语义：标准 parse + 递归包装；异常记错后返回 null。
   env.utsJSON = {
     parse(text) {
@@ -175,9 +176,9 @@ function environment() {
     assert.ok(env.requests.length > 0);
     for (const request of env.requests) assert.equal(request.dataType, 'text');
     const state = env.http.state();
-    assert.equal(state.isRefreshing, false, 'refresh lock must be released');
     assert.equal(state.pending, 0, 'refresh wait queue must be drained');
     assert.equal(state.refreshPromise, null, 'refresh promise must be reset');
+    assert.equal(state.refreshEpoch, -1, 'refresh session lock must be released');
   };
   return env;
 }
@@ -263,7 +264,8 @@ await check('refresh HTML/malformed/empty/null/HTTP error preserves login; expli
   env.login();
   env.replies.push({ data: '{"code":401,"msg":"expired"}' });
   assert.equal(await env.http.tryRefreshToken(), 'invalid');
-  assert.equal(env.cleared, 1);
+  assert.equal(env.storage.has('qt-access-token'), false);
+  assert.equal(env.storage.has('qt-refresh-token'), false);
 });
 
 await check('business 401 refreshes once, retries with new token, and drains concurrent waiting requests', async () => {
@@ -323,6 +325,44 @@ await check('proactive refresh shares one request, saves real token fields and s
   assert.equal(env.storage.get('qt-token'), 'renewed');
   assert.equal(env.storage.get('qt-refresh-token'), 'renewed-refresh');
   assert.ok(env.storage.get('qt-token-expiry') > Date.now() + 7100000);
+  env.assertText();
+});
+
+await check('proactive refresh network failure drains mixed 401 waiter and continues with old token', async () => {
+  const env = environment();
+  env.login('near-expiry', Date.now() + 60000);
+  env.replies.push(
+    { data: '{"code":401}' },
+    { fail: true },
+    { data: '{"code":200,"data":{"value":7}}' },
+  );
+  const forced = env.http.apiRequest('app/forced', new UTSJSONObject());
+  const proactive = env.http.apiRequest('app/proactive', new UTSJSONObject(), 'GET', true);
+  const [forcedResult, proactiveResult] = await Promise.allSettled([forced, proactive]);
+  assert.equal(forcedResult.status, 'rejected');
+  assert.equal(forcedResult.reason.message, '网络请求失败');
+  assert.equal(proactiveResult.status, 'fulfilled');
+  assert.equal(proactiveResult.value.get('value'), 7);
+  assert.equal(env.requests.length, 3);
+  assert.equal(env.requests[0].header.get('satoken'), 'near-expiry');
+  assert.equal(env.requests[1].url, gateway + 'app/user/refresh');
+  assert.equal(env.requests[2].header.get('satoken'), 'near-expiry');
+  assert.equal(env.http.state().pending, 0);
+  env.assertText();
+});
+
+await check('stale astral response is rejected even when caller passes auth=false', async () => {
+  const env = environment();
+  env.login('account-A');
+  env.replies.push({ manual: true });
+  const pending = env.http.apiRequest('app/public-profile', new UTSJSONObject());
+  assert.equal(env.requests[0].header.get('satoken'), 'account-A');
+  env.login('account-B');
+  env.requests[0].success({
+    statusCode: 200,
+    data: '{"code":200,"data":{"owner":"account-A"}}',
+  });
+  await assert.rejects(pending, { message: '登录状态已变更，请重试' });
   env.assertText();
 });
 

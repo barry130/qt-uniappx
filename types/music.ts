@@ -69,12 +69,6 @@ export type PendingLikeOp = {
   action: "add" | "remove";
   /** song 用 Song、playlist 用 Playlist（序列化为 JSON 字符串暂存） */
   dataJson: string;
-  /**
-   * 单条隔离重推的连续失败次数（毒丸隔离用，2026-11-03 加）。
-   * 只在内存里累计、不落盘：save() 只写 type/action/dataJson，
-   * 重启后清零重新计数，避免把一次崩溃误记成多次服务端拒绝。
-   */
-  failCount?: number;
 };
 /**
  * 逐字歌词里的一个词（音源包 `wordByWord` 解析产物，卡拉 OK 染色用）。

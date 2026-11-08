@@ -41,6 +41,7 @@ const ICON_BODIES: Record<string, string> = {
   "arrow-down": '<line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/>',
   close: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
   check: '<polyline points="20 6 9 17 4 12"/>',
+  "image-plus": '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m3 17 5-5 4 4 3-3 6 6M16 5v6M13 8h6"/>',
   more: '<circle cx="5" cy="12" r="1.6" fill="' + COLOR_TOKEN + '" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="' + COLOR_TOKEN + '" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="' + COLOR_TOKEN + '" stroke="none"/>',
   // 竖排三点：歌单详情右上角的排序入口（用户要求横排改竖排）
   "more-vert": '<circle cx="12" cy="5" r="1.6" fill="' + COLOR_TOKEN + '" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="' + COLOR_TOKEN + '" stroke="none"/><circle cx="12" cy="19" r="1.6" fill="' + COLOR_TOKEN + '" stroke="none"/>',
@@ -70,6 +71,7 @@ const ICON_BODIES: Record<string, string> = {
   // 音量：喇叭 + 两道声波（宽屏底栏音量入口）。喇叭用多边形填充，
   // 与 play/skip 同法用 COLOR_TOKEN 占位，小尺寸下比纯描边更清晰。
   volume: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="' + COLOR_TOKEN + '" stroke="none"/><path d="M15.5 8.6a5 5 0 0 1 0 6.8"/><path d="M18.6 5.6a9.4 9.4 0 0 1 0 12.8"/>',
+  cast: '<path d="M4 5h15a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-6"/><path d="M3 13a8 8 0 0 1 8 8M3 17a4 4 0 0 1 4 4"/><circle cx="3" cy="21" r="1" fill="' + COLOR_TOKEN + '" stroke="none"/>',
   // 静音：同款喇叭 + 右侧叉（底栏静音态）。叉与喇叭分离，避免小尺寸糊成一团
   "volume-mute": '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="' + COLOR_TOKEN + '" stroke="none"/><line x1="15.5" y1="9.5" x2="21" y2="15"/><line x1="21" y1="9.5" x2="15.5" y2="15"/>',
 
@@ -125,6 +127,7 @@ const ICON_BODIES: Record<string, string> = {
  * 缓存下来即可。图标名固定 50 个、颜色取自主题调色板，缓存规模有界。
  */
 const srcCache = new Map<string, string>();
+const SRC_CACHE_LIMIT = 384;
 
 const B64_TABLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -201,6 +204,9 @@ export function iconSrc(name: string, color: string = "#ffffff", strokeWidth: nu
   if (cached != null) return cached;
   const svg = iconSvg(name, stroke, strokeWidth);
   const src = "data:image/svg+xml;base64," + toBase64(svg);
+  // Custom color sliders can produce thousands of distinct tint keys in one session.
+  // Existing image nodes retain their strings; dropping memoized entries is harmless.
+  if (srcCache.size >= SRC_CACHE_LIMIT) srcCache.clear();
   srcCache.set(cacheKey, src);
   return src;
 }

@@ -19,6 +19,9 @@ export type OpenExternalUrl = (url: string) => boolean;
  */
 export type ExitAppNative = () => boolean;
 
+/** 将当前任务移到后台，保留页面和播放服务；成功返回 true，不支持或失败返回 false。 */
+export type MoveAppToBackgroundNative = () => Promise<boolean>;
+
 /**
  * 安装 APK（Android，经 FileProvider 兼容 Android 7+）
  * @param filePath APK 本地文件绝对路径
@@ -203,10 +206,13 @@ export type RecreateActivity = () => boolean;
  * 取值约定（安卓要区分「读到了但不用让位」，故用符号编码）：
  *   正数 = 需要让位的真实高度；0 = 不需要让位 / 取不到；
  *   负数 = 读到了导航栏高度（取绝对值），但系统已给内容区让过位，不应再叠加。
- * App.uvue 只把正值写进 layout.safeBottomPx，负值仅用于诊断日志。
+ * App.uvue 保留符号交给共享布局。Android 用完整栏高减去同次窗口几何已消费的
+ * 高度；原生内容根与运行时窗口的更新可能先后到达，不能提前把负值清成 0。
+ * navigationKeys 独立于避让高度：1 有导航键，0 手势/无键，-1 尚未确定；
+ * Harmony 返回 2 表示已读到合并避让区，services/app-native 换成逻辑像素后分类。
  * @param onResult 结果回调：见上面的取值约定（px）
  */
-export type ReadBottomNavInset = (onResult: (px: number) => void) => void;
+export type ReadBottomNavInset = (onResult: (px: number, navigationKeys: number) => void) => void;
 
 /** 系统文件选择器的结果 */
 export type PickFileResult = {
@@ -434,7 +440,7 @@ export type CloseAuthWebView = () => void;
  *
  * 语义（三端一致）：
  *   - 返回值 ≥0：文件在盘且可读，值为字节数（0 = 空文件，也算在盘）；
- *   - 返回 -1：stat 不到（真不在盘 / 无权限 / content:// 协议 / 路径为空）。
+ *   - 返回 -1：stat 不到（真不在盘 / 无权限 / 路径为空）。Android content:// 会打开只读描述符校验；长度未知返回 0。
  * 调用方约定：它只做 uni stat 失败后的**兜底**，不取代 uni stat——uni 成功的
  * 路径（私有目录、鸿蒙沙盒）维持原行为，iOS 端恒 -1 回落原行为，零回归。
  *

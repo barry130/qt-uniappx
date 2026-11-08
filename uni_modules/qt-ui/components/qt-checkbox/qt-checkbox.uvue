@@ -1,15 +1,17 @@
 <template>
   <view class="qt-checkbox" :class="[boxClass, disabled ? 'qt-checkbox-disabled' : '']" :style="boxStyle" @click.stop="onTap">
-    <view v-if="checked" class="qt-checkbox-dot" :class="layout.isWide ? 'qt-checkbox-dot-wide' : ''" :style="'background-color:' + selectedColor + ';'"></view>
+    <QtIcon v-if="checked && indicator == 'check'" name="check" :size="layout.isWide ? 16 : 28" color="#ffffff" />
+    <view v-else-if="checked" class="qt-checkbox-dot" :class="layout.isWide ? 'qt-checkbox-dot-wide' : ''" :style="'background-color:' + selectedColor + ';'"></view>
   </view>
 </template>
 <script setup lang="ts">
 import { computed } from "vue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtSelectionColor } from "@/uni_modules/qt-ui/composables/selection";
-/** Compatibility API for all toggle/multi-select indicators; red only, never a check glyph. */
-const props = defineProps<{ checked?: boolean; size?: "sm" | "md"; disabled?: boolean }>();
+/** 默认保留红环点；收藏歌单显式使用 check，选中状态不只依赖颜色。 */
+const props = withDefaults(defineProps<{ checked?: boolean; size?: "sm" | "md"; disabled?: boolean; indicator?: "dot" | "check" }>(), { indicator: "dot" });
 const emit = defineEmits<{ change: [boolean] }>();
 const theme = useThemeStore();
 const layout = useQtLayout();
@@ -17,7 +19,7 @@ const checked = computed((): boolean => props.checked == true);
 const size = computed((): string => props.size != null ? props.size : "md");
 const selectedColor = computed((): string => qtSelectionColor(theme.dark));
 const boxClass = computed((): string => "qt-checkbox-size-" + size.value + (layout.isWide ? "-wide" : ""));
-const boxStyle = computed((): string => "border-color:" + (checked.value ? selectedColor.value : theme.skin.border) + ";");
+const boxStyle = computed((): string => "border-color:" + (checked.value ? selectedColor.value : theme.skin.border) + ";background-color:" + (checked.value && props.indicator == "check" ? selectedColor.value : "transparent") + ";");
 function onTap(): void { if (props.disabled != true) emit("change", !checked.value); }
 </script>
 <style>

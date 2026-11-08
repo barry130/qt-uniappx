@@ -94,6 +94,7 @@ import { DEFAULT_PLAYLIST_COVER_ASSET } from "@/services/media";
 import { beginLoading, finishLoading } from "@/services/ui-loading";
 import { qtFontPx } from "@/uni_modules/qt-ui/stores/font-scale";
 import { saveImageToGallery } from "@/services/app-native";
+import { logError } from "@/services/logger";
 
 const layout = useQtLayout();
 const themeStore = useThemeStore();
@@ -126,6 +127,10 @@ const cardPx = computed((): number => {
 const scrollInto = ref("");
 /** snapshotCard 的滚动等待定时器，onUnload 清理，防止离开页面后仍触截图。 */
 let snapDelay = 0;
+let snapTimeout = 0;
+let loadingToken = 0;
+let disposed = false;
+let cancelSnapshot: (() => void) | null = null;
 
 onLoad(() => {
   qtTrackPage("pages/share-card/index");
@@ -133,12 +138,12 @@ onLoad(() => {
 });
 
 onUnload(() => {
+  disposed = true;
   // 离开页面即清目标，避免返回后再进残留上一首
   shareCard.song = null;
-  if (snapDelay != 0) {
-    clearTimeout(snapDelay);
-    snapDelay = 0;
-  }
+  if (cancelSnapshot != null) cancelSnapshot();
+  clearExportLoading();
+  working.value = false;
 });
 
 function loadLyrics(): void {
@@ -163,87 +168,98 @@ function onCoverLoad(): void {
   coverReady.value = true;
 }
 
-/** 截图卡片节点，拿到临时文件后走 then 分支（分享 / 保存共用） */
-function snapshotCard(onDone: (tempPath: string) => void, onFail: () => void): void {
-  if (working.value) return;
+function clearExportLoading(): void {
+  if (loadingToken > 0) finishLoading(loadingToken);
+  loadingToken = 0;
+}
+
+/** 截图及其完成回调保持在同一作用域，避免拆函数后丢失 onDone/onFail。 */
+function snapshotCard(): Promise<string | null> {
   if (!coverReady.value) {
     qtShowToast({ title: "封面还在加载，稍候再试", icon: "none", duration: 2500 });
-    onFail();
-    return;
+    return Promise.resolve(null);
   }
   const el = uni.getElementById("shareCard");
   if (el == null) {
     qtShowToast({ title: "生成图片失败", icon: "none", duration: 2500 });
-    onFail();
-    return;
+    return Promise.resolve(null);
   }
-  working.value = true;
-  // 歌词卡可能被滚出视口：先把卡片滚回可视区再截（scroll-into-view 对齐顶部），
-  // 等一拍滚动完成；working 已置位挡住等待窗口内的重复点击。
-  // 截图结束后 runSnapshot 会把 scrollInto 复位为 ""，下次还能重新触发滚动。
-  scrollInto.value = "shareCard";
-  snapDelay = setTimeout(() => {
-    snapDelay = 0;
-    runSnapshot(el);
-  }, 320) as unknown as number;
-}
-
-/** 真正执行截图；与 snapDelay 分离后 onUnload 清定时器即可安全放弃未启动的截图 */
-function runSnapshot(el: UniElement): void {
-  // 截图是异步原生调用，先给 loading，避免“点了没反应”的错觉
-  const snapToken = beginLoading("生成图片中...");
-  el.takeSnapshot({
-    success: (res) => {
-      working.value = false;
+  return new Promise<string | null>((resolve) => {
+    let settled = false;
+    const settle = (path: string | null, message: string): void => {
+      if (settled) return;
+      settled = true;
+      if (snapDelay != 0) clearTimeout(snapDelay);
+      if (snapTimeout != 0) clearTimeout(snapTimeout);
+      snapDelay = 0;
+      snapTimeout = 0;
+      cancelSnapshot = null;
       scrollInto.value = "";
-      finishLoading(snapToken);
-      const path = res.tempFilePath;
-      if (path == null || path.length == 0) {
-        qtShowToast({ title: "生成图片失败", icon: "none", duration: 2500 });
-        onFail();
-        return;
+      clearExportLoading();
+      if (!disposed && message.length > 0) qtShowToast({ title: message, icon: "none", duration: 2500 });
+      resolve(disposed ? null : path);
+    };
+    cancelSnapshot = (): void => settle(null, "");
+    // 先滚回卡片顶部；等待期间也保持防重复点击与明确的加载反馈。
+    scrollInto.value = "shareCard";
+    loadingToken = beginLoading("生成图片中...");
+    snapTimeout = setTimeout(() => settle(null, "生成图片超时，请重试"), 12000) as unknown as number;
+    snapDelay = setTimeout(() => {
+      snapDelay = 0;
+      try {
+        el.takeSnapshot({
+          success: (res) => {
+            const path = res.tempFilePath;
+            if (path == null || path.length == 0) settle(null, "生成图片失败，请重试");
+            else settle(path, "");
+          },
+          fail: (err) => {
+            if (settled) return;
+            logError("ShareCard", "截图失败", err);
+            settle(null, "生成图片失败，请重试");
+          },
+        });
+      } catch (err) {
+        logError("ShareCard", "截图调用失败", err);
+        settle(null, "生成图片失败，请重试");
       }
-      onDone(path);
-    },
-    fail: () => {
-      working.value = false;
-      scrollInto.value = "";
-      finishLoading(snapToken);
-      qtShowToast({ title: "生成图片失败", icon: "none", duration: 2500 });
-      onFail();
-    },
+    }, 320) as unknown as number;
   });
 }
 
-function doShare(): void {
-  snapshotCard((tempPath) => {
-    // shareWithSystem 属于按需编译进基座的 uni 模块：调试基座若早于本页生成，
-    // 运行时没有该 API，调用会直接抛错（表现为点击无反应），这里必须兜住并给出出口
-    try {
-      uni.shareWithSystem({
-        type: "image",
-        imageUrl: tempPath,
-        fail: () => {
-          qtShowToast({ title: "分享未完成", icon: "none", duration: 2500 });
-        },
+async function exportCard(action: "share" | "save"): Promise<void> {
+  if (working.value || disposed) return;
+  working.value = true;
+  try {
+    const tempPath = await snapshotCard();
+    if (tempPath == null || disposed) return;
+    if (action == "share") {
+      await new Promise<void>((resolve, reject) => {
+        uni.shareWithSystem({
+          type: "image",
+          imageUrl: tempPath,
+          success: () => resolve(),
+          fail: (err) => reject(err),
+        });
       });
-    } catch (_) {
-      qtShowToast({ title: "系统分享不可用，可先保存到相册", icon: "none", duration: 3000 });
+    } else {
+      loadingToken = beginLoading("保存图片中...");
+      const saved = await saveImageToGallery(tempPath, "qt-share-" + Date.now() + ".png");
+      clearExportLoading();
+      if (!disposed) qtShowToast({ title: saved.length > 0 ? "已保存到相册" : "保存失败，请检查存储空间", icon: "none", duration: 2500 });
     }
-  }, () => {});
+  } catch (err) {
+    logError("ShareCard", action == "share" ? "系统分享失败" : "保存图片失败", err);
+    clearExportLoading();
+    if (!disposed) qtShowToast({ title: action == "share" ? "分享未完成，可重试或保存到相册" : "保存失败，请检查存储空间后重试", icon: "none", duration: 3000 });
+  } finally {
+    clearExportLoading();
+    working.value = false;
+  }
 }
 
-function doSave(): void {
-  snapshotCard((tempPath) => {
-    saveImageToGallery(tempPath, "qt-share-" + Date.now() + ".png").then((saved: string) => {
-      if (saved.length > 0) {
-        qtShowToast({ title: "已保存到相册", icon: "none", duration: 2500 });
-      } else {
-        qtShowToast({ title: "保存失败，请检查存储空间", icon: "none", duration: 2500 });
-      }
-    });
-  }, () => {});
-}
+function doShare(): void { exportCard("share"); }
+function doSave(): void { exportCard("save"); }
 </script>
 <style lang="css">
 .page {

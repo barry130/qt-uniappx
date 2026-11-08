@@ -1,5 +1,9 @@
 import type { Song } from "@/types/music";
 import { logInfo, logErrV, logWarnV } from "@/services/logger";
+// #ifdef APP-ANDROID
+import { audioDlnaActive, audioDlnaState, audioDlnaOnResolveRequest, audioDlnaResolveDone, audioDlnaResolveFail } from "@/uni_modules/qt-audio-player";
+// #endif
+import type { AudioDlnaResolveCallback, AudioDlnaState } from "@/uni_modules/qt-audio-player";
 // #ifdef APP-ANDROID || APP-HARMONY
 // 自研原生通知栏播放器，替代 uni.getBackgroundAudioManager()：
 //   安卓 = media3 前台服务 + MediaSession + 媒体通知（utssdk/app-android）
@@ -52,16 +56,18 @@ import {
   audioEvictSongCache,
   audioOnSetRating,
   audioSetLiked,
-  audioSetCarLyric,
+  audioSetCarLyricMode,
+  audioCarLyricToken,
+  audioSetCarLyricFor,
+  audioSetCarLyricOffset,
+  audioSetTrackCover,
   audioSetFloatOutput,
   audioSetPreferSoftwareDecoder,
   audioSetEnhanceEnabled,
   audioSetEnhanceGain,
 } from "@/uni_modules/qt-audio-player";
 // #endif
-// #ifdef APP-ANDROID || APP-HARMONY
 import type { AudioPlaylistItem, AudioResolveRequestCallback, AudioTrackChangedCallback, AudioRatingRequestCallback } from "@/uni_modules/qt-audio-player";
-// #endif
 // 轻提示：不能放进条件编译块，play() 的 #ifndef 分支也要用
 import { qtShowToast } from "@/services/toast";
 
@@ -115,6 +121,7 @@ const ENHANCE_GAIN_DEFAULT_MB = 300;
 /** 用户音量（0–1，字符串存储）与静音开关（"1"/"0"）。静音独立存，不覆盖音量值 */
 const VOLUME_KEY = "qt-playback-volume";
 const MUTED_KEY = "qt-playback-muted";
+const CAR_LYRIC_MODE_KEY = "qt-car-lyric-mode";
 const VOLUME_DEFAULT = 1.0;
 
 /**
@@ -130,6 +137,17 @@ export const PLAYER_VOLUME_CHANGED_EVENT = "qt-player-volume-changed";
  * - 其他平台（H5 等）：使用 uni.createInnerAudioContext 降级实现（不影响编译）。
  * 对外保持与原来一致的 AudioPlayer 接口，store/页面调用无需改动。
  */
+/** 页面与设置共用的真实音频能力。 */
+export function audioCapabilities(): { equalizer: boolean; outputEffects: boolean } {
+  // #ifdef APP-ANDROID
+  if (audioDlnaActive()) return { equalizer: false, outputEffects: false };
+  return { equalizer: true, outputEffects: true };
+  // #endif
+  // #ifndef APP-ANDROID
+  return { equalizer: false, outputEffects: false };
+  // #endif
+}
+
 export class AudioPlayer {
   private manager: InnerAudioContext | null = null;
   private onTime: TimeListener | null = null;
@@ -142,8 +160,15 @@ export class AudioPlayer {
   private trackCb: AudioTrackChangedCallback | null = null;
   /** 系统收藏（♡）请求回调（通知栏/车机点击），同样持有以便重注册 */
   private ratingCb: AudioRatingRequestCallback | null = null;
+  private dlnaResolveCb: AudioDlnaResolveCallback | null = null;
+  private dlnaUnmuteVolume = 1.0;
   private prevListener: (() => void) | null = null;
   private loadedUrl: string | null = null;
+  private fallbackItems: AudioPlaylistItem[] = [];
+  private fallbackIndex = -1;
+  private fallbackRevision = 0;
+  private fallbackStart = 0;
+  private fallbackAutoPlay = true;
   rate = 1.0;
   /** EQ 当前开关与 5 段增益（dB，-12~12），启动时从持久化恢复 */
   eqEnabled = false;
@@ -183,6 +208,7 @@ export class AudioPlayer {
     this.restoreEqSettings();
     // 输出通道 / 解码方式 / 音量增强同样要在建播放器之前下发（这三项决定 RenderersFactory）
     this.restoreOutputSettings();
+    audioSetCarLyricMode(this.getCarLyricMode());
     // #endif
   }
 
@@ -220,6 +246,9 @@ export class AudioPlayer {
 
   /** 当前用户音量（0–1，默认 1）。静音是独立开关，读取本值不受静音影响 */
   getVolume(): number {
+    // #ifdef APP-ANDROID
+    if (audioDlnaActive()) return audioDlnaState().volume;
+    // #endif
     try {
       const raw = uni.getStorageSync(VOLUME_KEY) as string;
       const value = parseFloat(raw);
@@ -237,6 +266,14 @@ export class AudioPlayer {
     let value = v;
     if (!(value >= 0)) value = VOLUME_DEFAULT;
     if (value > 1) value = 1;
+    // #ifdef APP-ANDROID
+    if (audioDlnaActive()) {
+      if (value > 0) this.dlnaUnmuteVolume = value;
+      audioSetVolume(value);
+      uni.$emit(PLAYER_VOLUME_CHANGED_EVENT);
+      return;
+    }
+    // #endif
     try {
       uni.setStorageSync(VOLUME_KEY, value.toString());
     } catch (_) {
@@ -247,6 +284,9 @@ export class AudioPlayer {
 
   /** 是否静音（独立持久化，不覆盖用户音量值） */
   getMuted(): boolean {
+    // #ifdef APP-ANDROID
+    if (audioDlnaActive()) return audioDlnaState().volume == 0;
+    // #endif
     try {
       const raw = uni.getStorageSync(MUTED_KEY) as string;
       return raw == "1";
@@ -260,6 +300,15 @@ export class AudioPlayer {
    * 若把音量本身写成 0，取消静音时就没有原值可恢复，用户调好的音量被一次静音抹掉。
    */
   setMuted(m: boolean): void {
+    // #ifdef APP-ANDROID
+    if (audioDlnaActive()) {
+      const volume = audioDlnaState().volume;
+      if (volume > 0) this.dlnaUnmuteVolume = volume;
+      audioSetVolume(m ? 0 : this.dlnaUnmuteVolume);
+      uni.$emit(PLAYER_VOLUME_CHANGED_EVENT);
+      return;
+    }
+    // #endif
     try {
       uni.setStorageSync(MUTED_KEY, m ? "1" : "0");
     } catch (_) {
@@ -391,6 +440,9 @@ export class AudioPlayer {
     audioOnResolveRequest(this.resolveCb);
     audioOnTrackChanged(this.trackCb);
     audioOnSetRating(this.ratingCb);
+    // #ifdef APP-ANDROID
+    audioDlnaOnResolveRequest(this.dlnaResolveCb);
+    // #endif
   }
   // #endif
 
@@ -456,7 +508,7 @@ export class AudioPlayer {
     if (url == null || url.length == 0) return url;
     const lower = url.toLowerCase();
     if (lower.indexOf("http://") == 0 || lower.indexOf("https://") == 0) return url;
-    if (lower.indexOf("file://") == 0 || lower.indexOf("content://") == 0) return url;
+    if (lower.indexOf("file://") == 0 || lower.indexOf("content://") == 0 || lower.indexOf("unifile://") == 0) return url;
     if (url.indexOf("/") == 0) return "file://" + url;
     return "file:///" + url;
   }
@@ -503,8 +555,11 @@ export class AudioPlayer {
 
   private seekWhenReady(time: number): void {
     if (time <= 0) return;
+    const revision = this.fallbackRevision;
+    const url = this.loadedUrl;
     let attempts = 0;
     const trySeek = () => {
+      if (url != this.loadedUrl || revision != this.fallbackRevision) return;
       // #ifdef APP-ANDROID || APP-HARMONY
       const current = audioGetCurrentTime();
       if (current >= time - 0.5) return;
@@ -707,6 +762,7 @@ export class AudioPlayer {
   }
 
   changeRate(value: number): void {
+    if (this.isDlnaActive()) { qtShowToast({ title: "DLNA 接收设备使用原速播放", icon: "none" }); return; }
     let rate = value;
     if (!(rate > 0)) rate = 1.0;
     this.rate = rate;
@@ -722,6 +778,7 @@ export class AudioPlayer {
   }
 
   pause(): void {
+    this.fallbackAutoPlay = false;
     // #ifdef APP-ANDROID || APP-HARMONY
     this.ensureNativeBound();
     audioPause();
@@ -731,6 +788,7 @@ export class AudioPlayer {
     // #endif
   }
   resume(): void {
+    this.fallbackAutoPlay = true;
     // #ifdef APP-ANDROID || APP-HARMONY
     this.ensureNativeBound();
     audioResume();
@@ -762,6 +820,10 @@ export class AudioPlayer {
     // #endif
   }
   stop(): void {
+    this.fallbackRevision++;
+    this.fallbackItems = [];
+    this.fallbackIndex = -1;
+    this.fallbackAutoPlay = false;
     // #ifdef APP-ANDROID || APP-HARMONY
     this.ensureNativeBound();
     audioStop();
@@ -807,6 +869,36 @@ export class AudioPlayer {
       logErrV("QT Audio", "setPlaylist 失败", e);
     }
     // #endif
+    // #ifndef APP-ANDROID || APP-HARMONY
+    this.fallbackItems = items.slice();
+    this.loadFallbackIndex(startIndex, autoPlay, startPositionSec);
+    // #endif
+  }
+
+  private loadFallbackIndex(index: number, autoPlay: boolean, start: number): void {
+    if (index < 0 || index >= this.fallbackItems.length) return;
+    this.fallbackRevision++;
+    this.fallbackIndex = index;
+    this.fallbackStart = start;
+    this.fallbackAutoPlay = autoPlay;
+    this.loadedUrl = null;
+    const item = this.fallbackItems[index];
+    this.getManager().stop();
+    if (item.uri.startsWith("qt-resolve://")) {
+      if (this.resolveCb != null) this.resolveCb(item.mediaId);
+      else if (this.onError != null) this.onError();
+    } else this.commitFallbackUrl(item.mediaId, item.uri);
+  }
+
+  private commitFallbackUrl(mediaId: string, url: string): void {
+    const item = this.fallbackItems[this.fallbackIndex];
+    if (item == null || item.mediaId != mediaId) return;
+    const audio = this.getManager();
+    audio.src = this.toPlayableUrl(url);
+    audio.playbackRate = this.rate;
+    this.loadedUrl = url;
+    if (this.fallbackAutoPlay) audio.play();
+    if (this.fallbackStart > 0) this.seekWhenReady(this.fallbackStart);
   }
 
   /** 定位到时间线下标并播放（JS 的上一首/下一首/点选执行端） */
@@ -814,6 +906,9 @@ export class AudioPlayer {
     // #ifdef APP-ANDROID || APP-HARMONY
     this.ensureNativeBound();
     audioPlayTimelineIndex(index);
+    // #endif
+    // #ifndef APP-ANDROID || APP-HARMONY
+    this.loadFallbackIndex(index, true, 0);
     // #endif
   }
 
@@ -832,7 +927,8 @@ export class AudioPlayer {
     return audioCurrentMediaId();
     // #endif
     // #ifndef APP-ANDROID || APP-HARMONY
-    return "";
+    const item = this.fallbackItems[this.fallbackIndex];
+    return item != null ? item.mediaId : "";
     // #endif
   }
 
@@ -841,6 +937,12 @@ export class AudioPlayer {
     // #ifdef APP-ANDROID || APP-HARMONY
     this.ensureNativeBound();
     audioSyncTimeline(items, expectedCurrentMid);
+    // #endif
+    // #ifndef APP-ANDROID || APP-HARMONY
+    const index = items.findIndex((item: AudioPlaylistItem): boolean => item.mediaId == expectedCurrentMid);
+    if (index < 0 || this.currentMediaId() != expectedCurrentMid) return;
+    this.fallbackItems = items.slice();
+    this.fallbackIndex = index;
     // #endif
   }
 
@@ -856,23 +958,68 @@ export class AudioPlayer {
 
   /** 注册解析处理器：原生加载 qt-resolve 条目时向 JS 要真实地址（主线程回调） */
   onResolveRequest(callback: AudioResolveRequestCallback): void {
-    // #ifdef APP-ANDROID || APP-HARMONY
     this.resolveCb = callback;
+    // #ifdef APP-ANDROID || APP-HARMONY
     audioOnResolveRequest(callback);
     // #endif
   }
 
+  onDlnaResolveRequest(callback: AudioDlnaResolveCallback): void {
+    this.dlnaResolveCb = callback;
+    // #ifdef APP-ANDROID
+    audioDlnaOnResolveRequest(callback);
+    // #endif
+  }
+
+  prepareDlna(): void {
+    // #ifdef APP-ANDROID
+    this.ensureNativeBound();
+    // #endif
+  }
+
+  isDlnaActive(): boolean {
+    // #ifdef APP-ANDROID
+    return audioDlnaActive();
+    // #endif
+    // #ifndef APP-ANDROID
+    return false;
+    // #endif
+  }
+
+  dlnaPlaybackState(): AudioDlnaState | null {
+    // #ifdef APP-ANDROID
+    return audioDlnaActive() ? audioDlnaState() : null;
+    // #endif
+    // #ifndef APP-ANDROID
+    return null;
+    // #endif
+  }
+
   /** 回填解析结果（成功）：URL 会先过 facade 的地址规范化 */
-  resolveDone(mediaId: string, url: string): void {
+  resolveDone(mediaId: string, url: string, dlnaGeneration: number = 0, referer: string = ""): void {
+    // #ifdef APP-ANDROID
+    if (dlnaGeneration > 0) { audioDlnaResolveDone(mediaId, this.toPlayableUrl(url), referer, dlnaGeneration); return; }
+    if (audioDlnaActive()) return;
+    // #endif
     // #ifdef APP-ANDROID || APP-HARMONY
     audioResolveDone(mediaId, this.toPlayableUrl(url));
+    // #endif
+    // #ifndef APP-ANDROID || APP-HARMONY
+    this.commitFallbackUrl(mediaId, url);
     // #endif
   }
 
   /** 回填解析结果（失败）：加载报错走 store 既有错误策略 */
-  resolveFail(mediaId: string): void {
+  resolveFail(mediaId: string, dlnaGeneration: number = 0): void {
+    // #ifdef APP-ANDROID
+    if (dlnaGeneration > 0) { audioDlnaResolveFail(mediaId, dlnaGeneration); return; }
+    if (audioDlnaActive()) return;
+    // #endif
     // #ifdef APP-ANDROID || APP-HARMONY
     audioResolveFail(mediaId);
+    // #endif
+    // #ifndef APP-ANDROID || APP-HARMONY
+    if (this.currentMediaId() == mediaId && this.onError != null) this.onError();
     // #endif
   }
 
@@ -919,14 +1066,58 @@ export class AudioPlayer {
     // #endif
   }
 
-  /**
-   * 下发整首歌词到车机蓝牙（AVRCP 1.3+，媒体元数据 key "android.media.metadata.LYRICS"）。
-   * text = 歌词全文（LRC 原文或纯文本，车机自行解析）；空串 = 清掉上一首残留歌词。
-   * 原生侧有（代数, mediaId, 文本）三键去重，重复推送无效但无害；iOS 无对应通道，静默忽略。
-   */
-  setCarLyric(text: string): void {
+  setTrackCover(mediaId: string, cover: string): void {
     // #ifdef APP-ANDROID || APP-HARMONY
-    audioSetCarLyric(text);
+    audioSetTrackCover(mediaId, cover);
+    // #endif
+  }
+
+  /** Optional metadata compatibility; not a standard dedicated AVRCP lyric channel. */
+  carLyricSupported(): boolean {
+    // #ifdef APP-ANDROID
+    return true;
+    // #endif
+    // #ifndef APP-ANDROID
+    return false;
+    // #endif
+  }
+
+  getCarLyricMode(): number {
+    if (!this.carLyricSupported()) return 0;
+    try {
+      const value = uni.getStorageSync(CAR_LYRIC_MODE_KEY) as string;
+      return value == "1" ? 1 : value == "2" ? 2 : 0;
+    } catch (_) { return 0; }
+  }
+
+  setCarLyricMode(mode: number): void {
+    const value = this.carLyricSupported() && (mode == 1 || mode == 2) ? mode : 0;
+    try { uni.setStorageSync(CAR_LYRIC_MODE_KEY, value.toString()); } catch (_) {
+      logWarnV("QT Audio", "蓝牙歌词设置保存失败（本次已生效）", "");
+    }
+    // #ifdef APP-ANDROID || APP-HARMONY
+    audioSetCarLyricMode(value);
+    // #endif
+  }
+
+  carLyricToken(): number {
+    // #ifdef APP-ANDROID
+    return audioCarLyricToken();
+    // #endif
+    // #ifndef APP-ANDROID
+    return 0;
+    // #endif
+  }
+
+  setCarLyric(text: string, mediaId: string, token: number, offsetMs: number): void {
+    // #ifdef APP-ANDROID
+    audioSetCarLyricFor(mediaId, token, text, offsetMs);
+    // #endif
+  }
+
+  setCarLyricOffset(mediaId: string, offsetMs: number): void {
+    // #ifdef APP-ANDROID
+    audioSetCarLyricOffset(mediaId, audioCarLyricToken(), offsetMs);
     // #endif
   }
 

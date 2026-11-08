@@ -1,800 +1,588 @@
 <template>
-  <qt-page-frame
-    width-kind="detail"
-    :header-chip-texts="sourceLabels"
-    :header-chip-actives="sourceActives"
-    @headerChipTap="onChipTap"
-  >
-    <view class="page">
-      <!-- 单条滚动区 + 无 key 的 v-for 是唯一在 Vapor 下被反复验证可靠的渲染方式
-           （换数据只做按索引原地 diff）。切音源走页内切换，安全配方来自搜索页实证：
-           **先回顶、再整组换 filteredCharts**——停在滚动深处整组替换会整段丢渲染
-           （keyed diff / v-if 重挂 / 每源常驻 v-show 或内联 display 也都会丢渲染，
-           均被真机否决），回顶后替换从未失败。每个音源的滚动位置由
-           services/chart-tabs.ts 记忆，切换/重进后 restoreScroll() 落位。 -->
-      <scroll-view id="chart-scroll" class="scroll" direction="vertical" :show-scrollbar="false" :scroll-top="scrollTop" @scroll="onListScroll">
-        <view class="chart-grid" :class="layout.isWide ? 'chart-grid-wide' : ''" :style="gridStyle">
-          <!-- 骨架与真实行同处一个 relative 宿主：骨架层盖在上面，逐行透明度互补 -->
-          <view class="sk-host">
-            <view
-              v-for="(chart, chartIndex) in filteredCharts"
-              class="rank-card"
-              :class="layout.isWide ? 'rank-card-wide' : ''"
-              :style="chartRowStyle(chartIndex) + rankCardStyle"
-              :hover-class="layout.isWide ? 'rank-card-hover' : 'none'"
-              @click="openChart(chart)"
-            >
-              <!-- 卡头：榜单名 + 更新说明（包侧 description 常带「每周四更新」这类话术） -->
-              <view class="rank-head">
-                <text class="rank-name" :class="layout.isWide ? 'rank-name-wide' : ''" :max-lines="1" :style="rankNameStyle + qtFontDual(32, 17)">{{ chart.name }}</text>
-                <text class="rank-meta" :class="layout.isWide ? 'rank-meta-wide' : ''" :max-lines="1" :style="rankMetaStyle + qtFontDual(24, 13)">{{ previewMeta(chartIndex) }}</text>
-              </view>
-              <!-- 卡身：左侧封面（点它进榜单详情），右侧前三名（点歌直接播） -->
-              <view class="rank-body" :class="layout.isWide ? 'rank-body-wide' : ''">
-                <view class="rank-cover-wrap" :class="layout.isWide ? 'rank-cover-wrap-wide' : ''" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" @click.stop="openChart(chart)">
-                  <image class="rank-cover" :class="layout.isWide ? 'rank-cover-wide' : ''" :src="chart.picUrl" mode="aspectFill" />
-                  <view class="rank-play">
-                    <QtIcon name="play" :size="layout.isWide ? 16 : 34" color="#ffffff" />
-                  </view>
-                </view>
-                <view class="rank-songs" :class="layout.isWide ? 'rank-songs-wide' : ''">
-                  <!-- 前三名不用 v-for、不在模板绑对象、不用 v-if/v-else 分支：这三样在
-                       Vapor 下都会让该行文本不渲染或渲染中断（v-if 分支实测两种都不出）。
-                       单文本节点 + 返回 string 的纯函数，与卡头「共 N 首」同款，实测可更新 -->
-                  <view
-                    class="rank-song"
-                    :class="layout.isWide ? 'rank-song-wide' : ''"
-                    @click.stop="onPreviewTap(chartIndex, 0)"
-                  >
-                    <text class="rank-idx" :class="layout.isWide ? 'rank-idx-wide' : ''" :style="rankIdxStyle + qtFontDual(26, 13)">1</text>
-                    <text class="rank-song-name" :class="layout.isWide ? 'rank-song-name-wide' : ''" :max-lines="1" :style="rankSongNameStyle + qtFontDual(26, 13)">{{ previewSongLine(chartIndex, 0) }}</text>
-                  </view>
-                  <view
-                    class="rank-song"
-                    :class="layout.isWide ? 'rank-song-wide' : ''"
-                    @click.stop="onPreviewTap(chartIndex, 1)"
-                  >
-                    <text class="rank-idx" :class="layout.isWide ? 'rank-idx-wide' : ''" :style="rankIdxStyle + qtFontDual(26, 13)">2</text>
-                    <text class="rank-song-name" :class="layout.isWide ? 'rank-song-name-wide' : ''" :max-lines="1" :style="rankSongNameStyle + qtFontDual(26, 13)">{{ previewSongLine(chartIndex, 1) }}</text>
-                  </view>
-                  <view
-                    class="rank-song"
-                    :class="layout.isWide ? 'rank-song-wide' : ''"
-                    @click.stop="onPreviewTap(chartIndex, 2)"
-                  >
-                    <text class="rank-idx" :class="layout.isWide ? 'rank-idx-wide' : ''" :style="rankIdxStyle + qtFontDual(26, 13)">3</text>
-                    <text class="rank-song-name" :class="layout.isWide ? 'rank-song-name-wide' : ''" :max-lines="1" :style="rankSongNameStyle + qtFontDual(26, 13)">{{ previewSongLine(chartIndex, 2) }}</text>
-                  </view>
+  <QtPageFrame title="排行榜" :header-title-visible="false" width-kind="detail" :header-actions="headerActions" @headerAction="onHeaderAction">
+    <view class="source-bar">
+      <scroll-view v-if="sources.length > 0" direction="horizontal" class="source-strip"
+      :style="sourceStripStyle" :scroll-into-view="sourceReveal.anchor.value" :show-scrollbar="false"
+      :scroll-with-animation="false" @scroll="onSourceScroll">
+        <view class="source-options" :style="sourceOptionsStyle">
+          <view v-for="(source, si) in sources" :id="sourceReveal.itemId(si)" class="source-option" :style="sourceOptionStyle(si)">
+            <QtOption :label="sourceRegistry.label(source)" kind="chip" :single-line="true" :style="sourceChipStyle(si)" :selected="selectionIndex == si" @select="onChipTap(si)" />
+          </view>
+        </view>
+      </scroll-view>
+      <view v-if="layout.isWide" class="chart-refresh" :style="refreshStyle" @click="reloadChartsSafely">
+        <QtIcon name="refresh" :size="22" :color="loading || sources.length == 0 ? theme.skin.textSubtle : theme.skin.icon" />
+      </view>
+    </view>
+    <view class="chart-body">
+      <!-- 单scroll-view与稳定前缀：追加后面的卡，不在深滚动处移除/换整组子树。 -->
+      <scroll-view id="chart-scroll" class="chart-scroll" direction="vertical" :scroll-top="scrollTop"
+        :scroll-with-animation="false" @scroll="onListScroll">
+        <view v-if="skeletonOn" class="chart-grid" :style="gridStyle">
+          <view class="chart-host">
+            <view v-for="i in skeletonCount" class="rank-card" :class="layout.isWide ? 'rank-card-wide' : ''" :style="rankCardStyle(i - 1)">
+              <view class="skeleton-heading" :class="layout.isWide ? 'skeleton-heading-wide' : ''" :style="skeletonHeadingStyle"></view>
+              <view class="rank-body" :style="rankBodyStyle">
+                <view class="rank-cover-placeholder" :class="layout.isWide ? 'rank-cover-placeholder-wide' : ''" :style="coverStyle"></view>
+                <view class="preview-lines">
+                  <view class="skeleton-line" :class="layout.isWide ? 'skeleton-line-wide' : ''" :style="skeletonLineStyle"></view>
+                  <view class="skeleton-line" :class="layout.isWide ? 'skeleton-line-wide' : ''" :style="skeletonLineStyle"></view>
+                  <view class="skeleton-line" :class="layout.isWide ? 'skeleton-line-wide' : ''" :style="skeletonLineStyle"></view>
                 </view>
               </view>
-            </view>
-            <!-- 骨架层必须再包一层满宽容器：.sk-host 是 row+wrap，骨架组件的根节点
-                 作为 flex item 塞进去会被压成内容宽，卡宽与换行全部失准
-                 （见 uni_modules/qt-ui/docs/design.md §6.17，首页同一原因也包了这一层） -->
-                <view v-if="skeletonOn" class="sk-fill">
-              <QtSkeletonList
-                kind="rank"
-                :rows="skeletonRows"
-                :revealed="reveal.revealedCount.value"
-                :lifted="skeletonLifted"
-                :shining="shining"
-                :card-width="skeletonRowWidth"
-              />
             </view>
           </view>
-              <!-- 空态必须同时满足「当前源确实拉过」：切到尚未加载的源时 filteredCharts
-                   本来就是空的，只看 !loading 会立刻误报「暂无榜单数据」
-                   （用户实测 2026-10-25：从咪咕切到网易云直接空态，等两分钟才出数据） -->
-              <view v-if="!loading && currentSourceLoaded && filteredCharts.length == 0" class="empty">
-                <QtEmpty
-                  icon="chart"
-                  title="暂无榜单数据"
-                  description="这个音源的榜单还没拉到，换一个音源或重新加载试试"
-                  :compact="true"
-                  action-text="重新加载"
-                  action-icon="refresh"
-                  @action="reloadChartsSafely"
-                />
+        </view>
+        <QtEmpty v-if="showNoSources" icon="settings" title="暂无可用音源"
+          description="请先到设置安装支持排行榜的数据包。" action-text="去设置" @action="goToSettings" />
+        <QtEmpty v-if="showListError" icon="info" title="排行榜加载失败"
+          description="网络或音源暂不可用，可以重试或切换其他音源。" action-text="重新加载" @action="reloadChartsSafely" />
+        <QtEmpty v-if="showEmptyList" icon="music" title="该音源暂无榜单"
+          description="音源返回了空列表，可切换音源或稍后刷新。" action-text="刷新" @action="reloadChartsSafely" />
+        <view v-if="filteredCharts.length > 0" class="chart-grid" :style="gridStyle">
+          <view class="chart-host">
+            <!-- 不加key；Vapor整组替换前必须回顶。前三行显式text，不嵌套v-for/v-else文本。 -->
+            <view v-for="(chart, idx) in renderedCharts" class="rank-card" :class="layout.isWide ? 'rank-card-wide' : ''" :style="rankCardStyle(idx)">
+              <view class="rank-heading" :style="rankHeadingStyle" @click="openChart(chart)">
+                <text class="rank-name" :style="rankNameStyle">{{ chart.name }}</text>
+                <text class="rank-meta" :style="smallMutedStyle">{{ chartLoader.meta(idx) }}</text>
+                <QtIcon name="chevron-right" :size="layout.isWide ? 16 : 28" :color="theme.skin.textSubtle" />
+              </view>
+              <view class="rank-body" :style="rankBodyStyle">
+                <view class="rank-cover-box" :style="coverBoxStyle" @click="openChart(chart)">
+                  <image v-if="coverSources[idx] != null && coverSources[idx] != ''" class="rank-cover" :class="layout.isWide ? 'rank-cover-wide' : ''"
+                    :style="coverStyle" :src="coverSources[idx]" mode="aspectFill" />
+                  <view v-else class="rank-cover-placeholder" :class="layout.isWide ? 'rank-cover-placeholder-wide' : ''" :style="coverStyle">
+                    <text class="cover-placeholder-text" :style="coverTextStyle">榜</text>
+                  </view>
+                </view>
+                <view class="preview-lines">
+                  <view class="preview-line" :style="previewLineStyle" @click.stop="onPreviewTap(idx, 0)">
+                    <text class="preview-number" :style="previewNumberStyle">1</text>
+                    <text class="preview-name" :style="previewNameStyle">{{ chartLoader.songLine(idx, 0) }}</text>
+                  </view>
+                  <view class="preview-line" :style="previewLineStyle" @click.stop="onPreviewTap(idx, 1)">
+                    <text class="preview-number" :style="previewNumberStyle">2</text>
+                    <text class="preview-name" :style="previewNameStyle">{{ chartLoader.songLine(idx, 1) }}</text>
+                  </view>
+                  <view class="preview-line" :style="previewLineStyle" @click.stop="onPreviewTap(idx, 2)">
+                    <text class="preview-number" :style="previewNumberStyle">3</text>
+                    <text class="preview-name" :style="previewNameStyle">{{ chartLoader.songLine(idx, 2) }}</text>
+                  </view>
+                </view>
               </view>
             </view>
-        <view class="pad" :class="layout.isWide ? 'pad-wide' : ''"></view>
+          </view>
+          <view class="chart-end">
+            <text class="chart-end-text" :style="smallMutedStyle">滑动查看 · 仅加载附近榜单的封面与前三首</text>
+          </view>
+        </view>
       </scroll-view>
-
-      <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
+      <view v-if="showBackTop" class="back-top" :class="layout.isWide ? 'back-top-wide' : ''" :style="backTopStyle" @click="backToTop">
+        <QtIcon name="arrow-up" :size="layout.isWide ? 20 : 36" :color="theme.skin.text" />
+      </view>
     </view>
-  </qt-page-frame>
+  </QtPageFrame>
 </template>
 
 <script setup lang="ts">
-import { qtShowToast } from "@/services/toast";
+import { computed, ref, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { onLoad, onShow, onHide } from "@dcloudio/uni-app";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
-import { ref, computed, onMounted, onUnmounted, watch } from "vue";
-import { onShow, onLoad } from "@dcloudio/uni-app";
+import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
-import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
-import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import QtEmpty from "@/uni_modules/qt-ui/components/qt-empty/qt-empty.uvue";
-import { useQtReveal } from "@/uni_modules/qt-ui/composables/use-qt-reveal";
-import { musicApi } from "@/services/music-api";
-import { packsFingerprint, SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { fontScale, qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtContentWidth, qtColumnCount } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { qtOptionChipMinHeightPx, qtOptionChipWidthPx } from "@/uni_modules/qt-ui/composables/qt-option-metrics";
+import { useQtSelectionReveal } from "@/uni_modules/qt-ui/composables/use-qt-selection-reveal";
+import { qtSelectionScrollOffset } from "@/uni_modules/qt-ui/composables/selection";
+import { musicApi, type Chart } from "@/services/music-api";
+import { createChartLoader, chartDemandWindow, readChartListSnapshot, chartListRequiresNetwork, rememberChartList, clearChartViewCache } from "@/services/chart-loader";
+import { readChartScroll, saveChartScroll, flushChartScroll } from "@/services/chart-tabs";
 import { useSourceStore } from "@/stores/source";
 import { useSourceRegistryStore } from "@/stores/source-registry";
 import { usePlayerStore } from "@/stores/player";
-import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
-import { qtColumnCount } from "@/uni_modules/qt-ui/composables/use-qt-widths";
-import { platformLabel } from "@/services/platform";
-import { readChartScroll, saveChartScroll } from "@/services/chart-tabs";
-import type { Source, Chart } from "@/services/music-api";
-import type { Song } from "@/types/music";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
 import { logMsgErr } from "@/services/logger";
+import { qtShowToast } from "@/services/toast";
 
-const themeStore = useThemeStore();
-const sourceStore = useSourceStore();
-const player = usePlayerStore();
+const theme = useThemeStore();
 const layout = useQtLayout();
-
-// 音源清单来自数据包注册表：注册表异步加载完成后由 watch 同步选中项。
-// 只列**声明了有排行榜**的源（sourceIdsWith）：没有榜单的源不渲染来源标签，
-// 否则点了只剩一个「暂无榜单数据」的空页（v4 包按 features 声明过滤；
-// 旧包未声明 features 时全部源照常显示，行为不变）。
+const sourceStore = useSourceStore();
 const sourceRegistry = useSourceRegistryStore();
-const sources = computed<Source[]>(() => sourceRegistry.sourceIdsWith("charts") as Source[]);
-// 标题栏药丸用全称（platformLabel，用户定稿「上面的tag显示全称」；无描边由 frame 内联给）
-const sourceLabels = computed<string[]>(() => sources.value.map((s) => platformLabel(s)));
-const sourceActives = computed<boolean[]>(() => sources.value.map((s, i) => i == sourceIndex.value));
-const sourceIndex = ref(0);
-// 页面参数 si：切 tab 走整页 redirectTo 重载，目标音源下标由它带过来
-let paramSi = -1;
-// 初值 true：onMounted 才发请求，首帧若按 false 渲染会先闪一下「暂无榜单数据」
-const loading = ref(true);
+const player = usePlayerStore();
+const chartLoader = createChartLoader();
+const coverSources = chartLoader.coverSources;
 const allCharts = ref<Chart[]>([]);
-/**
- * 已经拿到过榜单结果的音源 id。
- *
- * 为什么需要它：榜单按需拉取（loadAll 只拉当前源，切 tab 才拉目标源），
- * 切到还没拉过的源时 filteredCharts 天然为空。旧判据只看 !loading，
- * 于是切 tab 立刻显示「暂无榜单数据」，而真实数据还在路上。
- * 空态只允许出现在「这个源确实拉过、并且结果为空」的时候。
- */
-const loadedSources = ref<string[]>([]);
-function markSourceLoaded(source: string): void {
-  if (source.length == 0) return;
-  const list = loadedSources.value;
-  if (list.indexOf(source) >= 0) return;
-  const next = list.slice();
-  next.push(source);
-  loadedSources.value = next;
-}
+const filteredCharts = computed((): Chart[] => allCharts.value);
+const renderedCount = ref(0);
+const renderedCharts = computed((): Chart[] => allCharts.value.slice(0, renderedCount.value));
+const loading = ref(true);
+const loadError = ref("");
+const currentSourceLoaded = ref(false);
+const sourceIndex = ref(-1);
+const pendingSourceIndex = ref(-1);
+const activeSource = ref("");
+const scrollTop = ref(0);
+const showBackTop = ref(false);
+const pageVisible = ref(true);
+let pageAlive = true;
+let mounted = false;
+let started = false;
+let loadAllBusy = false;
+let intent = 0;
+let loadedIdentity = "";
+let paramSi = -1;
+let lastScrollTop = 0;
+let suppressScroll = false;
+let topTimer = 0;
+let topResolve: ((ready: boolean) => void) | null = null;
+let restoreTimer = 0;
+let releaseTimer = 0;
+let measureTimer = 0;
+let measureSeq = 0;
+const measuredWidth = ref(0);
+const measuredHeight = ref(0);
+let sourceScrollLeft = 0;
 
-// ── 榜单内前三名预览 ─────────────────────────────────────────────────────
-// 每张卡要单独拉一次 chartDetail（全量榜单接口），逐卡并发 3 个排队取，
-// 结果按「平台:id@包态指纹」缓存：切音源/切页回来不再重发请求。
-const PREVIEW_ROWS = 3;
-// 预览是逐卡一次 chartDetail 请求，25 张卡排 3 并发要 9 轮；提到 6 明显缩短首屏补齐时间
-const PREVIEW_CONCURRENCY = 6;
-interface RankPreview {
-  songs: Song[];
-  total: number;
-}
-let previewCache = new Map<string, RankPreview>();
-const previewStates = ref<number[]>([]); // 0/3 = 等待或拉取中（画占位），1 = 就绪，2 = 拉不到
-const previewSongs = ref<Song[][]>([]);
-const previewTotals = ref<number[]>([]);
-let previewSeq = 0;
-
-function chartKey(chart: Chart): string {
-  return chart.platform + ":" + chart.id + "@" + packsFingerprint();
-}
-
-function rebuildPreviews(): void {
-  const list = filteredCharts.value;
-  const states: number[] = [];
-  const songs: Song[][] = [];
-  const totals: number[] = [];
-  for (let i = 0; i < list.length; i++) {
-    const cached = previewCache.get(chartKey(list[i]));
-    states.push(cached != null ? 1 : 0);
-    songs.push(cached != null ? cached.songs : []);
-    totals.push(cached != null ? cached.total : 0);
+const sources = computed((): string[] => {
+  const ids: string[] = [];
+  const available = sourceRegistry.sources;
+  for (let i = 0; i < available.length; i++) {
+    if (available[i].id != "local" && available[i].charts !== false) ids.push(available[i].id);
   }
-  previewStates.value = states;
-  previewSongs.value = songs;
-  previewTotals.value = totals;
-  kickPreviews();
+  return ids;
+});
+const selectionIndex = computed((): number => {
+  const index = pendingSourceIndex.value >= 0 ? pendingSourceIndex.value : sources.value.indexOf(activeSource.value);
+  return index >= 0 && index < sources.value.length ? index : -1;
+});
+function sourceSelectionKey(): string {
+  const labels: string[] = [];
+  for (let i = 0; i < sources.value.length; i++) {
+    const id = sources.value[i];
+    labels.push(JSON.stringify([id, sourceRegistry.label(id)]));
+  }
+  return JSON.stringify(labels);
 }
+const sourceReveal = useQtSelectionReveal((): boolean => pageVisible.value,
+  (): number => selectionIndex.value, (): string => sourceSelectionKey(), sourceNeedsReveal);
+const skeletonOn = computed((): boolean => loading.value && allCharts.value.length == 0);
+const showNoSources = computed((): boolean => !loading.value && sources.value.length == 0);
+const showListError = computed((): boolean => !loading.value && sources.value.length > 0 && loadError.value.length > 0 && allCharts.value.length == 0);
+const showEmptyList = computed((): boolean => !loading.value && sources.value.length > 0 && currentSourceLoaded.value && loadError.value.length == 0 && allCharts.value.length == 0);
+const headerActions = ["refresh"];
+const padX = computed((): number => layout.isWide ? 16 : qtRpx(24));
+const padY = computed((): number => layout.isWide ? 12 : qtRpx(20));
+const gapPx = computed((): number => layout.isWide ? 12 : qtRpx(20));
+const gridWidth = computed((): number => measuredWidth.value > 0 ? measuredWidth.value : qtContentWidth("detail"));
+const innerWidth = computed((): number => Math.max(1, gridWidth.value - padX.value * 2));
+const columns = computed((): number => layout.isWide ? qtColumnCount(innerWidth.value, 380, gapPx.value, 3) : 1);
+const cardWidth = computed((): number => Math.floor((innerWidth.value - (columns.value - 1) * gapPx.value) / columns.value));
+const headPx = computed((): number => Math.ceil((layout.isWide ? 17 : qtRpx(32)) * fontScale.scale * 1.4));
+const linePx = computed((): number => Math.max(layout.isWide ? 28 : qtRpx(50), Math.ceil((layout.isWide ? 13 : qtRpx(26)) * fontScale.scale * 1.4 + 4)));
+const coverPx = computed((): number => layout.isWide ? 84 : qtRpx(148));
+const bodyPx = computed((): number => Math.max(coverPx.value, linePx.value * 3));
+const bodyGap = computed((): number => layout.isWide ? 10 : qtRpx(20));
+const cardPad = computed((): number => layout.isWide ? 12 : qtRpx(24));
+const cardHeight = computed((): number => 2 + cardPad.value * 2 + headPx.value + bodyGap.value + bodyPx.value);
+const cardStride = computed((): number => cardHeight.value + gapPx.value);
+const viewportHeight = computed((): number => measuredHeight.value > 0 ? measuredHeight.value : Math.max(120, layout.windowHeight - (layout.isWide ? 156 : qtRpx(270))));
+const skeletonCount = computed((): number => Math.min(8, chartDemandWindow(0, viewportHeight.value, cardStride.value, columns.value, 8).end));
+const sourceStripWidth = computed((): number => Math.max(1, gridWidth.value - (layout.isWide ? 68 : 0)));
+const sourceStripStyle = computed((): string => "width:" + sourceStripWidth.value + "px;height:" + (qtOptionChipMinHeightPx() + 12) + "px;");
+const refreshStyle = computed((): string => "opacity:" + (loading.value || sources.value.length == 0 ? "0.45" : "1") + ";");
+const sourceGapPx = computed((): number => layout.isWide ? 8 : qtRpx(16));
+const sourceChipWidths = computed((): number[] => sources.value.map((id: string): number => qtOptionChipWidthPx(sourceRegistry.label(id), true)));
+const sourceRowWidth = computed((): number => {
+  let width = padX.value * 2 + Math.max(0, sources.value.length - 1) * sourceGapPx.value;
+  for (let i = 0; i < sourceChipWidths.value.length; i++) width += sourceChipWidths.value[i];
+  return Math.ceil(width);
+});
+function onSourceScroll(event: UniScrollEvent): void {
+  const left = Number(event.detail.scrollLeft);
+  if (Number.isFinite(left)) sourceScrollLeft = Math.max(0, left);
+}
+function sourceNeedsReveal(index: number): boolean {
+  if (index < 0 || index >= sourceChipWidths.value.length) return false;
+  let start = padX.value;
+  for (let i = 0; i < index; i++) start += sourceChipWidths.value[i] + sourceGapPx.value;
+  const next = qtSelectionScrollOffset(start, start + sourceChipWidths.value[index], sourceStripWidth.value, sourceScrollLeft, sourceRowWidth.value);
+  return Math.abs(next - sourceScrollLeft) > 0.5;
+}
+// Native horizontal content does not grow from flex-none children; use the shared chip border boxes.
+const sourceOptionsStyle = computed((): string => "width:" + sourceRowWidth.value + "px;padding:4px " + padX.value + "px;");
+function sourceOptionStyle(index: number): string {
+  const right = index < sources.value.length - 1 ? sourceGapPx.value : 0;
+  return "width:" + sourceChipWidths.value[index] + "px;margin-right:" + right + "px;";
+}
+// Label-only page border box: override Native's content-floor min-height; shared QtOption stays unchanged.
+function sourceChipStyle(index: number): string {
+  return "width:" + sourceChipWidths.value[index] + "px;height:" + qtOptionChipMinHeightPx() + "px;min-height:0;";
+}
+const smallMutedStyle = computed((): string => "color:" + theme.skin.textSubtle + ";" + qtFontDual(21, 11));
+const gridStyle = computed((): string => "width:" + gridWidth.value + "px;padding:" + padY.value + "px " + padX.value + "px 0px;");
+function rankCardStyle(index: number): string {
+  const right = index % columns.value < columns.value - 1 ? gapPx.value : 0;
+  return "width:" + cardWidth.value + "px;height:" + cardHeight.value + "px;padding:" + cardPad.value + "px;margin-right:" + right + "px;margin-bottom:" + gapPx.value + "px;background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";";
+}
+const rankHeadingStyle = computed((): string => "height:" + headPx.value + "px;");
+const rankNameStyle = computed((): string => "color:" + theme.skin.text + ";" + qtFontDual(32, 17));
+const rankBodyStyle = computed((): string => "height:" + bodyPx.value + "px;margin-top:" + bodyGap.value + "px;");
+const coverBoxStyle = computed((): string => "width:" + coverPx.value + "px;height:" + coverPx.value + "px;margin-right:" + (layout.isWide ? 12 : qtRpx(24)) + "px;");
+const coverStyle = computed((): string => "width:" + coverPx.value + "px;height:" + coverPx.value + "px;background-color:" + theme.skin.divider + ";");
+const coverTextStyle = computed((): string => "color:" + theme.skin.textSubtle + ";" + qtFontDual(46, 26));
+const previewLineStyle = computed((): string => "height:" + linePx.value + "px;");
+const previewNameStyle = computed((): string => "color:" + theme.skin.textMuted + ";" + qtFontDual(26, 13));
+const previewNumberStyle = computed((): string => "width:" + (layout.isWide ? 16 : qtRpx(28)) + "px;color:" + theme.skin.textSubtle + ";" + qtFontDual(22, 11));
+const skeletonHeadingStyle = computed((): string => "height:" + headPx.value + "px;background-color:" + theme.skin.divider + ";");
+const skeletonLineStyle = computed((): string => "height:" + Math.max(8, linePx.value - 10) + "px;margin-bottom:10px;background-color:" + theme.skin.divider + ";");
+const backTopStyle = computed((): string => "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";" + (layout.isWide ? "width:44px;height:44px;right:20px;bottom:20px;" : ""));
 
-function kickPreviews(): void {
-  const mySeq = ++previewSeq;
-  let next = 0;
-  const runNext = (): void => {
-    if (mySeq != previewSeq) return;
-    const list = filteredCharts.value;
-    while (next < list.length) {
-      const idx = next++;
-      if (previewStates.value[idx] != 0) continue;
-      previewStates.value[idx] = 3;
-      loadPreview(mySeq, idx, list[idx], runNext);
+function current(seq: number): boolean { return pageAlive && pageVisible.value && seq == intent; }
+function cancelTop(): void {
+  if (topTimer != 0) { clearTimeout(topTimer); topTimer = 0; }
+  const resolve = topResolve;
+  topResolve = null;
+  if (resolve != null) resolve(false);
+}
+function cancelTimers(): void {
+  cancelTop();
+  if (restoreTimer != 0) { clearTimeout(restoreTimer); restoreTimer = 0; }
+  if (releaseTimer != 0) { clearTimeout(releaseTimer); releaseTimer = 0; }
+  if (measureTimer != 0) { clearTimeout(measureTimer); measureTimer = 0; }
+  measureSeq++;
+}
+function beginIntent(): number {
+  intent++;
+  cancelTimers();
+  chartLoader.suspend(true);
+  loadAllBusy = false;
+  return intent;
+}
+/** 真实设备已验证的替换配方：先回顶，等原生布局，然后换整个source。 */
+function awaitTop(seq: number): Promise<boolean> {
+  cancelTop();
+  if (releaseTimer != 0) { clearTimeout(releaseTimer); releaseTimer = 0; }
+  suppressScroll = true;
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  lastScrollTop = 0;
+  showBackTop.value = false;
+  return new Promise<boolean>((resolve) => {
+    topResolve = resolve;
+    topTimer = setTimeout(() => {
+      topTimer = 0;
+      topResolve = null;
+      if (!current(seq)) { resolve(false); return; }
+      scrollTop.value = 0;
+      releaseScroll(seq);
+      resolve(true);
+    }, 80) as number;
+  });
+}
+function releaseScroll(seq: number): void {
+  if (releaseTimer != 0) clearTimeout(releaseTimer);
+  releaseTimer = setTimeout(() => {
+    releaseTimer = 0;
+    if (current(seq)) suppressScroll = false;
+  }, 80) as number;
+}
+function updatePreviewWindow(top: number = lastScrollTop, force: boolean = false): void {
+  if (!pageAlive || !pageVisible.value || activeSource.value.length == 0) return;
+  const demand = chartDemandWindow(Math.max(0, top - padY.value), viewportHeight.value, cardStride.value, columns.value, allCharts.value.length);
+  // 不收缩前缀、不换窗口树；先前卡保持原位，仅追加所需尾部。
+  renderedCount.value = Math.max(renderedCount.value, demand.end);
+  chartLoader.setDemand(demand.start, demand.end, force);
+}
+function restoreScroll(seq: number, top: number): void {
+  if (releaseTimer != 0) { clearTimeout(releaseTimer); releaseTimer = 0; }
+  suppressScroll = true;
+  lastScrollTop = top;
+  updatePreviewWindow(top);
+  nextTick(() => {
+    if (!current(seq)) return;
+    restoreTimer = setTimeout(() => {
+      restoreTimer = 0;
+      if (!current(seq)) return;
+      scrollTop.value = top;
+      showBackTop.value = top > 640;
+      releaseScroll(seq);
+    }, 80) as number;
+  });
+}
+function measureGrid(attempt: number = 0): void {
+  if (!pageAlive || !pageVisible.value) return;
+  const seq = ++measureSeq;
+  nextTick(() => {
+    if (!pageAlive || !pageVisible.value || seq != measureSeq) return;
+    uni.createSelectorQuery().select("#chart-scroll").boundingClientRect((rect) => {
+      if (!pageAlive || !pageVisible.value || seq != measureSeq) return;
+      if (rect != null && rect.width > 0 && rect.height > 0) {
+        measuredWidth.value = rect.width;
+        measuredHeight.value = rect.height;
+        updatePreviewWindow();
+        return;
+      }
+      if (attempt < 3) measureTimer = setTimeout(() => { measureTimer = 0; measureGrid(attempt + 1); }, 120) as number;
+    }).exec();
+  });
+}
+function onListScroll(event: UniScrollEvent): void {
+  const top = Number(event.detail.scrollTop);
+  if (suppressScroll || !pageVisible.value || !Number.isFinite(top) || top < 0 || top > 500000) return;
+  lastScrollTop = top;
+  showBackTop.value = top > 640;
+  if (activeSource.value.length > 0) saveChartScroll(activeSource.value, top);
+  updatePreviewWindow(top);
+}
+function backToTop(): void {
+  suppressScroll = true;
+  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
+  lastScrollTop = 0;
+  showBackTop.value = false;
+  saveChartScroll(activeSource.value, 0);
+  updatePreviewWindow(0);
+  releaseScroll(intent);
+}
+function present(source: string, list: Chart[], seq: number, force: boolean): void {
+  if (!current(seq)) return;
+  activeSource.value = source;
+  allCharts.value = list;
+  renderedCount.value = 0;
+  chartLoader.display(source, list);
+  chartLoader.resume();
+  currentSourceLoaded.value = true;
+  loadError.value = "";
+  loading.value = false;
+  const restore = force ? 0 : Math.min(readChartScroll(source), Math.max(0, Math.ceil(list.length / columns.value) * cardStride.value - viewportHeight.value));
+  lastScrollTop = restore;
+  updatePreviewWindow(restore, force);
+  restoreScroll(seq, restore);
+  measureGrid();
+}
+async function fetchSource(source: string, force: boolean, seq: number): Promise<void> {
+  const identity = musicApi.chartCacheIdentity();
+  loadedIdentity = identity;
+  const cached = readChartListSnapshot(source);
+  if (!force && cached != null) {
+    present(source, cached.charts, seq, false);
+    return;
+  }
+  loading.value = true;
+  try {
+    const forceList = force || chartListRequiresNetwork(source);
+    const list = await musicApi.charts(source, forceList);
+    if (!current(seq) || identity != musicApi.chartCacheIdentity()) return;
+    // 等待期间用户可再滚动；无条件再次回顶，不依赖被程序滚动暂时屏蔽的事件值。
+    if (allCharts.value.length > 0 && !(await awaitTop(seq))) return;
+    if (!current(seq) || identity != musicApi.chartCacheIdentity()) return;
+    rememberChartList(source, list, identity);
+    present(source, list, seq, forceList);
+  } catch (error) {
+    if (!current(seq) || identity != musicApi.chartCacheIdentity()) return;
+    logMsgErr("[QT Music Chart Page]", error);
+    loadError.value = "加载失败";
+    currentSourceLoaded.value = true;
+    loading.value = false;
+    if (force && allCharts.value.length > 0) qtShowToast({ title: "刷新失败，已保留原榜单", icon: "none" });
+    chartLoader.resume();
+    updatePreviewWindow();
+    releaseScroll(seq);
+  }
+}
+function chooseSource(): number {
+  const ids = sources.value;
+  if (paramSi >= 0 && paramSi < ids.length) { const index = paramSi; paramSi = -1; return index; }
+  paramSi = -1;
+  let index = ids.indexOf(activeSource.value);
+  if (index < 0) index = ids.indexOf(sourceStore.current);
+  return index >= 0 ? index : ids.length > 0 ? 0 : -1;
+}
+async function loadAll(force: boolean = false): Promise<void> {
+  if (!pageAlive || !pageVisible.value) return;
+  const seq = beginIntent();
+  loadAllBusy = true;
+  loading.value = true;
+  loadError.value = "";
+  try {
+    sourceStore.restore();
+    await sourceRegistry.ensure();
+    if (!current(seq)) return;
+    const index = chooseSource();
+    if (index < 0) {
+      activeSource.value = "";
+      sourceIndex.value = -1;
+      pendingSourceIndex.value = -1;
+      allCharts.value = [];
+      renderedCount.value = 0;
+      chartLoader.display("", []);
+      currentSourceLoaded.value = true;
+      loading.value = false;
+      suppressScroll = false;
+      started = true;
       return;
     }
-  };
-  for (let w = 0; w < PREVIEW_CONCURRENCY; w++) runNext();
-}
-
-async function loadPreview(mySeq: number, idx: number, chart: Chart, done: () => void): Promise<void> {
-  try {
-    const songs = await musicApi.chartDetail(chart);
-    if (mySeq != previewSeq) return;
-    const top: Song[] = [];
-    for (let i = 0; i < songs.length && i < PREVIEW_ROWS; i++) top.push(songs[i]);
-    const preview: RankPreview = { songs: top, total: songs.length };
-    if (songs.length > 0) previewCache.set(chartKey(chart), preview);
-    const songArr = previewSongs.value.slice();
-    while (songArr.length <= idx) songArr.push([]);
-    songArr[idx] = top;
-    previewSongs.value = songArr;
-    const totalArr = previewTotals.value.slice();
-    while (totalArr.length <= idx) totalArr.push(0);
-    totalArr[idx] = preview.total;
-    previewTotals.value = totalArr;
-    const stateArr = previewStates.value.slice();
-    stateArr[idx] = songs.length > 0 ? 1 : 2;
-    previewStates.value = stateArr;
-  } catch (error) {
-    if (mySeq != previewSeq) return;
-    const stateArr = previewStates.value.slice();
-    stateArr[idx] = 2;
-    previewStates.value = stateArr;
+    const source = sources.value[index];
+    const changed = source != activeSource.value;
+    if (allCharts.value.length > 0 && !(await awaitTop(seq))) return;
+    if (!current(seq)) return;
+    sourceIndex.value = index;
+    pendingSourceIndex.value = -1;
+    activeSource.value = source;
+    if (changed) { allCharts.value = []; renderedCount.value = 0; currentSourceLoaded.value = false; }
+    await fetchSource(source, force, seq);
+    if (current(seq)) started = true;
   } finally {
-    done();
+    if (seq == intent) loadAllBusy = false;
   }
 }
-
-/** 卡头右侧：就绪后显示「共 N 首」（用户定稿，替换原来的榜单描述文案） */
-function previewMeta(idx: number): string {
-  if (idx >= previewStates.value.length || previewStates.value[idx] != 1) return "";
-  const total = idx < previewTotals.value.length ? previewTotals.value[idx] : 0;
-  return "共 " + total + " 首";
+async function switchSource(index: number): Promise<void> {
+  const source = sources.value[index];
+  if (source == null) return;
+  const seq = beginIntent(); // A→B→A也必须失效先前B，不能按“当前仍是A”早退。
+  pendingSourceIndex.value = index;
+  loading.value = true;
+  if (!(await awaitTop(seq))) return;
+  if (!current(seq)) return;
+  sourceIndex.value = index;
+  pendingSourceIndex.value = -1;
+  if (source != activeSource.value) { allCharts.value = []; renderedCount.value = 0; currentSourceLoaded.value = false; }
+  activeSource.value = source;
+  loadError.value = "";
+  await fetchSource(source, false, seq);
 }
-
-/** 第 idx 张榜单第 row 行的展示文案：就绪「歌名 - 歌手」，未就绪「···」占位。
- *  占位收进函数里而不是模板 v-else —— Vapor 下 v-if/v-else 分支文本实测不渲染 */
-function previewSongLine(idx: number, row: number): string {
-  if (idx >= previewSongs.value.length) return "···";
-  const songs = previewSongs.value[idx];
-  if (row >= songs.length) return "···";
-  const song = songs[row];
-  return song.name + " - " + song.singer;
+function onChipTap(index: number): void {
+  if (index < 0 || index >= sources.value.length) return;
+  if (index == sourceIndex.value && pendingSourceIndex.value < 0 && !loading.value) return;
+  // #ifdef APP-HARMONY
+  // 鸿蒙真机页内整组换源会丢渲染；沿用已验证的整页重建与si参数。
+  uni.redirectTo({ url: "/pages/chart/index?si=" + index });
+  return;
+  // #endif
+  switchSource(index);
 }
-
-async function onPreviewTap(idx: number, row: number): Promise<void> {
-  if (idx >= previewSongs.value.length) return;
-  const songs = previewSongs.value[idx];
-  if (row >= songs.length) return;
-  const song = songs[row];
+function reloadChartsSafely(): void {
+  if (loading.value || sources.value.length == 0) return;
+  loadAll(true);
+}
+function onHeaderAction(name: string): void { if (name == "refresh") reloadChartsSafely(); }
+function onPacksChanged(): void {
+  beginIntent(); // 包事件同步失效在飞工作，不能等回顶计时器再失效。
+  clearChartViewCache();
+  loadedIdentity = "";
+  currentSourceLoaded.value = false;
+  if (pageVisible.value && mounted) loadAll(false);
+}
+function goToSettings(): void { uni.navigateTo({ url: "/pages/settings/index" }); }
+function openChart(chart: Chart): void {
+  uni.navigateTo({ url: "/pages/playlist/index?id=" + encodeURIComponent(chart.id) + "&platform=" + encodeURIComponent(chart.platform)
+    + "&type=chart&name=" + encodeURIComponent(chart.name) + "&desc=" + encodeURIComponent(chart.description || "") + "&pic=" + encodeURIComponent(chart.picUrl || "") });
+}
+async function onPreviewTap(index: number, row: number): Promise<void> {
+  if (chartLoader.previewStates.value[index] == 2) { chartLoader.retry(index); return; }
+  const songs = chartLoader.previewSongs.value[index];
+  if (songs == null || row < 0 || row >= songs.length) return;
   try {
-    // 不预取在线地址：解析桥起播那一刻才取链、取链前先走本地优先，预取会把在线
-    // urlSize 灌进码率显示（m22743）；取链/起播失败由 handlePlaybackError 统一兜底
-    await player.playSingle(song);
+    // 不预取在线地址；保持player.playSingle的本地优先/统一起播错误处理。
+    await player.playSingle(songs[row]);
   } catch (error) {
     logMsgErr("[QT Music Chart Page]", error);
     qtShowToast({ title: "播放失败", icon: "none" });
   }
 }
-
-// ── 滚动状态 ─────────────────────────────────────────────────────────────
-// 切 tab 是整页 redirectTo 重载（见模板注释），所以这里的 scrollTop 只是本页
-// 生命周期内的绑定值；每个音源的滚动位置由 chart-tabs 服务记忆，重载后恢复。
-const scrollTop = ref(0);
-const showBackToTop = ref(false);
-
-/** 当前音源 id（记忆滚动位置用的键；注册表未就绪时为空串，直接不记忆） */
-function currentSourceId(): string {
-  const list = sources.value;
-  const i = sourceIndex.value;
-  return i >= 0 && i < list.length ? list[i] : "";
-}
-
-function onListScroll(e: any): void {
-  const st = e.detail != null ? Number(e.detail.scrollTop ?? 0) : 0;
-  saveChartScroll(currentSourceId(), st);
-  const next = st > 600;
-  if (next !== showBackToTop.value) showBackToTop.value = next;
-}
-
-function backToTop(): void {
-  // 0/1 交替写入，保证 scroll-top 每次都真正变化——用户向下滚后绑定值未同步更新，
-  // 重复设同一个值不会触发回顶
-  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
-  showBackToTop.value = false;
-  saveChartScroll(currentSourceId(), 0);
-}
-
-/** 重载后把该音源上次的滚动位置还原（网格高度未稳定时重试几轮） */
-function restoreScroll(): void {
-  const target = readChartScroll(currentSourceId());
-  if (target <= 0) {
-    showBackToTop.value = false;
-    return;
-  }
-  showBackToTop.value = target > 600;
-  const apply = (attempt: number): void => {
-    if (!gridAlive) return;
-    if (attempt >= 6) return;
-    gridTimers.push(setTimeout(() => {
-      if (!gridAlive) return;
-      scrollTop.value = scrollTop.value == target ? target - 1 : target;
-      if (attempt < 2) apply(attempt + 1);
-    }, attempt == 0 ? 120 : 260) as number);
-  };
-  apply(0);
-}
-
-const contentWidth = computed<number>(() => Math.min(layout.windowWidth, 1280));
-// 本页所有延迟/重试定时器句柄：页面卸载时统一清掉，避免在已注销的实例上触发原生回调
-let gridTimers: number[] = [];
-// 页面是否仍存活：onUnmounted 置 false。
-// 必须单独留这个标志，不能只靠 onUnmounted 里清句柄：框架路由（reLaunch/redirectTo/
-// navigateBack）先 closeWebview 销毁原生页、再 unmountPage 跑 onUnmounted，中间那段
-// 窗口里原生 UniPage 已反注册而本页脚本还在，此时任何 createSelectorQuery().exec()
-// 都会走到 $nativePage.waitNativeRender —— 桥调用带着已反注册的 instanceId，抛
-// "UTS instance N is not registered"（真机堆栈：Bridge.onJSTimerFired ←
-// Bridge$scheduleJSTimer$runnable$1.run ← Handler.handleCallback ← Looper.loop）。
-// 定时器回调进场先判它，比清句柄更保险（句柄可能在窗口期已经排进原生队列）。
-let gridAlive = true;
-// 宽屏下 windowWidth 可能与真实渲染宽度不符（见 use-qt-layout 注释），按它算卡宽会留出大片空白。
-// 且 scroll-view 子节点 width:100% 解析不出（会收缩成卡片总宽），所以：
-// 1) 测外层 scroll-view（定宽元素）拿真实可用宽度；2) 把该宽度显式写成网格的 px 宽度。
-const scrollWidth = ref(0);
-// 列表可视高度：骨架块数要按「一屏能铺多少块」算，宽屏还得乘列数（见 skeletonRows）
-const scrollHeight = ref(0);
-// 选择器必须用模板里真实存在的 id（#chart-scroll）。
-// 旧代码写的是 "#chart-scroll-" + sourceIndex —— 模板里从没有过这个 id，
-// 实测永远测不到，scrollWidth 恒为 0：gridStyle 拿不到显式宽度，
-// .chart-grid 的 width:100% 在 scroll-view 里解析不出（会收缩成卡片总宽），
-// 宽屏整格向右溢出、第二列被屏幕裁掉 —— 列数代码形同虚设（真机 2026-10-25）。
-function measureGrid(attempt: number): void {
-  if (!gridAlive) return;
-  uni.createSelectorQuery()
-    .select("#chart-scroll")
-    .boundingClientRect((rect: UniNodeInfo) => {
-      if (rect != null && rect.width > 0) {
-        scrollWidth.value = rect.width;
-        scrollHeight.value = rect.height;
-        return;
-      }
-      if (attempt < 3) {
-        gridTimers.push(setTimeout(() => {
-          measureGrid(attempt + 1);
-        }, 200) as number);
-      }
-    })
-    .exec();
-}
-/** 网格内容区宽（扣除左右 16px padding）；未测得前按 windowWidth 估算兜底 */
-const chartInnerWidth = computed<number>(() => {
-  if (scrollWidth.value > 0) return scrollWidth.value - 32;
-  return Math.max(320, contentWidth.value - 48);
-});
-const chartColumns = computed<number>(() => {
-  // 榜单卡（封面 + 三行歌）比旧的单行条目宽，最小卡宽从 300 提到 380，宽屏最多 3 列
-  if (!layout.isWide) return 1;
-  return qtColumnCount(chartInnerWidth.value, 380, 12, 3);
-});
-/** 宽屏按 scroll-view 实测宽度自动分成 2/3 列，竖屏始终一列。 */
-const chartCardWidth = computed<number>(() => {
-  if (!layout.isWide) return 0;
-  // 每个卡片保留 12px 右侧间距，避免最后一项换行。
-  return Math.max(160, Math.floor((chartInnerWidth.value - chartColumns.value * 12) / chartColumns.value));
-});
-const gridStyle = computed<string>(() => layout.isWide && scrollWidth.value > 0 ? "width:" + scrollWidth.value + "px;" : "");
-
-const filteredCharts = computed<Chart[]>(() => {
-  const currentSource = sources.value[sourceIndex.value];
-  if (currentSource == null) return [];
-  return allCharts.value.filter((chart) => chart.platform === currentSource);
-});
-/**
- * 当前音源是否「确实拉过」。
- *
- * 空态与骨架都靠它分流：没拉过的源显示骨架（并触发拉取），拉过且为空才显示空态。
- * 注册表未就绪（音源 id 为空串）时按 true 处理，维持旧行为不额外闪骨架。
- */
-const currentSourceLoaded = computed<boolean>(() => {
-  const s = currentSourceId();
-  if (s.length == 0) return true;
-  return loadedSources.value.indexOf(s) >= 0;
-});
-
-// ── 骨架屏 ────────────────────────────────────────────────────────────────
-// 骨架块数不能写死：竖屏一列要铺满整屏，宽屏 2/3 列还得乘列数。写死 6 块时
-// 竖屏只盖住半屏、宽屏只盖住一行半，下面一大片空白，看着不像「正在加载」。
-const SKELETON_MIN_ROWS = 6; // 再短的屏也铺这么多块，冷启动首帧不至于只有两三块
-// 一屏最多按 24 行算：24 行 × 单块步长已超过任何真实窗口高，纯属兜底
-const SKELETON_MAX_LINES = 24;
-const SKELETON_STAGGER_MAX = 16; // 错峰 tick 数单独封顶（见 loadAll）
-const reveal = useQtReveal();
-// 初值必须是「全部透明」，否则首帧会先按满载状态把真实行画出来再收回去
-reveal.resetReveal();
-/** 列表可视高度：优先用实测的 scroll-view 高，未测得前按窗口高扣掉顶部标签行估算 */
-const listAreaPx = computed<number>(() => {
-  if (scrollHeight.value > 0) return scrollHeight.value;
-  return Math.max(320, layout.windowHeight - qtRpx(180));
-});
-const skeletonRows = computed<number>(() => {
-  // 单块竖向步长 = 榜单卡总高 + 卡距（与 .qt-skl-rk / .rank-card 同源：
-  // 竖屏 20+44+20+148+24rpx 内边距 + 20rpx 卡距 ≈ 296rpx；宽屏约 156px）
-  const rowPx = layout.isWide ? 156 : qtRpx(296);
-  const lines = Math.min(SKELETON_MAX_LINES, Math.ceil(listAreaPx.value / Math.max(24, rowPx)) + 1);
-  const fill = layout.isWide ? lines * chartColumns.value : lines;
-  const real = filteredCharts.value.length;
-  // 真实行比一屏还少时骨架跟着收窄，否则多出来的灰块会盖在「已加载全部」下方
-  if (real > 0 && real < fill) return real;
-  return Math.max(SKELETON_MIN_ROWS, fill);
-});
-/**
- * 骨架行宽：宽屏是网格卡宽；竖屏真实行是 width:100%，但骨架行在 row+wrap 容器里
- * 没有可靠的百分比基准（Vapor 下百分比宽度需父级定宽），所以按实测 scroll-view 宽
- * 减去 .chart-grid 的左右 24rpx 内边距显式给 px，与 .rank-card 等宽。
- */
-const skeletonRowWidth = computed<number>(() => {
-  if (layout.isWide) return chartCardWidth.value;
-  const inner = scrollWidth.value > 0 ? scrollWidth.value : contentWidth.value;
-  return Math.max(120, inner - qtRpx(48));
-});
-const skeletonOn = computed<boolean>(() => reveal.revealing.value || (filteredCharts.value.length == 0 && (loading.value || !currentSourceLoaded.value)));
-// 数据到达后骨架层脱离文档流，改由真实行决定高度，两层才能同位叠加
-const skeletonLifted = computed<boolean>(() => filteredCharts.value.length > 0);
-const shining = computed<boolean>(() => skeletonOn.value && !skeletonLifted.value);
-// 榜单卡配色全部走皮肤令牌：换 linen / aurora 等皮肤时卡底、描边、正文一起跟，
-// 不再依赖手写深色覆盖类（原写法与皮肤系统脱钩）。
-const rankCardStyle = computed<string>(() => 'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';');
-const rankNameStyle = computed<string>(() => 'color:' + themeStore.skin.text + ';');
-const rankMetaStyle = computed<string>(() => 'color:' + themeStore.skin.textMuted + ';');
-const rankIdxStyle = computed<string>(() => 'color:' + themeStore.skin.textMuted + ';');
-const rankSongNameStyle = computed<string>(() => 'color:' + themeStore.skin.text + ';');
-function chartRowStyle(index: number): string {
-  // 两种模式都必须走内联 width：宽屏 = 网格卡宽，竖屏 = 内容行宽。
-  // 不能把 width:100% 放回 .rank-card 类里 —— 本 Vapor 构建下类内 width 会压过
-  // 内联 width（歌单广场 .card 类不含 width 所以内联生效；本页类里曾经写了
-  // width:100%，真机把 513px 卡宽整个压回整行，宽屏列数代码形同虚设）。
-  const w = layout.isWide ? chartCardWidth.value : skeletonRowWidth.value;
-  return reveal.itemStyle(index, "width:" + w + "px;");
-}
-
-/** 上次加载时的包态指纹：音源包安装/更新/卸载/启停后变化，整页重拉 */
-let loadedPackFp = "";
-// loadAll 并发序号：onShow 与包变更广播可能同时触发拉取，旧一轮的慢响应
-// 若后到会把新数据覆盖掉、还会提前收走 loading——非最新序号的回调全部丢弃
-let loadAllSeq = 0;
-
-/**
- * 拉单个音源的榜单，并把结果并进 allCharts。
- *
- * 为什么要单独有这个函数：切 tab / 后台补拉时按源拉取并入 allCharts，
- * charts() 自带内存缓存与 12h TTL，命中时几乎秒回，只有真没缓存才发网络请求。
- */
-async function fetchSource(source: string): Promise<void> {
-  const mySeq = loadAllSeq;
-  try {
-    const list = await musicApi.charts(source);
-    if (mySeq != loadAllSeq) return;
-    // 成功（哪怕是空列表）都算「这个源拉过了」：空列表要显示空态而不是一直转骨架
-    markSourceLoaded(source);
-    if (list.length == 0) return;
-    // 只替换该音源的部分：已经合并进来的其他源结果不能被覆盖掉
-    const kept = allCharts.value.filter((chart) => chart.platform !== source);
-    if (kept.length == 0) {
-      // 只有这一个源的数据时整组换（unkeyed v-for 按索引原地 diff 才可靠）
-      allCharts.value = list;
-    } else {
-      const merged = kept.slice();
-      for (let i = 0; i < list.length; i++) {
-        merged.push(list[i]);
-      }
-      allCharts.value = merged;
-    }
-    rebuildPreviews();
-    // 数据到了：骨架淡出、真实行错峰浮现（与 loadAll 的 settle 同款错峰）。
-    // 两个前提：① loading 仍为真时不动浮现进度——首屏由 loadAll 的 settle 统一起跑，
-    // 这里再起一次会把已经浮现的行重新按回 opacity:0，闪一下；
-    // ② 只在该源正是当前显示源时起跑——用户可能已经又切走了，
-    // 那时给别的源重置浮现进度会让屏幕上那组行整片重淡入。
-    if (!loading.value && currentSourceId() === source) {
-      reveal.startReveal(Math.min(skeletonRows.value, SKELETON_STAGGER_MAX));
-    }
-    gridTimers.push(setTimeout(() => {
-      if (!gridAlive) return;
-      measureGrid(0);
-      // 切换过来时还没数据、被 onChipTap 推迟的位置还原在这里补做：
-      // 此时真实行已经渲染，套上该源上次的深位置不会越过内容底。
-      if (currentSourceId() === source) {
-        restoreScroll();
-      }
-    }, 300) as number);
-  } catch (error) {
-    if (mySeq != loadAllSeq) return;
-    logMsgErr("[QT Music Chart Page]", error);
-    // 失败也记为「拉过」：否则骨架永远转下去，用户连空态都看不到
-    markSourceLoaded(source);
-  }
-}
-
-function onChipTap(index: number): void {
-  if (index == sourceIndex.value) return;
-  // #ifdef APP-HARMONY
-  // 鸿蒙真机上「回顶 + 80ms 后整组换 filteredCharts」这套页内切换配方会让整块
-  // 子树丢渲染（2026-10-25 复现：切 tag 后药丸行与内容区全白，只剩状态栏和返回
-  // 箭头；安卓同构建无此问题）。Vapor 鸿蒙端对原地整组替换的兜底不如安卓可靠，
-  // 改走整页重载——本页不是 tabBar 页，鸿蒙上 redirectTo 可用；si 参数由 onLoad
-  // 接住（paramSi），syncSourceIndex 优先采用，滚动位置由 chart-tabs 记忆恢复，
-  // 代价只有一次重建闪黑，鸿蒙端可接受。
-  uni.redirectTo({ url: "/pages/chart/index?si=" + index });
-  return;
-  // #endif
-  // 目标源还没数据就立刻发请求，和下面的回顶/换源并行，不必等 allCharts 合并
-  const target = sources.value[index];
-  const needFetch = target != null && loadedSources.value.indexOf(target as string) < 0;
-  if (needFetch) {
-    fetchSource(target as string);
-  }
-  // 页内切换，不整页重载（redirectTo 的重建间隙必然闪黑，且该基座不认动画参数）。
-  // 换数据的唯一安全配方来自搜索页实证（pages/search L871/L977 注释）：
-  // **先回顶、再整组换 filteredCharts**——停在滚动深处整组替换会让 scroll-view
-  // 整段丢渲染（本页前几版黑屏的真正根因），回顶后替换从未失败过。
-  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
-  gridTimers.push(setTimeout(() => {
-    if (!gridAlive) return;
-    sourceIndex.value = index;
-    // 浮现进度按目标源的状态重新定档：
-    // - 目标源还没数据 → 清零，让骨架层立刻可见（不清零的话真实行还是全透明、
-    //   骨架行又早已淡出，换过去是一片空白），数据到达后由 fetchSource 起跑；
-    // - 目标源已有数据 → 直接推到终态。这一步防的是「切到未加载源、又马上切回
-    //   已加载源」：上一次清零的进度还在，不推终态的话整页会一直空白。
-    if (!currentSourceLoaded.value) {
-      reveal.resetReveal();
-    } else if (!loading.value) {
-      reveal.finishReveal();
-    }
-    // 预览重建由下方 watch(sourceIndex) 统一负责。位置还原只在目标源已有数据时
-    // 立即做：还没拉过的源内容只有一屏骨架，此刻把该源上次保存的深滚动位置套上
-    // 去，视口会被顶到内容之外的空白区——骨架滚出视野，看起来就是「一片空白、
-    // 也没有加载动画」（网络其实正在拉，真机 2026-10-25）。等数据到位后由
-    // fetchSource 的落位定时器再还原。
-    if (filteredCharts.value.length > 0) {
-      restoreScroll();
-    }
-  }, 80) as number);
-}
-
-/** 注册表源清单变化（异步加载/换包）后同步选中项 */
-function syncSourceIndex(): void {
-  const ids = sources.value;
-  if (ids.length == 0) return;
-  // 页面参数 si 优先（切 tab 是整页重载，参数就是目标音源下标）；
-  // 没有参数（从其他页面进来）时跟随全局当前音源
-  const idx = ids.indexOf(sourceStore.current);
-  if (paramSi >= 0 && paramSi < ids.length) {
-    sourceIndex.value = paramSi;
-  } else if (idx >= 0) {
-    sourceIndex.value = idx;
-  }
-}
-
-/** 拉榜单（onMounted/onShow/包变更广播共用），完成后记录包态指纹。
- *  只拉当前音源（charts() 命中 12h TTL 时几乎秒回）；其他源按需——
- *  onChipTap 切到哪个源才拉哪个源。2026-10-25 移除后台全源合并
- *  （6 源在引擎单线程排队最长两分钟，且合并到达时网格整段重排会跳）。 */
-async function loadAll(): Promise<void> {
-  const mySeq = ++loadAllSeq;
-  loadedPackFp = packsFingerprint();
-  // 重新进入加载态：把浮现进度清零，骨架才会重新可见
-  reveal.resetReveal();
-  loading.value = true;
-  allCharts.value = [];
-  // 整页重拉：之前「已拉过」的判定全部作废，否则空态会在新数据回来前抢先露出来
-  loadedSources.value = [];
-  let firstShown = false;
-  const settle = (): void => {
-    if (mySeq != loadAllSeq || firstShown) return;
-    firstShown = true;
-    // 错峰只排首屏前 16 块：宽屏 4 列时骨架块数能到 40，逐块 60ms 要两秒多，
-    // 那样真实内容迟迟不亮；排不到的块在最后一拍一起浮现
-    reveal.startReveal(Math.min(skeletonRows.value, SKELETON_STAGGER_MAX));
-    loading.value = false;
-    gridTimers.push(setTimeout(() => {
-      measureGrid(0);
-      // 首屏就位后还原该音源上次的滚动位置（切 tab 是整页重载，位置靠存储带过来）。
-      // 拉到空榜单时内容为空，不能还原——视口会被顶到内容之外（同 onChipTap）
-      if (filteredCharts.value.length > 0) {
-        restoreScroll();
-      }
-    }, 300) as number);
-  };
-  const applyCharts = (list: Chart[]): void => {
-    if (mySeq != loadAllSeq) return;
-    // unkeyed v-for 只做「按索引原地 diff」是安全的：唯一验证可靠的换数据方式
-    allCharts.value = list;
-    // 合并结果里出现过的音源都算「拉过了」（空榜单的源不在这里，由下面的单源分支记）
-    for (let i = 0; i < list.length; i++) {
-      markSourceLoaded(list[i].platform);
-    }
-    // 首轮也必须启动前三名预览：rebuildPreviews 原来只挂在 sourceIndex 的 watch 上，
-    // 首次进入（sourceIndex 没变化过）时队列永远不会跑，三行一直是「···」占位
-    rebuildPreviews();
-  };
-  try {
-    const current = sources.value[sourceIndex.value];
-    if (current != null) {
-      const mine = await musicApi.charts(current);
-      if (mySeq != loadAllSeq) return;
-      // 单源返回（哪怕为空）就记为该源已拉过：空榜单要显示空态而不是永远转骨架
-      markSourceLoaded(current);
-      if (mine.length > 0) {
-        applyCharts(mine);
-      }
-    }
-    // 不再后台合并全源（2026-10-25 移除 await musicApi.allCharts()）：
-    // 全源合并要在引擎单线程上逐源排队（6 源 × 最多 4s 超时），首开慢的根源；
-    // 且合并结果到达时网格整段重排、屏幕上的卡片会跳。改成纯按需——
-    // onChipTap 切到哪个源才拉哪个源（fetchSource），charts() 自带 60s 内存
-    // 缓存与 12h TTL，命中时几乎秒回。空源/失败源走 markSourceLoaded 的空态分支。
-    settle();
-  } catch (error) {
-    logMsgErr("[QT Music Chart Page]", error);
-    if (mySeq == loadAllSeq) {
-      qtShowToast({ title: "加载失败", icon: "none" });
-    }
-    settle();
-  }
-}
-
-function openChart(chart: Chart): void {
-  uni.navigateTo({
-    url:
-      "/pages/playlist/index?id=" +
-      encodeURIComponent(chart.id) +
-      "&platform=" +
-      encodeURIComponent(chart.platform) +
-      "&type=chart" +
-      "&name=" +
-      encodeURIComponent(chart.name) +
-      "&desc=" +
-      encodeURIComponent(chart.description || "") +
-      "&pic=" +
-      encodeURIComponent(chart.picUrl || ""),
-  });
-}
-
-/**
- * 带渲染安全配方的整页重拉：先回顶，再整组换数据。
- *
- * loadAll 会把 allCharts 整组清空再重填。2026-10-27 排行榜再次白屏：包变更广播
- * （SOURCE_PACKS_CHANGED_EVENT，音源包安装/更新/切换成功后必发）与 onShow 的
- * 指纹比对都会在用户**停留在滚动深处**时触发 loadAll——深处整组替换正是本页
- * 多次白屏的根因（见模板注释与 onChipTap 的配方说明）。切 tab 早已走「回顶 +
- * 80ms 后换数据」，loadAll 这条路径漏了同样的保护：播放包半屏直装（2026-10-27
- * 起全局可用）让用户停在榜单页深处就能完成装包，白屏由这条路复现。
- * 有已渲染内容时先回顶——同步清掉该源的滚动记忆，防止数据回来后 restoreScroll
- * 又把视口顶回深处——稍候再执行真正的 loadAll；首挂载（无内容）直接拉，不加延迟。
- */
-function reloadChartsSafely(): void {
-  if (!gridAlive) return;
-  if (filteredCharts.value.length == 0) {
-    loadAll();
-    return;
-  }
-  scrollTop.value = scrollTop.value == 0 ? 1 : 0;
-  saveChartScroll(currentSourceId(), 0);
-  gridTimers.push(setTimeout(() => {
-    if (!gridAlive) return;
-    loadAll();
-  }, 120) as number);
-}
-
-/** 音源包变更广播：App 层更新弹窗确认时收不到 onShow，事件实时重拉 */
-function onPacksChanged(): void {
-  // 包换了，榜单内容全变：前三名缓存作废并整页重拉
-  previewCache = new Map<string, RankPreview>();
-  reloadChartsSafely();
-}
-
-onLoad((options: Record<string, string> | null) => {
-  if (options == null) return;
-  const raw = options["si"];
-  if (raw == null) return;
-  const n = Number(raw);
-  if (n >= 0) paramSi = Math.floor(n);
+onLoad((options) => {
+  // onLoad supplies plain route options, including when mounted in the wide workspace.
+  const raw = options != null ? (options["si"] as string | null | undefined) : null;
+  if (raw == null || raw.trim().length == 0) return;
+  const parsed = Number(raw);
+  if (Number.isInteger(parsed) && parsed >= 0) paramSi = parsed;
 });
 onMounted(() => {
-  sourceStore.restore();
-  sourceRegistry.ensure();
-  syncSourceIndex();
-  loadAll();
+  mounted = true;
   uni.$on(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
+  measureGrid();
+  loadAll(false);
 });
-// 注册表异步加载完成（或换包后清单变化）时重选当前音源对应 tab
-watch(() => sources.value.length, () => {
-  syncSourceIndex();
-});
-// 切音源：榜单列表换了，预览行跟着重建（命中缓存的卡直接亮，其余重新排队拉）
-watch(sourceIndex, () => {
-  rebuildPreviews();
-});
-// 页面停留时旋转屏幕：窗口尺寸变化后重测网格宽度，列数/卡宽随之刷新
-watch(
-  () => layout.windowWidth,
-  () => {
-    if (!layout.isWide) return;
-    gridTimers.push(setTimeout(() => {
-      measureGrid(0);
-    }, 300) as number);
-  }
-);
 onShow(() => {
-  sourceStore.restore();
-  sourceRegistry.ensure();
-  // 空列表 or 音源包态变化（安装/更新/卸载/启停）时重拉，其余停留在原地；
-  // 重拉必须走安全配方（先回顶再整组换），深处直接整组替换会白屏（2026-10-27）
-  if (allCharts.value.length == 0 || loadedPackFp != packsFingerprint()) {
-    syncSourceIndex();
-    reloadChartsSafely();
+  pageVisible.value = true;
+  if (!mounted || loadAllBusy) return;
+  const source = activeSource.value;
+  const changed = loadedIdentity != musicApi.chartCacheIdentity();
+  if (changed) clearChartViewCache();
+  if (!started || changed || !currentSourceLoaded.value || sources.value.indexOf(source) < 0 || readChartListSnapshot(source) == null) {
+    loadAll(false);
+  } else {
+    chartLoader.resume();
+    suppressScroll = false;
+    updatePreviewWindow();
+    measureGrid();
   }
+});
+onHide(() => {
+  pageVisible.value = false;
+  beginIntent();
+  pendingSourceIndex.value = -1;
+  loading.value = false;
+  chartLoader.suspend();
+  flushChartScroll();
 });
 onUnmounted(() => {
-  gridAlive = false;
-  previewSeq++; // 在途的预览请求全部作废
-  // 页面卸载时清掉全部延迟/重试定时器，避免在已注销的 UTS 实例上触发回调
-  for (const t of gridTimers) {
-    if (t != null) clearTimeout(t);
-  }
-  gridTimers = [];
+  pageAlive = false;
+  pageVisible.value = false;
+  beginIntent();
+  chartLoader.dispose();
+  flushChartScroll();
   uni.$off(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
+});
+watch((): string => sources.value.join("|"), () => {
+  if (!mounted || !pageVisible.value || loadAllBusy) return;
+  const index = sources.value.indexOf(activeSource.value);
+  if (index < 0 || loadedIdentity != musicApi.chartCacheIdentity()) loadAll(false);
+  else sourceIndex.value = index;
+});
+watch((): string => layout.sizeEpoch + ":" + fontScale.scale, () => {
+  if (!pageVisible.value) return;
+  measuredWidth.value = 0;
+  measuredHeight.value = 0;
+  updatePreviewWindow();
+  measureGrid();
 });
 </script>
 
 <style>
-.page { flex: 1; min-height: 0; }
-.scroll { flex: 1; min-height: 0; }
-/* 骨架宿主：骨架层用 absolute 盖在真实行上，宿主必须是这两层的定位祖先 */
-.sk-host { width: 100%; position: relative; flex-direction: row; flex-wrap: wrap; }
-/* 骨架层必须包满宽：.sk-host 是 row+wrap，骨架根节点直接当 flex item 会被压成内容宽 */
-.sk-fill { width: 100%; }
-/* 宽屏下网格宽度由脚本实测 scroll-view 后显式指定（见 gridStyle）；
-   这里保留 width:100% 供竖屏兜底 */
-.chart-grid { width: 100%; padding: 20rpx 24rpx 0; flex-direction: row; flex-wrap: wrap; }
-/* QQ 音乐式榜单卡：卡头标题 + 左封面右前三名 */
-.rank-card { padding: 20rpx 24rpx 24rpx; margin-bottom: 20rpx; border-width: 1px; border-style: solid; border-radius: 24rpx; }
-.rank-head { flex-direction: row; align-items: center; justify-content: space-between; }
-.rank-name { font-size: 32rpx; font-weight: 600; text-overflow: ellipsis; }
-.rank-meta { margin-left: 16rpx; font-size: 24rpx; text-overflow: ellipsis; flex-shrink: 0; }
-.rank-body { margin-top: 20rpx; flex-direction: row; align-items: center; }
-.rank-cover-wrap { width: 148rpx; height: 148rpx; border-radius: 16rpx; overflow: hidden; flex-shrink: 0; }
-.rank-cover { width: 148rpx; height: 148rpx; }
-.rank-play { position: absolute; left: 0; top: 0; right: 0; bottom: 0; align-items: center; justify-content: center; background-color: rgba(0, 0, 0, 0.25); }
-.rank-songs { flex: 1; min-width: 0; margin-left: 24rpx; }
-.rank-song { height: 50rpx; flex-direction: row; align-items: center; }
-.rank-idx { width: 40rpx; font-size: 26rpx; font-weight: 600; }
-.rank-song-name { flex: 1; min-width: 0; font-size: 26rpx; text-overflow: ellipsis; }
-/* 空态容器只留高度与居中，内容交给 QtEmpty（2026-10-29 统一空态口径） */
-.empty { width: 100%; align-items: center; justify-content: center; }
-.pad { height: 44rpx; }
-
-.chart-grid-wide { padding: 12px 16px 0; }
-.rank-card-wide { padding: 12px 14px 14px; margin-bottom: 12px; margin-right: 12px; border-radius: 14px; }
-.rank-name-wide { font-size: 17px; }
-.rank-meta-wide { margin-left: 8px; font-size: 13px; }
-.rank-body-wide { margin-top: 10px; }
-.rank-cover-wrap-wide { width: 84px; height: 84px; border-radius: 10px; }
-.rank-cover-wide { width: 84px; height: 84px; }
-.rank-songs-wide { margin-left: 12px; }
-.rank-song-wide { height: 28px; }
-.rank-idx-wide { width: 22px; font-size: 13px; }
-.rank-song-name-wide { font-size: 13px; }
-/* 桌面指针反馈：只在宽屏启用 */
-.rank-card-hover {
-  background-color: rgba(127, 127, 127, 0.10);
-}
-.pad-wide { height: 22px; }
+.source-bar { flex-direction: row; align-items: center; flex-shrink: 0; }
+.source-strip { flex-shrink: 0; }
+.chart-refresh { width: 44px; height: 44px; margin-left: 8px; margin-right: 16px; align-items: center; justify-content: center; flex-shrink: 0; }
+.source-options { flex-direction: row; align-items: center; }
+.source-option { flex-shrink: 0; }
+.chart-body { flex: 1; min-height: 0; position: relative; }
+.chart-scroll { flex: 1; }
+.chart-host { width: 100%; flex-direction: row; flex-wrap: wrap; }
+.rank-card { flex-shrink: 0; border-width: 1px; border-style: solid; border-radius: 18rpx; overflow: hidden; }
+.rank-card-wide { border-radius: 18px; }
+.rank-heading { flex-direction: row; align-items: center; }
+.rank-name { flex: 1; min-width: 0; font-weight: 600; line-height: 1.4; white-space: nowrap; text-overflow: ellipsis; }
+.rank-meta { margin-left: 8px; margin-right: 4px; line-height: 1.4; }
+.rank-body { flex-direction: row; align-items: center; }
+.rank-cover-box { flex-shrink: 0; }
+.rank-cover { border-radius: 12rpx; }
+.rank-cover-wide { border-radius: 12px; }
+.rank-cover-placeholder { border-radius: 12rpx; flex-shrink: 0; align-items: center; justify-content: center; }
+.rank-cover-placeholder-wide { border-radius: 12px; }
+.cover-placeholder-text { font-weight: 700; }
+.preview-lines { flex: 1; min-width: 0; justify-content: center; }
+.preview-line { flex-direction: row; align-items: center; }
+.preview-number { flex-shrink: 0; width: 28rpx; margin-right: 6px; line-height: 1.4; }
+.preview-name { flex: 1; min-width: 0; line-height: 1.4; white-space: nowrap; text-overflow: ellipsis; }
+.skeleton-heading { width: 54%; border-radius: 8rpx; }
+.skeleton-heading-wide { border-radius: 8px; }
+.skeleton-line { width: 82%; margin-left: 12px; border-radius: 6rpx; }
+.skeleton-line-wide { border-radius: 6px; }
+.chart-end { padding: 20px 0px 28px; align-items: center; }
+.chart-end-text { line-height: 1.5; text-align: center; }
+.back-top { position: absolute; right: 32rpx; bottom: 32rpx; width: 88rpx; height: 88rpx; border-radius: 44rpx; border-width: 1px; border-style: solid; align-items: center; justify-content: center; }
+.back-top-wide { border-radius: 22px; }
 </style>

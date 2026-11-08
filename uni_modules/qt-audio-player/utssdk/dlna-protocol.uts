@@ -1,0 +1,86 @@
+/** 无平台依赖的 DLNA 协议值处理，供原生实现与可重复测试共用。 */
+export function dlnaXmlEscape(value: string): string {
+	return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+		.replaceAll('"', '&quot;').replaceAll("'", '&apos;')
+}
+
+export function dlnaTimeMs(value: string): number {
+	const parts = value.trim().split(':')
+	if (parts.length != 3) return 0
+	const hour = parseInt(parts[0]), minute = parseInt(parts[1]), second = parseFloat(parts[2])
+	if (!(hour >= 0) || !(minute >= 0 && minute < 60) || !(second >= 0 && second < 60)) return 0
+	return Math.round((hour * 3600 + minute * 60 + second) * 1000)
+}
+
+export function dlnaTimeText(ms: number): string {
+	const total = Math.max(0, Math.floor(ms / 1000))
+	const hour = Math.floor(total / 3600), minute = Math.floor(total / 60) % 60, second = total % 60
+	return hour.toString().padStart(2, '0') + ':' + minute.toString().padStart(2, '0') + ':' + second.toString().padStart(2, '0')
+}
+
+export type DlnaByteRange = { start: number, end: number, partial: boolean }
+/** 仅支持一个字节区间；非法/多段/越界返回 null，不伪造 206。 */
+export function dlnaByteRange(header: string, size: number): DlnaByteRange | null {
+	if (!(size >= 0) || Math.floor(size) != size) return null
+	if (header.length == 0) return { start: 0, end: size - 1, partial: false }
+	if (!header.startsWith('bytes=') || size == 0 || header.indexOf(',') >= 0) return null
+	const pair = header.substring(6).trim().split('-')
+	if (pair.length != 2) return null
+	const left = pair[0], right = pair[1]
+	if (left.length == 0) {
+		if (!/^\d+$/.test(right)) return null
+		const suffix = parseFloat(right)
+		if (!(suffix > 0)) return null
+		return { start: Math.max(0, size - suffix), end: size - 1, partial: true }
+	}
+	if (!/^\d+$/.test(left) || (right.length > 0 && !/^\d+$/.test(right))) return null
+	const start = parseFloat(left), end = right.length == 0 ? size - 1 : parseFloat(right)
+	if (!(start < size) || end < start) return null
+	return { start, end: Math.min(end, size - 1), partial: true }
+}
+
+/** 接收端必须给出可靠时长/近尾进度，并且此前确实播放过当前地址。 */
+export function dlnaNaturalEnd(previous: string, current: string, positionMs: number, durationMs: number,
+	wasPlaying: boolean, manualStop: boolean, sameUri: boolean): boolean {
+	return wasPlaying && !manualStop && sameUri && previous == 'PLAYING' && current == 'STOPPED'
+		&& durationMs > 2000 && positionMs >= durationMs - 1500
+}
+
+export function dlnaMimeFromPath(path: string): string {
+	const clean = path.split('?')[0].toLowerCase()
+	if (clean.endsWith('.mp3')) return 'audio/mpeg'
+	if (clean.endsWith('.flac')) return 'audio/flac'
+	if (clean.endsWith('.m4a') || clean.endsWith('.mp4')) return 'audio/mp4'
+	if (clean.endsWith('.aac')) return 'audio/aac'
+	if (clean.endsWith('.wav')) return 'audio/wav'
+	if (clean.endsWith('.ogg')) return 'audio/ogg'
+	if (clean.endsWith('.jpg') || clean.endsWith('.jpeg')) return 'image/jpeg'
+	if (clean.endsWith('.png')) return 'image/png'
+	return 'application/octet-stream'
+}
+
+export function dlnaMimeSupported(protocolInfo: string, mime: string): boolean {
+	if (protocolInfo.length == 0) return true // 设备未提供，保留实际装载结果作为判据。
+	const wanted = mime.toLowerCase()
+	return protocolInfo.split(',').some((entry: string): boolean => {
+		const fields = entry.trim().toLowerCase().split(':')
+		if (fields.length < 3 || (fields[0] != 'http-get' && fields[0] != '*')) return false
+		const accepted = fields[2]
+		return accepted == '*' || accepted == wanted ||
+			(accepted == 'audio/x-flac' && wanted == 'audio/flac') ||
+			(accepted == 'audio/x-wav' && wanted == 'audio/wav')
+	})
+}
+
+export function dlnaDidl(id: string, title: string, artist: string, album: string, cover: string,
+	url: string, mime: string, size: number, durationMs: number): string {
+	const art = cover.length > 0 ? '<upnp:albumArtURI>' + dlnaXmlEscape(cover) + '</upnp:albumArtURI>' : ''
+	const length = size > 0 ? ' size="' + Math.floor(size).toString() + '"' : ''
+	const duration = durationMs > 0 ? ' duration="' + dlnaTimeText(durationMs) + '"' : ''
+	return '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">' +
+		'<item id="' + dlnaXmlEscape(id) + '" parentID="0" restricted="1"><dc:title>' + dlnaXmlEscape(title) +
+		'</dc:title><upnp:artist>' + dlnaXmlEscape(artist) + '</upnp:artist><upnp:album>' + dlnaXmlEscape(album) +
+		'</upnp:album><upnp:class>object.item.audioItem.musicTrack</upnp:class>' + art +
+		'<res protocolInfo="http-get:*:' + dlnaXmlEscape(mime) + ':*"' + length + duration + '>' +
+		dlnaXmlEscape(url) + '</res></item></DIDL-Lite>'
+}

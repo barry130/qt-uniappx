@@ -93,6 +93,19 @@ export function exitAppNative(): boolean {
   }
 }
 
+/** 回到后台保留 UIAbility；必须等待结果，失败不能伪报成功或改为 terminateSelf。 */
+export async function moveAppToBackgroundNative(): Promise<boolean> {
+  try {
+    const ctx = UTSHarmony.getUIAbilityContext() as common.UIAbilityContext;
+    if (ctx == null) return false;
+    await ctx.moveAbilityToBackground();
+    return true;
+  } catch (e) {
+    console.log('[AppNative] moveAbilityToBackground 失败', e);
+    return false;
+  }
+}
+
 /** 安装 APK：鸿蒙不是 APK 体系，恒 false（JS 提示到文件管理安装） */
 export function installApkNative(filePath: string): boolean {
   return false;
@@ -241,6 +254,23 @@ export function hasCustomDirUri(): boolean {
   return customDirUri.length > 0;
 }
 
+/** 公共目录同名文件不覆盖：追加 (1)、(2) …，与 Android 的 avoidDuplicate 保持一致。 */
+function uniquePublicPath(dir: string, fileName: string): string {
+  const dot = fileName.lastIndexOf('.');
+  const base = dot > 0 ? fileName.substring(0, dot) : fileName;
+  const suffix = dot > 0 ? fileName.substring(dot) : '';
+  let candidate = fileName;
+  let index = 1;
+  while (fileIo.accessSync(dir + '/' + candidate) && index < 1000) {
+    candidate = base + '(' + index.toString() + ')' + suffix;
+    index++;
+  }
+  if (fileIo.accessSync(dir + '/' + candidate)) {
+    throw new Error('同名下载文件过多，无法安全创建新文件');
+  }
+  return dir + '/' + candidate;
+}
+
 /**
  * 把临时文件写入公共目录。
  *
@@ -287,11 +317,18 @@ export function saveToPublicMedia(tempPath: string, dirType: string, fileName: s
         if (!fileIo.accessSync(dir)) {
           fileIo.mkdirSync(dir, true);
         }
-        const dest = dir + '/' + fileName;
-        if (fileIo.accessSync(dest)) {
-          fileIo.unlinkSync(dest);
+        const dest = uniquePublicPath(dir, fileName);
+        try {
+          fileIo.copyFileSync(src, dest);
+        } catch (copyError) {
+          // 只清理本次选择且原先不存在的目标；未知既有文件绝不删除。
+          try {
+            if (fileIo.accessSync(dest)) fileIo.unlinkSync(dest);
+          } catch (_) {
+            // 静默：复制失败的半成品清理失败时交给系统诊断
+          }
+          throw new Error(copyError != null ? copyError.toString() : "复制文件失败");
         }
-        fileIo.copyFileSync(src, dest);
         console.log('[AppNative] 已写入公共目录: ' + dest);
         resolve(dest);
       } catch (e) {
@@ -554,11 +591,11 @@ export function recreateActivity(): boolean {
  * （2026-10-31 真机反馈：悬浮 TabBar 压在导航键上），避让区只能走原生查询。
  * getLastWindow 为异步接口，本文件统一用 .then/.catch 风格（见 openNotificationSettings）。
  */
-export function readBottomNavInset(onResult: (px: number) => void): void {
+export function readBottomNavInset(onResult: (px: number, navigationKeys: number) => void): void {
   try {
     const ctx = UTSHarmony.getUIAbilityContext() as common.UIAbilityContext;
     if (ctx == null) {
-      onResult(0);
+      onResult(0, -1);
       return;
     }
     window.getLastWindow(ctx)
@@ -566,15 +603,16 @@ export function readBottomNavInset(onResult: (px: number) => void): void {
         // TYPE_NAVIGATION_INDICATOR 覆盖底部导航区：三键导航的按键栏与
         // 手势导航的指示条都算（HarmonyOS「沉浸式」官方避让示例同款选型）。
         const avoid = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
-        onResult(Math.round(avoid.bottomRect.height));
+        // 2 = valid combined avoid area; service classifies after px -> logical px.
+        onResult(Math.round(avoid.bottomRect.height), 2);
       })
       .catch((err: BusinessError) => {
         console.log('[AppNative] readBottomNavInset getLastWindow 失败: ' + err.code + ' ' + err.message);
-        onResult(0);
+        onResult(0, -1);
       });
   } catch (e) {
     console.log('[AppNative] readBottomNavInset error ' + (e != null ? e.toString() : 'unknown'));
-    onResult(0);
+    onResult(0, -1);
   }
 }
 

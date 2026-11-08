@@ -1,0 +1,120 @@
+<template>
+  <view class="qpq-mask" :class="layout.isWide ? 'qpq-mask-wide' : ''" :style="maskStyle" @click="close">
+    <view class="qpq-panel" :class="layout.isWide ? 'qpq-panel-wide' : ''" :style="panelStyle" @click.stop>
+      <view class="qpq-header" :class="layout.isWide ? 'qpq-header-wide' : ''" :style="headerStyle">
+        <text class="qpq-heading" :style="'color:' + theme.skin.text + ';' + qtFontDual(32, 17)">播放列表</text>
+        <text class="qpq-count" :class="layout.isWide ? 'qpq-count-wide' : ''" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(24, 12)">{{ player.queue.length }} 首</text>
+        <view class="qpq-spacer" />
+        <view class="qpq-action" :class="layout.isWide ? 'qpq-action-wide' : ''" @click.stop="clearQueue"><QtIcon name="trash" :size="layout.isWide ? 18 : 30" :color="theme.skin.iconMuted" /></view>
+        <view class="qpq-action" :class="layout.isWide ? 'qpq-action-wide' : ''" @click.stop="close"><QtIcon name="close" :size="layout.isWide ? 20 : 32" :color="theme.skin.iconMuted" /></view>
+      </view>
+      <scroll-view v-if="player.queue.length > 0" class="qpq-list" direction="vertical" :style="listStyle" :scroll-top="scrollTop" :scroll-with-animation="false" @scroll="onScroll">
+        <view class="qpq-virtual" :style="'height:' + windowRange.contentHeightPx + 'px;'">
+          <view v-for="row in rows" :key="row.index" class="qpq-row" :class="layout.isWide ? 'qpq-row-wide' : ''" :style="rowStyle(row.index)" @click="playAt(row.index)">
+            <view class="qpq-index" :class="layout.isWide ? 'qpq-index-wide' : ''">
+              <QtIcon v-if="row.index == player.currentIndex()" name="music" :size="layout.isWide ? 17 : 28" :color="theme.skin.accent" />
+              <text v-else :style="'color:' + theme.skin.textSubtle + ';' + qtFontDual(23, 12)">{{ row.index + 1 }}</text>
+            </view>
+            <view class="qpq-copy">
+              <text class="qpq-song" :style="'color:' + (row.index == player.currentIndex() ? theme.skin.accent : theme.skin.text) + ';' + qtFontDual(28, 15)" :max-lines="1">{{ row.song.name }}</text>
+              <text class="qpq-singer" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)" :max-lines="1">{{ row.song.singer }}</text>
+            </view>
+            <view class="qpq-action" :class="layout.isWide ? 'qpq-action-wide' : ''" @click.stop="moveAt(row.index, -1)"><QtIcon name="arrow-up" :size="layout.isWide ? 17 : 28" :color="row.index > 0 ? theme.skin.iconMuted : theme.skin.border" /></view>
+            <view class="qpq-action" :class="layout.isWide ? 'qpq-action-wide' : ''" @click.stop="moveAt(row.index, 1)"><QtIcon name="arrow-down" :size="layout.isWide ? 17 : 28" :color="row.index < player.queue.length - 1 ? theme.skin.iconMuted : theme.skin.border" /></view>
+            <view class="qpq-action" :class="layout.isWide ? 'qpq-action-wide' : ''" @click.stop="removeAt(row.index)"><QtIcon name="close" :size="layout.isWide ? 17 : 28" :color="theme.skin.iconMuted" /></view>
+          </view>
+        </view>
+      </scroll-view>
+      <view v-else class="qpq-empty" :style="listStyle"><text :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(26, 14)">队列为空</text></view>
+    </view>
+  </view>
+</template>
+<script setup lang="ts">
+import { computed, ref, watch, nextTick, onMounted, onUnmounted } from "vue";
+import type { Song } from "@/types/music";
+import { usePlayerStore } from "@/stores/player";
+import { useQtLayout, qtStatusBarPx, qtPlayerBarHeightPx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { playerQueueWindow } from "@/uni_modules/qt-ui/composables/player-presentation";
+import { playbackQueueMetrics, removePlaybackQueueItem, movePlaybackQueueItem } from "@/uni_modules/qt-ui/composables/playback-queue";
+import { registerPlaybackQueueClose, unregisterPlaybackQueueClose } from "@/uni_modules/qt-ui/composables/playback-queue-overlay";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+
+// This special anchored queue belongs to the current frame/workspace, never to a player-page route.
+// Mount only while open so inactive pages do not keep another queue window or scroll-view alive.
+const emit = defineEmits<{ close: [] }>();
+const player = usePlayerStore();
+const layout = useQtLayout();
+const theme = useThemeStore();
+const metrics = computed(() => playbackQueueMetrics(layout.windowWidth, layout.windowHeight, layout.isWide, qtStatusBarPx(), layout.safeBottomPx, qtPlayerBarHeightPx(), fontScale.scale, player.queue.length));
+const maskStyle = computed((): string => "background-color:" + theme.skin.scrim + ";padding-bottom:" + metrics.value.insetBottomPx + "px;");
+const panelStyle = computed((): string => "width:" + (layout.isWide ? qtSheetWidth("drawer") : layout.windowWidth) + "px;background-color:" + theme.skin.sheetSurface + ";border-color:" + theme.skin.border + ";padding-bottom:" + metrics.value.panelBottomPx + "px;");
+const headerStyle = computed((): string => "height:" + metrics.value.headerPx + "px;border-bottom-color:" + theme.skin.divider + ";");
+const listStyle = computed((): string => "height:" + metrics.value.viewportPx + "px;");
+const scrollValue = ref(0);
+const scrollTop = ref(0);
+const windowRange = computed(() => playerQueueWindow(player.queue.length, metrics.value.stridePx, metrics.value.viewportPx, scrollValue.value, 5));
+type QueueRow = { index: number; song: Song };
+const rows = computed((): QueueRow[] => {
+  const list: QueueRow[] = [];
+  for (let i = windowRange.value.first; i <= windowRange.value.last; i++) list.push({ index: i, song: player.queue[i] });
+  return list;
+});
+function rowStyle(index: number): string {
+  return "top:" + (index * metrics.value.stridePx) + "px;height:" + metrics.value.stridePx + "px;background-color:" + (index == player.currentIndex() ? theme.skin.accentSoft : theme.skin.sheetSurface) + ";";
+}
+function onScroll(event: any): void {
+  const value = event.detail != null ? Number(event.detail.scrollTop ?? 0) : 0;
+  scrollValue.value = Math.max(0, isFinite(value) ? value : 0);
+}
+function setScroll(value: number): void {
+  const target = playerQueueWindow(player.queue.length, metrics.value.stridePx, metrics.value.viewportPx, value, 0).scrollPx;
+  scrollValue.value = target;
+  // Native scroll position can differ from the last command after a manual gesture.
+  if (scrollTop.value == target) {
+    scrollTop.value = target + 0.1;
+    nextTick(() => { scrollTop.value = target; });
+  } else scrollTop.value = target;
+}
+function revealCurrent(): void {
+  setScroll(Math.max(0, player.currentIndex() - 1) * metrics.value.stridePx);
+}
+watch((): number => player.currentIndex(), () => revealCurrent(), { immediate: true });
+watch((): Song[] => player.queue, () => setScroll(scrollValue.value));
+watch((): string => layout.sizeEpoch + ":" + fontScale.scale, () => revealCurrent());
+function playAt(index: number): void {
+  if (index >= 0 && index < player.queue.length) player.play(player.queue[index]);
+}
+function moveAt(index: number, offset: number): void { movePlaybackQueueItem(player, index, offset); }
+function removeAt(index: number): void { removePlaybackQueueItem(player, index); }
+function clearQueue(): void { player.stop(); close(); }
+function close(): void { unregisterPlaybackQueueClose(close); emit("close"); }
+onMounted(() => registerPlaybackQueueClose(close));
+onUnmounted(() => unregisterPlaybackQueueClose(close));
+</script>
+<style>
+.qpq-mask { position: absolute; left: 0; right: 0; top: 0; bottom: 0; justify-content: flex-end; z-index: 1400; }
+.qpq-mask-wide { align-items: flex-end; padding-right: 16px; }
+.qpq-panel { border-radius: 28rpx 28rpx 0 0; border-width: 1px; border-style: solid; overflow: hidden; flex-shrink: 0; }
+.qpq-panel-wide { border-radius: 16px; }
+.qpq-header { flex-direction: row; align-items: center; padding: 0 24rpx; border-bottom-width: 1px; border-bottom-style: solid; flex-shrink: 0; }
+.qpq-header-wide { padding: 0 16px; }
+.qpq-heading { font-weight: 600; }
+.qpq-count { margin-left: 12rpx; }
+.qpq-count-wide { margin-left: 8px; }
+.qpq-spacer { flex: 1; }
+.qpq-list { flex-shrink: 0; }
+.qpq-virtual { position: relative; }
+.qpq-row { position: absolute; left: 0; right: 0; flex-direction: row; align-items: center; padding: 0 16rpx; }
+.qpq-row-wide { padding: 0 10px; }
+.qpq-index { width: 48rpx; align-items: center; justify-content: center; flex-shrink: 0; margin-right: 10rpx; }
+.qpq-index-wide { width: 26px; margin-right: 6px; }
+.qpq-copy { flex: 1; min-width: 0; }
+.qpq-song { line-height: 1.35; text-overflow: ellipsis; }
+.qpq-singer { line-height: 1.35; margin-top: 4px; text-overflow: ellipsis; }
+.qpq-action { width: 64rpx; height: 64rpx; align-items: center; justify-content: center; flex-shrink: 0; }
+.qpq-action-wide { width: 34px; height: 36px; }
+.qpq-empty { align-items: center; justify-content: center; }
+</style>

@@ -31,7 +31,8 @@ const CONFIRM_ENTRY = "services/confirm.ts";
 
 function walk(dir, out = []) {
   for (const e of readdirSync(dir)) {
-    if (e === "node_modules" || e === "unpackage" || e === ".git" || e.startsWith(".")) continue;
+    // _tmp 是截图/构建日志/临时工作区（含会话调试时的项目文件副本），不参与门禁扫描
+    if (e === "node_modules" || e === "unpackage" || e === "_tmp" || e === ".git" || e.startsWith(".")) continue;
     const full = join(dir, e);
     if (statSync(full).isDirectory()) walk(full, out);
     else if (/\.(uvue|uts|ts)$/.test(e)) out.push(full);

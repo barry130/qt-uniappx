@@ -1,0 +1,53 @@
+<template>
+  <QtSheet :visible="ui.visible.value" title="DLNA 投屏" subtitle="与电视或音箱连接同一局域网" @close="closeDlna">
+    <view class="cast-status" :class="layout.isWide ? 'cast-status-wide' : ''">
+      <text v-if="connected" class="cast-status-text" :style="'color:' + theme.skin.text + ';' + qtFontDual(26, 14)">{{ deviceName }}</text>
+      <text v-if="ui.searching.value" class="cast-status-text" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(24, 12)">正在搜索设备…</text>
+      <text v-else-if="ui.error.value.length > 0" class="cast-status-text" :style="'color:' + theme.skin.danger + ';' + qtFontDual(24, 12)">{{ ui.error.value }}</text>
+      <text v-else-if="ui.devices.value.length == 0" class="cast-status-text" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(24, 12)">未发现设备，请确认电视已开启 DLNA 接收功能</text>
+    </view>
+    <scroll-view class="cast-list" direction="vertical" :style="listStyle" :scroll-into-view="anchor">
+      <view v-for="(device, index) in ui.devices.value" :key="device.id" :id="itemId(index)">
+        <QtOption :label="device.name" :description="description(device)" :selected="selected(device)" :disabled="ui.searching.value" @select="connectDlna(device)" />
+      </view>
+    </scroll-view>
+    <template #footer>
+      <view class="cast-actions" :class="layout.isWide ? 'cast-actions-wide' : ''">
+        <view v-if="connected" class="cast-action" :class="layout.isWide ? 'cast-action-wide' : ''"><QtButton label="断开" variant="outline" size="sm" @click="disconnectDlna(false)" /></view>
+        <view v-if="connected" class="cast-action" :class="layout.isWide ? 'cast-action-wide' : ''"><QtButton label="切回本机" variant="outline" size="sm" @click="disconnectDlna(true)" /></view>
+        <view class="cast-action" :class="layout.isWide ? 'cast-action-wide' : ''"><QtButton :disabled="ui.searching.value" label="刷新" size="sm" @click="discoverDlna" /></view>
+      </view>
+    </template>
+  </QtSheet>
+</template>
+<script setup lang="ts">
+import { computed, onMounted } from "vue";
+import QtSheet from "@/uni_modules/qt-ui/components/qt-sheet/qt-sheet.uvue";
+import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import { dlnaUiState, initDlna, closeDlna, discoverDlna, connectDlna, disconnectDlna } from "@/services/dlna";
+import type { AudioDlnaDevice } from "@/uni_modules/qt-audio-player";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtSelectionReveal } from "@/uni_modules/qt-ui/composables/use-qt-selection-reveal";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+const ui = dlnaUiState(), layout = useQtLayout(), theme = useThemeStore();
+const connected = computed((): boolean => ui.state.value != null && ui.state.value!.target == "dlna");
+const deviceName = computed((): string => connected.value ? "投放至 " + ui.state.value!.deviceName : "");
+const selectedIndex = computed((): number => ui.devices.value.findIndex((device: AudioDlnaDevice): boolean => selected(device)));
+const { anchor, itemId } = useQtSelectionReveal((): boolean => ui.visible.value, (): number => selectedIndex.value, (): string => ui.devices.value.map((d: AudioDlnaDevice): string => d.id).join("|") + ":" + layout.sizeEpoch + ":" + fontScale.scale);
+const listStyle = computed((): string => "height:" + Math.max(100, Math.min(360, layout.windowHeight * 0.5)) + "px;");
+function selected(device: AudioDlnaDevice): boolean { return connected.value && ui.state.value!.deviceId == device.id; }
+function description(device: AudioDlnaDevice): string { return "DLNA 音频接收设备" + (device.canSeek ? " · 可拖动进度" : "") + (device.canSetVolume ? " · 可调音量" : ""); }
+onMounted(() => initDlna());
+</script>
+<style>
+.cast-list { min-height: 0; flex-shrink: 1; }
+.cast-status { padding: 24rpx 32rpx 12rpx; }
+.cast-status-wide { padding: 14px 20px 8px; }
+.cast-status-text { line-height: 1.5; }
+.cast-actions { padding: 24rpx 32rpx; flex-direction: row; justify-content: flex-end; }
+.cast-actions-wide { padding: 14px 20px; }
+.cast-action { margin-left: 16rpx; }
+.cast-action-wide { margin-left: 10px; }
+</style>

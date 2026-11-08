@@ -103,6 +103,7 @@ import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import { saveTokens, parseTokenResponse, clearTokens, getUserId, saveUserId } from "@/services/auth";
 import { refreshMe } from "@/services/user-cache";
+import { cacheUserAvatar } from "@/services/avatar-cache";
 import { usePlayerStore } from "@/stores/player";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 
@@ -250,19 +251,22 @@ async function submit(): Promise<void> {
     if (tokenInfo == null) {
       throw new Error("登录响应缺少 token");
     }
-    saveTokens(tokenInfo);
-    // 兼容旧存储
-    uni.setStorageSync("qt-token", tokenInfo.accessToken);
     const user = data.get("user") as UTSJSONObject | null;
     // 收藏缓存按账号隔离：检测到换账号登录就清空本地收藏
     //（服务器是数据源，A 的数据留在 A 的服务器账号里，随后全量拉取恢复 B 的数据）
     const uidRaw = user != null ? user.get("id") : null;
     const uid = uidRaw != null ? uidRaw.toString() : "";
     const prevUid = getUserId();
+    // 先把 UID 和该 UID 的分区状态准备好，再提交新 token。这样即使进程在两次
+    // 同步存储写入之间退出，也不会让 B 的 token 在下次启动时读到 A 的游标/队列。
+    if (uid.length > 0) saveUserId(uid);
     if (prevUid.length > 0 && uid.length > 0 && prevUid != uid) {
       usePlayerStore().clearLocalLikeData();
     }
-    if (uid.length > 0) saveUserId(uid);
+    saveTokens(tokenInfo);
+    if (user != null) cacheUserAvatar((user.get("avatar") as string | null) ?? "");
+    // 兼容旧存储
+    uni.setStorageSync("qt-token", tokenInfo.accessToken);
     const nicknameValue = user != null ? (user.get("nickname") as string | null) : null;
     const displayName =
       nicknameValue != null && nicknameValue.length > 0

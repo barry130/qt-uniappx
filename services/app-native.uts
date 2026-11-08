@@ -11,6 +11,7 @@
 
 import { openExternalUrl, exitAppNative, installApkNative, openNotificationSettings as openNotificationSettingsNative, isIgnoringBatteryOptimizations as isIgnoringBatteryOptimizationsNative, openBatteryOptimizationSettings as openBatteryOptimizationSettingsNative, openAutoStartSettings as openAutoStartSettingsNative, openAppDetailsSettings as openAppDetailsSettingsNative, applyLegacyInsets as applyLegacyInsetsNative, readBottomNavInset as readBottomNavInsetNative, pickJsFile as pickJsFileNative, pickDirectory as pickDirectoryNative, setCustomDirUri as setCustomDirUriNative, queryPermissionStates as queryPermissionStatesNative, openPermissionSettings as openPermissionSettingsNative, getWebCookies as getWebCookiesNative, openAuthWebView as openAuthWebViewNative, closeAuthWebView as closeAuthWebViewNative, saveToPublicMedia as saveToPublicMediaNative } from "@/uni_modules/qt-app-native";
 import type { PickFileResult, PickDirectoryResult, PermissionState } from "@/uni_modules/qt-app-native";
+import { moveAppToBackgroundNative } from "@/uni_modules/qt-app-native";
 import { logErrV, logWarn } from "@/services/logger";
 import { ensureNotificationPermission as ensureNotificationPermissionNative } from "@/uni_modules/qt-audio-player";
 import { qtShowToast } from "@/services/toast";
@@ -62,6 +63,23 @@ export function isIosOs(): boolean {
   // #ifndef APP-IOS
   return false;
   // #endif
+}
+
+/** 系统返回键设置只在具备后台/退出能力的平台展示。 */
+export function supportsHomeBackMode(): boolean {
+  return isAndroidOs() || isHarmonyOs();
+}
+
+/** 保留播放与页面状态；后台请求失败只提示，不降级为退出或停播。 */
+export async function moveAppToBackground(): Promise<void> {
+  // #ifdef APP-ANDROID || APP-HARMONY
+  try {
+    if (await moveAppToBackgroundNative()) return;
+  } catch (e) {
+    logErrV("AppNative", "回到后台失败", e);
+  }
+  // #endif
+  qtShowToast({ title: "暂时无法回到后台，请使用系统主页键", icon: "none" });
 }
 
 /**
@@ -349,11 +367,23 @@ function devicePxToLogical(devicePx: number): number {
  * 把「没回调」当作未知，继续用 uni 的 safeAreaInsets 兜底；回调一个 0 会被当成
  * 「系统已经让过位」的确定结论，反而把 iOS 的安全区让位关掉。
  */
-export function readBottomNavInset(onResult: (px: number) => void): void {
+export function readBottomNavInset(onResult: (px: number, navigationKeys: number) => void): void {
   // #ifdef APP-ANDROID || APP-HARMONY
   try {
-    readBottomNavInsetNative((devicePx: number) => {
-      onResult(devicePxToLogical(devicePx));
+    readBottomNavInsetNative((devicePx: number, navigationKeys: number) => {
+      // Android 新 Activity 尚未布局/inset 未分发时回 (0,-1)，这是未知而非无导航栏。
+      // 不能抹掉上一页已确认的避让，否则下一次有效回调又会把底栏抬起。
+      // #ifdef APP-ANDROID
+      if (devicePx == 0 && navigationKeys < 0) return;
+      // #endif
+      const logicalPx = devicePxToLogical(devicePx);
+      let keys = navigationKeys;
+      // Harmony exposes a combined avoid area: retain the previous position for
+      // button-height areas; small gesture indicators can use the lower gap.
+      // #ifdef APP-HARMONY
+      if (navigationKeys == 2) keys = logicalPx >= 32 ? 1 : 0;
+      // #endif
+      onResult(logicalPx, keys);
     });
   } catch (e) {
     // 静默：原生读数失败时保持「未知」，下一轮 onShow 会再试，不覆写成 0

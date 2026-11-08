@@ -1,17 +1,24 @@
 /**
- * 媒体直传（UPDATE_DESIGN.md §5.2/§5.3）：头像 / 收藏歌单封面。
+ * 媒体上传（UPDATE_DESIGN.md §5.2/§5.3 + 2026-11 代传支持）：头像 / 收藏歌单封面。
  *
- * 文件正文不经过 Astral 服务器，三段式：
- * ① 网关取签发凭证（ticket：直传地址 + 表单字段，校验在 storage 插件完成）；
- * ② 客户端把文件直传存储端——
+ * 统一入口是「上传计划」（upload-plan）：后端按目录首选渠道分流——
+ * ① 直传家族（TELEGRAM Worker / S3 系 / COS / OSS / 又拍云）：计划返回 DIRECT + 直传凭证，
+ *    三段式不变，文件正文不经过 Astral 服务器；
  *    S3 系/R2/COS/OSS：预签名 PUT，body 就是文件原始字节（uni.request + ArrayBuffer）；
  *    TELEGRAM Worker / 又拍云：multipart 表单（uni.uploadFile，file 字段 + policy/authorization）；
- * ③ 凭 uploadId 回执登记，网关返回「URL 即版本」的永久地址。
+ * ② CUSTOM_HTTP（如 ImgBB）：不允许客户端直传（直传凭证会把上游凭据泄露给浏览器端），
+ *    计划返回 PROXY + 两段式代传参数——原始字节 POST 到 astral 网关的代传端点，
+ *    由服务端 HttpUploadGateway 发往上游；响应 state=COMMITTED 后凭 uploadId 调 apply 落业务字段。
  *
  * 注意：本层不做任何大小/类型/配额校验——策略由 storage 插件强制执行，
  * 服务端拒绝时把它的文案原样抛给调用方（如「今日上传次数已达上限」）。
  */
-import { apiRequest } from "./http";
+import { apiRequest, asUtso, resolveUrl } from "./http";
+import { getAccessToken, getSessionEpoch, sessionIsCurrent } from "./auth";
+import { cacheUserAvatar, getCachedAvatarUrl } from "./avatar-cache";
+import { updateCachedMeAvatar } from "./user-cache";
+import { mergeClientHeaders } from "./client-info";
+import { logErrV } from "./logger";
 
 /** 直传凭证（后端 QtUploadTicketVo） */
 type UploadTicket = {
@@ -157,16 +164,146 @@ async function directUpload(ticket: UploadTicket, filePath: string, mime: string
   await uploadMultipart(ticket, filePath);
 }
 
-/** 上传一条龙共用体：ticket → 直传 → complete，返回永久 URL */
+// ==================== 两段式代传（CUSTOM_HTTP 渠道，正文经 astral 网关） ====================
+
+/** 上传计划（后端 QtUploadPlanVo）：mode=DIRECT 带嵌套 ticket；mode=PROXY 带代传参数 */
+type UploadPlan = {
+  mode: string;
+  ticket: UploadTicket | null;
+  proxyUploadId: string;
+  proxyContentPath: string;
+};
+
+function parsePlan(data: UTSJSONObject): UploadPlan | null {
+  const mode = data.get("mode") as string | null;
+  if (mode == null || mode.length === 0) return null;
+  if (mode === "PROXY") {
+    const uploadId = data.get("uploadId") as string | null;
+    const contentPath = data.get("contentPath") as string | null;
+    if (uploadId == null || contentPath == null) return null;
+    return { mode, ticket: null, proxyUploadId: uploadId, proxyContentPath: contentPath };
+  }
+  const rawTicket = data.get("ticket");
+  if (rawTicket == null || typeof rawTicket != "object") return null;
+  const ticket = parseTicket(rawTicket as UTSJSONObject);
+  if (ticket == null) return null;
+  return { mode, ticket, proxyUploadId: "", proxyContentPath: "" };
+}
+
+/**
+ * 幂等键：一次上传流程内固定（plan 网络重试复用同一键，服务端按它重放返回同一操作）。
+ * 仅需唯一性，无需加密强度：时间戳 + 进程内自增即可。
+ */
+let uploadKeyCounter = 0;
+function newIdempotencyKey(): string {
+  uploadKeyCounter++;
+  return "qt-upload-" + Date.now() + "-" + uploadKeyCounter;
+}
+
+/**
+ * 代传正文单次发送（astral 网关自家端点，HTTP POST：生产网关/WAF 实测拦截 PUT）：
+ * 必须带 satoken 与统一客户端系统头，与预签名直传不同（那些是第三方地址，一个自定义头都不能加）。
+ * 返回操作状态：COMMITTED=完成；CREATED=本次渠道失败已切换备用渠道，需重发同一正文。
+ */
+function proxyPutOnce(contentPath: string, bytes: ArrayBuffer, mime: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const header = new UTSJSONObject();
+    header.set("Content-Type", mime);
+    const token = getAccessToken();
+    if (token.length > 0) {
+      header.set("satoken", token);
+    }
+    mergeClientHeaders(header);
+    uni.request({
+      url: resolveUrl(contentPath),
+      // 生产网关/WAF 拦截非 GET/POST 方法（实测 PUT 返回 200+纯文本「非法请求」），统一 POST
+      method: "POST",
+      data: bytes,
+      header,
+      timeout: 120000,
+      // 与 http.ts 同约定（dataType: "text"）：保留原始文本到回调手动解析，
+      // 避免运行时默认 JSON 解析抢先报错、或返回无 .get 的普通对象
+      // （真机实测普通对象上 JSON.parse/as UTSJSONObject 双双抛错 → 误报「格式异常」）。
+      dataType: "text",
+      success: (res) => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error("代传失败（HTTP " + res.statusCode + "）"));
+          return;
+        }
+        try {
+          // 形态无关归一化（asUtso）：res.data 可能是原始文本，也可能是运行时
+          // 已预解析的普通对象/UTSJSONObject（dataType 在部分平台对 PUT 不生效）。
+          // 不要 `as string`——Kotlin 端不安全 cast 遇对象直接 ClassCastException。
+          const body = asUtso(res.data);
+          const code = body.get("code");
+          if (code != null && (code as number) !== 200) {
+            const msg = body.get("msg") as string | null;
+            reject(new Error(msg != null && msg.length > 0 ? msg : "代传失败"));
+            return;
+          }
+          const data = body.get("data");
+          if (data == null || typeof data != "object") {
+            reject(new Error("代传回执格式异常"));
+            return;
+          }
+          const state = (data as UTSJSONObject).get("state") as string | null;
+          if (state == null || state.length === 0) {
+            reject(new Error("代传回执缺少状态"));
+            return;
+          }
+          resolve(state);
+        } catch (e) {
+          // 真机定位用：原始回执形态（string/对象）与实际异常都落盘，诊断页可见
+          logErrV("QT Music", "代传回执解析失败 " + contentPath + " data=" + typeof res.data, e);
+          reject(new Error("代传回执格式异常"));
+        }
+      },
+      fail: () => {
+        reject(new Error("网络请求失败"));
+      },
+    });
+  });
+}
+
+/** 代传正文：PUT + 渠道切换重试（state=CREATED 表示已切到备用渠道，重发同一正文） */
+async function proxyUpload(contentPath: string, filePath: string, mime: string): Promise<void> {
+  const bytes = await readFileBytes(filePath);
+  // 上限 3 次与服务端两段式 MAX_ATTEMPTS 对齐：首次 + 最多 2 次渠道切换
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const state = await proxyPutOnce(contentPath, bytes, mime);
+    if (state === "COMMITTED") return;
+    if (state !== "CREATED") {
+      throw new Error("文件发送失败（" + state + "）");
+    }
+  }
+  throw new Error("上传渠道暂不可用，请稍后重试");
+}
+
+/** 上传一条龙共用体：plan 分流 → 直传或代传 → complete/apply，返回永久 URL */
 async function uploadFlow(
-  ticketPath: string,
-  ticketBody: UTSJSONObject,
+  planPath: string,
+  planBody: UTSJSONObject,
   completePath: string,
+  applyPath: string,
   filePath: string,
   mime: string
 ): Promise<string> {
-  const ticketRes = await apiRequest(ticketPath, ticketBody, "POST", true);
-  const ticket = parseTicket(ticketRes);
+  const planRes = await apiRequest(planPath, planBody, "POST", true);
+  const plan = parsePlan(planRes);
+  if (plan == null) {
+    throw new Error("获取上传计划失败");
+  }
+  if (plan.mode === "PROXY") {
+    await proxyUpload(plan.proxyContentPath, filePath, mime);
+    const done = await apiRequest(
+      applyPath,
+      { uploadId: plan.proxyUploadId } as UTSJSONObject,
+      "POST",
+      true
+    );
+    return urlOf(done);
+  }
+  const ticket = plan.ticket;
   if (ticket == null) {
     throw new Error("获取上传凭证失败");
   }
@@ -177,9 +314,12 @@ async function uploadFlow(
 
 /**
  * 头像上传（仅修改时调用；每日每用户次数由文件夹策略限制）。
- * 成功后把 URL 写入 qt-avatar 存储，展示页直接读取。
+ * 大小上限不在这里预检：单一事实源在后端目录策略（QtMediaService.leafPolicy
+ * 的 maxSizeBytes），超限时 plan 阶段直接返回带上限数值的友好文案。
+ * 成功后同步资料缓存并保存本机选图，展示页无需再次下载。
  */
 export async function uploadAvatar(filePath: string): Promise<string> {
+  const epoch = getSessionEpoch();
   const mime = guessImageMime(filePath);
   if (mime.length === 0) {
     throw new Error("仅支持 png / jpg / webp 图片");
@@ -187,13 +327,21 @@ export async function uploadAvatar(filePath: string): Promise<string> {
   const size = await fileSize(filePath);
   const fileName = "avatar." + imageExt(filePath);
   const url = await uploadFlow(
-    "app/user/avatar/ticket",
-    { fileName, contentType: mime, sizeBytes: size } as UTSJSONObject,
+    "app/user/avatar/upload-plan",
+    {
+      fileName,
+      contentType: mime,
+      sizeBytes: size,
+      idempotencyKey: newIdempotencyKey(),
+    } as UTSJSONObject,
     "app/user/avatar/complete",
+    "app/user/avatar/apply",
     filePath,
     mime
   );
-  uni.setStorageSync("qt-avatar", url);
+  if (!sessionIsCurrent(epoch)) throw new Error("登录状态已变化，请重新操作");
+  cacheUserAvatar(url, filePath);
+  updateCachedMeAvatar(url);
   return url;
 }
 
@@ -215,9 +363,16 @@ export async function uploadPlaylistCover(pid: string, platform: string, filePat
   const size = await fileSize(filePath);
   const fileName = "cover." + imageExt(filePath);
   return await uploadFlow(
-    "app/user/like/playlist/" + pid + "/cover/ticket",
-    { platform, fileName, contentType: mime, sizeBytes: size } as UTSJSONObject,
+    "app/user/like/playlist/" + pid + "/cover/upload-plan",
+    {
+      platform,
+      fileName,
+      contentType: mime,
+      sizeBytes: size,
+      idempotencyKey: newIdempotencyKey(),
+    } as UTSJSONObject,
     "app/user/like/playlist/" + pid + "/cover/complete?platform=" + platform,
+    "app/user/like/playlist/" + pid + "/cover/apply?platform=" + platform,
     filePath,
     mime
   );
@@ -257,10 +412,10 @@ export function chooseImage(): Promise<string> {
 
 /** 展示地址兜底：空头像时渲染本地默认资源（与 qt-pc 同路径约定）。
  * 默认头像/歌单封面直接复用应用图标（static/icon 最大档），不单独维护占位图文件 */
-export const DEFAULT_AVATAR_ASSET = "/static/icon/xxxhdpi.png";
+export { DEFAULT_AVATAR_ASSET } from "./avatar-cache";
 export const DEFAULT_PLAYLIST_COVER_ASSET = "/static/icon/xxxhdpi.png";
 
 /** 读取缓存头像（登录/me/上传成功时写入） */
 export function getCachedAvatar(): string {
-  return uni.getStorageSync("qt-avatar") as string;
+  return getCachedAvatarUrl();
 }

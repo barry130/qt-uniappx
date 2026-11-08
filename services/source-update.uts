@@ -42,6 +42,10 @@ import {
   setActive,
   setActiveMeta,
   putPack,
+  restorePackRecord,
+  beginPackInstall,
+  finishPackInstall,
+  recoverPackInstall,
   removePack,
   markPackBad,
   isPackBadVersion,
@@ -86,6 +90,7 @@ import {
   reloadEngineMeta,
   loadedMetaCode,
   engineUsable,
+  invalidatePlayPackCache,
 } from "@/services/source-engine";
 
 /**
@@ -549,7 +554,24 @@ export async function installFromText(text: string, smokeSongs: Song[], source: 
  *   5. 失败回滚（仅 isUpdate）：恢复 .prev、恢复包记录与生效位、重放旧包；
  *      拉黑与否由调用方（applyUpdate 拉黑，手动重装不拉黑）。
  */
+let gInstallingPack = false;
+
 async function installPackText(
+  text: string, header: PackHeaderInfo, smokeSongs: Song[], isUpdate: boolean, source: string, ref: string,
+): Promise<SourceApplyResult> {
+  if (gInstallingPack) return applyResult(false, header.versionCode, "另一个音源包正在安装，请稍后重试");
+  gInstallingPack = true;
+  try {
+    return await installPackTextLocked(text, header, smokeSongs, isUpdate, source, ref);
+  } catch (e) {
+    logErrV("SourceUpdate", "安装失败", e);
+    return applyResult(false, header.versionCode, "音源包安装失败，请检查存储空间后重试");
+  } finally {
+    gInstallingPack = false;
+  }
+}
+
+async function installPackTextLocked(
   text: string,
   header: PackHeaderInfo,
   smokeSongs: Song[],
@@ -558,6 +580,7 @@ async function installPackText(
   ref: string,
 ): Promise<SourceApplyResult> {
   await ensureLocalStateRestored();
+  if (!(await recoverPackInstall())) return applyResult(false, header.versionCode, "上次安装尚未恢复，请检查存储后重启");
   const kind = header.kind;
   const id = header.id;
   if (kind != PACK_KIND_META && kind != PACK_KIND_PLAY) {
@@ -597,13 +620,27 @@ async function installPackText(
     return applyResult(false, header.versionCode, `包 id 冲突：${id} 已被${old.kind == PACK_KIND_META ? "数据" : "播放"}包占用`);
   }
   const now = Date.now();
+  const installRevision = old != null ? Math.max(now, old.updatedAt + 1) : now;
+  const previousActiveId = localState().activeId;
+  const previousActiveMetaId = localState().activeMetaId;
   // ② 旧文件暂存（更新失败回滚用；新装没有旧文件）
   const prevPath = packDirOf(id) + "/" + artifact + ".prev";
   const mainPath = artifactPath(id, artifact);
-  const hadOld = (await readPackArtifact(id, artifact)).length > 0;
-  if (hadOld) {
-    await ensurePackDir(id);
-    await writeTextFileAt(prevPath, await readPackArtifact(id, artifact));
+  const oldText = await readPackArtifact(id, artifact);
+  const oldChain = kind == PACK_KIND_PLAY ? await readPackArtifact(id, ARTIFACT_CHAIN) : "";
+  if (old != null && oldText.length == 0) {
+    return applyResult(false, header.versionCode, "旧包文件无法读取，未替换；请先修复或卸载旧包");
+  }
+  if (oldText.length > 0) {
+    if (!(await ensurePackDir(id)) || !(await writeTextFileAt(prevPath, oldText))) {
+      return applyResult(false, header.versionCode, "写入失败：旧包备份未完成，未替换");
+    }
+  }
+  if (oldChain.length > 0 && !(await writeTextFileAt(prevPath + ".chain", oldChain))) {
+    return applyResult(false, header.versionCode, "写入失败：旧线路备份未完成，未替换");
+  }
+  if (!(await beginPackInstall(id, kind, installRevision, oldText.length > 0, oldChain.length > 0))) {
+    return applyResult(false, header.versionCode, "安装恢复记录写入失败，未替换");
   }
   // ③ 落盘 + 登记
   if (!(await ensurePackDir(id))) {
@@ -615,7 +652,11 @@ async function installPackText(
   if (kind == PACK_KIND_PLAY) {
     // 链接/本地安装的 play 包自包含（内嵌默认链），残留的旧 chain 会造成
     // 「新播放层配旧线路」，一律清掉
-    await removePackArtifact(id, ARTIFACT_CHAIN);
+    if (!(await removePackArtifact(id, ARTIFACT_CHAIN))) {
+      const restored = oldText.length > 0 ? await writeTextFileAt(mainPath, oldText) : await removeFileAt(mainPath);
+      if (restored) await finishPackInstall();
+      return applyResult(false, header.versionCode, "旧线路清理失败；" + (restored ? "包文件已恢复" : "包文件恢复失败，请重试安装"));
+    }
   }
   const meta: SourcePackMeta = {
     id: id,
@@ -626,7 +667,7 @@ async function installPackText(
     updateUrl: header.updateUrl,
     dir: packDirOf(id),
     installedAt: old != null ? old.installedAt : now,
-    updatedAt: now,
+    updatedAt: installRevision,
     skipCodes: old != null ? old.skipCodes : ([] as number[]),
     lastProbeAt: old != null ? old.lastProbeAt : 0,
     // 来源溯源：source=="keep"（自管更新）保留原安装来源；manifest 渠道改写为官方；
@@ -639,7 +680,17 @@ async function installPackText(
     // 验过也会置 true——installPackText 里 signVerified 在此之前已算好）
     signVerified: isOfficialPackId(id) ? signVerified : (source == "keep" && old != null ? old.signVerified : false),
   };
-  await putPack(meta);
+  const willActivate = kind == PACK_KIND_PLAY
+    ? previousActiveId.length == 0 || previousActiveId == id
+    : previousActiveMetaId.length == 0 || previousActiveMetaId == id;
+  if (!(await putPack(meta, willActivate))) {
+    const restoredMain = oldText.length > 0 ? await writeTextFileAt(mainPath, oldText) : await removeFileAt(mainPath);
+    const restoredChain = oldChain.length > 0 ? await writePackArtifact(id, ARTIFACT_CHAIN, oldChain) : true;
+    if (restoredMain && restoredChain) await finishPackInstall();
+    return applyResult(false, header.versionCode, "本地状态提交失败；" + (restoredMain && restoredChain ? "旧文件已恢复，未安装" : "文件恢复未完成，已保留备份，请重试安装"));
+  }
+  await finishPackInstall();
+  invalidatePlayPackCache(id);
   await pruneOrphans();
   // ④ 生效判定
   const state = localState();
@@ -656,13 +707,12 @@ async function installPackText(
         `${meta.name} v${header.versionName} 已落盘（当前生效的是其他播放包，可在列表切换）`,
       );
     }
-    await setActive(id);
     const smoke = await applyActivePack(smokeSongs);
     if (!smoke.ok && isUpdate) {
-      await rollbackPack(old, id, prevPath, mainPath);
+      const restored = await rollbackPack(old, id, kind, prevPath, mainPath, oldChain, previousActiveId, previousActiveMetaId);
       await notePackError(id, smoke.message);
       bumpPacksChanged();
-      return applyResult(false, header.versionCode, `${smoke.message}；已回滚到 ${old != null ? old.versionName : "未安装"}`);
+      return applyResult(false, header.versionCode, `${smoke.message}；${restored ? "已回滚到 " + (old != null ? old.versionName : "未安装") : "回滚未完成，请重建引擎或重新安装旧包"}`);
     }
     if (!smoke.ok) {
       // 手动重装失败：保留文件由用户决定（可能是环境问题），仅提示。
@@ -691,21 +741,19 @@ async function installPackText(
       `${meta.name} v${header.versionName} 已落盘（当前生效的是其他数据包，可在列表切换）`,
     );
   }
-  await setActiveMeta(id);
   const reloaded = await reloadEngineMeta();
   const verified = reloaded && engineUsable() && loadedMetaCode() == header.versionCode;
   if (!verified) {
     const detail = lastEngineError();
     if (isUpdate || old == null) {
       // 新装/更新的 meta 包验证不过：回滚（新装 = 回到未安装，更新 = 回旧文件）
-      await rollbackPack(old, id, prevPath, mainPath);
-      await reloadEngineMeta();
+      const restored = await rollbackPack(old, id, kind, prevPath, mainPath, oldChain, previousActiveId, previousActiveMetaId);
       await notePackError(id, `装载未通过（${detail}）`);
       bumpPacksChanged();
       return applyResult(
         false,
         header.versionCode,
-        old != null
+        !restored ? `数据包装载未通过（${detail}）；回滚未完成，请重建引擎或重新安装旧包` : old != null
           ? `数据包装载未通过（${detail}）；已回退到 v${old.versionName}`
           : `数据包装载未通过（${detail}）；已卸载，可重试或换一个包`,
       );
@@ -728,27 +776,43 @@ async function installPackText(
 async function rollbackPack(
   old: SourcePackMeta | null,
   id: string,
+  kind: string,
   prevPath: string,
   mainPath: string,
-): Promise<void> {
+  oldChain: string,
+  previousActiveId: string,
+  previousActiveMetaId: string,
+): Promise<boolean> {
   try {
     if (old != null) {
       const prev = await readTextFileAt(prevPath);
-      if (prev.length > 0) {
-        await writeTextFileAt(mainPath, prev);
-        await putPack(old);
-        await removeFileAt(prevPath);
-        return;
+      if (prev.length == 0 || !(await writeTextFileAt(mainPath, prev))) return false;
+      if (kind == PACK_KIND_PLAY) {
+        const chainOk = oldChain.length > 0 ? await writePackArtifact(id, ARTIFACT_CHAIN, oldChain) : await removePackArtifact(id, ARTIFACT_CHAIN);
+        if (!chainOk) return false;
       }
     }
-    // 没有旧文件可回滚：恢复到安装前状态（未安装）
-    if (old != null && loadedPlayPackId() == old.id) {
+    if (!(await restorePackRecord(old, id, previousActiveId, previousActiveMetaId))) return false;
+    invalidatePlayPackCache(id);
+    // Rebuild the runtime too: a successful install followed by a failed smoke test
+    // has already replaced the live factory, even though the files are now old.
+    if (kind == PACK_KIND_META) {
+      const reloaded = await reloadEngineMeta();
+      if (previousActiveMetaId.length > 0 && (!reloaded || !engineUsable() || (old != null && loadedMetaCode() != old.versionCode))) return false;
+      if (previousActiveMetaId.length == 0 && engineUsable()) return false;
+    } else if (previousActiveId.length > 0) {
+      if (!(await ensurePlayPackLoaded()) || !playPackReady() || loadedPlayPackId() != previousActiveId || (old != null && previousActiveId == old.id && loadedPlayPackCode() != old.versionCode)) return false;
+    } else {
       await unloadPlayPack();
+      if (loadedPlayPackId().length > 0) return false;
     }
-    await removePack(id);
+    if (old == null && !(await removeFileAt(mainPath))) return false;
     await removeFileAt(prevPath);
+    await removeFileAt(prevPath + ".chain");
+    return true;
   } catch (e) {
     logErrV("SourceUpdate", "回滚失败", e);
+    return false;
   }
 }
 
@@ -816,7 +880,9 @@ export async function activatePack(id: string, smokeSongs: Song[]): Promise<Sour
     const ok = await reloadEngineMeta();
     if (!ok || loadedMetaCode() != pack.versionCode) {
       // 装载不过：清空生效位回到「停用」（数据面下线），列表里保留可重装/另选
-      await setActiveMeta("");
+      if (!(await setActiveMeta(""))) {
+        return applyResult(false, pack.versionCode, "数据包装载未通过，停用状态保存失败，请检查存储后重试");
+      }
       await reloadEngineMeta();
       await notePackError(id, `装载未通过：${lastEngineError()}`);
       bumpPacksChanged();

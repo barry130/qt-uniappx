@@ -129,36 +129,40 @@ let lastNavInsetLog = "";
  *
  * 失败方向刻意选「回 0」：读不到几何时保持现状，宁可少让位也不重复叠。
  */
-export const readBottomNavInset: ReadBottomNavInset = function (onResult: (px: number) => void): void {
+export const readBottomNavInset: ReadBottomNavInset = function (onResult: (px: number, navigationKeys: number) => void): void {
   try {
     // getRootWindowInsets 需要 API 23+；更低版本保持现状（回 0）
     if (Build.VERSION.SDK_INT < 23) {
-      onResult(0);
+      onResult(0, -1);
       return;
     }
     const activity = UTSAndroid.getUniActivity();
     if (activity == null) {
-      onResult(0);
+      onResult(0, -1);
       return;
     }
     const window = activity.getWindow();
     if (window == null) {
-      onResult(0);
+      onResult(0, -1);
       return;
     }
     const decor: View = window.getDecorView();
     if (decor == null) {
-      onResult(0);
+      onResult(0, -1);
       return;
     }
     const rootInsets: WindowInsets | null = decor.getRootWindowInsets();
     if (rootInsets == null) {
       // 首帧 inset 尚未分发：回 0，等 App.uvue 的 onShow / 延时重读
-      onResult(0);
+      onResult(0, -1);
       return;
     }
     const compat = WindowInsetsCompat.toWindowInsetsCompat(rootInsets);
     const barBottom = compat.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom;
+    // Tappable system insets distinguish buttons from gestures, even when the
+    // window has already been inset by the system.
+    const tappable = compat.getInsets(WindowInsetsCompat.Type.tappableElement());
+    const navigationKeys = tappable.bottom > 0 || tappable.left > 0 || tappable.right > 0 ? 1 : 0;
     // 手势导航（无按键栏）时 navigationBars 的 bottom 恒 0，但屏幕最底下仍有一条
     // 系统手势指示条区域 —— 2026-10-31 用户反馈「没有下面导航栏的时候，tab 也应该
     // 保持之前那样上浮一点」：只认 navigationBars 的话手势机让位量回 0，悬浮胶囊
@@ -168,13 +172,13 @@ export const readBottomNavInset: ReadBottomNavInset = function (onResult: (px: n
     const gestureBottom = compat.getInsets(WindowInsetsCompat.Type.mandatorySystemGestures()).bottom;
     const navBottom = barBottom > gestureBottom ? barBottom : gestureBottom;
     if (navBottom <= 0) {
-      onResult(0);
+      onResult(0, navigationKeys);
       return;
     }
     const decorHeight = decor.getHeight();
     const contentRoot: View | null = (decor as ViewGroup).getChildAt(0);
     if (decorHeight <= 0 || contentRoot == null) {
-      onResult(0);
+      onResult(0, -1);
       return;
     }
     const padBottom = contentRoot.getPaddingBottom();
@@ -190,10 +194,10 @@ export const readBottomNavInset: ReadBottomNavInset = function (onResult: (px: n
       lastNavInsetLog = diag;
       console.log("[AppNative] readBottomNavInset " + diag);
     }
-    onResult(px);
+    onResult(px, navigationKeys);
   } catch (e) {
     console.log("[AppNative] readBottomNavInset error " + (e != null ? e.toString() : "unknown"));
-    onResult(0);
+    onResult(0, -1);
   }
 };
 
@@ -562,18 +566,46 @@ function copyStream(input: FileInputStream, output: OutputStream): void {
 	output.flush();
 }
 
-/** 同名文件避让：a.mp3 -> a(1).mp3 */
-function avoidDuplicate(dir: File, displayName: string): string {
+/** 同名避让并排他创建：a.mp3 -> a(1).mp3；只返回本次创建的目标。 */
+function reservePublicFile(dir: File, displayName: string): File {
 	const dot = displayName.lastIndexOf(".");
 	const base = dot > 0 ? displayName.substring(0, dot) : displayName;
 	const suffix = dot > 0 ? displayName.substring(dot) : "";
 	let candidate = displayName;
 	let index = 1;
-	while (new File(dir, candidate).exists() && index < 100) {
+	let target = new File(dir, candidate);
+	// createNewFile 的检查与创建是原子的；不能先 exists 再让输出流截断文件。
+	while (!target.createNewFile()) {
 		candidate = base + "(" + index + ")" + suffix;
 		index++;
+		target = new File(dir, candidate);
 	}
-	return candidate;
+	return target;
+}
+
+/** 只复制到 reservePublicFile 返回的独占目标；失败不触碰原文件或其它同名文件。 */
+function copyReservedPublicFile(source: File, target: File): void {
+	let input: FileInputStream | null = null;
+	let output: FileOutputStream | null = null;
+	let copied = false;
+	try {
+		try {
+			input = new FileInputStream(source);
+			output = new FileOutputStream(target);
+			copyStream(input!, output!);
+		} finally {
+			try {
+				if (input != null) input!.close();
+			} finally {
+				if (output != null) output!.close();
+			}
+		}
+		copied = true;
+	} finally {
+		if (!copied) {
+			try { target.delete(); } catch (e3) { /* 静默：仅清理本次排他创建的残留目标 */ }
+		}
+	}
 }
 
 /** Android 9- 直接写公共目录（需要 WRITE_EXTERNAL_STORAGE） */
@@ -595,17 +627,9 @@ function saveLegacy(source: File, dirType: string, displayName: string, mime: st
 	const root = Environment.getExternalStoragePublicDirectory(rootType);
 	const dir = new File(root, subDir);
 	if (!dir.exists()) dir.mkdirs();
-	const finalName = avoidDuplicate(dir, displayName);
-	const target = new File(dir, finalName);
+	const target = reservePublicFile(dir, displayName);
 
-	const input = new FileInputStream(source);
-	const output = new FileOutputStream(target);
-	try {
-		copyStream(input, output);
-	} finally {
-		try { input.close(); } catch (e1) { /* 静默：关流失败不影响复制结果 */ }
-		try { output.close(); } catch (e2) { /* 静默：关流失败不影响复制结果 */ }
-	}
+	copyReservedPublicFile(source, target);
 
 	// 通知媒体库，让文件管理器能扫描到（同样交给扫描器解析标签，见 saveAbsolute 的说明）
 	try {
@@ -666,24 +690,39 @@ function saveScoped(source: File, dirType: string, displayName: string, mime: st
 		return "";
 	}
 
-	const output = resolver.openOutputStream(itemUri!);
-	if (output == null) {
-		try { resolver.delete(itemUri!, null, null); } catch (e1) { /* 静默：清刚插入的空条目失败无妨，该 URI 本就无效 */ }
-		console.log("[MediaStore] openOutputStream 返回 null");
-		return "";
-	}
-
-	const input = new FileInputStream(source);
+	let published = false;
 	try {
-		copyStream(input, output!);
-	} finally {
-		try { input.close(); } catch (e2) { /* 静默：关流失败不影响拷贝结果 */ }
-		try { output!.close(); } catch (e3) { /* 静默：关流失败不影响拷贝结果 */ }
-	}
+		let input: FileInputStream | null = null;
+		let output: OutputStream | null = null;
+		try {
+			output = resolver.openOutputStream(itemUri!);
+			if (output == null) {
+				console.log("[MediaStore] openOutputStream 返回 null");
+				return "";
+			}
+			input = new FileInputStream(source);
+			copyStream(input!, output!);
+		} finally {
+			try {
+				if (input != null) input!.close();
+			} finally {
+				if (output != null) output!.close();
+			}
+		}
 
-	const done = new ContentValues();
-	done.put(MediaStore.MediaColumns.IS_PENDING, 0);
-	resolver.update(itemUri!, done, null, null);
+		const done = new ContentValues();
+		done.put(MediaStore.MediaColumns.IS_PENDING, 0);
+		const updated = resolver.update(itemUri!, done, null, null);
+		if (updated <= 0) {
+			console.log("[MediaStore] update 未发布，影响条目数=" + updated.toString());
+			return "";
+		}
+		published = true;
+	} finally {
+		if (!published) {
+			try { resolver.delete(itemUri!, null, null); } catch (e3) { /* 静默：只回滚本次 insert 的 URI */ }
+		}
+	}
 
 	// 优先返回真实文件绝对路径
 	let result = itemUri!.toString();
@@ -746,17 +785,9 @@ function saveAbsolute(source: File, dirPath: string, displayName: string, mime: 
 		return "";
 	}
 
-	const finalName = avoidDuplicate(dir, displayName);
-	const target = new File(dir, finalName);
+	const target = reservePublicFile(dir, displayName);
 
-	const input = new FileInputStream(source);
-	const output = new FileOutputStream(target);
-	try {
-		copyStream(input, output);
-	} finally {
-		try { input.close(); } catch (e1) { /* 静默：关流失败不影响复制结果 */ }
-		try { output.close(); } catch (e2) { /* 静默：关流失败不影响复制结果 */ }
-	}
+	copyReservedPublicFile(source, target);
 
 	// 通知媒体库（音频才有意义；封面/歌词登记失败无所谓，不影响文件本身）。
 	// 走 MediaScannerConnection 而不是手工 insert：手工 insert 只能塞进
@@ -2079,11 +2110,23 @@ export const readEmbeddedTags: ReadEmbeddedTags = function (filePath: string): E
 export const statLocalFile: StatLocalFile = function (filePath: string): number {
 	if (filePath == null || filePath.length == 0) return -1;
 	try {
+		if (filePath.startsWith("content://")) {
+			const context = UTSAndroid.getAppContext();
+			if (context == null) return -1;
+			const descriptor = context.getContentResolver().openAssetFileDescriptor(Uri.parse(filePath), "r");
+			if (descriptor == null) return -1;
+			try {
+				const size = descriptor.getLength();
+				return size >= 0 ? size.toDouble() : 0;
+			} finally {
+				descriptor.close();
+			}
+		}
 		// 与 readPrefixAny 同口径：先过 resolveRealPath（去 file:// 前缀、转绝对路径、
 		// unifile://usr → 真实目录）。2026-11-02 审阅：这里原先直接 new File(filePath)，
 		// 调用方传 file:// 前缀时永远得 -1，把「文件明明在盘」误报成不在盘。
 		const f = new File(resolveRealPath(filePath));
-		if (!f.exists() || !f.isFile()) return -1;
+		if (!f.exists() || !f.isFile() || !f.canRead()) return -1;
 		const len = f.length();
 		return len > 0 ? len : 0;
 	} catch (e) {
@@ -2151,9 +2194,8 @@ export const getWebCookies: GetWebCookies = function (urls: string[]): Promise<s
  * 表现就是用户看到的「实际无反应」（2026-10-31 实测）。
  *
  * 这里用 Dialog 装一个真正的 android.webkit.WebView：
- *   - 接管 shouldOverrideUrlLoading：http(s) 留在内部加载，其余 scheme 交给系统
- *     Intent（手机QQ/微信/应用市场）；intent:// 按 URI_INTENT_SCHEME 解析并支持
- *     browser_fallback_url 兜底；
+ *   - HTTPS 留在内部；只有已知登录 origin 的主框架、用户手势可以打开 QQ/微信。
+ *     intent URI 仅提取并验证 data，绝不执行网页提供的组件、action、selector 或 extras；
  *   - 同进程 CookieManager（含 httpOnly 与第三方 Cookie），宿主照旧用
  *     getWebCookies 轮询即可读到授权后种回的 Cookie，流程无需改动；
  *   - 返回键 / 代码调用 closeAuthWebView 都能关；只有**用户自己关**才回调 onClose。
@@ -2192,38 +2234,58 @@ let gAuthExternalLaunched = false;
  */
 const AUTH_WEBVIEW_UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
 
-/** 非 http(s) 的自定义 scheme 交给系统打开（拉起手机QQ/微信等） */
+/** Exact HTTPS origins authorized to hand off login to QQ/WeChat. Custom source
+ * pages can still use web login, but gain no native-app launch permission. */
+function qtAuthTrustedOrigin(url: string): boolean {
+  try {
+    const uri = Uri.parse(url);
+    if (uri.getScheme() != "https" || uri.getUserInfo() != null) return false;
+    const port = uri.getPort();
+    if (port != -1 && port != 443) return false;
+    const host = uri.getHost();
+    return host == "y.qq.com" || host == "xui.ptlogin2.qq.com" || host == "ssl.ptlogin2.qq.com" || host == "graph.qq.com" || host == "open.weixin.qq.com" || host == "music.163.com";
+  } catch (_) {
+    return false;
+  }
+}
+
+function qtAuthSsoPackage(scheme: string): string {
+  if (scheme == "mqqapi" || scheme == "mqqopensdkapi") return "com.tencent.mobileqq";
+  if (scheme == "weixin") return "com.tencent.mm";
+  return "";
+}
+
+/** Only called after origin + main-frame + gesture checks. */
 function qtAuthOpenExternalUrl(url: string): void {
 	const activity = UTSAndroid.getUniActivity();
 	if (activity == null) return;
-	// 标记「正在离开自己去外部 App」：回到本窗口时重载一次登录页
-	gAuthExternalLaunched = true;
 	try {
+		let data = Uri.parse(url);
+		let requestedPackage: string | null = null;
 		if (url.toLowerCase().startsWith("intent:")) {
-			// intent://...#Intent;scheme=mqqapi;package=com.tencent.mobileqq;S.browser_fallback_url=...;end
-			const intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME);
-			try {
-				activity.startActivity(intent);
-				return;
-			} catch (err1) {
-				console.log("[AppNative] 授权 intent 无对应应用: " + (err1 != null ? err1.toString() : "unknown"));
-				// 不自动打开 browser_fallback_url（实测通常是 QQ 下载页）：会把用户甩去系统浏览器，
-				// 且登录结果再也回不到本页；直接提示改走扫码（2026-10-31：用户环境没装 QQ）
-				qtAuthFail("没有找到手机QQ，已关闭授权页，请改用扫码登录");
-				return;
-			}
+			const parsed = Intent.parseUri(url, Intent.URI_INTENT_SCHEME);
+			const parsedData = parsed.getData();
+			if (parsedData == null) return;
+			data = parsedData;
+			requestedPackage = parsed.getPackage();
 		}
-		const intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
-		intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+		const scheme = data.getScheme();
+		const allowedPackage = scheme == null ? "" : qtAuthSsoPackage(scheme.toLowerCase());
+		if (allowedPackage.length == 0 || (requestedPackage != null && requestedPackage != allowedPackage)) return;
+		// Fresh intent strips all untrusted action/component/selector/categories/extras/flags.
+		const intent = new Intent(Intent.ACTION_VIEW, data);
+		intent.setPackage(allowedPackage);
+		intent.addCategory(Intent.CATEGORY_BROWSABLE);
 		try {
 			activity.startActivity(intent);
+			gAuthExternalLaunched = true;
 		} catch (err2) {
-			console.log("[AppNative] 授权 scheme 拉起失败: " + (err2 != null ? err2.toString() : "unknown") + " url=" + url);
+			console.log("[AppNative] 授权 App 拉起失败");
 			qtAuthFail("没有找到对应的 App，已关闭授权页，请改用扫码登录");
 		}
 	} catch (e) {
 		// 目标 App 没装 / 系统拒绝：必须给用户可见反馈，不能只写日志
-		console.log("[AppNative] 授权 scheme 解析失败: " + (e != null ? e.toString() : "unknown") + " url=" + url);
+		console.log("[AppNative] 授权 scheme 解析失败");
 		qtAuthFail("无法打开授权页，请改用扫码登录");
 	}
 }
@@ -2259,8 +2321,10 @@ function qtAuthFail(message: string): void {
 
 /** 登录 WebView 的导航钩子：只放行 http(s) 与内部协议，其余交给系统 */
 class QtAuthWebViewClient extends WebViewClient {
-	constructor() {
+	private externalAllowed: boolean;
+	constructor(initialUrl: string) {
 		super();
+		this.externalAllowed = qtAuthTrustedOrigin(initialUrl);
 	}
 
 	/**
@@ -2275,11 +2339,11 @@ class QtAuthWebViewClient extends WebViewClient {
 		const url = uri.toString();
 		if (url.length == 0) return false;
 		const lower = url.toLowerCase();
-		if (lower.startsWith("http://") || lower.startsWith("https://") ||
-			lower.startsWith("about:") || lower.startsWith("javascript:") ||
-			lower.startsWith("data:") || lower.startsWith("blob:") || lower.startsWith("file:")) {
+		if (lower.startsWith("https://")) {
 			return false;
 		}
+		const currentUrl = view.getUrl();
+		if (!this.externalAllowed || !request.isForMainFrame() || !request.hasGesture() || currentUrl == null || !qtAuthTrustedOrigin(currentUrl)) return true;
 		qtAuthOpenExternalUrl(url);
 		return true;
 	}
@@ -2396,6 +2460,16 @@ function qtAuthUserCloseOnMain(): void {
 
 /** 主线程：真正建 Dialog + WebView 并加载登录页 */
 function qtAuthOpenOnMain(url: string, onClose: (message: string) => void, ua: string): void {
+  try {
+    const uri = Uri.parse(url);
+    if (uri.getScheme() != "https" || uri.getHost() == null || uri.getUserInfo() != null) {
+      onClose("登录页必须使用 HTTPS 地址");
+      return;
+    }
+  } catch (_) {
+    onClose("登录页地址无效");
+    return;
+  }
 	const activity = UTSAndroid.getUniActivity();
 	if (activity == null) {
 		console.log("[AppNative] openAuthWebView: Activity 不可用");
@@ -2421,7 +2495,7 @@ function qtAuthOpenOnMain(url: string, onClose: (message: string) => void, ua: s
 		settings.setDisplayZoomControls(false);
 	}
 	settings.setUserAgentString(ua.length > 0 ? ua : AUTH_WEBVIEW_UA);
-	wv.setWebViewClient(new QtAuthWebViewClient());
+	wv.setWebViewClient(new QtAuthWebViewClient(url));
 	wv.setWebChromeClient(new WebChromeClient());
 
 	// 第三方 Cookie：QQ 登录页在 y.qq.com 里用隐藏 iframe 轮询 ptlogin2/ssl.ptlogin2 的登录态，
@@ -2515,3 +2589,15 @@ export const openAuthWebView: OpenAuthWebView = function (url: string, onClose: 
 export const closeAuthWebView: CloseAuthWebView = function (): void {
 	webCookieHandler().post(new QtAuthCloseTask());
 };
+
+// Vapor 按导出顺序分配原生桥接 methodId；新增能力放在末尾，保持已有接口编号稳定。
+/** 回到后台：保留任务与服务，不执行 finish / stop，音乐继续播放。 */
+export async function moveAppToBackgroundNative(): Promise<boolean> {
+  try {
+    const activity = UTSAndroid.getUniActivity();
+    if (activity != null) return activity.moveTaskToBack(true);
+  } catch (e) {
+    console.log("[AppNative] moveTaskToBack error", e);
+  }
+  return false;
+}

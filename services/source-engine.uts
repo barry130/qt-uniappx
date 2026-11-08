@@ -48,7 +48,6 @@ import {
   loadBundle,
   loadPlayBundle,
   invoke,
-  evaluate,
   isRunning,
   isHealthy,
 } from "@/uni_modules/qt-js-engine";
@@ -62,7 +61,6 @@ import {
   ARTIFACT_META,
   PACK_KIND_META,
 } from "@/services/source-bundle-fs";
-import { PACK_VERIFY_NACL_SRC } from "@/services/pack-verify-nacl";
 import { logErr, logErrV, logInfo, logWarn, logWarnV } from "@/services/logger";
 
 /** 与插件 interface.uts 对应的结构类型（服务层不引插件类型，避免跨模块类型耦合） */
@@ -164,8 +162,18 @@ let gMetaLoadedCode = 0;
 let gPlayPackLoadedId = "";
 /** 已成功注入引擎的播放包版本号（0 = 无；设置页/红点比对用） */
 let gPlayPackLoadedCode = 0;
-/** 注入失败过的播放包 id，避免每次播放都重试同一个坏包 */
-let gPlayPackFailedId = "";
+let gPlayPackLoadedKey = "";
+/** Failed installation revision, never just the package ID. */
+let gPlayPackFailedKey = "";
+function playPackRevision(pack: SourcePackMeta): string {
+  return pack.id + ":" + pack.versionCode + ":" + pack.updatedAt;
+}
+
+/** Reinstall/rollback may keep ID and version; explicitly invalidate that revision. */
+export function invalidatePlayPackCache(id: string): void {
+  if (gPlayPackLoadedId == id) gPlayPackLoadedKey = "";
+  if (gPlayPackFailedKey.startsWith(id + ":")) gPlayPackFailedKey = "";
+}
 /** 起引擎的并发去重 */
 let gBootPromise: Promise<boolean> | null = null;
 /** 装 meta 的并发去重 */
@@ -231,7 +239,8 @@ export function engineUsable(): boolean {
 
 /** 引擎当前是否可用于**取链**：meta + 播放包都已注入且引擎健康 */
 export function playPackReady(): boolean {
-  return engineUsable() && gPlayPackLoadedId.length > 0;
+  const pack = activePack();
+  return engineUsable() && pack != null && gPlayPackLoadedKey == playPackRevision(pack);
 }
 
 function msgOf(e: any): string {
@@ -303,108 +312,6 @@ function callLoadPlayBundle(code: string): Promise<boolean> {
   });
 }
 
-/**
- * 在引擎里执行一段同步 JS 表达式（String(...) 收尾），返回求值字符串。
- * 官方包验签专用（nacl 装载 + verify），业务取链仍走 callInvoke。
- * 返回值可能是 evaluateJavascript 的 JSON 序列化形式（两端带引号），调用方需 stripEvalQuotes。
- */
-function callEvaluate(code: string): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    evaluate(code, (r: EvalResult) => {
-      if (r.ok) {
-        resolve(r.value);
-      } else {
-        reject(new Error(r.error));
-      }
-    });
-  });
-}
-
-/** 剥掉 evaluateJavascript JSON 序列化字符串两端可能带的引号（含 \" 转义还原） */
-export function stripEvalQuotes(value: string): string {
-  let v = value.trim();
-  if (v.length >= 2 && v.charAt(0) == '"' && v.charAt(v.length - 1) == '"') {
-    v = v.substring(1, v.length - 1);
-    v = v.split('\\"').join('"').split("\\\\").join("\\").split("\\n").join("\n");
-  }
-  return v;
-}
-
-/** 官方包验签器（nacl）在引擎全局的冻结引用名；空串 = 未装载（resetLoadedState 归零） */
-let gVerifierGlobal = "";
-
-/** RFC 8032 §7.1 Ed25519 TEST 1（空消息）——验签器已知答案自检的标准向量 */
-const VERIFIER_KAT_PUB_HEX = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
-const VERIFIER_KAT_SIG_HEX = "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b";
-
-/** 验签器冻结全局名（pack-signature.uts 组装验签表达式用；未装载为空串） */
-export function verifierGlobalName(): string {
-  return gVerifierGlobal;
-}
-
-/**
- * 确保引擎里已装载官方包验签器（tweetnacl，PACK_VERIFY_NACL_SRC 内嵌常量，
- * 纯 JS 同步实现；不走 APK assets——基座 assets 冻结在基座构建时刻，dev 热推
- * 不更新，见 pack-verify-nacl.uts 文件头）。引擎重建后归零重装（resetLoadedState）。
- *
- * 防伪装载（复审 P0-A；nacl.min.js UMD 尾部是 module.exports 优先）：同引擎里
- * 已生效的恶意包可以预埋 globalThis.module={exports:{}}、伪 self.nacl（或其
- * 访问器）劫持装载结果，也可以在装载完成后重定义裸 nacl。本实现不信任引擎
- * 里任何既有全局：
- * 1. nacl 源码在 IIFE 参数作用域内执行——self/module/exports/window 被全新
- *    对象/undefined 遮蔽，UMD 只能把真 nacl 落到本次新建的私有对象上；
- * 2. 装载后立刻跑 RFC 8032 标准测试向量：正例必须验真、篡改末字节的负例
- *    必须验假，恒真式假实现直接判失败（fail-closed）；
- * 3. 自检通过后把 nacl 对象冻结为随机名全局的不可写、不可配置属性，后续
- *    验签表达式只经由该冻结属性访问（见 pack-signature.uts），装载后的
- *    重定义/删除在语言层面不可能。
- * 残余面：恶意包完全接管 JS realm（替换 Function 构造器等）时同域防御一律
- * 不成立——需要独立 realm 验签才能封死，超出本轮修复范围。
- */
-export async function ensurePackVerifier(): Promise<boolean> {
-  if (gVerifierGlobal.length > 0) return true;
-  if (!(await ensureEngine())) return false;
-  try {
-    if (PACK_VERIFY_NACL_SRC.length < 1000) {
-      logErrV("SourceEngine", "验签器内嵌常量异常", PACK_VERIFY_NACL_SRC.length);
-      return false;
-    }
-    const asset = PACK_VERIFY_NACL_SRC;
-    const name = "__qtVfy_" + Math.floor(Math.random() * 2147483647).toString();
-    // 单次同步求值：参数遮蔽装载 → 结构探测 → KAT 正负例 → 冻结到随机名全局
-    const expr =
-      "(function(self,module,exports,window){" +
-      asset +
-      ";var n=self.nacl;" +
-      "if(!n||!n.sign||!n.sign.detached||typeof n.sign.detached.verify!=='function')return String('missing');" +
-      "function hb(s){var a=new Uint8Array(s.length/2);for(var i=0;i<s.length;i+=2){a[i>>1]=parseInt(s.substr(i,2),16)}return a}" +
-      "var pub=hb('" + VERIFIER_KAT_PUB_HEX + "');" +
-      "var sig=hb('" + VERIFIER_KAT_SIG_HEX + "');" +
-      "if(!n.sign.detached.verify(new Uint8Array(0),sig,pub))return String('kat-pos');" +
-      "var bad=hb('" + VERIFIER_KAT_SIG_HEX + "');bad[63]^=1;" +
-      "if(n.sign.detached.verify(new Uint8Array(0),bad,pub))return String('kat-neg');" +
-      "try{Object.defineProperty(globalThis,'" + name + "',{value:n,writable:false,configurable:false})}catch(e){return String('freeze')}" +
-      "return String('ok');" +
-      "})({},undefined,undefined,{})";
-    const probe = await callEvaluate(expr);
-    const ok = stripEvalQuotes(probe) == "ok";
-    if (ok) {
-      gVerifierGlobal = name;
-    } else {
-      logErrV("SourceEngine", "验签器装载/自检失败", probe);
-    }
-    return ok;
-  } catch (e) {
-    logErrV("SourceEngine", "验签器装载异常", e);
-    return false;
-  }
-}
-
-/** 在引擎里跑验签表达式（pack-signature.uts 组装），返回剥引号后的结果字符串 */
-export async function evalOnEngine(code: string): Promise<string> {
-  return stripEvalQuotes(await callEvaluate(code));
-}
-
 // ==================== 引擎生命周期 ====================
 
 /**
@@ -449,15 +356,15 @@ export function ensureEngine(): Promise<boolean> {
   return p;
 }
 
-/** 引擎重建后归零「已装载」标记（meta、播放包与验签器都要重装） */
+/** 引擎重建后归零 meta 与播放包的装载标记。 */
 function resetLoadedState(): void {
   gMetaReady = false;
   gMetaLoadedId = "";
   gMetaLoadedCode = 0;
   gPlayPackLoadedId = "";
   gPlayPackLoadedCode = 0;
-  gPlayPackFailedId = "";
-  gVerifierGlobal = "";
+  gPlayPackLoadedKey = "";
+  gPlayPackFailedKey = "";
 }
 
 /** 被隔离后的重建：停掉旧引擎（放弃卡住的线程）再起一个新的 */
@@ -622,10 +529,13 @@ export async function ensurePlayPackLoaded(): Promise<boolean> {
     return false;
   }
   if (!(await ensureDataEngine())) return false;
-  if (gPlayPackLoadedId == pack.id && gPlayPackLoadedCode == pack.versionCode && isHealthy()) return true;
-  if (gPlayPackFailedId == pack.id && isHealthy()) return false;
+  if (gPlayPackLoadedKey == playPackRevision(pack) && isHealthy()) return true;
+  if (gPlayPackFailedKey == playPackRevision(pack) && isHealthy()) return false;
   const pending = gPlayPackPromise;
-  if (pending != null) return pending;
+  if (pending != null) {
+    await pending;
+    return ensurePlayPackLoaded();
+  }
   const p = applyPlayPackInEngine(pack);
   gPlayPackPromise = p;
   return p;
@@ -647,7 +557,7 @@ async function applyPlayPackInEngine(pack: SourcePackMeta): Promise<boolean> {
   try {
     const code = await readPackArtifact(pack.id, ARTIFACT_PLAY);
     if (code.length == 0) {
-      gPlayPackFailedId = pack.id;
+      gPlayPackFailedKey = playPackRevision(pack);
       gLoadFailure = "missing";
       fail(`播放包文件缺失：${pack.id}`);
       return false;
@@ -675,7 +585,7 @@ async function applyPlayPackInEngine(pack: SourcePackMeta): Promise<boolean> {
     const res = JSON.parse(resText) as UTSJSONObject;
     const okFlag = res.get("ok") as boolean | null;
     if (okFlag != true) {
-      gPlayPackFailedId = pack.id;
+      gPlayPackFailedKey = playPackRevision(pack);
       gLoadFailure = "invalid";
       const err = res.get("error") as string | null;
       fail(`播放包装配失败：${pack.id}（${err != null ? err : "installPlayPack 未成功"}）`);
@@ -692,7 +602,7 @@ async function applyPlayPackInEngine(pack: SourcePackMeta): Promise<boolean> {
         if (chainOk != true) throw new Error("loadChain 应答 ok!=true");
       } catch (e) {
         // chain 不合法等于没有线路，按包有问题处理（否则每次播放都白跑一趟）
-        gPlayPackFailedId = pack.id;
+        gPlayPackFailedKey = playPackRevision(pack);
         gLoadFailure = "invalid";
         fail(`chain.json 装载失败：${msgOf(e)}`);
         return false;
@@ -700,7 +610,8 @@ async function applyPlayPackInEngine(pack: SourcePackMeta): Promise<boolean> {
     }
     gPlayPackLoadedId = pack.id;
     gPlayPackLoadedCode = pack.versionCode;
-    gPlayPackFailedId = "";
+    gPlayPackLoadedKey = playPackRevision(pack);
+    gPlayPackFailedKey = "";
     gStatus = "ready";
     gLastError = "";
     gLoadFailure = "";
@@ -708,7 +619,7 @@ async function applyPlayPackInEngine(pack: SourcePackMeta): Promise<boolean> {
     return true;
   } catch (e) {
     // 装载阶段失败：包体语法错/缺工厂按包问题处理；其余（引擎/超时）也算装载失败
-    gPlayPackFailedId = pack.id;
+    gPlayPackFailedKey = playPackRevision(pack);
     gLoadFailure = "invalid";
     fail(`播放包装载失败：${pack.id}（${msgOf(e)}）`);
     return false;
@@ -731,19 +642,22 @@ function emitPlayPackMissing(): void {
  * 从引擎里卸掉当前播放包（切包/卸载前的清理；meta 层保留，数据功能不受影响）。
  * 失败不阻塞调用方——引擎重建后播放包本来就要重注入。
  */
-export async function unloadPlayPack(): Promise<void> {
-  if (gPlayPackLoadedId.length == 0) return;
+export async function unloadPlayPack(): Promise<boolean> {
+  if (gPlayPackLoadedId.length == 0) return true;
   const loaded = gPlayPackLoadedId;
-  gPlayPackLoadedId = "";
-  gPlayPackLoadedCode = 0;
   try {
-    if (await ensureDataEngine()) {
-      await callInvoke("uninstallPlayPack", "[]", LOAD_CHAIN_TIMEOUT_MS);
-    }
+    if (!(await ensureDataEngine())) return false;
+    const result = JSON.parse(await callInvoke("uninstallPlayPack", "[]", LOAD_CHAIN_TIMEOUT_MS)) as UTSJSONObject;
+    if (result.get("ok") != true) return false;
+    gPlayPackLoadedId = "";
+    gPlayPackLoadedCode = 0;
+    gPlayPackLoadedKey = "";
   } catch (e) {
     logWarnV("SourceEngine", "uninstallPlayPack 失败，将在下次注入时覆盖", msgOf(e));
+    return false;
   }
   logInfo("SourceEngine", `播放包已卸载：${loaded}`);
+  return true;
 }
 
 /**

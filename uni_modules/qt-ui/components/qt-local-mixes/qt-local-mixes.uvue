@@ -4,8 +4,8 @@
       <view class="local-mixes-copy">
         <!-- kicker 配色跟随宿主：竖屏其他区块用 accent（.section-kicker 的取色），
              宽屏其他面板用弱化灰（.wide-kicker 的取色），否则这一块会在白卡群里跳出来 -->
-        <text class="local-mixes-kicker" :class="layout.isWide ? 'local-mixes-kicker-wide' : ''" :style="('color:' + (layout.isWide ? theme.skin.textSubtle : theme.skin.accent) + ';') + qtFontDual(19, 11)">Local picks</text>
-        <text class="local-mixes-title" :class="layout.isWide ? 'local-mixes-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(34, 18)">为你整理</text>
+        <text v-if="!layout.isWide" class="local-mixes-kicker" :style="('color:' + theme.skin.accent + ';') + qtFontDual(19, 11)">Local picks</text>
+        <text class="local-mixes-title" :class="layout.isWide ? 'local-mixes-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(34, 20)">为你整理</text>
       </view>
       <text class="local-mixes-hint" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(21, 13)">根据本机收听记录</text>
     </view>
@@ -21,8 +21,8 @@
               <QtIcon v-else name="music" :size="layout.isWide ? 16 : 30" :color="theme.skin.iconMuted" />
             </view>
           </view>
-          <text class="local-mix-name" :class="layout.isWide ? 'local-mix-name-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(32, 13)" :max-lines="2">{{ mix.title }}</text>
-          <text class="local-mix-subtitle" :class="layout.isWide ? 'local-mix-subtitle-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(23, 11)" :max-lines="1">{{ mix.subtitle }}</text>
+          <text class="local-mix-name" :class="layout.isWide ? 'local-mix-name-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(32, 14) + (layout.isWide ? 'line-height:' + 20 * fontScale.scale + 'px;' : '')" :max-lines="2">{{ mix.title }}</text>
+          <text class="local-mix-subtitle" :class="layout.isWide ? 'local-mix-subtitle-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(23, 12) + (layout.isWide ? 'line-height:' + 17 * fontScale.scale + 'px;' : '')" :max-lines="1">{{ mix.subtitle }}</text>
         </view>
       </view>
     </scroll-view>
@@ -63,7 +63,7 @@ import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtContentWidth, qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { usePlayerStore } from "@/stores/player";
 import type { LocalMix } from "@/services/local-mixes";
 import type { Song } from "@/types/music";
@@ -103,7 +103,7 @@ const lastCellWidth = computed<number>(() => Math.max(30, cardWidth.value - cell
 const lastRowHeight = computed<number>(() => Math.max(30, cardWidth.value - cellWidth.value - coverGap.value));
 /** 架高 = 封面方图 + 两行标题 + 一行副标题 + 间距：竖屏 12+2x42+6+30=132rpx 留到 140rpx；
     宽屏 7+2x17+3+16=60px 留到 64px。矮了会裁掉最后一行副标题 */
-const railHeight = computed<number>(() => cardWidth.value + (layout.isWide ? 64 : qtRpx(140)));
+const railHeight = computed<number>(() => cardWidth.value + (layout.isWide ? Math.ceil(18 + 57 * fontScale.scale) : qtRpx(140)));
 /** 抽屉高度照 qt-listen-detail：竖屏吃满 0.88 窗口高（原来 0.82 只露四行半，用户反馈「下滑范围小了」），
     宽屏仍是 0.92。列表不再算死像素高，改由 flex:1 吃满头部/全部播放条之外的剩余空间。
     下限 520/420 只保证「正常窗口里别缩成一条」，必须再夹到窗口高以内 —— 否则横屏矮窗
@@ -159,9 +159,9 @@ async function playAll(): Promise<void> {
 .local-mixes-copy { flex-direction: column; }
 /* 字重与 .section-kicker / .section-title（800）、.wide-kicker / .wide-panel-title（700）对齐 */
 .local-mixes-kicker { font-weight: 800; }
-.local-mixes-kicker-wide { font-weight: 700; }
+
 .local-mixes-title { margin-top: 6rpx; font-weight: 800; }
-.local-mixes-title-wide { margin-top: 3px; font-weight: 700; }
+.local-mixes-title-wide { margin-top: 0; font-weight: 600; }
 .local-mixes-hint { margin-bottom: 2rpx; }
 .local-mixes-rail { }
 .local-mixes-row { flex-direction: row; }

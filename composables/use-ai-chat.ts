@@ -79,6 +79,14 @@ const POLL_INTERVAL_MS = 700;
 /** 单轮请求的最长轮询时长：兜底防止后端卡死把界面拖住 */
 const POLL_MAX_MS = 180000;
 
+type ChatTurnToken = {
+  sequence: number;
+  revision: number;
+  mode: AiEngineMode;
+  conversationId: number;
+  messageId: number;
+};
+
 /** 后台没配 entryConfig 时的兜底推荐问题 */
 const DEFAULT_SUGGESTIONS: string[] = [
   "随便来点适合晚上写代码的歌",
@@ -167,6 +175,8 @@ export function useAiChat() {
   let loadSeq = 0;
   /** 轮询代次：切会话/停止后，在途 fetchEvents 晚到不得写状态、也不得重挂轮询（2026-11-03 审阅 R2） */
   let pollSeq = 0;
+  /** 发送拥有者独立于轮询代次，覆盖搜候选、建会话和本地模型调用。 */
+  let sendSeq = 0;
   /** 上一轮候选搜索用的关键词与页码：追问（「再来点」）时沿用主题、往后翻页 */
   let lastSearchKeyword = "";
   let lastSearchPage = 1;
@@ -240,6 +250,8 @@ export function useAiChat() {
   }
 
   async function loadConversations(): Promise<void> {
+    const revision = loadSeq;
+    const mode = engineMode.value;
     if (isLocalEngine.value) {
       conversations.value = listLocalConversations();
       return;
@@ -247,10 +259,11 @@ export function useAiChat() {
     const a = agent.value;
     if (a == null) return;
     try {
-      conversations.value = await fetchConversations(a.agentCode);
+      const list = await fetchConversations(a.agentCode);
+      if (!disposed && revision == loadSeq && mode == engineMode.value) conversations.value = list;
     } catch (e) {
       // 会话列表失败不挡主流程：第一次进来本来就没有会话
-      conversations.value = [];
+      if (!disposed && revision == loadSeq && mode == engineMode.value) conversations.value = [];
     }
   }
 
@@ -262,6 +275,7 @@ export function useAiChat() {
    */
   async function openConversation(id: number): Promise<void> {
     stopPolling();
+    invalidateSend();
     const seq = ++loadSeq;
     activeConversationId.value = id;
     messages.value = [];
@@ -292,6 +306,7 @@ export function useAiChat() {
   /** 新建对话：本地清空，建会话推迟到首次发送 */
   function newConversation(): void {
     stopPolling();
+    invalidateSend();
     loadSeq++;
     activeConversationId.value = 0;
     messages.value = [];
@@ -320,6 +335,38 @@ export function useAiChat() {
 
   // ==================== 发送 ====================
 
+  function invalidateSend(): void {
+    sendSeq++;
+    sending.value = false;
+    runningRequestId.value = 0;
+    loadingMessages.value = false;
+    lastSearchKeyword = "";
+    lastSearchPage = 1;
+  }
+
+  function beginTurn(message: AiChatMessage): ChatTurnToken {
+    const sequence = ++sendSeq;
+    // 服务端尚未分配 ID 时，用本实例单调递增的负 ID 标识气泡。
+    message.id = -sequence;
+    return {
+      sequence: sequence,
+      revision: loadSeq,
+      mode: engineMode.value,
+      conversationId: activeConversationId.value,
+      messageId: message.id,
+    };
+  }
+
+  function turnIsCurrent(token: ChatTurnToken): boolean {
+    if (disposed || token.sequence != sendSeq || token.revision != loadSeq ||
+        token.mode != engineMode.value || token.conversationId != activeConversationId.value) return false;
+    for (let i = 0; i < messages.value.length; i++) {
+      const message = messages.value[i];
+      if (message.id == token.messageId && message.role == "ASSISTANT") return true;
+    }
+    return false;
+  }
+
   /**
    * 发消息主流程：本地搜索候选 → 建会话（首次）→ 提交 → 轮询事件。
    *
@@ -328,7 +375,7 @@ export function useAiChat() {
    */
   async function send(text: string): Promise<void> {
     const content = text.trim();
-    if (content.length == 0 || sending.value) return;
+    if (disposed || content.length == 0 || sending.value) return;
     if (content.length > AI_MESSAGE_MAX_CHARS) {
       qtShowToast({ title: "消息太长了，请分几次说", icon: "none" });
       return;
@@ -353,34 +400,42 @@ export function useAiChat() {
     const assistantBubble = emptyChatMessage("ASSISTANT", "");
     assistantBubble.streaming = true;
     assistantBubble.progress = "正在理解你的需求…";
+    const token = beginTurn(assistantBubble);
     messages.value = messages.value.concat([assistantBubble]);
     const at = messages.value.length - 1;
 
     try {
       // 2) 本地多音源搜索（失败不阻断，只是模型少了候选）
-      const candidates = await prepareCandidates(content);
+      const candidates = await prepareCandidates(content, token.sequence);
+      if (!turnIsCurrent(token)) return;
 
       // 3) 首次发消息才建会话
       if (activeConversationId.value <= 0) {
         const conv = await createConversation(a.agentCode, titleOf(content));
+        if (!turnIsCurrent(token)) return;
         activeConversationId.value = conv.id;
+        token.conversationId = conv.id;
         await loadConversations();
+        if (!turnIsCurrent(token)) return;
       }
 
       // 4) 提交
       const context = buildContext(candidates);
       const idem = "m" + Date.now() + "-" + at;
       const resp = await sendMessage(activeConversationId.value, content, context, idem);
+      if (!turnIsCurrent(token)) return;
       runningRequestId.value = resp.requestId;
       patchMessage(at, (m) => {
         m.requestId = resp.requestId;
         m.id = resp.assistantMessageId;
         m.progress = "正在生成回答…";
       });
+      token.messageId = resp.assistantMessageId;
 
       // 5) 开轮询
-      startPolling(resp.requestId, at);
+      startPolling(resp.requestId, at, token);
     } catch (e) {
+      if (!turnIsCurrent(token)) return;
       const msg = errText(e);
       error.value = msg;
       patchMessage(at, (m) => {
@@ -411,23 +466,29 @@ export function useAiChat() {
     const assistantBubble = emptyChatMessage("ASSISTANT", "");
     assistantBubble.streaming = true;
     assistantBubble.progress = engineMode.value == "local" ? "正在请本机模型挑歌…" : "正在按关键词挑歌…";
+    const token = beginTurn(assistantBubble);
     messages.value = messages.value.concat([assistantBubble]);
     const at = messages.value.length - 1;
+    const history = recentHistory(2);
 
     try {
-      const candidates = await prepareCandidates(content);
+      const candidates = await prepareCandidates(content, token.sequence);
+      if (!turnIsCurrent(token)) return;
       const songs: Song[] = [];
       for (let i = 0; i < candidates.length; i++) songs.push(songFromCandidate(candidates[i]));
+      const profile = await profileOrNull();
+      if (!turnIsCurrent(token)) return;
 
       const input: AssistantTurnInput = {
-        mode: engineMode.value == "local" ? "local" : "rule",
+        mode: token.mode == "local" ? "local" : "rule",
         text: content,
         // 末尾两条是本轮刚铺的气泡，不能当历史再喂回去
-        history: recentHistory(2),
+        history: history,
         candidates: songs,
-        profile: await profileOrNull(),
+        profile: profile,
       };
       const result: AssistantTurnResult = await runAssistantTurn(input);
+      if (!turnIsCurrent(token)) return;
 
       patchMessage(at, (m) => {
         m.status = "COMPLETED";
@@ -441,7 +502,9 @@ export function useAiChat() {
       });
       if (result.note.length > 0) qtShowToast({ title: result.note, icon: "none" });
       persistLocal(content);
+      token.conversationId = activeConversationId.value;
     } catch (e) {
+      if (!turnIsCurrent(token)) return;
       const msg = errText(e);
       error.value = msg;
       patchMessage(at, (m) => {
@@ -452,7 +515,7 @@ export function useAiChat() {
         m.content = "这次没挑出来：" + msg;
       });
     } finally {
-      sending.value = false;
+      if (turnIsCurrent(token)) sending.value = false;
     }
   }
 
@@ -554,11 +617,13 @@ export function useAiChat() {
     const rid = runningRequestId.value;
     if (rid <= 0) return;
     stopPolling();
+    const seq = pollSeq;
     try {
       await cancelRequest(rid, "用户主动停止");
     } catch (e) {
       // 静默：取消失败也照样停本地轮询，否则界面永远卡在「思考中」
     }
+    if (disposed || seq != pollSeq || runningRequestId.value != rid) return;
     const idx = indexOfRequest(rid);
     if (idx >= 0) {
       patchMessage(idx, (m) => {
@@ -574,7 +639,7 @@ export function useAiChat() {
 
   // ==================== 轮询 ====================
 
-  function startPolling(requestId: number, messageIndex: number): void {
+  function startPolling(requestId: number, messageIndex: number, token: ChatTurnToken): void {
     stopPolling();
     // stopPolling 已递增过一次，这里再固定到自己的代次：在途旧 tick
     // 返回后一比对不上就散场，不写状态、不重挂 timeout。
@@ -584,7 +649,7 @@ export function useAiChat() {
     let finished = false;
 
     const tick = async (): Promise<void> => {
-      if (finished) return;
+      if (finished || seq != pollSeq || !turnIsCurrent(token)) return;
       if (Date.now() - pollStartedAt > POLL_MAX_MS) {
         finished = true;
         patchMessage(messageIndex, (m) => {
@@ -603,7 +668,7 @@ export function useAiChat() {
         // 请求期间用户切了会话/点了停止（stopPolling 已换代）：旧响应直接丢弃，
         // 否则它会写进当前会话的消息流，还会在下面把轮询重新挂起来，
         // 甚至把用户主动置的 CANCELLED 又改回 STREAMING。
-        if (seq != pollSeq) return;
+        if (seq != pollSeq || !turnIsCurrent(token)) return;
         if (batch.nextSequence > cursor) cursor = batch.nextSequence;
         for (let i = 0; i < batch.events.length; i++) {
           applyEvent(batch.events[i].type, batch.events[i].data, messageIndex);
@@ -620,10 +685,11 @@ export function useAiChat() {
           return;
         }
       } catch (e) {
+        if (seq != pollSeq || !turnIsCurrent(token)) return;
         // 单次轮询失败不终止：网络抖一下就要用户重发太脆
         error.value = errText(e);
       }
-      if (finished || disposed) return;
+      if (finished || seq != pollSeq || !turnIsCurrent(token)) return;
       pollTimer = setTimeout(() => {
         tick();
       }, POLL_INTERVAL_MS);
@@ -780,8 +846,11 @@ export function useAiChat() {
     index: number
   ): Promise<void> {
     if (conversationId <= 0 || assistantMessageId <= 0) return;
+    const revision = loadSeq;
     try {
       const page = await fetchMessages(conversationId, 0);
+      if (disposed || revision != loadSeq || conversationId != activeConversationId.value ||
+          index >= messages.value.length || messages.value[index].id != assistantMessageId) return;
       let saved: AiMessage | null = null;
       for (let i = 0; i < page.items.length; i++) {
         if (page.items[i].id == assistantMessageId) {
@@ -858,7 +927,7 @@ export function useAiChat() {
    * 未装音源包 / 引擎未就绪时 `allSearch` 会抛错或返回空——都按「没有候选」处理，
    * 绝不因为搜索失败挡住对话本身。
    */
-  async function prepareCandidates(content: string): Promise<AiMusicCandidate[]> {
+  async function prepareCandidates(content: string, sequence: number): Promise<AiMusicCandidate[]> {
     const keyword = searchKeyword(content);
     // 「再来点/换一批」这类追问没有新主题词：用退化词（如「来20首」）重搜只会
     // 捞回与上一轮主题无关的垃圾候选。沿用上一轮搜索词，把候选池往前翻页。
@@ -873,7 +942,9 @@ export function useAiChat() {
     let songs: Song[] = [];
     try {
       await registry.ensure();
+      if (disposed || sequence != sendSeq) return [];
       songs = await musicApi.allSearch(effective, page, AI_CANDIDATE_MAX);
+      if (disposed || sequence != sendSeq) return [];
     } catch (e) {
       return [];
     }
@@ -1101,6 +1172,8 @@ export function useAiChat() {
   function dispose(): void {
     disposed = true;
     stopPolling();
+    invalidateSend();
+    loadSeq++;
   }
 
   return {

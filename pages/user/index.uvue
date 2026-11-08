@@ -6,9 +6,10 @@
         <view class="user-card" :class="layout.isWide ? 'user-card-wide' : ''" :style="cardStyle">
           <view class="avatar" :class="layout.isWide ? 'avatar-wide' : ''" :style="'background-color:' + theme.skin.accent + ';'">
             <image
-              :src="avatarUrl.length > 0 ? avatarUrl : DEFAULT_AVATAR_ASSET"
+              :src="avatarSource"
               class="avatar-img" :class="layout.isWide ? 'avatar-img-wide' : ''"
               mode="aspectFill"
+              @error="onAvatarError"
             />
           </view>
           <view class="info" :class="layout.isWide ? 'info-wide' : ''">
@@ -96,8 +97,8 @@ import { qtContentWidth, QT_GUTTER_PX } from "@/uni_modules/qt-ui/composables/us
 import { usePlayerStore } from "@/stores/player";
 import { accountApi, persistUserRoles } from "@/services/music-api";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
-import { clearTokens, getAccessToken } from "@/services/auth";
-import { getCachedAvatar, DEFAULT_AVATAR_ASSET } from "@/services/media";
+import { clearTokens, getAccessToken, getSessionEpoch, sessionIsCurrent } from "@/services/auth";
+import { useQtAvatar } from "@/uni_modules/qt-ui/composables/use-qt-avatar";
 import { meCached, clearCachedMe } from "@/services/user-cache";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
@@ -115,8 +116,7 @@ const cellBorderStyle = computed<string>(() => "border-bottom-color:" + theme.sk
 const token = ref("");
 const userInfo = ref<any>(null);
 const storedNickname = ref("");
-// 展示头像：缓存优先，/me 回来后刷新（http 直链才展示）
-const avatarUrl = ref(getCachedAvatar());
+const { avatarSource, refreshAvatar, onAvatarError } = useQtAvatar();
 
 /** 两列里的单行入口（图标 + 标题 + 箭头结构完全相同，只有跳转不同） */
 type UserCell = { key: string; icon: string; title: string; go: () => void };
@@ -155,6 +155,8 @@ const colStyle = computed<string>(() => {
 });
 
 async function fetchUserInfo() {
+  refreshAvatar();
+  const epoch = getSessionEpoch();
   const accessToken = getAccessToken();
   if (!accessToken) {
     // 未登录时直接回我的页（本页仅登录态可见）
@@ -164,6 +166,8 @@ async function fetchUserInfo() {
   token.value = accessToken;
   // /me 走启动/登录时写入的缓存（本次运行只查一次接口），缓存缺失才联网补拉
   const res = await meCached();
+  if (!sessionIsCurrent(epoch)) return;
+  refreshAvatar();
   if (res == null) {
     // 拉取失败用本地缓存的昵称兜底
     const localNick = uni.getStorageSync("qt-nickname") as string;
@@ -177,11 +181,6 @@ async function fetchUserInfo() {
     persistUserRoles(res);
     const nick = user.get("nickname") as string | null;
     if (nick != null && nick.length > 0) storedNickname.value = nick;
-    // 头像 http 直链才展示，否则回退本地默认资源；同时刷新缓存
-    const rawAvatar = user.get("avatar") as string | null;
-    const avatar = rawAvatar != null ? rawAvatar : "";
-    avatarUrl.value = avatar.startsWith("http") ? avatar : "";
-    if (avatarUrl.value.length > 0) uni.setStorageSync("qt-avatar", avatarUrl.value);
   }
 }
 

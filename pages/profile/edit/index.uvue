@@ -6,7 +6,7 @@
       <view class="avatar-row" :class="layout.isWide ? 'avatar-row-wide' : ''">
         <view class="avatar" :class="layout.isWide ? 'avatar-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @click="openPreview">
           <image
-            :src="displayAvatar"
+            :src="avatarSource"
             class="avatar-img" :class="layout.isWide ? 'avatar-img-wide' : ''"
             mode="aspectFill"
             @error="onAvatarError"
@@ -79,7 +79,7 @@
           <view class="avatar-preview-close" @click="closePreview">
             <QtIcon name="close" :size="layout.isWide ? 22 : 44" color="#ffffff" />
           </view>
-          <image :src="displayAvatar" class="avatar-preview-img" mode="aspectFit" @error="onAvatarError" />
+          <image :src="avatarSource" class="avatar-preview-img" mode="aspectFit" @error="onAvatarError" />
           <view class="avatar-preview-actions" :class="layout.isWide ? 'avatar-preview-actions-wide' : ''">
             <view class="avatar-preview-btn avatar-preview-btn-save" :class="layout.isWide ? 'avatar-preview-btn-wide' : ''" @click="saveImage">
               <text class="avatar-preview-btn-text avatar-preview-btn-text-save" :class="layout.isWide ? 'avatar-preview-btn-text-wide' : ''" :style="qtFontDual(30, 16)">保存图片</text>
@@ -102,13 +102,15 @@ import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
-import { getAccessToken, clearTokens } from "@/services/auth";
+import { getAccessToken, clearTokens, getSessionEpoch, sessionIsCurrent } from "@/services/auth";
 import { beginLoading, finishLoading } from "@/services/ui-loading";
 import { meCached, refreshMe, clearCachedMe } from "@/services/user-cache";
 import {
   uploadAvatar, chooseImage, getCachedAvatar,
   DEFAULT_AVATAR_ASSET,
 } from "@/services/media";
+import { useQtAvatar } from "@/uni_modules/qt-ui/composables/use-qt-avatar";
+import { downloadPublicCover } from "@/services/http";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { saveImageToGallery } from "@/services/app-native";
 
@@ -128,20 +130,10 @@ const loading = ref(false);
 const tip = ref("");
 /** 保存成功后延迟跳转登录页的定时器：页面卸载时必须清掉，避免在已注销的实例上触发回调 */
 let editReloadTimer: number | null = null;
-// 展示用头像：http(s) 直链才渲染（相对路径/服务端路径 webview 外加载不出来），否则用本地默认资源
+// 提交资料保留远程地址；展示与预览独立读取本机头像。
 const DEFAULT_AVATAR = "/files/qt-upload/avatar/default.png";
 const avatar = ref("");
-const avatarUrl = ref(getCachedAvatar());
-// 头像地址加载失败（如指向不可达的存储域名）：渲染兜底到本地默认资源，
-// 避免页面上留一个空白圆。只在换地址时复位，不在 @load 复位——否则
-// 「死链 → 默认图 → @load 复位 → 死链」会来回振荡。
-const avatarBroken = ref(false);
-const displayAvatar = computed<string>(() =>
-  avatarUrl.value.length > 0 && !avatarBroken.value ? avatarUrl.value : DEFAULT_AVATAR_ASSET
-);
-function onAvatarError(): void {
-  avatarBroken.value = true;
-}
+const { avatarSource, refreshAvatar, onAvatarError } = useQtAvatar();
 const avatarBusy = ref(false);
 // 头像放大预览遮罩
 const previewOpen = ref(false);
@@ -177,18 +169,17 @@ function isEmail(text: string): boolean {
 /** 加载当前用户信息 */
 async function loadProfile(): Promise<void> {
   if (!getAccessToken()) return;
+  const epoch = getSessionEpoch();
   // /me 走启动/登录时写入的缓存（本次运行只查一次接口），缓存缺失才联网补拉
   const res = await meCached();
+  if (!sessionIsCurrent(epoch)) return;
+  refreshAvatar();
   if (res == null) return;
   const user = res.get("user") as UTSJSONObject | null;
   if (user != null) {
     nickname.value = (user.get("nickname") as string) ?? "";
     email.value = (user.get("email") as string) ?? "";
     avatar.value = (user.get("avatar") as string) ?? "";
-    const raw = avatar.value;
-    avatarUrl.value = raw.startsWith("http") ? raw : "";
-    avatarBroken.value = false;
-    if (avatarUrl.value.length > 0) uni.setStorageSync("qt-avatar", avatarUrl.value);
     const em = user.get("email") as string | null;
     if (em != null && em.length > 0) uni.setStorageSync("qt-email", em);
   }
@@ -212,8 +203,8 @@ async function changeAvatar(): Promise<void> {
   const upToken = beginLoading("上传中...");
   try {
     const url = await uploadAvatar(path);
-    avatarUrl.value = url;
-    avatarBroken.value = false;
+    avatar.value = url;
+    refreshAvatar();
     finishLoading(upToken);
     qtShowToast({ title: "头像已更新", icon: "none" });
     // 头像走 ticket+complete 直写服务端，不经 updateProfile；后台刷新一次 /me 缓存保持一致
@@ -227,37 +218,6 @@ async function changeAvatar(): Promise<void> {
 }
 
 // ==================== 保存图片到相册 ====================
-const DOWNLOAD_TIMEOUT_MS = 15000;
-
-function downloadToTemp(url: string): Promise<string> {
-  return new Promise<string>((resolve) => {
-    // uni.downloadFile 只有全局 networkTimeout（默认 60s）：地址指向不可达的存储域名时
-    // 会白转一分钟圈，这里 15s 主动放弃，由调用方给明确文案
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      resolve("");
-    }, DOWNLOAD_TIMEOUT_MS);
-    uni.downloadFile({
-      url,
-      success: (res) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        const t = res.tempFilePath;
-        resolve((res.statusCode >= 200 && res.statusCode < 300 && t.length > 0) ? t : "");
-      },
-      fail: () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve("");
-      },
-    });
-  });
-}
-
 function saveToAlbum(filePath: string): Promise<void> {
   // 走 app-native 的 MediaStore 写入：uni.saveImageToPhotosAlbum 在 Android 14+ 会因
   // 清单里 WRITE_EXTERNAL_STORAGE 带 maxSdkVersion 而抛异常打崩页面（见 services/app-native.uts）
@@ -267,14 +227,15 @@ function saveToAlbum(filePath: string): Promise<void> {
 }
 
 async function saveImage(): Promise<void> {
-  const src = avatarUrl.value;
+  const src = getCachedAvatar();
   if (src.length === 0) {
     qtShowToast({ title: "暂无可保存的头像", icon: "none" });
     return;
   }
   const saveToken = beginLoading("保存中...");
   try {
-    const temp = await downloadToTemp(src);
+    const local = avatarSource.value;
+    const temp = local != DEFAULT_AVATAR_ASSET ? local : await downloadPublicCover(src);
     if (temp.length === 0) throw new Error("图片地址无法访问，下载超时或失败");
     await saveToAlbum(temp);
     finishLoading(saveToken);
@@ -314,8 +275,8 @@ async function submit(): Promise<void> {
     const data: UTSJSONObject = {
       nickname: nickname.value.trim(),
       email: mail,
-      avatar: avatarUrl.value.length > 0
-        ? avatarUrl.value
+      avatar: getCachedAvatar().length > 0
+        ? getCachedAvatar()
         : (avatar.value.length > 0 ? avatar.value : DEFAULT_AVATAR),
     } as UTSJSONObject;
     if (password.value.length > 0) {

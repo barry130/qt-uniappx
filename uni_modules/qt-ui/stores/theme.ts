@@ -152,9 +152,9 @@ const OCEAN_LIGHT = makeSkin("ocean", "Ocean", "深海蓝与清爽水面", false
 const OCEAN_DARK = makeSkin("ocean", "Ocean", "深海蓝与清爽水面", true, "#58aef5", "#0f151d", "rgba(32,42,56,0.94)", "rgba(44,56,73,0.97)", "#eef3f8", "#a2aebb", "rgba(255,255,255,0.14)", "rgba(15,21,29,0.72)", "#171f29");
 const FOREST_LIGHT = makeSkin("forest", "Forest", "松林绿与自然晨雾", false, "#1f9d61", "#f1f8f3", "#ffffff", "rgba(255,255,255,0.97)", "#14211a", "#6d7d72", "rgba(20,33,26,0.12)", "rgba(241,248,243,0.76)", "#ffffff");
 const FOREST_DARK = makeSkin("forest", "Forest", "松林绿与自然晨雾", true, "#4cd08d", "#0e1712", "rgba(30,44,36,0.94)", "rgba(42,58,49,0.97)", "#ecf5ef", "#9fb2a6", "rgba(255,255,255,0.14)", "rgba(14,23,18,0.72)", "#16211b");
-const SUNSET_LIGHT = makeSkin("sunset", "Sunset", "落日橙与暖沙余晖", false, "#d96a1f", "#faf5f0", "rgba(255,255,255,0.80)", "rgba(255,255,255,0.94)", "#241a12", "#7d7266", "rgba(36,26,18,0.12)", "rgba(250,245,240,0.76)", "#ffffff");
+const SUNSET_LIGHT = makeSkin("sunset", "Sunset", "落日橙与暖沙余晖", false, "#d96a1f", "#faf5f0", "#ffffff", "rgba(255,255,255,0.94)", "#241a12", "#7d7266", "rgba(36,26,18,0.12)", "rgba(250,245,240,0.76)", "#ffffff");
 const SUNSET_DARK = makeSkin("sunset", "Sunset", "落日橙与暖沙余晖", true, "#ff9e54", "#191210", "rgba(46,36,30,0.94)", "rgba(60,47,39,0.97)", "#f8f1ea", "#b3a69a", "rgba(255,255,255,0.14)", "rgba(25,18,16,0.72)", "#211a15");
-const BLOSSOM_LIGHT = makeSkin("blossom", "Blossom", "樱花粉与柔和春日", false, "#d6487e", "#fbf3f7", "rgba(255,255,255,0.80)", "rgba(255,255,255,0.94)", "#241520", "#7f6d79", "rgba(36,21,32,0.12)", "rgba(251,243,247,0.76)", "#ffffff");
+const BLOSSOM_LIGHT = makeSkin("blossom", "Blossom", "樱花粉与柔和春日", false, "#d6487e", "#fbf3f7", "#ffffff", "rgba(255,255,255,0.94)", "#241520", "#7f6d79", "rgba(36,21,32,0.12)", "rgba(251,243,247,0.76)", "#ffffff");
 const BLOSSOM_DARK = makeSkin("blossom", "Blossom", "樱花粉与柔和春日", true, "#ff7fae", "#1a1117", "rgba(47,33,42,0.94)", "rgba(62,44,56,0.97)", "#f9edf3", "#b5a1ad", "rgba(255,255,255,0.14)", "rgba(26,17,23,0.72)", "#231820");
 
 export const QT_SKINS: QtSkinPreset[] = [

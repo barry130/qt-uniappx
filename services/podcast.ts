@@ -37,6 +37,14 @@ const FETCH_TIMEOUT_MS = 20000;
 const MAX_BODY_CHARS = 8 * 1024 * 1024;
 const SHOWS_KEY = "qt-podcast-shows";
 const EPISODES_KEY_PREFIX = "qt-podcast-eps-";
+/** 同一订阅的增删/刷新代次；迟到请求不能覆盖更新后的订阅。 */
+const showRevisions: Record<string, number> = {};
+
+function nextShowRevision(showId: string): number {
+  const revision = numAt(showRevisions, showId) + 1;
+  showRevisions[showId] = revision;
+  return revision;
+}
 
 export type PodcastShow = {
   id: string;
@@ -513,6 +521,10 @@ function fetchFeedText(url: string): Promise<string> {
       method: "GET",
       timeout: FETCH_TIMEOUT_MS,
       sslVerify: true,
+      // 与 services/http.ts 同款显式声明：XML 不是 JSON，默认 dataType:"json"
+      // 时鸿蒙的 success 回调前会打「非 JSON」错误日志，Android 端解析失败后
+      // 的回落策略是运行时行为（不应靠猜）；声明 text 后两端一致拿原始字符串
+      dataType: "text",
       header: {
         Accept:
           "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
@@ -702,8 +714,41 @@ function episodesKeyOf(showId: string): string {
   return EPISODES_KEY_PREFIX + showId;
 }
 
+// 页面切换会重新挂载；避免反复跨桥读盘、递归转换数百集（含长简介）。
+// 只保留最近四个订阅，所有写入/删除都在本服务内同步缓存。
+const EPISODE_CACHE_LIMIT = 4;
+const episodeCache = new Map<string, PodcastEpisode[]>();
+const episodeCacheOrder: string[] = [];
+
+function copyEpisodes(list: PodcastEpisode[]): PodcastEpisode[] {
+  return list.map((ep: PodcastEpisode): PodcastEpisode => ({ ...ep }));
+}
+
+function forgetEpisodeCache(showId: string): void {
+  episodeCache.delete(showId);
+  const at = episodeCacheOrder.indexOf(showId);
+  if (at >= 0) episodeCacheOrder.splice(at, 1);
+}
+
+function cacheEpisodes(showId: string, list: PodcastEpisode[]): void {
+  forgetEpisodeCache(showId);
+  episodeCache.set(showId, copyEpisodes(list));
+  episodeCacheOrder.push(showId);
+  if (episodeCacheOrder.length > EPISODE_CACHE_LIMIT) {
+    forgetEpisodeCache(episodeCacheOrder[0]);
+  }
+}
+
 /** 读某个订阅的单集（已按发布时间倒序） */
 export function listPodcastEpisodes(showId: string): PodcastEpisode[] {
+  const cached = episodeCache.get(showId);
+  if (cached != null) {
+    const at = episodeCacheOrder.indexOf(showId);
+    if (at >= 0) episodeCacheOrder.splice(at, 1);
+    episodeCacheOrder.push(showId);
+    // 调用者会修改进度；不能让未落盘的修改污染刷新合并所用的快照。
+    return copyEpisodes(cached);
+  }
   try {
     const raw = uni.getStorageSync(episodesKeyOf(showId));
     if (typeof raw != "string") return [];
@@ -719,6 +764,7 @@ export function listPodcastEpisodes(showId: string): PodcastEpisode[] {
       const one = episodeFromJson(arr[i] as UTSJSONObject);
       if (one != null) out.push(one);
     }
+    cacheEpisodes(showId, out);
     return out;
   } catch (e) {
     logWarn("[PODCAST] 读取单集失败，按空处理");
@@ -733,6 +779,7 @@ function writeEpisodes(showId: string, list: PodcastEpisode[]): void {
     const root = new UTSJSONObject();
     root.set("eps", arr);
     uni.setStorageSync(episodesKeyOf(showId), JSON.stringify(root));
+    cacheEpisodes(showId, list);
   } catch (e) {
     logErrV("[PODCAST] 保存单集失败", e);
   }
@@ -793,8 +840,10 @@ function findShowIndex(shows: PodcastShow[], showId: string): number {
  */
 export async function addPodcastShow(rawUrl: string): Promise<PodcastShow> {
   const url = normalizeFeedUrl(rawUrl);
-  const feed = await fetchParsedFeed(url);
   const id = PODCAST_PLATFORM + ":" + shortHash(url);
+  const revision = nextShowRevision(id);
+  const feed = await fetchParsedFeed(url);
+  if (numAt(showRevisions, id) != revision) throw new Error("订阅已变更，请重新操作");
   const shows = readShows();
   const at = findShowIndex(shows, id);
   const episodes = mergeEpisodes(id, feed.episodes);
@@ -817,10 +866,19 @@ export async function addPodcastShow(rawUrl: string): Promise<PodcastShow> {
 
 /** 刷新某个订阅（拉最新单集）。进度与「已听完」标记不受影响 */
 export async function refreshPodcastShow(showId: string): Promise<PodcastShow> {
+  const before = readShows();
+  const previousAt = findShowIndex(before, showId);
+  if (previousAt < 0) throw new Error("这个订阅已经不在了");
+  const url = before[previousAt].url;
+  const revision = nextShowRevision(showId);
+  const feed = await fetchParsedFeed(url);
+  // await 期间目录可能增删；只更新仍属于本次请求的条目。
   const shows = readShows();
   const at = findShowIndex(shows, showId);
   if (at < 0) throw new Error("这个订阅已经不在了");
-  const feed = await fetchParsedFeed(shows[at].url);
+  if (numAt(showRevisions, showId) != revision || shows[at].url != url) {
+    throw new Error("订阅已变更，请重新刷新");
+  }
   const episodes = mergeEpisodes(showId, feed.episodes);
   const show = shows[at];
   if (feed.title.length > 0) show.title = feed.title;
@@ -836,6 +894,8 @@ export async function refreshPodcastShow(showId: string): Promise<PodcastShow> {
 
 /** 取消订阅：连同该订阅的单集一起去掉（音频不落盘，无需清理文件） */
 export function removePodcastShow(showId: string): void {
+  nextShowRevision(showId);
+  forgetEpisodeCache(showId);
   const shows = readShows();
   const kept: PodcastShow[] = [];
   for (let i = 0; i < shows.length; i++) {

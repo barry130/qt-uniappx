@@ -118,6 +118,7 @@ import { useDislikesStore } from "@/stores/dislikes";
 import { useSourceStore } from "@/stores/source";
 import { useListenStatsStore } from "@/stores/listen-stats";
 import { clearCachedMe } from "@/services/user-cache";
+import { clearTokens } from "@/services/auth";
 import { qtConfirm } from "@/services/confirm";
 import { desktopLyric } from "@/services/desktop-lyric";
 import { usePlayerBarStore } from "@/stores/player-bar";
@@ -324,7 +325,9 @@ async function clearItem(id: string): Promise<boolean> {
     return true;
   }
   if (id == "account") {
-    removeKeys(["qt-token", "qt-access-token", "qt-refresh-token", "qt-token-expiry", "qt-user-id", "qt-nickname", "qt-email", "qt-avatar", "qt-roles", "qt-permissions", "qt-notice-first-login"]);
+    // 与正常退出一致：作废旧会话，但保留 qt-user-id 作为收藏/outbox 的归属，供下次换号检测。
+    clearTokens();
+    removeKeys(["qt-token", "qt-nickname", "qt-email", "qt-avatar", "qt-roles", "qt-permissions", "qt-notice-first-login"]);
     clearCachedMe();
     return true;
   }
@@ -386,6 +389,7 @@ function resetSettings(): void {
   }
   sourceStore.setSource("wyy");
   audioPlayer.setConcurrentMode(0);
+  audioPlayer.setCarLyricMode(0);
   audioPlayer.setMuted(false);
   audioPlayer.setVolume(1.0);
   audioPlayer.changeRate(1.0);

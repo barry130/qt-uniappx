@@ -1,0 +1,150 @@
+<template>
+  <QtSheet :visible="visible" title="播放页风格" @update:visible="emit('update:visible', $event)">
+    <scroll-view direction="vertical" :style="'height:' + viewportPx + 'px;'" :scroll-into-view="revealId" :show-scrollbar="false">
+      <view id="playing-styles" class="ps-cards" :class="layout.isWide ? 'ps-cards-wide' : ''">
+      <view v-for="item in PLAYING_STYLES" :id="'playing-style-' + item.id" :key="item.id" class="ps-card" :style="'width:' + cardPx + 'px;'">
+        <QtOption :label="item.label" :description="item.description" kind="card" :preview="true" :indicator="true" :selected="preference.style == item.id" @select="selectPlayingStyle(item.id)">
+          <template #preview>
+            <view class="ps-preview" :style="previewStyle(item.id)">
+              <view v-if="item.id == 'classic'" class="ps-disc" :style="'width:' + previewPx * 0.62 + 'px;height:' + previewPx * 0.62 + 'px;'">
+                <view class="ps-disc-label" :style="'width:' + previewPx * 0.28 + 'px;height:' + previewPx * 0.28 + 'px;'"></view>
+              </view>
+              <view v-if="item.id == 'gallery'" class="ps-album" :style="'width:' + previewPx * 0.58 + 'px;height:' + previewPx * 0.58 + 'px;'">
+                <view class="ps-album-light"></view><view class="ps-album-dark"></view>
+              </view>
+              <view v-if="item.id == 'rhythm'" class="ps-words">
+                <text v-for="(word, i) in ['随','心','而','动']" :key="i" class="ps-word" :style="'font-size:' + previewPx * 0.28 + 'px;transform:translateY(' + (i == 1 ? -5 : i == 2 ? 3 : 0) + 'px) rotate(' + (i == 1 ? -12 : i == 2 ? 8 : 0) + 'deg);'">{{ word }}</text>
+              </view>
+              <view v-else class="ps-lines" :style="'width:' + previewPx * (item.id == 'focus' ? 0.95 : 0.60) + 'px;'">
+                <view v-for="n in [0,1,2]" :key="n" class="ps-line" :style="previewLineStyle(item.id, n)"></view>
+              </view>
+            </view>
+          </template>
+        </QtOption>
+      </view>
+      </view>
+      <view class="ps-background-heading" :style="'border-top-color:' + theme.skin.divider + ';'">
+        <text :style="'color:' + theme.skin.text + ';' + qtFontDual(25, 13)">背景</text>
+        <text :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 12)">{{ backgroundLabel }}</text>
+      </view>
+      <view class="ps-backgrounds" :class="layout.isWide ? 'ps-backgrounds-wide' : ''">
+        <view v-for="item in PLAYING_BACKGROUNDS" :id="'playing-bg-' + item.id" :key="item.id" class="ps-choice">
+          <QtOption :label="item.label" kind="swatch" :indicator="true" :style="'width:' + swatchPx + 'px;height:' + swatchPx + 'px;'" :selected="preference.background == item.id" :disabled="picking" @select="selectBackground(item.id)">
+            <view class="ps-swatch" :style="'background-color:' + swatchColor(item.id) + ';'">
+              <view v-if="item.id == 'auto' || item.id == 'theme'" class="ps-swatch-half" :style="'background-color:' + (item.id == 'auto' ? '#2e2b3c' : theme.skin.accent) + ';'"></view>
+              <image v-if="item.id == 'cover' && cover.length > 0" class="ps-swatch-image" :src="cover" mode="aspectFill" />
+              <image v-if="item.id == 'image' && preference.image.length > 0" class="ps-swatch-image" :src="preference.image" mode="aspectFill" />
+              <QtIcon v-if="item.id == 'image' && preference.image.length == 0" name="image-plus" :size="layout.isWide ? 18 : 32" :color="theme.skin.iconMuted" />
+            </view>
+          </QtOption>
+        </view>
+      </view>
+      <view v-if="preference.image.length > 0" class="ps-retry"><QtButton label="更换背景图片" icon="disc" variant="ghost" size="sm" :disabled="picking" @click="pickImage" /></view>
+      <view v-if="preference.saveError" class="ps-retry"><QtButton label="保存失败，点击重试" variant="outline" size="sm" @click="savePlayingStyle" /></view>
+      <text class="ps-note" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)">{{ picking ? '正在保存图片…' : '风格与背景可自由搭配，下次打开沿用。' }}</text>
+    </scroll-view>
+  </QtSheet>
+</template>
+<script setup lang="ts">
+import { ref, computed, watch, nextTick } from "vue";
+import QtSheet from "@/uni_modules/qt-ui/components/qt-sheet/qt-sheet.uvue";
+import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useQtLayout } from "../../composables/use-qt-layout";
+import { qtSheetWidth } from "../../composables/use-qt-widths";
+import { useThemeStore } from "../../stores/theme";
+import { qtFontDual, useFontScaleStore } from "@/uni_modules/qt-ui/stores/font-scale";
+import { PLAYING_STYLES, PLAYING_BACKGROUNDS, playingBackgroundColor } from "../../composables/playing-style";
+import { usePlayingStyle, selectPlayingStyle, selectPlayingBackground, savePlayingStyle } from "../../stores/playing-style";
+import { chooseImage } from "@/services/media";
+import { qtShowToast } from "@/services/toast";
+const props = withDefaults(defineProps<{ visible: boolean; cover?: string }>(), { cover: "" });
+const emit = defineEmits<{ "update:visible": [value: boolean] }>();
+const layout = useQtLayout();
+const theme = useThemeStore();
+const preference = usePlayingStyle();
+const fontScale = useFontScaleStore();
+const picking = ref(false);
+const revealId = ref("");
+const columns = computed((): number => fontScale.scale > 1.3 ? 1 : 2);
+const contentPx = computed((): number => layout.isWide ? qtSheetWidth("drawer") - 40 : layout.windowWidth - 64 * layout.windowWidth / 750);
+const cardPx = computed((): number => (contentPx.value - (columns.value - 1) * 8) / columns.value);
+const previewPx = computed((): number => Math.min(112, (cardPx.value - 16) * (layout.isWide ? 0.38 : 0.55)));
+const swatchPx = computed((): number => Math.min(48, (contentPx.value - 6 * 8) / 7));
+const backgroundLabel = computed((): string => PLAYING_BACKGROUNDS.find(item => item.id == preference.background)?.label ?? "风格默认");
+const viewportPx = computed((): number => {
+  const unit = layout.isWide ? 1 : layout.windowWidth / 750;
+  const cardText = layout.isWide ? 46 * fontScale.scale : 82 * unit * fontScale.scale;
+  const contentHeight = (4 / columns.value) * (previewPx.value + cardText + 32) + 180 * (layout.isWide ? 1 : unit) + swatchPx.value + (preference.image.length > 0 || preference.saveError ? 54 : 0);
+  const header = layout.isWide ? 60 * fontScale.scale : 120 * unit * fontScale.scale;
+  return Math.max(80, Math.min(contentHeight, layout.windowHeight * 0.86 - layout.safeBottomPx - header));
+});
+function previewStyle(id: string): string {
+  const color = id == "classic" ? "#e8e5ee" : id == "rhythm" ? "#542638" : id == "gallery" ? "#3b414d" : "#1d2b43";
+  return "height:" + previewPx.value + "px;background-color:" + color + ";";
+}
+function previewLineStyle(id: string, n: number): string {
+  const color = id == "classic" ? "#75668e" : n == 1 ? "#e9e5df" : "#8c96a9";
+  return "width:" + (n == 1 ? 100 : 72) + "%;height:" + (n == 1 && id == "focus" ? 6 : 3) + "px;background-color:" + color + ";margin-top:" + (n == 0 ? 0 : 8) + "px;";
+}
+function swatchColor(id: string): string {
+  if (id == "auto") return "#e8e5df";
+  if (id == "theme" || id == "image") return theme.skin.surfaceMuted;
+  if (id == "cover") return "#9cacae";
+  return playingBackgroundColor(id);
+}
+watch(() => props.visible + ":" + preference.style + ":" + layout.windowWidth + ":" + layout.windowHeight + ":" + fontScale.scale, () => {
+  if (!props.visible) return;
+  revealId.value = "";
+  nextTick(() => { revealId.value = columns.value == 2 ? "playing-styles" : "playing-style-" + preference.style; });
+});
+watch(() => preference.background, () => {
+  if (!props.visible) return;
+  revealId.value = "";
+  nextTick(() => { revealId.value = "playing-bg-" + preference.background; });
+});
+function selectBackground(id: string): void {
+  if (id == "image" && preference.image.length == 0) { void pickImage(); return; }
+  selectPlayingBackground(id);
+}
+async function pickImage(): Promise<void> {
+  if (picking.value) return;
+  picking.value = true;
+  let temp = "";
+  try { temp = await chooseImage(); } catch (_) { picking.value = false; return; }
+  try {
+    // Temp gallery paths do not survive restart. Only persist a successfully saved file.
+    const path = await new Promise<string>((resolve, reject) => {
+      uni.getFileSystemManager().saveFile({ tempFilePath: temp, success: res => resolve(res.savedFilePath), fail: err => reject(err) });
+    });
+    selectPlayingBackground("image", path);
+  } catch (_) {
+    qtShowToast({ title: "背景图片保存失败，请重试", icon: "none" });
+  } finally { picking.value = false; }
+}
+</script>
+<style>
+.ps-cards { padding: 24rpx 32rpx 0; flex-direction: row; flex-wrap: wrap; justify-content: space-between; }
+.ps-cards-wide { padding: 14px 20px 0; }
+.ps-card { margin-bottom: 8px; flex-shrink: 0; }
+.ps-background-heading { margin: 8px 20px 10px; padding-top: 12px; border-top-width: 1px; border-top-style: solid; flex-direction: row; align-items: center; justify-content: space-between; }
+.ps-backgrounds { padding: 0 32rpx; flex-direction: row; justify-content: space-between; }
+.ps-backgrounds-wide { padding: 0 20px; }
+.ps-choice { margin-bottom: 6px; flex-shrink: 0; }
+.ps-note { margin: 6px 20px 12px; line-height: 1.5; }
+.ps-retry { padding: 8px 20px; }
+.ps-preview { flex-direction: row; align-items: center; justify-content: center; }
+.ps-disc { border-radius: 100px; background-color: #292637; border-width: 2px; border-style: solid; border-color: #524a60; align-items: center; justify-content: center; margin-right: 14px; }
+.ps-disc-label { border-radius: 100px; background-color: #afa0b7; }
+.ps-lines { align-items: center; }
+.ps-line { border-radius: 3px; }
+.ps-album { background-color: #8c918e; border-radius: 3px; overflow: hidden; margin-right: 14px; }
+.ps-album-light { height: 45%; background-color: #b8b2a0; }
+.ps-album-dark { flex: 1; background-color: #54606a; }
+.ps-words { flex-direction: row; align-items: center; }
+.ps-word { color: #e4bdc5; font-weight: 700; }
+.ps-swatch { width: 100%; height: 100%; align-items: center; justify-content: center; }
+.ps-swatch-half { position: absolute; right: 0; bottom: 0; width: 50%; height: 100%; }
+.ps-swatch-image { width: 100%; height: 100%; }
+</style>

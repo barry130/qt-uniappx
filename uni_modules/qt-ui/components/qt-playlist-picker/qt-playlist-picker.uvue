@@ -1,6 +1,16 @@
 <template>
   <QtSheet :visible="visible" :title="title" :subtitle="subtitle" @update:visible="onVisibleChange">
-    <scroll-view class="picker-list" direction="vertical" :style="listStyle" :scroll-into-view="revealAnchor" :show-scrollbar="false">
+    <view class="picker-create" :class="layout.isWide ? 'picker-create-wide' : ''" :style="'border-bottom-color:' + theme.skin.divider + ';'">
+      <view class="picker-create-row">
+        <input class="picker-new-input" :class="layout.isWide ? 'picker-new-input-wide' : ''" :style="'color:' + theme.skin.text + ';background-color:' + theme.skin.surfaceMuted + ';' + qtFontDual(28, 14)" type="text" :value="newName" @input="onNameInput" @confirm="submitCreate" confirm-type="done" placeholder="输入新歌单名称" :maxlength="20" />
+        <QtButton label="新建" icon="folder" variant="secondary" size="sm" :disabled="newName.trim().length == 0" @click="submitCreate" />
+      </view>
+      <text v-if="createError.length > 0" class="picker-error" :class="layout.isWide ? 'picker-error-wide' : ''" :style="'color:' + selectionColor + ';' + qtFontDual(23, 12)">{{ createError }}</text>
+    </view>
+    <view v-if="playlists.length == 0" class="picker-empty" :class="layout.isWide ? 'picker-empty-wide' : ''">
+      <text :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(26, 14)">还没有歌单，在上方新建一个</text>
+    </view>
+    <scroll-view v-else class="picker-list" direction="vertical" :style="listStyle" :scroll-into-view="revealAnchor" :show-scrollbar="false">
       <view v-for="(playlist, index) in playlists" :key="playlist.id" :id="itemId(index)">
         <QtOption :label="playlist.name" kind="row" :selected="isSelected(playlist.id)" @select="togglePlaylist(playlist)">
           <template #leading>
@@ -9,14 +19,17 @@
               <text :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(32, 16)">{{ playlist.name.charAt(0) }}</text>
             </view>
           </template>
+          <template #trailing>
+            <view class="picker-check" :class="layout.isWide ? 'picker-check-wide' : ''">
+              <QtCheckbox :checked="isSelected(playlist.id)" indicator="check" @change="togglePlaylist(playlist)" />
+            </view>
+          </template>
         </QtOption>
       </view>
     </scroll-view>
     <template #footer>
       <view class="picker-footer" :class="layout.isWide ? 'picker-footer-wide' : ''">
         <template v-if="batchMode">
-          <input class="picker-new-input" :class="layout.isWide ? 'picker-new-input-wide' : ''" :style="'color:' + theme.skin.text + ';background-color:' + theme.skin.surfaceMuted + ';' + qtFontDual(28, 14)" type="text" :value="newName" @input="onNameInput" placeholder="新建歌单" :maxlength="20" />
-          <view class="picker-button"><QtButton label="新建" variant="secondary" size="sm" @click="submitCreate" /></view>
           <QtButton label="完成" variant="primary" size="sm" @click="close" />
         </template>
         <template v-else>
@@ -32,6 +45,8 @@ import { ref, computed, watch } from "vue";
 import QtSheet from "@/uni_modules/qt-ui/components/qt-sheet/qt-sheet.uvue";
 import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import QtCheckbox from "@/uni_modules/qt-ui/components/qt-checkbox/qt-checkbox.uvue";
+import { qtSelectionColor } from "@/uni_modules/qt-ui/composables/selection";
 import type { Playlist } from "@/types/music";
 import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
@@ -47,17 +62,21 @@ const props = withDefaults(defineProps<{
   /** 输入兼容；普通选择已统一 Sheet，不再按窗口坐标定位 popover。 */
   anchorTop?: number;
   batchMode?: boolean;
-}>(), { title: "选择歌单", subtitle: "选择歌单", anchorTop: -1, batchMode: false });
+  /** 宿主负责落盘；返回新歌单，失败返回 null。批量宿主同时收藏所选歌曲。 */
+  createPlaylist: (name: string) => Playlist | null;
+}>(), { title: "选择歌单", subtitle: "可多选，点确定保存收藏", anchorTop: -1, batchMode: false });
 const emit = defineEmits<{
   (e: "update:visible", value: boolean): void;
   (e: "confirm", selectedIds: string[]): void;
   (e: "toggle", playlistId: string): void;
-  (e: "create", name: string): void;
 }>();
 const layout = useQtLayout();
 const theme = useThemeStore();
 const selectedPlaylistIds = ref<string[]>([...props.selectedIds]);
 const newName = ref("");
+const createError = ref("");
+const selectionColor = computed((): string => qtSelectionColor(theme.dark));
+watch((): boolean => props.visible, (): void => { newName.value = ""; createError.value = ""; });
 /** 封面地址加载失败的歌单 id：失败后回落首字占位（口径同 qt-local-mixes onCoverError） */
 const failedCovers = ref<Set<string>>(new Set());
 function onCoverError(id: string): void {
@@ -90,8 +109,9 @@ const { anchor: revealAnchor, itemId } = useQtSelectionReveal(
 );
 const listStyle = computed((): string => {
   // 原生 scroll-view 使用有界高度；大字号下仍给 header/footer 留出空间。
-  const preferred = layout.isWide ? 300 : qtRpx(600);
-  const available = Math.max(0, layout.windowHeight * 0.86 - layout.safeBottomPx - (layout.isWide ? 180 : qtRpx(300)) * fontScale.scale);
+  const rowHeight = (layout.isWide ? 64 : qtRpx(128)) * fontScale.scale;
+  const preferred = Math.min(layout.isWide ? 300 : qtRpx(600), props.playlists.length * rowHeight);
+  const available = Math.max(0, layout.windowHeight * 0.86 - layout.safeBottomPx - (layout.isWide ? 240 : qtRpx(420)) * fontScale.scale);
   return "height:" + Math.min(preferred, available) + "px;";
 });
 function togglePlaylist(playlist: Playlist): void {
@@ -100,13 +120,25 @@ function togglePlaylist(playlist: Playlist): void {
   if (index >= 0) selectedPlaylistIds.value.splice(index, 1);
   else selectedPlaylistIds.value.push(playlist.id);
 }
-function onNameInput(e: InputEvent): void { newName.value = e.detail.value; }
-// 原业务：空名不提交；按下清空；重名/失败仍由宿主回执，不增加状态通路。
+function onNameInput(e: InputEvent): void { newName.value = e.detail.value; createError.value = ""; }
 function submitCreate(): void {
   const name = newName.value.trim();
   if (name.length == 0) return;
-  newName.value = "";
-  emit("create", name);
+  if (props.playlists.some((playlist: Playlist): boolean => playlist.name == name)) {
+    createError.value = "已有同名歌单，请换个名称";
+    return;
+  }
+  try {
+    const created = props.createPlaylist(name);
+    if (created == null) { createError.value = "未能新建歌单，请重试"; return; }
+    // 单曲只改草稿，确定后才保存歌曲；批量勾选仍由宿主的收藏结果回灌。
+    if (!props.batchMode && !selectedPlaylistIds.value.includes(created.id)) selectedPlaylistIds.value.push(created.id);
+    newName.value = "";
+    createError.value = "";
+    refreshRevealIndex();
+  } catch (_) {
+    createError.value = "未能新建歌单，请重试";
+  }
 }
 function confirm(): void { emit("confirm", [...selectedPlaylistIds.value]); close(); }
 function close(): void { emit("update:visible", false); }
@@ -117,9 +149,18 @@ function onVisibleChange(value: boolean): void { emit("update:visible", value); 
 .picker-cover { width: 72rpx; height: 72rpx; border-radius: 12rpx; margin-right: 20rpx; flex-shrink: 0; }
 .picker-cover-wide { width: 36px; height: 36px; border-radius: 6px; margin-right: 10px; }
 .picker-placeholder { align-items: center; justify-content: center; }
+.picker-check { margin-left: 24rpx; flex-shrink: 0; }
+.picker-check-wide { margin-left: 12px; }
+.picker-create { padding: 24rpx 32rpx; border-bottom-width: 1rpx; border-bottom-style: solid; flex-shrink: 0; }
+.picker-create-wide { padding: 14px 20px; border-bottom-width: 1px; }
+.picker-create-row { flex-direction: row; align-items: center; }
+.picker-error { margin-top: 12rpx; font-size: 23rpx; }
+.picker-error-wide { margin-top: 6px; font-size: 12px; }
+.picker-empty { padding: 40rpx 32rpx; align-items: center; }
+.picker-empty-wide { padding: 24px 20px; }
 .picker-footer { flex-direction: row; justify-content: flex-end; align-items: center; padding: 28rpx 32rpx; }
 .picker-footer-wide { padding: 14px 20px; }
 .picker-button { margin-right: 12px; }
-.picker-new-input { flex: 1; min-width: 0; height: 68rpx; margin-right: 20rpx; padding: 0 20rpx; border-radius: 16rpx; }
-.picker-new-input-wide { height: 34px; margin-right: 10px; padding: 0 10px; border-radius: 8px; }
+.picker-new-input { flex: 1; min-width: 0; height: 88rpx; margin-right: 20rpx; padding: 0 20rpx; border-radius: 16rpx; }
+.picker-new-input-wide { height: 44px; margin-right: 10px; padding: 0 10px; border-radius: 12px; }
 </style>

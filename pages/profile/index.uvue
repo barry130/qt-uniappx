@@ -1,5 +1,5 @@
 <template>
-  <qt-page-frame width-kind="grid" inset-top :refresh-key="refreshKey">
+  <qt-page-frame current="/pages/profile/index" width-kind="grid" inset-top :refresh-key="refreshKey">
     <!-- 宽屏三栏（与设置页族同一套机制，2026-10-19 起）：中栏的「我的」总览由框架
          渲染，本页 slot 里自己的那一份在 wideSplit 时隐藏，只留宽屏工具托管层
          与（宽屏自隐的）竖屏 tab bar，右栏在进入子页前保持空态（同设置总览页）。
@@ -16,14 +16,14 @@
            （qt-ui 不再 import 业务页面）。单活动 pane：qtPaneOn＝当前托管
            路由匹配才挂载，切换即换挂 16~300ms，保活方案真机史见
            composables/qt-wide-workspace.ts 的 qtPaneOn 注释。 -->
-      <view v-if="qtPaneOn('/pages/search/index')" class="qtww-pane"><SearchPage /></view>
-      <view v-if="qtPaneOn('/pages/daily-recommend/index')" class="qtww-pane"><DailyRecommendPage /></view>
-      <view v-if="qtPaneOn('/pages/radio/index')" class="qtww-pane"><RadioPage /></view>
-      <view v-if="qtPaneOn('/pages/podcast/index')" class="qtww-pane"><PodcastPage /></view>
-      <view v-if="qtPaneOn('/pages/daily/index')" class="qtww-pane"><DailyPage /></view>
-      <view v-if="qtPaneOn('/pages/playlists/index')" class="qtww-pane"><PlaylistsPage /></view>
-      <view v-if="qtPaneOn('/pages/chart/index')" class="qtww-pane"><ChartPage /></view>
-      <view v-if="qtPaneOn('/pages/settings/index')" class="qtww-pane"><SettingsPage /></view>
+      <view v-if="profilePaneOn('/pages/search/index')" class="qtww-pane"><SearchPage /></view>
+      <view v-if="profilePaneOn('/pages/daily-recommend/index')" class="qtww-pane"><DailyRecommendPage /></view>
+      <view v-if="profilePaneOn('/pages/radio/index')" class="qtww-pane"><RadioPage /></view>
+      <view v-if="profilePaneOn('/pages/podcast/index')" class="qtww-pane"><PodcastPage /></view>
+      <view v-if="profilePaneOn('/pages/daily/index')" class="qtww-pane"><DailyPage /></view>
+      <view v-if="profilePaneOn('/pages/playlists/index')" class="qtww-pane"><PlaylistsPage /></view>
+      <view v-if="profilePaneOn('/pages/chart/index')" class="qtww-pane"><ChartPage /></view>
+      <view v-if="profilePaneOn('/pages/settings/index')" class="qtww-pane"><SettingsPage /></view>
     </qt-wide-workspace>
   </qt-page-frame>
 </template>
@@ -31,6 +31,7 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
 import { onShow, onBackPress } from "@dcloudio/uni-app";
+import { closePlaybackQueue } from "@/uni_modules/qt-ui/composables/playback-queue-overlay";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtProfileOverview from "@/uni_modules/qt-ui/components/qt-profile-overview/qt-profile-overview.uvue";
 import QtWideWorkspace from "@/uni_modules/qt-ui/components/qt-wide-workspace/qt-wide-workspace.uvue";
@@ -61,6 +62,10 @@ import { qtSwitchTab } from "@/uni_modules/qt-ui/composables/qt-nav";
  * 本页只负责「宿主」该做的事：onShow 递增 refreshKey 通知总览重新对账，
  * 以及返回键（先关宽屏就地托管工具页，再回首页 tab）。
  */
+function profilePaneOn(route: string): boolean {
+  return qtPaneOn(route, "/pages/profile/index");
+}
+
 const refreshKey = ref(0);
 const layout = useQtLayout();
 const downloads = useDownloadsStore();
@@ -89,6 +94,7 @@ onShow(() => {
 // profile 是第二个 tab：返回键先关掉宽屏就地托管的工具页，再回到首页 tab
 onBackPress((options: OnBackPressOptions): boolean => {
   if (options.from != "backbutton") return false;
+  if (closePlaybackQueue()) return true;
   if (qtCloseWideTool()) return true;
   qtSwitchTab("/pages/home/index");
   return true;

@@ -1,3 +1,5 @@
+import { cryptoFramework } from '@kit.CryptoArchitectureKit';
+import { util as verifyUtil } from '@kit.ArkTS';
 /**
  * qt-js-engine · 鸿蒙（app-harmony）实现
  * ============================================================================
@@ -3063,4 +3065,26 @@ export const spikeNativeTimer: QtJsSpikeNativeTimer = function (
 	} catch (e) {
 		deliverSpike(callback, '', errText(e))
 	}
+}
+
+
+/** 系统密码库验签，不进入 ArkWeb 脚本环境。 */
+export function verifyPackSignature(content: string, signatureBase64: string, publicKeyHex: string, callback: QtJsEvalCallback): void {
+  const run = async (): Promise<void> => {
+    try {
+      const encoded = "302a300506032b6570032100" + publicKeyHex;
+      const bytes = new Uint8Array(encoded.length / 2);
+      for (let i = 0; i < encoded.length; i += 2) bytes[i / 2] = parseInt(encoded.substring(i, i + 2), 16);
+      const key = await cryptoFramework.createAsyKeyGenerator('Ed25519').convertKey({ data: bytes }, null);
+      const verifier = cryptoFramework.createVerify('Ed25519');
+      await verifier.init(key.pubKey);
+      const signature = new verifyUtil.Base64Helper().decodeSync(signatureBase64);
+      const data = new verifyUtil.TextEncoder().encodeInto(content);
+      const valid = await verifier.verify({ data: data }, { data: signature });
+      callback({ ok: true, value: valid ? 'ok' : 'bad', error: '' });
+    } catch (e) {
+      callback({ ok: false, value: '', error: '原生 Ed25519 验签不可用：' + e });
+    }
+  };
+  void run();
 }

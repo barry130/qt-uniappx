@@ -1,0 +1,99 @@
+/** Timed text for the optional Bluetooth metadata compatibility mode. */
+export type CarLyricLine = { timeMs: number, text: string }
+export type CarLyricFields = { title: string, artist: string, displayTitle: string }
+
+function carDigits(value: string): boolean {
+  if (value.length == 0) return false
+  for (let i = 0; i < value.length; i++) {
+    if ('0123456789'.indexOf(value.substring(i, i + 1)) < 0) return false
+  }
+  return true
+}
+
+/** Keep metadata small; never split a UTF-16 surrogate pair at the limit. */
+export function carLyricText(value: string): string {
+  let text = value.replace(/\r/g, ' ').replace(/\n/g, ' ').replace(/\t/g, ' ').trim()
+  if (text.length <= 160) return text
+  let end = 160
+  const code = text.charCodeAt(end - 1) ?? 0
+  if (code >= 0xd800 && code <= 0xdbff) end--
+  return text.substring(0, end)
+}
+
+/** Standard LRC (including repeated timestamps) and normalized QRC/YRC lines. */
+export function parseCarLyric(text: string): CarLyricLine[] {
+  const lines: CarLyricLine[] = []
+  const rawLines = text.substring(0, 262144).split('\n')
+  let fileOffset = 0
+  for (let i = 0; i < rawLines.length && lines.length < 4000; i++) {
+    const raw = rawLines[i].trim()
+    if (raw.indexOf('[offset:') == 0) {
+      const end = raw.indexOf(']')
+      const parsed = parseFloat(raw.substring(8, end))
+      if (end > 8 && Number.isFinite(parsed)) fileOffset = Math.max(-60000, Math.min(60000, parsed))
+      continue
+    }
+    const times: number[] = []
+    let cursor = 0
+    let wordLine = false
+    while (raw.substring(cursor, cursor + 1) == '[') {
+      const end = raw.indexOf(']', cursor)
+      if (end < 0) break
+      const tag = raw.substring(cursor + 1, end)
+      const colon = tag.indexOf(':')
+      const comma = tag.indexOf(',')
+      if (colon > 0 && carDigits(tag.substring(0, colon))) {
+        const seconds = tag.substring(colon + 1)
+        const dot = seconds.indexOf('.')
+        const whole = dot < 0 ? seconds : seconds.substring(0, dot)
+        const fraction = dot < 0 ? '' : seconds.substring(dot + 1)
+        if (!carDigits(whole) || (fraction.length > 0 && !carDigits(fraction))) break
+        const sec = parseFloat(seconds)
+        if (!Number.isFinite(sec) || sec >= 60) break
+        const at = (parseInt(tag.substring(0, colon)) * 60 + sec) * 1000
+        if (!Number.isFinite(at)) break
+        times.push(at)
+      } else if (comma > 0 && carDigits(tag.substring(0, comma)) && carDigits(tag.substring(comma + 1))) {
+        const at = parseInt(tag.substring(0, comma))
+        if (!Number.isFinite(at)) break
+        times.push(at)
+        wordLine = true
+      } else break
+      cursor = end + 1
+    }
+    if (times.length == 0) continue
+    let content = raw.substring(cursor)
+    if (wordLine) content = content.replace(/\(\d+,\d+(,\d+)?\)/g, '')
+    content = carLyricText(content)
+    for (let j = 0; j < times.length && lines.length < 4000; j++) {
+      lines.push({ timeMs: times[j], text: content })
+    }
+  }
+  for (let i = 0; i < lines.length; i++) lines[i].timeMs = Math.max(0, lines[i].timeMs - fileOffset)
+  lines.sort((a: CarLyricLine, b: CarLyricLine): number => a.timeMs - b.timeMs)
+  return lines
+}
+
+/** Empty before the first timed line and during explicit instrumental blank lines. */
+export function carLyricAt(lines: CarLyricLine[], positionMs: number, offsetMs: number): string {
+  if (!Number.isFinite(positionMs) || !Number.isFinite(offsetMs)) return ''
+  const at = positionMs - offsetMs
+  let lo = 0
+  let hi = lines.length - 1
+  let found = -1
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2)
+    if (lines[mid].timeMs <= at) { found = mid; lo = mid + 1 } else hi = mid - 1
+  }
+  return found >= 0 ? lines[found].text : ''
+}
+
+/** 0 off; 1 artist field; 2 title field. Untimed/empty lyrics restore the real song. */
+export function carLyricFields(mode: number, bluetooth: boolean, line: string, title: string, artist: string, displayTitle: string): CarLyricFields {
+  const active = bluetooth && line.length > 0
+  return {
+    title: active && mode == 2 ? line : title,
+    artist: active && mode == 1 ? line : artist,
+    displayTitle: active && mode == 2 ? line : displayTitle,
+  }
+}

@@ -811,6 +811,7 @@ class DesktopLyricService {
     try {
       // 在播本地文件自带内嵌歌词时直接用它：文件里那份与音频同源、最准，也省掉在线取词
       // （本地曲目 / 下载歌 / 本地优先命中的在线歌都走这里）
+      const localFirstText = await player.lyricsForSong(current);
       const embedded = player.embeddedLyricOf(current);
       let text = "";
       let translation = "";
@@ -821,7 +822,7 @@ class DesktopLyricService {
         // 译文/逐字/罗马音都是按「在线源返回」组织的，混进内嵌词只会对不上时间轴，
         // 有内嵌词时整段跳过（与播放页同口径）
       } else {
-        text = await musicApi.lyrics(current);
+        text = localFirstText;
         if (text.length == 0) {
           // 空结果既可能是真·纯音乐，也可能是接口偶发失败：稍等重试一次再下结论。
           // 走 retryLyrics（忽略「已问过」标记）；若播放页刚拉到结果，这里会直接命中缓存。

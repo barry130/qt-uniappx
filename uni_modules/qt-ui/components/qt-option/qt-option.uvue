@@ -1,26 +1,40 @@
 <template>
   <view class="qo" :class="[kindClass, disabled ? 'qo-disabled' : '']" :style="optionStyle" @click.stop="pick">
+    <view v-if="preview" class="qo-preview"><slot name="preview"></slot></view>
     <slot name="leading"></slot>
-    <view class="qo-body">
-      <text class="qo-label" :class="layout.isWide ? 'qo-label-wide' : ''" :style="labelStyle">{{ label }}</text>
+    <view class="qo-body" :class="[kind == 'row' ? 'qo-body-row' : '', preview ? 'qo-body-visual' : '', kind == 'swatch' ? 'qo-body-swatch' : '', singleLine ? 'qo-body-single-line' : '']">
+      <view v-if="preview" class="qo-title-row">
+        <text class="qo-label qo-label-visual" :class="layout.isWide ? 'qo-label-wide' : ''" :style="labelStyle">{{ label }}</text>
+        <QtIcon v-if="indicator && selected" name="check" :size="layout.isWide ? 14 : 26" :color="red" />
+      </view>
+      <text v-else-if="kind != 'swatch'" class="qo-label" :class="layout.isWide ? 'qo-label-wide' : ''" :style="labelStyle">{{ label }}</text>
       <text v-if="description.length > 0" class="qo-description" :class="layout.isWide ? 'qo-description-wide' : ''" :style="descriptionStyle">{{ description }}</text>
       <slot></slot>
     </view>
+    <view v-if="kind == 'swatch' && indicator && selected" class="qo-swatch-check" :style="'background-color:' + red + ';'"><QtIcon name="check" :size="layout.isWide ? 12 : 22" color="#ffffff" /></view>
+    <slot name="trailing"></slot>
   </view>
 </template>
 <script setup lang="ts">
 import { computed } from "vue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtSelectionColor } from "@/uni_modules/qt-ui/composables/selection";
+import { qtOptionChipMinHeightPx } from "@/uni_modules/qt-ui/composables/qt-option-metrics";
 
 const props = withDefaults(defineProps<{
   label: string;
+  /** Horizontal source tabs keep the complete label on one line; host budgets their width. */
+  singleLine?: boolean;
   description?: string;
   selected?: boolean;
   disabled?: boolean;
-  kind?: "row" | "chip" | "card";
+  kind?: "row" | "chip" | "card" | "swatch";
+  /** Optional explicit check; preview slot turns a card into a vertical visual option. */
+  indicator?: boolean;
+  preview?: boolean;
   /** Non-selection action color (e.g. destructive menu action); selected red always wins. */
   color?: string;
   /**
@@ -28,31 +42,41 @@ const props = withDefaults(defineProps<{
    * 单行菜单里用同一套会显得行间空隙过大，所以由调用方（action sheet）显式声明。
    */
   dense?: boolean;
-}>(), { description: "", selected: false, disabled: false, kind: "row", color: "", dense: false });
+}>(), { description: "", selected: false, disabled: false, kind: "row", color: "", dense: false, indicator: false, preview: false, singleLine: false });
 const emit = defineEmits<{ select: [] }>();
 const layout = useQtLayout();
 const theme = useThemeStore();
 const red = computed((): string => qtSelectionColor(theme.dark));
 const kindClass = computed((): string => {
-  const base = "qo-" + props.kind + (layout.isWide ? " qo-" + props.kind + "-wide" : "");
+  const base = "qo-" + props.kind + (layout.isWide ? " qo-" + props.kind + "-wide" : "") + (props.preview ? " qo-visual" : "");
   if (!props.dense) return base;
   // 紧凑行只对 row 有意义（chip/card 自带内边距），宽窄屏用两套单位互不覆盖
   return base + (layout.isWide ? " qo-row-dense qo-row-dense-wide" : " qo-row-dense");
 });
 const optionStyle = computed((): string => {
   if (props.kind == "row") return "border-bottom-color:" + theme.skin.divider + ";";
-  return "background-color:" + theme.skin.surfaceMuted + ";border-color:" + (props.selected ? red.value : theme.skin.border) + ";";
+  const box = props.kind == "chip" ? "min-height:" + qtOptionChipMinHeightPx() + "px;" : "";
+  return box + "background-color:" + theme.skin.surfaceMuted + ";border-color:" + (props.selected ? red.value : theme.skin.border) + ";";
 });
 const labelStyle = computed((): string => {
   const color = props.disabled ? theme.skin.textSubtle : props.selected ? red.value : props.color.length > 0 ? props.color : theme.skin.text;
-  return "color:" + color + ";font-weight:" + (props.selected ? "600" : "400") + ";" + qtFontDual(28, 15);
+  return "color:" + color + ";font-weight:" + (props.selected ? "600" : "400") + ";" + qtFontDual(28, 15) + (props.singleLine ? "white-space:nowrap;" : "");
 });
-const descriptionStyle = computed((): string => "color:" + (props.selected ? red.value : theme.skin.textMuted) + ";" + qtFontDual(23, 12));
+const descriptionStyle = computed((): string => "color:" + (props.selected && !props.preview ? red.value : theme.skin.textMuted) + ";" + qtFontDual(23, 12));
 function pick(): void { if (!props.disabled) emit("select"); }
 </script>
 <style>
 .qo { flex-direction: row; align-items: center; flex-shrink: 0; min-width: 0; }
 .qo-body { flex-shrink: 1; min-width: 0; }
+.qo-body-single-line { flex-shrink: 0; }
+.qo-body-row { flex: 1; }
+.qo-title-row { flex-direction: row; align-items: center; justify-content: space-between; }
+.qo-preview { width: 100%; overflow: hidden; border-radius: 7px; }
+.qo-body-visual { width: 100%; margin-top: 9px; padding: 0 2px 3px; }
+.qo-swatch { position: relative; width: 68rpx; height: 68rpx; padding: 4rpx; border-width: 2rpx; border-style: solid; border-radius: 14rpx; }
+.qo-swatch-wide { width: 42px; height: 42px; padding: 3px; border-width: 1px; border-radius: 9px; }
+.qo-body-swatch { width: 100%; height: 100%; overflow: hidden; border-radius: 6px; }
+.qo-swatch-check { position: absolute; right: 2px; bottom: 2px; border-radius: 10px; padding: 2px; }
 .qo-row { min-height: 104rpx; padding: 20rpx 32rpx; border-bottom-width: 1rpx; border-bottom-style: solid; align-self: stretch; }
 .qo-row-wide { min-height: 52px; padding: 10px 20px; border-bottom-width: 1px; }
 /* 单行菜单的紧凑行：不设 min-height，高度=内边距+一行文字（约 82rpx / 42px），
@@ -63,6 +87,8 @@ function pick(): void { if (!props.disabled) emit("select"); }
 .qo-chip-wide { min-height: 36px; padding: 6px 14px; border-radius: 8px; border-width: 1px; }
 .qo-card { padding: 24rpx; border-radius: 20rpx; border-width: 2rpx; border-style: solid; }
 .qo-card-wide { padding: 14px; border-radius: 10px; border-width: 1px; }
+.qo-visual { flex-direction: column; align-items: stretch; padding: 7px; }
+.qo-label-visual { flex-shrink: 1; margin-right: 4px; }
 .qo-label { font-size: 28rpx; line-height: 1.35; }
 .qo-label-wide { font-size: 15px; }
 .qo-description { font-size: 23rpx; line-height: 1.4; margin-top: 6rpx; }

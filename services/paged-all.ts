@@ -41,6 +41,9 @@ export type PagedAllState = {
   total: number;
   /** 是否收尾（正常到底 / 出错 / 触及上限）。为 false 就还在跑 */
   finished: boolean;
+  /** finished 只表示停止；只有 complete 才能宣告已加载全部。 */
+  status: "running" | "complete" | "error" | "limit" | "cancelled";
+  failedPages: number[];
   /** 第 1 页带回来的附加信息（歌手头像） */
   meta: string;
 };
@@ -50,7 +53,7 @@ export type PagedAllListener = (state: PagedAllState) => void;
 export type PagedAllOptions = {
   fetchPage: (page: number) => Promise<PagedAllPage>;
   keyOf: (item: Song) => string;
-  /** 每页条数：用它判断「满页 = 可能还有下一页」 */
+  /** 每页条数仅描述请求粒度；是否到底由 hasMore 决定。 */
   pageSize: number;
   /** 并发在飞请求数，默认 4（移动端比 PC 保守） */
   concurrency?: number;
@@ -69,6 +72,8 @@ function emptyState(): PagedAllState {
     done: 0,
     total: -1,
     finished: false,
+    status: "running",
+    failedPages: [],
     meta: "",
   };
   return state;
@@ -81,6 +86,10 @@ export class PagedAllJob {
   cancelled: boolean = false;
   /** 登记在缓存表里的任务：没人订阅也要跑完（一次性任务没人听就取消） */
   cached: boolean = false;
+  options: PagedAllOptions | null = null;
+  /** 保留成功页，重试只重发失败或尚未请求的页。 */
+  pageNumbers: number[] = [];
+  pageValues: PagedAllPage[] = [];
 
   snapshot(): PagedAllState {
     return this.state;
@@ -95,11 +104,22 @@ export class PagedAllJob {
   unsubscribe(fn: PagedAllListener): void {
     const at = this.listeners.indexOf(fn);
     if (at >= 0) this.listeners.splice(at, 1);
-    if (!this.cached && this.listeners.length == 0) this.cancelled = true;
+    if (!this.cached && this.listeners.length == 0) this.cancel();
   }
 
   cancel(): void {
     this.cancelled = true;
+    this.state.loading = false;
+    this.state.finished = true;
+    this.state.status = "cancelled";
+    this.state.error = "加载已取消，请重新加载";
+    this.emit();
+  }
+
+  retry(): void {
+    const options = this.options;
+    if (this.cancelled || !this.state.finished || this.state.status != "error" || options == null) return;
+    runJob(this, options);
   }
 
   /** 广播当前 state（订阅期间可能退订，先拷一份） */
@@ -130,6 +150,7 @@ export function startPagedAllJob(key: string, options: PagedAllOptions): PagedAl
   const job = new PagedAllJob();
   job.key = key;
   job.cached = true;
+  job.options = options;
   jobKeys.push(key);
   jobValues.push(job);
   trimJobs();
@@ -142,7 +163,7 @@ export function clearPagedAllJob(key: string): void {
   const at = jobKeys.indexOf(key);
   if (at < 0) return;
   const hit = jobValues[at] as PagedAllJob;
-  hit.cancelled = true;
+  hit.cancel();
   jobKeys.splice(at, 1);
   jobValues.splice(at, 1);
 }
@@ -150,7 +171,7 @@ export function clearPagedAllJob(key: string): void {
 function trimJobs(): void {
   while (jobKeys.length > PAGED_ALL_JOB_CAP) {
     const drop = jobValues[0] as PagedAllJob;
-    drop.cancelled = true;
+    drop.cancel();
     jobKeys.splice(0, 1);
     jobValues.splice(0, 1);
   }
@@ -158,11 +179,19 @@ function trimJobs(): void {
 
 /** 单页取数：失败按 null 处理，不让一页的错误拖垮整批（PC 同款） */
 async function fetchSafe(
+  job: PagedAllJob,
   fetchPage: (page: number) => Promise<PagedAllPage>,
   page: number
 ): Promise<PagedAllPage | null> {
+  const at = job.pageNumbers.indexOf(page);
+  if (at >= 0) return job.pageValues[at] as PagedAllPage;
   try {
-    return await fetchPage(page);
+    const result = await fetchPage(page);
+    if (!job.cancelled) {
+      job.pageNumbers.push(page);
+      job.pageValues.push(result);
+    }
+    return result;
   } catch (_) {
     return null;
   }
@@ -195,8 +224,8 @@ function appendUnique(
 }
 
 async function runJob(job: PagedAllJob, options: PagedAllOptions): Promise<void> {
-  const concurrency = options.concurrency != null ? options.concurrency : 4;
-  const maxPages = options.maxPages != null ? options.maxPages : 40;
+  const concurrency = Math.max(1, Math.floor(options.concurrency != null ? options.concurrency : 4));
+  const maxPages = Math.max(1, Math.floor(options.maxPages != null ? options.maxPages : 40));
   // pageSize 不再参与「是否到底」的判断（见 PagedAllPage.hasMore 的注释）；
   // options 里保留它只为调用方自描述，任务本身不用。
 
@@ -206,6 +235,7 @@ async function runJob(job: PagedAllJob, options: PagedAllOptions): Promise<void>
   let acc: Song[] = [];
   let meta = "";
   let seen = new Set<string>();
+  let failedPages: number[] = [];
 
   const publish = (): void => {
     const next: PagedAllState = {
@@ -215,12 +245,14 @@ async function runJob(job: PagedAllJob, options: PagedAllOptions): Promise<void>
       done: done,
       total: total,
       finished: false,
+      status: "running",
+      failedPages: failedPages,
       meta: meta,
     };
     job.state = next;
     job.emit();
   };
-  const finish = (): void => {
+  const finish = (status: "complete" | "error" | "limit"): void => {
     const next: PagedAllState = {
       items: acc,
       loading: false,
@@ -228,81 +260,65 @@ async function runJob(job: PagedAllJob, options: PagedAllOptions): Promise<void>
       done: done,
       total: total,
       finished: true,
+      status: status,
+      failedPages: failedPages,
       meta: meta,
     };
     job.state = next;
     job.emit();
   };
 
+  publish();
   try {
-    // 第 1 页单独拉：既拿首屏（立刻出列表），也用它判「还有没有下一页」
-    const first = await options.fetchPage(1);
-    if (job.cancelled) return;
-    if (first.meta.length > 0) meta = first.meta;
-    acc = first.songs;
-    seen = new Set<string>();
-    for (let i = 0; i < acc.length; i++) seen.add(options.keyOf(acc[i] as Song));
-    done = 1;
-    publish();
-    if (!first.hasMore) {
-      total = 1;
-      finish();
-      return;
-    }
-
-    const second = await options.fetchPage(2);
-    if (job.cancelled) return;
-    if (second.meta.length > 0 && meta.length == 0) meta = second.meta;
-    const before = acc.length;
-    acc = appendUnique(acc, second.songs, options.keyOf, seen);
-    done = 2;
-    publish();
-    // 上游翻页失效时会一直返回同一页：这一页一条都没新增就别再往下探，
-    // 否则要空转到 maxPages（用户看到的就是「条数不变但一直在转」）。
-    if (!second.hasMore || acc.length == before) {
-      finish();
-      return;
-    }
-
-    let nextPage = 3;
+    // 前两页单独取，之后并发。权威 hasMore 不受空页或重复条目影响。
+    let nextPage = 1;
     while (nextPage <= maxPages) {
+      const firstPage = nextPage;
+      const batchSize = nextPage <= 2 ? 1 : concurrency;
       const tasks: Promise<PagedAllPage | null>[] = [];
-      for (let i = 0; i < concurrency && nextPage <= maxPages; i++) {
-        tasks.push(fetchSafe(options.fetchPage, nextPage));
+      for (let i = 0; i < batchSize && nextPage <= maxPages; i++) {
+        tasks.push(fetchSafe(job, options.fetchPage, nextPage));
         nextPage++;
       }
       const settled = await Promise.all(tasks);
       if (job.cancelled) return;
 
-      let added = 0;
       let stop = false;
       for (let i = 0; i < settled.length; i++) {
         const pageData = settled[i] as PagedAllPage | null;
         if (pageData == null) {
           failed = "部分页加载失败，列表可能不完整";
-          stop = true;
+          failedPages.push(firstPage + i);
           continue;
         }
         if (pageData.meta.length > 0 && meta.length == 0) meta = pageData.meta;
-        const prevLen = acc.length;
         acc = appendUnique(acc, pageData.songs, options.keyOf, seen);
-        added += acc.length - prevLen;
         done++;
         // 每拿完一页就发一次：并发在飞期间条数也要往上走
         publish();
-        if (!pageData.hasMore || pageData.songs.length == 0) {
+        if (!pageData.hasMore) {
           stop = true;
+          total = firstPage + i;
           // 这一页之后的批次内页**不能再并入**：本页已经是尾页，后面的页是同一批
           // 并发发出去的「越界页」，其内容属于列表之外（对过滤型歌手列表来说就是
           // 别的歌手的搜索结果）。以前继续并入，导致同一歌手改并发数就改显示条数。
           break;
         }
       }
-      if (stop || added == 0) break;
+      if (failedPages.length > 0) {
+        finish("error");
+        return;
+      }
+      if (stop) {
+        finish("complete");
+        return;
+      }
     }
-    finish();
+    failed = "已达到加载页数上限，列表可能不完整";
+    finish("limit");
   } catch (_) {
+    if (job.cancelled) return;
     failed = "加载失败";
-    finish();
+    finish("error");
   }
 }

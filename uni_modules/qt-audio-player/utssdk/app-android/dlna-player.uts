@@ -1,0 +1,128 @@
+/** Media3 的真实远端 Player：自身不解码/不出声，系统媒体控制直接转给 DLNA。 */
+import type { AudioPlaylistItem } from '../interface.uts'
+import { dlnaActive, dlnaState, dlnaLoad, dlnaPlay, dlnaPause, dlnaStop, dlnaSeek, dlnaSetVolume } from './dlna.uts'
+import SimpleBasePlayer from 'androidx.media3.common.SimpleBasePlayer'
+import MediaItem from 'androidx.media3.common.MediaItem'
+import MediaMetadata from 'androidx.media3.common.MediaMetadata'
+import Player from 'androidx.media3.common.Player'
+import DeviceInfo from 'androidx.media3.common.DeviceInfo'
+import C from 'androidx.media3.common.C'
+import Uri from 'android.net.Uri'
+import Looper from 'android.os.Looper'
+import ArrayList from 'java.util.ArrayList'
+import ListenableFuture from 'com.google.common.util.concurrent.ListenableFuture'
+import Futures from 'com.google.common.util.concurrent.Futures'
+
+let items: AudioPlaylistItem[] = []
+let index = -1
+let data = new ArrayList<SimpleBasePlayer.MediaItemData>()
+let autoplay = false
+let trackChanged: ((mediaId: string) => void) | null = null
+let nextTrack: (() => void) | null = null
+let previousTrack: (() => void) | null = null
+let revision = 0
+let dataSignature = ''
+let unmuteVolume = 1
+
+export function dlnaPlayerHooks(track: (mediaId: string) => void, next: () => void, previous: () => void): void {
+	trackChanged = track; nextTrack = next; previousTrack = previous
+}
+function rebuild(): void {
+	const state = dlnaState()
+	const signature = revision.toString() + ':' + index.toString() + ':' + state.durationMs.toString() + ':' + state.canSeek.toString()
+	if (signature == dataSignature) return
+	dataSignature = signature
+	data = new ArrayList<SimpleBasePlayer.MediaItemData>()
+	for (let i = 0; i < items.length; i++) {
+		const entry = items[i], metadata = new MediaMetadata.Builder()
+		metadata.setTitle(entry.title); metadata.setArtist(entry.artist); metadata.setAlbumTitle(entry.album)
+		if (entry.coverUrl.length > 0) metadata.setArtworkUri(Uri.parse(entry.coverUrl))
+		const media = new MediaItem.Builder().setMediaId(entry.mediaId).setUri(entry.uri).setMediaMetadata(metadata.build()).build()
+		const builder = new SimpleBasePlayer.MediaItemData.Builder(entry.mediaId + ':' + i.toString())
+		builder.setMediaItem(media)
+		const duration = i == index && state.mediaId == entry.mediaId ? state.durationMs : Math.max(0, (entry.duration ?? 0) * 1000)
+		builder.setDurationUs(duration > 0 ? (duration * 1000).toLong() : C.TIME_UNSET)
+		builder.setIsSeekable(i == index && state.canSeek)
+		data.add(builder.build())
+	}
+}
+export function dlnaPlayerSetPlaylist(list: AudioPlaylistItem[], start: number, play: boolean, startMs: number): void {
+	if (list.length == 0) { dlnaStop(); items = []; index = -1; rebuild(); return }
+	items = list.slice(); revision++; index = Math.max(0, Math.min(list.length - 1, Math.floor(start)))
+	autoplay = play
+	dlnaLoad(items[index], startMs, play)
+	rebuild(); trackChanged?.invoke(items[index].mediaId)
+}
+export function dlnaPlayerPlayIndex(next: number): void {
+	const value = Math.floor(next)
+	if (value < 0 || value >= items.length) return
+	index = value; autoplay = true
+	dlnaLoad(items[index], 0, true); rebuild(); trackChanged?.invoke(items[index].mediaId)
+}
+export function dlnaPlayerSyncTimeline(list: AudioPlaylistItem[], expectedMediaId: string): void {
+	if (index < 0 || index >= items.length || items[index].mediaId != expectedMediaId) return
+	const next = list.findIndex((item: AudioPlaylistItem): boolean => item.mediaId == expectedMediaId)
+	if (next < 0) return
+	items = list.slice(); revision++; index = next; rebuild()
+}
+export function dlnaPlayerCurrentMediaId(): string { return index >= 0 && index < items.length ? items[index].mediaId : '' }
+export function dlnaPlayerTimelineSize(): number { return items.length }
+export function dlnaPlayerIntendingToPlay(): boolean {
+	const phase = dlnaState().phase
+	return phase == 'playing' || phase == 'buffering' || (phase == 'loading' && autoplay)
+}
+
+export class DlnaSessionPlayer extends SimpleBasePlayer {
+	constructor() { super(Looper.getMainLooper()) }
+	refresh(): void { rebuild(); this.invalidateState() }
+	override getState(): SimpleBasePlayer.State {
+		const cast = dlnaState(), commands = new Player.Commands.Builder()
+		commands.add(Player.COMMAND_PLAY_PAUSE); commands.add(Player.COMMAND_STOP)
+		commands.add(Player.COMMAND_GET_CURRENT_MEDIA_ITEM); commands.add(Player.COMMAND_GET_TIMELINE)
+		commands.add(Player.COMMAND_GET_METADATA); commands.add(Player.COMMAND_GET_DEVICE_VOLUME)
+		if (items.length > 0) {
+			commands.add(Player.COMMAND_SEEK_TO_NEXT); commands.add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+			commands.add(Player.COMMAND_SEEK_TO_PREVIOUS); commands.add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+		}
+		if (cast.canSeek) { commands.add(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM); commands.add(Player.COMMAND_SEEK_TO_MEDIA_ITEM) }
+		if (cast.canSetVolume) { commands.add(Player.COMMAND_SET_VOLUME); commands.add(Player.COMMAND_SET_DEVICE_VOLUME_WITH_FLAGS); commands.add(Player.COMMAND_ADJUST_DEVICE_VOLUME_WITH_FLAGS) }
+		const builder = new SimpleBasePlayer.State.Builder()
+		builder.setAvailableCommands(commands.build())
+		builder.setPlaylist(data)
+		if (items.length > 0 && index >= 0) builder.setCurrentMediaItemIndex(index.toInt())
+		const loading = cast.phase == 'loading' || cast.phase == 'buffering'
+		builder.setPlayWhenReady(dlnaPlayerIntendingToPlay(), Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
+		builder.setPlaybackState(items.length == 0 || !dlnaActive() || cast.phase == 'error' ? Player.STATE_IDLE : loading ? Player.STATE_BUFFERING : Player.STATE_READY)
+		builder.setIsLoading(loading)
+		builder.setContentPositionMs(SimpleBasePlayer.PositionSupplier.getExtrapolating(cast.positionMs.toLong(), (cast.phase == 'playing' ? 1 : 0).toFloat()))
+		builder.setVolume(cast.volume.toFloat())
+		builder.setDeviceInfo(new DeviceInfo.Builder(DeviceInfo.PLAYBACK_TYPE_REMOTE).setMinVolume(0).setMaxVolume(100).build())
+		builder.setDeviceVolume(Math.round(cast.volume * 100).toInt())
+		builder.setIsDeviceMuted(cast.volume == 0)
+		return builder.build()
+	}
+	override handleSetPlayWhenReady(play: boolean): ListenableFuture<boolean> {
+		autoplay = play
+		if (play) dlnaPlay(); else dlnaPause()
+		return Futures.immediateFuture(true)
+	}
+	override handleStop(): ListenableFuture<boolean> { autoplay = false; dlnaStop(); return Futures.immediateFuture(true) }
+	override handleRelease(): ListenableFuture<boolean> { return Futures.immediateFuture(true) }
+	override handleSeek(mediaIndex: Int, positionMs: Long, seekCommand: Int): ListenableFuture<boolean> {
+		if (seekCommand == Player.COMMAND_SEEK_TO_NEXT || seekCommand == Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM) nextTrack?.invoke()
+		else if (seekCommand == Player.COMMAND_SEEK_TO_PREVIOUS || seekCommand == Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM) previousTrack?.invoke()
+		else if (mediaIndex.toDouble() == index) dlnaSeek(positionMs.toDouble())
+		else dlnaPlayerPlayIndex(mediaIndex.toDouble())
+		return Futures.immediateFuture(true)
+	}
+	override handleSetVolume(volume: Float, volumeOperationType: Int): ListenableFuture<boolean> { dlnaSetVolume(volume.toDouble()); return Futures.immediateFuture(true) }
+	override handleSetDeviceVolume(volume: Int, flags: Int): ListenableFuture<boolean> { dlnaSetVolume(volume.toDouble() / 100); return Futures.immediateFuture(true) }
+	override handleIncreaseDeviceVolume(flags: Int): ListenableFuture<boolean> { dlnaSetVolume(dlnaState().volume + 0.01); return Futures.immediateFuture(true) }
+	override handleDecreaseDeviceVolume(flags: Int): ListenableFuture<boolean> { dlnaSetVolume(dlnaState().volume - 0.01); return Futures.immediateFuture(true) }
+	override handleSetDeviceMuted(muted: boolean, flags: Int): ListenableFuture<boolean> {
+		const current = dlnaState().volume
+		if (current > 0) unmuteVolume = current
+		dlnaSetVolume(muted ? 0 : unmuteVolume)
+		return Futures.immediateFuture(true)
+	}
+}

@@ -1,6 +1,8 @@
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { qtLayout, qtRpx, qtRailWidth } from "../composables/use-qt-layout";
 import { logWarn } from "@/services/logger";
+import { useMiniPlayerSettings } from "../stores/mini-player";
+import { qtMiniStripHeightPx } from "../composables/mini-player-layout";
 
 /**
  * 悬浮播放器（qt-mini-player）的全站共享 UI 状态。
@@ -52,9 +54,7 @@ export const miniRotateDeg = ref(0);
 /** 悬浮球尺寸（rpx）与展开条尺寸（rpx/px）。必须经 qtRpx 折算（见 use-qt-layout）。 */
 export const MINI_FAB_SIZE_RPX = 120;
 const MINI_WIDTH_RPX = 620;
-const MINI_HEIGHT_RPX = 112;
 const MINI_WIDTH_WIDE_PX = 360;
-const MINI_HEIGHT_WIDE_PX = 56;
 const FAB_WIDE_PX = 72;
 /** 默认左边距（rpx） */
 const LEFT_MARGIN_RPX = 28;
@@ -68,6 +68,7 @@ const POS_KEY = "qt-mini-player-fab";
 const POS_VERSION = "v2";
 
 const layout = qtLayout();
+const settings = useMiniPlayerSettings();
 
 /** 悬浮球边长（px）：宽屏固定 72，窄屏按 rpx 折算 */
 export const miniFabPx = computed((): number => {
@@ -87,56 +88,90 @@ export const miniCurrentWidth = computed((): number => {
 export const miniCurrentHeight = computed((): number => {
   layout.windowWidth;
   return miniExpanded.value
-    ? (layout.isWide ? MINI_HEIGHT_WIDE_PX : qtRpx(MINI_HEIGHT_RPX))
+    ? qtMiniStripHeightPx()
     : miniFabPx.value;
 });
 
 /* ---------------- 旋转（单一 rAF，全站共享） ---------------- */
 
 let spinTimer: number | null = null;
-let spinLastTime = 0;
+let spinLastTime = -1;
 let spinPlaying = false;
-/** 挂载的组件实例数：>0 且正在播放才跑 rAF */
-let mountCount = 0;
+let appForeground = true;
+let nextMountId = 1;
+let spinGeneration = 0;
+/** Visible pages may overlap during navigation. They share one animation loop. */
+const mounts = new Map<number, boolean>();
+const SPIN_FRAME_MS = 1000 / 30;
 
-function rotateStep(timestamp: number): void {
-  if (spinLastTime == 0) spinLastTime = timestamp;
+function spinVisible(): boolean {
+  if (!appForeground || settings.mode == "docked" || !spinPlaying) return false;
+  let visible = false;
+  mounts.forEach((active: boolean) => { if (active) visible = true; });
+  return visible;
+}
+
+function rotateStep(timestamp: number, generation: number): void {
+  if (generation != spinGeneration) return;
+  spinTimer = null;
+  if (!spinVisible()) return;
+  if (spinLastTime < 0) spinLastTime = timestamp;
   const dt = timestamp - spinLastTime;
-  spinLastTime = timestamp;
-  if (dt > 0) {
-    // 约 12 度/秒，按实际经过时间计算，保证不同帧率下速度一致
+  if (dt >= SPIN_FRAME_MS - 0.1) {
+    spinLastTime = timestamp;
+    // Slow decorative rotation only needs 30 updates/s, independent of display Hz.
     miniRotateDeg.value = (miniRotateDeg.value + dt * 0.012) % 360;
   }
-  spinTimer = requestAnimationFrame(rotateStep);
+  spinTimer = requestAnimationFrame((time: number) => rotateStep(time, generation));
 }
 
 function syncSpinLoop(): void {
-  const shouldRun = mountCount > 0 && spinPlaying;
+  const shouldRun = spinVisible();
   if (shouldRun && spinTimer == null) {
-    spinLastTime = 0;
-    spinTimer = requestAnimationFrame(rotateStep);
+    spinLastTime = -1;
+    const generation = ++spinGeneration;
+    spinTimer = requestAnimationFrame((time: number) => rotateStep(time, generation));
     return;
   }
   if (!shouldRun && spinTimer != null) {
+    spinGeneration++;
     cancelAnimationFrame(spinTimer);
     spinTimer = null;
   }
 }
 
 /** 组件 onMounted 调：登记一个渲染实例 */
-export function miniPlayerMount(): void {
-  mountCount += 1;
+export function miniPlayerMount(active: boolean = true): number {
+  const id = nextMountId++;
+  mounts.set(id, active);
   syncSpinLoop();
+  return id;
 }
 
 /** 组件 onUnmounted 调 */
-export function miniPlayerUnmount(): void {
-  if (mountCount > 0) mountCount -= 1;
+export function miniPlayerUnmount(id: number): void {
+  mounts.delete(id);
+  if (mounts.size == 0) {
+    clearInitRetry();
+    onMiniPlayerHidden();
+  }
+  syncSpinLoop();
+}
+
+export function miniPlayerSetVisible(id: number, active: boolean): void {
+  if (!mounts.has(id) || mounts.get(id) == active) return;
+  mounts.set(id, active);
+  syncSpinLoop();
+}
+
+export function miniPlayerSetForeground(active: boolean): void {
+  appForeground = active;
   syncSpinLoop();
 }
 
 /** 组件 watch(player.playing) 调 */
 export function miniPlayerSetPlaying(playing: boolean): void {
+  if (spinPlaying == playing) return;
   spinPlaying = playing;
   syncSpinLoop();
 }
@@ -163,7 +198,7 @@ function clearInitRetry(): void {
  */
 export function ensureMiniPositioned(): void {
   clearInitRetry();
-  if (miniPositioned.value) return;
+  if (miniPositioned.value || settings.mode == "docked") return;
   const win = uni.getWindowInfo();
   // 高度优先取 useQtLayout 的量测值（响应式、与整套分栏判定同口径），
   // getWindowInfo 只在量测未就绪时兜底。
@@ -209,8 +244,8 @@ export function ensureMiniPositioned(): void {
     // 静默：坐标存档解析失败走默认定位兜底，不影响悬浮球显示
   }
   const minX = layout.isWide ? qtRailWidth() + 8 : 0;
-  const maxX = Math.max(minX, winW - miniFabPx.value);
-  const maxY = Math.max(0, winH - miniFabPx.value);
+  const maxX = Math.max(minX, winW - miniCurrentWidth.value);
+  const maxY = Math.max(0, winH - layout.safeBottomPx - miniCurrentHeight.value);
   y = Math.max(0, Math.min(y, maxY));
   // 悬浮球始终吸附一侧；宽屏左侧避开 rail，右侧贴窗口右缘。
   miniEdgeSide.value = Math.abs(maxX - x) < Math.abs(x - minX) ? "right" : "left";
@@ -285,7 +320,7 @@ export function miniSnapToNearestEdge(): void {
   const distanceToRight = Math.abs(maxX - miniFabX.value);
   miniEdgeSide.value = distanceToRight < distanceToLeft ? "right" : "left";
   const targetX = miniEdgeSide.value == "right" ? maxX : minX;
-  const maxY = Math.max(0, win.windowHeight - miniCurrentHeight.value);
+  const maxY = Math.max(0, win.windowHeight - layout.safeBottomPx - miniCurrentHeight.value);
   miniFabY.value = Math.max(0, Math.min(miniFabY.value, maxY));
   miniEdgeAnimating.value = true;
   miniFabX.value = targetX;
@@ -303,6 +338,7 @@ export function miniSnapToNearestEdge(): void {
  * 横向展开同帧进行，避免「先瞬移到边缘再展开」。
  */
 export function miniExpandFromFab(): void {
+  if (settings.mode != "expandable") return;
   const win = uni.getWindowInfo();
   const minX = layout.isWide ? qtRailWidth() + 8 : 0;
   const maxFabX = Math.max(minX, win.windowWidth - miniFabPx.value);
@@ -312,7 +348,7 @@ export function miniExpandFromFab(): void {
   miniExpanded.value = true;
   miniEdgeAnimating.value = true;
   miniFabX.value = targetX;
-  miniFabY.value = Math.max(0, Math.min(miniFabY.value, win.windowHeight - miniCurrentHeight.value));
+  miniFabY.value = Math.max(0, Math.min(miniFabY.value, win.windowHeight - layout.safeBottomPx - miniCurrentHeight.value));
   miniAnimateToCurrentSize();
   clearEdgeTimer();
   edgeTimer = setTimeout(() => {
@@ -327,6 +363,7 @@ export function miniExpandFromFab(): void {
  * 直接切换回球会留下一个悬空位置。
  */
 export function miniCollapse(): void {
+  if (settings.mode != "expandable") return;
   if (!miniExpanded.value) return;
   const win = uni.getWindowInfo();
   const minX = layout.isWide ? qtRailWidth() + 8 : 0;
@@ -335,7 +372,7 @@ export function miniCollapse(): void {
   miniExpanded.value = false;
   miniFabX.value = miniEdgeSide.value == "right" ? maxX : minX;
   miniAnimateToCurrentSize();
-  miniFabY.value = Math.max(0, Math.min(miniFabY.value, win.windowHeight - miniFabPx.value));
+  miniFabY.value = Math.max(0, Math.min(miniFabY.value, win.windowHeight - layout.safeBottomPx - miniFabPx.value));
   clearEdgeTimer();
   edgeTimer = setTimeout(() => {
     miniEdgeAnimating.value = false;
@@ -356,19 +393,19 @@ export function onMiniWindowResize(): void {
     ensureMiniPositioned();
     return;
   }
-  if (miniExpanded.value) {
+  if (miniExpanded.value && settings.mode == "expandable") {
     miniCollapse();
     return;
   }
   const win = uni.getWindowInfo();
   const minX = layout.isWide ? qtRailWidth() + 8 : 0;
-  const maxX = Math.max(minX, win.windowWidth - miniFabPx.value);
+  const maxX = Math.max(minX, win.windowWidth - miniCurrentWidth.value);
   miniFabX.value = miniEdgeSide.value == "right" ? maxX : minX;
-  miniFabY.value = Math.max(0, Math.min(miniFabY.value, win.windowHeight - miniFabPx.value));
+  miniFabY.value = Math.max(0, Math.min(miniFabY.value, win.windowHeight - layout.safeBottomPx - miniCurrentHeight.value));
   persistPosition();
 }
 
-/** 窗口从窄变宽（进入宽屏）时由 v-if 直接卸载球；这里清掉悬着的动画状态 */
+/** All instances gone or mode changed: cancel unfinished size/edge animations. */
 export function onMiniPlayerHidden(): void {
   clearEdgeTimer();
   miniEdgeAnimating.value = false;
@@ -377,3 +414,21 @@ export function onMiniPlayerHidden(): void {
     sizeTimer = null;
   }
 }
+
+// Module lifetime: a watcher created inside the first component's setup/onMounted
+// would be disposed when that page unmounts, even if another instance survives.
+watch(() => settings.mode, () => {
+  onMiniPlayerHidden();
+  miniExpanded.value = settings.mode == "bar";
+  syncSpinLoop();
+  if (settings.mode == "docked") return;
+  if (mounts.size > 0) onMiniWindowResize();
+  miniSyncRenderSize();
+}, { immediate: true });
+
+watch(() => [layout.windowWidth, layout.windowHeight, layout.isWide, layout.safeBottomPx, qtMiniStripHeightPx()], () => {
+  syncSpinLoop();
+  if (mounts.size == 0 || settings.mode == "docked") return;
+  onMiniWindowResize();
+  miniSyncRenderSize();
+});

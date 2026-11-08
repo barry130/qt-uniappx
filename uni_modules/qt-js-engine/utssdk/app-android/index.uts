@@ -60,6 +60,8 @@ import FileInputStream from 'java.io.FileInputStream'
 import FileOutputStream from 'java.io.FileOutputStream'
 import GZIPInputStream from 'java.util.zip.GZIPInputStream'
 import Base64 from 'android.util.Base64'
+import Ed25519Signer from 'org.bouncycastle.crypto.signers.Ed25519Signer'
+import Ed25519PublicKeyParameters from 'org.bouncycastle.crypto.params.Ed25519PublicKeyParameters'
 import { UTSAndroid } from 'io.dcloud.uts'
 
 import {
@@ -1612,4 +1614,58 @@ export const spikeNativeTimer: QtJsSpikeNativeTimer = function (
 	} catch (e) {
 		deliverSpike(callback, '', errText(e))
 	}
+}
+
+
+/** 原生 Ed25519 验签，与音源 WebView 隔离。 */
+export function verifyPackSignature(content: string, signatureBase64: string, publicKeyHex: string, callback: QtJsEvalCallback): void {
+  // 大包 UTF-8 编码及曲线运算不阻塞 UI；结果仍经统一主线程桥回投。
+  new Thread(new VerifyPackTask(content, signatureBase64, publicKeyHex, callback)).start();
+}
+
+class VerifyPackTask implements Runnable {
+  private content: string;
+  private signature: string;
+  private publicKey: string;
+  private callback: QtJsEvalCallback;
+  constructor(content: string, signature: string, publicKey: string, callback: QtJsEvalCallback) {
+    this.content = content;
+    this.signature = signature;
+    this.publicKey = publicKey;
+    this.callback = callback;
+  }
+  override run(): void {
+    verifyPackSignatureNative(this.content, this.signature, this.publicKey, this.callback);
+  }
+}
+
+function verifyPackSignatureNative(content: string, signatureBase64: string, publicKeyHex: string, callback: QtJsEvalCallback): void {
+  try {
+    const encoded = publicKeyHex;
+    const bytes = new ByteArrayOutputStream();
+    for (let i = 0; i < encoded.length; i += 2) bytes.write(parseInt(encoded.substring(i, i + 2), 16).toInt());
+    const key = new Ed25519PublicKeyParameters(bytes.toByteArray(), 0);
+    const verifier = new Ed25519Signer();
+    verifier.init(false, key);
+    const payload = new ByteArrayOutputStream();
+    // UTF-8 与发布端 Buffer.from(text, 'utf8') 保持一致。
+    for (let i = 0; i < content.length; i++) {
+      let cp: number = content.charCodeAt(i) ?? 0xfffd;
+      if (cp >= 0xd800 && cp <= 0xdbff && i + 1 < content.length) {
+        const low: number = content.charCodeAt(i + 1) ?? 0;
+        if (low >= 0xdc00 && low <= 0xdfff) { cp = (cp - 0xd800) * 1024 + low - 0xdc00 + 0x10000; i++; }
+      }
+      if (cp >= 0xd800 && cp <= 0xdfff) cp = 0xfffd;
+      if (cp < 0x80) payload.write(cp.toInt());
+      else if (cp < 0x800) { payload.write((0xc0 | (cp >> 6)).toInt()); payload.write((0x80 | (cp & 63)).toInt()); }
+      else if (cp < 0x10000) { payload.write((0xe0 | (cp >> 12)).toInt()); payload.write((0x80 | ((cp >> 6) & 63)).toInt()); payload.write((0x80 | (cp & 63)).toInt()); }
+      else { payload.write((0xf0 | (cp >> 18)).toInt()); payload.write((0x80 | ((cp >> 12) & 63)).toInt()); payload.write((0x80 | ((cp >> 6) & 63)).toInt()); payload.write((0x80 | (cp & 63)).toInt()); }
+    }
+    const message = payload.toByteArray();
+    verifier.update(message, 0, message.size);
+    const valid = verifier.verifySignature(Base64.decode(signatureBase64, Base64.DEFAULT));
+    deliverEval(callback, true, valid ? "ok" : "bad", "");
+  } catch (e) {
+    deliverEval(callback, false, "", "原生 Ed25519 验签不可用：" + e);
+  }
 }

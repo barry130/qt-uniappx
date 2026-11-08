@@ -13,6 +13,7 @@ export function useQtSelectionReveal(
   visible: () => boolean,
   selectedIndex: () => number,
   contentKey: () => string,
+  shouldReveal: (index: number) => boolean = (_index: number): boolean => true,
 ): QtSelectionReveal {
   nextScope += 1;
   const prefix = "qt-selection-" + nextScope + "-";
@@ -40,7 +41,8 @@ export function useQtSelectionReveal(
       timer = setTimeout(() => {
         if (disposed || token != generation || !visible()) return;
         timer = 0;
-        anchor.value = target;
+        // 有明确行内尺寸的宿主可跳过已完整可见项，避免进入页面后标签突然左移。
+        if (shouldReveal(selectedIndex())) anchor.value = target;
       }, 32) as number;
     });
   }

@@ -6,9 +6,9 @@
         <view class="head-row">
           <view class="head-info">
             <text class="head-title" :class="layout.isWide ? 'head-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(32, 16)">均衡器</text>
-            <text class="head-sub" :class="layout.isWide ? 'head-sub-wide' : ''" max-lines="2" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 12)">五段音效调节，对所有播放声音即时生效</text>
+            <text class="head-sub" :class="layout.isWide ? 'head-sub-wide' : ''" max-lines="2" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 12)">{{ effectsSupported ? "五段音效调节，对所有播放声音即时生效" : "当前平台暂不支持均衡器" }}</text>
           </view>
-          <QtSwitch :model-value="enabled" @change="toggleEnabled" />
+          <QtSwitch :disabled="!effectsSupported" :model-value="effectsSupported && enabled" @change="toggleEnabled" />
         </view>
       </view>
 
@@ -32,6 +32,7 @@
             :max="12"
             :step="1"
             :value="bands[i]"
+            :disabled="!effectsSupported"
             :block-size="layout.isWide ? 22 : qtRpx(44)"
             track-class="eq-track"
             track-active-class="eq-track-active"
@@ -54,8 +55,9 @@ import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layou
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
-import { audioPlayer } from "@/services/audio-player.uts";
+import { audioPlayer, audioCapabilities } from "@/services/audio-player.uts";
 
+const effectsSupported = audioCapabilities().equalizer;
 const layout = useQtLayout();
 const themeStore = useThemeStore();
 
@@ -109,6 +111,7 @@ function commit(): void {
 }
 
 function applyPreset(idx: number): void {
+  if (!effectsSupported) return;
   const pb = presetBands[idx];
   const next: number[] = [pb[0], pb[1], pb[2], pb[3], pb[4]];
   bands.value = next;
@@ -125,6 +128,7 @@ function onBandChange(i: number, e: UniSliderChangeEvent): void {
 }
 
 function toggleEnabled(): void {
+  if (!effectsSupported) return;
   const on = !enabled.value;
   enabled.value = on;
   audioPlayer.setEqualizerEnabled(on);

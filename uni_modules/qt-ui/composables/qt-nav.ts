@@ -8,15 +8,13 @@
  * 形态、关不掉它 —— 真机屏录实测见 qt-wide-workspace.ts 注释。就地托管是同
  * Activity、同帧换内容 ⇒ 没有起始窗。
  *
- * 普通页面跳转**一律不传 `animationType`**（走框架默认动画）。曾试过显式传值
- * （宽屏 none 瞬切 / 窄屏 auto），真机反馈「每次点击都黑屏闪一下」：none 会让
- * 起始窗整窗裸闪（深色系统下就是黑屏），显式 auto 与「不传」在运行时的等价性
- * 也无法保证 —— 全部回退到不传，与引入前的真机表现逐字节一致。宽屏导航时
- * rail 会跟着页面动画短暂移动，这是默认动画的固有形态，接受它。
+ * 普通页面进入与返回由 App 启动时安装的 qt-navigation-motion 统一设为 none，
+ * 横竖屏均不再横滑。业务直调 uni.navigateTo / navigateBack 也遵循相同策略。
+ * 原生新页面仍需要创建和加载；关闭动画不代表消除首次渲染等待。
  *
  * 平台事实（uni-app x 文档 api/navigator.md）：`animationType` 自 Android 4.18 起
- * 支持，合法值含 `none`；`animationDuration` 在 Android 不支持。pages.json 里的
- * `animationType` 在 Android 也不支持，只能在调用点传。
+ * 支持，合法值含 `none`；`animationDuration` 在 Android 不支持。
+ * 通过 API 拦截器设置动画，不依赖不同平台对 pages.json 动画配置的支持差异。
  */
 import { qtLayout } from "./use-qt-layout";
 import { qtTopRoute } from "./qt-page-chrome";
@@ -25,7 +23,51 @@ import {
   qtCloseWideTool,
   qtIsWideToolHost,
   qtWideWorkspaceRefresh,
+  qtWideWorkspace,
 } from "./qt-wide-workspace";
+
+type QtNavIntent = { url: string; tab: boolean };
+let activeIntent: QtNavIntent | null = null;
+let queuedIntent: QtNavIntent | null = null;
+let navSequence = 0;
+let navWatchdog = 0;
+
+/** 原生导航一次只发一条；过渡期间只保留最后一次点击，不逐条回放。 */
+function requestNavigation(url: string, tab: boolean): void {
+  const intent: QtNavIntent = { url: url, tab: tab };
+  if (activeIntent != null) {
+    // 又点回正在前往的目的地，相当于撤销等待中的另一目的地，无需再发一遍。
+    queuedIntent = activeIntent.url == url && activeIntent.tab == tab ? null : intent;
+    return;
+  }
+  activeIntent = intent;
+  const sequence = ++navSequence;
+  // 只解除缺失回执的锁，不定时重跳旧目的地。迟到回执由序号隔离。
+  navWatchdog = setTimeout(() => { finishNavigation(sequence); }, 2000) as number;
+  if (tab) switchTabNow(url, sequence);
+  else navigateToolNow(url, sequence);
+}
+
+function navigationCurrent(sequence: number): boolean {
+  return activeIntent != null && sequence == navSequence;
+}
+
+function navigationSuperseded(sequence: number): boolean {
+  if (!navigationCurrent(sequence)) return true;
+  const active = activeIntent;
+  const queued = queuedIntent;
+  return active != null && queued != null && (active.url != queued.url || active.tab != queued.tab);
+}
+
+function finishNavigation(sequence: number): void {
+  if (!navigationCurrent(sequence)) return;
+  clearTimeout(navWatchdog);
+  navWatchdog = 0;
+  activeIntent = null;
+  const next = queuedIntent;
+  queuedIntent = null;
+  if (next != null) requestNavigation(next.url, next.tab);
+}
 
 /**
  * 切换底部导航页（发现 / 我的）的唯一入口。
@@ -44,14 +86,44 @@ import {
  * 已经吞掉这个错误，不用改。
  */
 export function qtSwitchTab(url: string): void {
+  requestNavigation(url, true);
+}
+
+function switchTabNow(url: string, sequence: number): void {
+  const workspace = qtWideWorkspace();
+  const paneSequence = workspace.openSeq;
+  const paneRoute = workspace.route;
+  const origin = qtTopRoute();
+  const closePane = (): void => {
+    // 不能让旧回执卸载此后新开的工具页（包括同路由的新实例）。
+    if (workspace.openSeq == paneSequence && workspace.route == paneRoute) qtCloseWideTool();
+    qtWideWorkspaceRefresh();
+  };
+  const success = (): void => {
+    if (!navigationCurrent(sequence)) return;
+    closePane();
+    finishNavigation(sequence);
+  };
+  const failed = (): void => { finishNavigation(sequence); };
+  if (origin == url) {
+    success();
+    return;
+  }
+  // 保留旧内容直到目标 tab 成功，不先 navigateBack 到另一个宿主页。
   // #ifdef APP-HARMONY
-  uni.reLaunch({ url: url });
+  uni.reLaunch({ url: url, success: success, fail: failed });
   // #endif
   // #ifndef APP-HARMONY
   uni.switchTab({
     url: url,
+    success: success,
     fail: (_: any) => {
-      uni.reLaunch({ url: url });
+      if (!navigationCurrent(sequence)) return;
+      if (navigationSuperseded(sequence) || qtTopRoute() != origin) {
+        finishNavigation(sequence);
+        return;
+      }
+      uni.reLaunch({ url: url, success: success, fail: failed });
     },
   });
   // #endif
@@ -70,7 +142,7 @@ export function qtSwitchTab(url: string): void {
  *      真机已实测否决（见 qt-wide-workspace.ts 头注释）；这条兜底路径在正常
  *      使用中几乎不会走到，宁可接受一次性的整窗瞬切。
  *
- * 窄屏完全按原样：直接 `navigateTo`（默认横滑）。
+ * 窄屏直接 `navigateTo`，同样由全局动画策略设为无动画。
  */
 function qtStackRouteAt(index: number): string {
   try {
@@ -98,10 +170,15 @@ function qtStackRouteIndex(url: string): number {
 }
 
 export function qtRailNavigate(url: string): void {
+  requestNavigation(url, false);
+}
+
+function navigateToolNow(url: string, sequence: number): void {
+  const done = (): void => { finishNavigation(sequence); };
   const current = qtTopRoute();
-  if (current == url) return;
+  if (current == url) { done(); return; }
   // 宽屏首选：就地托管进栈顶的宿主 tab 页（同 Activity、同帧换内容 ⇒ 无起始窗白帧）
-  if (qtOpenWideTool(url)) return;
+  if (qtOpenWideTool(url)) { done(); return; }
   const pages = qtPageStackDepthSafe();
   // 栈顶不是宿主页、但栈里还有宿主 tab 页：先退回宿主页再托管。
   if (qtLayout().isWide) {
@@ -118,11 +195,14 @@ export function qtRailNavigate(url: string): void {
         delta: pages - 1 - hostAt,
         animationType: "none",
         success: () => {
+          if (!navigationCurrent(sequence)) return;
+          if (navigationSuperseded(sequence)) { done(); return; }
           // 托管仍不成立（栈时序异常）时退回原生导航，别让这次点击落空
           if (!qtOpenWideTool(target)) {
-            uni.navigateTo({ url: target });
-          }
+            uni.navigateTo({ url: target, success: done, fail: done });
+          } else done();
         },
+        fail: done,
       });
       return;
     }
@@ -130,88 +210,21 @@ export function qtRailNavigate(url: string): void {
   const existing = qtStackRouteIndex(url);
   if (existing >= 0 && existing < pages - 1) {
     // 目标页仍在栈内：直接回到已挂载的原生视图，不创建/销毁目标页。
-    uni.navigateBack({ delta: pages - 1 - existing });
+    uni.navigateBack({ delta: pages - 1 - existing, success: done, fail: done });
     return;
   }
-  uni.navigateTo({ url: url });
+  uni.navigateTo({ url: url, success: done, fail: done });
 }
 
 /**
- * 宽屏 rail 切换「发现 / 我的」前先关掉就地托管的工具页，再一次性回收工具工作路径。
- *
- * 工具页为避免闪动会短暂保留在栈中（就地托管后基本不再产生这类页面，但深链/旧路径
- * 可能留下）；直接 `switchTab` 时 Android 会逐个关闭这些 UniPageActivity，用户会看到
- * 一串回退。这里以 `navigateBack(delta)` + `none` 一次回到已挂载的 tab 根页，再切换
- * 目标 tab，既不会逐页回放，也不会让工具工作路径长期滞留。
+ * 侧栏与竖屏底栏共用同一切换事务。switchTab 自己回收非 tab 页；先回根再切 tab
+ * 会把无关宿主页作为 B→C→A 的中间帧露出来。托管 pane 只在目标 tab 成功后关闭。
  */
 export function qtRailSwitchTab(url: string): void {
-  // 就地托管的工具页不在页面栈里，也没法被 switchTab 关掉 —— 先关覆盖层
-  const wasHosted = qtCloseWideTool();
-  if (qtTopRoute() == url) {
-    qtWideWorkspaceRefresh();
-    return;
-  }
-  // 2026-10-25 真机（MuMu）实测两件事：
-  //  1) 关闭覆盖层（visibility 翻转）与 uni.switchTab 同一 tick 发起时，switchTab
-  //     会被偶发吞掉（「经常没有反应」，竞态）——所以不能先关再立刻切；
-  //  2) 先关覆盖层再延迟切 tab（上一版 60ms 方案）会先露出宿主页一瞬
-  //     （「从搜索页点我的，先闪一下发现页」）。
-  // 正确顺序：覆盖层保持盖着（不露宿主页），先 switchTab，成功后再关；
-  // 另加 300ms 兜底强制关，switchTab 被吞时弹层也不会卡死。
-  if (wasHosted) {
-    // 关覆盖层时必须同时 qtWideWorkspaceRefresh()：覆盖层可见性 computed 里读的
-    // qtTopRoute()（getCurrentPages）不是响应式，切 tab 后栈变了但两个宿主的
-    // 覆盖层都不会自动重估 —— 旧宿主那条会整块漏在新 tab 上（真机实测
-    // 「我的页面和搜索页面叠在一起」）。refresh 强制两边立即重算。
-    const close = () => {
-      qtCloseWideTool();
-      qtWideWorkspaceRefresh();
-    };
-    // #ifdef APP-HARMONY
-    close();
-    uni.reLaunch({ url: url });
-    // #endif
-    // #ifndef APP-HARMONY
-    uni.switchTab({
-      url: url,
-      success: () => { close(); },
-      fail: (e) => {
-        close();
-        uni.reLaunch({ url: url });
-      },
-    });
-    // 兜底（300ms）：switchTab 被吞时 success 不来 —— 关掉覆盖层并再试一次，
-    // 退化成「短暂露出宿主页后切换」，好过卡在工具页没反应。
-    setTimeout(() => {
-      if (qtTopRoute() != url) {
-        close();
-        qtSwitchTab(url);
-      } else {
-        close();
-      }
-    }, 300);
-    // #endif
-    return;
-  }
-  const pages = qtPageStackDepthSafe();
-  if (!qtLayout().isWide || pages <= 1) {
-    qtSwitchTab(url);
-    return;
-  }
-  uni.navigateBack({
-    delta: pages - 1,
-    animationType: "none",
-    success: () => {
-      if (qtTopRoute() != url) qtSwitchTab(url);
-    },
-    fail: () => {
-      // 非标准栈（例如深链）降级到运行时原生 tab 跳转。
-      qtSwitchTab(url);
-    },
-  });
+  qtSwitchTab(url);
 }
 
-/** 返回上一页：宽屏同样去掉滑动动画 */
+/** 返回上一页：全局策略统一去掉横竖屏的滑动动画。 */
 export function qtNavigateBack(): void {
   if (qtPageStackDepthSafe() > 1) {
     uni.navigateBack();

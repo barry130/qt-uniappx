@@ -4,31 +4,31 @@
        避免「下一首」串到音乐）。本页负责：订阅地址输入、订阅/刷新/移除、单集列表、断点续播。 -->
   <qt-page-frame width-kind="list" :max-width="720" title="播客">
     <view class="page" :class="layout.isWide ? 'page-wide' : ''">
-      <list-view id="podcast-scroll" class="scroll" direction="vertical" :scroll-top="scrollTop" @scroll="onListScroll">
+      <list-view id="podcast-scroll" class="scroll" direction="vertical" :scroll-top="scrollTop" @scroll="onListScroll" @scrolltolower="loadMoreEpisodes">
         <!-- 订阅区：窄屏标题栏已有「播客」，宽屏时这张卡是主操作区 -->
-        <list-item class="hero-item">
-          <view class="hero" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
+        <list-item class="hero-item" :class="layout.isWide ? 'hero-item-wide' : ''">
+          <view class="hero" :class="layout.isWide ? 'hero-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
             <view class="hero-title-row">
               <QtIcon name="mic" :size="layout.isWide ? 20 : 40" :color="themeStore.skin.accent" />
-              <text class="hero-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(36, 22)">播客</text>
+              <text class="hero-title" :class="layout.isWide ? 'hero-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(36, 22)">播客</text>
             </view>
-            <text class="hero-desc" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(25, 14)">
+            <text class="hero-desc" :class="layout.isWide ? 'hero-desc-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(25, 14)">
               粘贴 RSS / Atom 订阅地址就能听：边播边缓存，退出再进来接着上次的位置。
             </text>
-            <view class="sub-row">
-              <view class="sub-field" :style="subFieldStyle">
+            <view class="sub-row" :class="layout.isWide ? 'sub-row-wide' : ''">
+              <view class="sub-field" :class="layout.isWide ? 'sub-field-wide' : ''" :style="subFieldStyle">
                 <QtIcon name="globe" :size="layout.isWide ? 12 : 24" :color="themeStore.skin.textMuted" />
                 <input
-                  class="sub-input"
+                  class="sub-input" :class="layout.isWide ? 'sub-input-wide' : ''"
                   :value="urlInput"
                   @input="onUrlInput"
                   @confirm="onSubscribeTap"
                   placeholder="https://example.com/feed.xml"
-                  :placeholder-class="layout.isWide ? 'sub-ph-wide' : 'sub-ph'"
-                  :style="'color:' + themeStore.skin.text + ';'"
+                  :placeholder-style="'color:' + themeStore.skin.placeholder + ';' + subscriptionFont"
+                  :style="'color:' + themeStore.skin.text + ';' + subscriptionFont"
                 />
               </view>
-              <view class="sub-btn" :style="subscribeStyle" @click="onSubscribeTap">
+              <view class="sub-btn" :class="layout.isWide ? 'sub-btn-wide' : ''" :style="subscribeStyle" @click="onSubscribeTap">
                 <text class="sub-btn-text" :style="'color:' + (busy ? themeStore.skin.textMuted : themeStore.skin.onAccent) + ';' + qtFontDual(25, 14)">{{ busy ? "订阅中…" : "订阅" }}</text>
               </view>
             </view>
@@ -36,65 +36,65 @@
         </list-item>
 
         <!-- 提示条：失败原因（服务层原文）与操作结果都不打断收听 -->
-        <list-item v-if="errorMsg.length > 0" class="notice-item">
-          <view class="notice" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'">
+        <list-item v-if="errorMsg.length > 0" class="notice-item" :class="layout.isWide ? 'notice-item-wide' : ''">
+          <view class="notice" :class="layout.isWide ? 'notice-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'">
             <QtIcon name="alert" :size="layout.isWide ? 14 : 26" :color="themeStore.skin.danger" />
-            <text class="notice-text" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(23, 13)">{{ errorMsg }}</text>
+            <text class="notice-text" :class="layout.isWide ? 'notice-text-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(23, 13)">{{ errorMsg }}</text>
           </view>
         </list-item>
-        <list-item v-if="noticeMsg.length > 0 && errorMsg.length == 0" class="notice-item">
-          <view class="notice" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'">
+        <list-item v-if="noticeMsg.length > 0 && errorMsg.length == 0" class="notice-item" :class="layout.isWide ? 'notice-item-wide' : ''">
+          <view class="notice" :class="layout.isWide ? 'notice-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'">
             <QtIcon name="info" :size="layout.isWide ? 14 : 26" :color="themeStore.skin.textMuted" />
-            <text class="notice-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 13)">{{ noticeMsg }}</text>
+            <text class="notice-text" :class="layout.isWide ? 'notice-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 13)">{{ noticeMsg }}</text>
           </view>
         </list-item>
 
         <!-- 订阅列表：一行一个订阅，点一下切换下面的单集列表 -->
-        <list-item v-if="shows.length > 0" class="sec-head">
+        <list-item v-if="shows.length > 0" class="sec-head" :class="layout.isWide ? 'sec-head-wide' : ''">
           <text class="sec-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 16)">我的订阅</text>
-          <text class="sec-sub" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(22, 12)">{{ shows.length }} 个 · 点一下切换</text>
+          <text class="sec-sub" :class="layout.isWide ? 'sec-sub-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(22, 12)">{{ shows.length }} 个 · 点一下切换</text>
         </list-item>
-        <list-item v-for="(show, si) in shows" :key="'ps-' + si" class="show-item">
-          <view class="show" :style="showRowStyle(show.id)" @click="onSelectTap(show.id)">
-            <image v-if="show.image.length > 0" class="show-cover" :src="show.image" mode="aspectFill" />
-            <view v-else class="show-cover show-cover-ph" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'">
+        <list-item v-for="show in shows" :key="show.id" class="show-item" :class="layout.isWide ? 'show-item-wide' : ''">
+          <view class="show" :class="layout.isWide ? 'show-wide' : ''" :style="showRowStyle(show.id)" @click="onSelectTap(show.id)">
+            <image v-if="show.image.length > 0" class="show-cover" :class="layout.isWide ? 'show-cover-wide' : ''" :src="show.image" mode="aspectFill" />
+            <view v-else class="show-cover show-cover-ph" :class="layout.isWide ? 'show-cover-wide' : ''" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'">
               <QtIcon name="mic" :size="layout.isWide ? 14 : 28" :color="themeStore.skin.textSubtle" />
             </view>
-            <view class="show-info">
+            <view class="show-info" :class="layout.isWide ? 'show-info-wide' : ''">
               <text class="show-name" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 16)" :max-lines="1">{{ show.title }}</text>
-              <text class="show-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)" :max-lines="1">{{ showMeta(show) }}</text>
+              <text class="show-meta" :class="layout.isWide ? 'show-meta-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)" :max-lines="1">{{ showMeta(show) }}</text>
             </view>
-            <view class="show-act" :style="ghostBtnStyle" @click.stop="onRefreshTap(show.id)">
+            <view class="show-act" :class="layout.isWide ? 'show-act-wide' : ''" :style="ghostBtnStyle" @click.stop="onRefreshTap(show.id)">
               <QtIcon name="refresh" :size="layout.isWide ? 13 : 24" :color="refreshingId == show.id ? themeStore.skin.accent : themeStore.skin.iconMuted" />
             </view>
-            <view class="show-act" :style="ghostBtnStyle" @click.stop="onRemoveTap(show.id)">
+            <view class="show-act" :class="layout.isWide ? 'show-act-wide' : ''" :style="ghostBtnStyle" @click.stop="onRemoveTap(show.id)">
               <QtIcon name="trash" :size="layout.isWide ? 13 : 24" :color="themeStore.skin.danger" />
             </view>
           </view>
         </list-item>
 
         <!-- 空态：还没订阅 -->
-        <list-item v-if="shows.length == 0 && !busy" class="empty-item">
-          <view class="empty">
+        <list-item v-if="shows.length == 0 && !busy && !initialLoading" class="empty-item" :class="layout.isWide ? 'empty-item-wide' : ''">
+          <view class="empty" :class="layout.isWide ? 'empty-wide' : ''">
             <QtIcon name="mic" :size="layout.isWide ? 22 : 46" :color="themeStore.skin.textSubtle" />
-            <text class="empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(24, 13)">还没有订阅任何播客：把常听节目的订阅地址贴到上面</text>
+            <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(24, 13)">还没有订阅任何播客：把常听节目的订阅地址贴到上面</text>
           </view>
         </list-item>
 
         <!-- 选中订阅：标题 + 简介 + 元信息 -->
-        <list-item v-if="hasSelection" class="detail-item">
-          <view class="detail" :style="'background-color:' + themeStore.skin.surfaceStrong + ';border-color:' + themeStore.skin.border + ';'">
+        <list-item v-if="hasSelection" class="detail-item" :class="layout.isWide ? 'detail-item-wide' : ''">
+          <view class="detail" :class="layout.isWide ? 'detail-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
             <text class="detail-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(32, 18)">{{ selectedTitle }}</text>
-            <text v-if="selectedDesc.length > 0" class="detail-desc" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 13)" :max-lines="4">{{ selectedDesc }}</text>
-            <text class="detail-meta" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(22, 12)" :max-lines="1">{{ selectedMeta }}</text>
+            <text v-if="selectedDesc.length > 0" class="detail-desc" :class="layout.isWide ? 'detail-desc-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 13)" :max-lines="4">{{ selectedDesc }}</text>
+            <text class="detail-meta" :class="layout.isWide ? 'detail-meta-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(22, 12)" :max-lines="1">{{ selectedMeta }}</text>
           </view>
         </list-item>
 
         <!-- 单集列表 -->
-        <list-item v-for="(ep, ei) in episodes" :key="'pe-' + ei" class="ep-item">
-          <view class="ep" :style="epRowStyle(ep)">
+        <list-item v-for="ep in visibleEpisodes" :key="ep.id" class="ep-item" :class="layout.isWide ? 'ep-item-wide' : ''">
+          <view class="ep" :class="layout.isWide ? 'ep-wide' : ''" :style="epRowStyle(ep)">
             <view
-              class="ep-play"
+              class="ep-play" :class="layout.isWide ? 'ep-play-wide' : ''"
               :style="'background-color:' + (isCurrentEpisode(ep) ? themeStore.skin.accent : themeStore.skin.surfaceMuted) + ';border-color:' + themeStore.skin.border + ';'"
               @click="onPlayTap(ep)"
             >
@@ -104,19 +104,23 @@
                 :color="isCurrentEpisode(ep) ? themeStore.skin.onAccent : themeStore.skin.iconMuted"
               />
             </view>
-            <view class="ep-info" @click="onPlayTap(ep)">
+            <view class="ep-info" :class="layout.isWide ? 'ep-info-wide' : ''" @click="onPlayTap(ep)">
               <text class="ep-name" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(27, 15)" :max-lines="2">{{ ep.title }}</text>
-              <text class="ep-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)" :max-lines="1">{{ episodeMeta(ep) }}</text>
+              <text class="ep-meta" :class="layout.isWide ? 'ep-meta-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)" :max-lines="1">{{ episodeMeta(ep) }}</text>
             </view>
-            <text v-if="isCurrentEpisode(ep)" class="ep-flag" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(21, 11)">{{ player.playing ? "播放中" : "已暂停" }}</text>
+            <text v-if="isCurrentEpisode(ep)" class="ep-flag" :class="layout.isWide ? 'ep-flag-wide' : ''" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(21, 11)">{{ player.playing ? "播放中" : "已暂停" }}</text>
           </view>
         </list-item>
 
+        <list-item v-if="hasMoreEpisodes" class="ep-item" :class="layout.isWide ? 'ep-item-wide' : ''">
+          <QtButton label="加载更多单集" variant="ghost" size="sm" @click="loadMoreEpisodes" />
+        </list-item>
+
         <!-- 选中了订阅但一集都没有（订阅源里没东西） -->
-        <list-item v-if="hasSelection && episodes.length == 0" class="empty-item">
-          <view class="empty">
+        <list-item v-if="hasSelection && episodes.length == 0" class="empty-item" :class="layout.isWide ? 'empty-item-wide' : ''">
+          <view class="empty" :class="layout.isWide ? 'empty-wide' : ''">
             <QtIcon name="info" :size="layout.isWide ? 20 : 40" :color="themeStore.skin.textSubtle" />
-            <text class="empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(24, 13)">这个订阅还没有单集，点右上角的刷新试试</text>
+            <text class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(24, 13)">这个订阅还没有单集，点右上角的刷新试试</text>
           </view>
         </list-item>
 
@@ -128,7 +132,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { ref, shallowRef, computed, onMounted, onUnmounted, watch } from "vue";
 import type { Song } from "@/types/music";
 import {
   PODCAST_PLATFORM,
@@ -145,6 +149,7 @@ import { usePlayerStore } from "@/stores/player";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
@@ -153,6 +158,8 @@ import { qtShowToast } from "@/services/toast";
 
 /** 进度落盘间隔（qt-pc 同款 5s）：太密会一直写盘，太疏则崩溃/被杀时丢太多 */
 const SAVE_INTERVAL_MS = 5000;
+/** The input and its placeholder use one responsive, globally scaled font source. */
+const subscriptionFont = computed((): string => qtFontDual(25, 14));
 /** 心跳里真正写盘的最小位移：一集 300 条单集的 JSON 每 5s 重写一次太浪费，
  *  位置没走出 15s 就先只在内存里记着，暂停/切集/离开页面时再落盘 */
 const PROGRESS_WRITE_MIN_MS = 15000;
@@ -160,13 +167,21 @@ const PROGRESS_WRITE_MIN_MS = 15000;
 const FINISH_RATIO = 0.95;
 /** 进度条位置与原目标相差多少秒以内就不再 seek（省得每次进页面都抖一下） */
 const SEEK_TOLERANCE_SEC = 3;
+/** 进入页面时自动补拉的最小间隔：15 分钟内拉过的订阅不再重复拉
+ *  （喜马拉雅这类大源一次 2.6MB，每次进页面都拉太费流量） */
+const AUTO_REFRESH_MIN_INTERVAL_MS = 15 * 60 * 1000;
+const EPISODE_BATCH_SIZE = 24;
 
 const player = usePlayerStore();
 const themeStore = useThemeStore();
 const layout = useQtLayout();
 
 const shows = ref<PodcastShow[]>([]);
-const episodes = ref<PodcastEpisode[]>([]);
+const episodes = shallowRef<PodcastEpisode[]>([]);
+const episodeLimit = ref(EPISODE_BATCH_SIZE);
+const visibleEpisodes = computed((): PodcastEpisode[] => episodes.value.slice(0, episodeLimit.value));
+const hasMoreEpisodes = computed((): boolean => episodeLimit.value < episodes.value.length);
+const initialLoading = ref(true);
 const selectedId = ref("");
 const urlInput = ref("");
 const busy = ref(false);
@@ -190,6 +205,10 @@ let pendingSeekSec = 0;
 let trackedUrl = "";
 let trackedSec = 0;
 let saveTimer: number | null = null;
+let loadTimer: number | null = null;
+let autoRefreshTimer: number | null = null;
+let disposed = false;
+let lookedUpUrl = "";
 
 const currentUrl = computed((): string => {
   const song = player.current;
@@ -296,35 +315,72 @@ function findShow(showId: string): PodcastShow | null {
   return null;
 }
 
-/** 把所有订阅的单集都塞进索引（跨订阅进度要靠它按播放地址找回那一集） */
-function indexAllEpisodes(): void {
-  epByUrl.clear();
-  const list = shows.value;
+/** 只在需要保存播客进度且索引未命中时查找，普通音乐/首次进页不读其他订阅。
+ * album 是创建播客 Song 时的节目名，优先查它；旧名字或同名节目仍按 URL 兜底。 */
+function findTrackedEpisode(): PodcastEpisode | null {
+  const indexed = epByUrl.get(trackedUrl);
+  if (indexed != null) return findShow(indexed.showId) == null ? null : indexed;
+  if (trackedUrl.length == 0 || lookedUpUrl == trackedUrl) return null;
+  lookedUpUrl = trackedUrl;
+  const song = player.current;
+  const album = song != null && song.id == trackedUrl ? song.album : "";
+  const preferred = shows.value.filter((show: PodcastShow): boolean => show.title == album);
+  const rest = shows.value.filter((show: PodcastShow): boolean => show.title != album);
+  const list = preferred.concat(rest);
   for (let i = 0; i < list.length; i++) {
     const eps = listPodcastEpisodes(list[i].id);
     for (let j = 0; j < eps.length; j++) {
-      epByUrl.set(eps[j].audioUrl, eps[j]);
+      if (eps[j].audioUrl == trackedUrl) {
+        epByUrl.set(trackedUrl, eps[j]);
+        return eps[j];
+      }
     }
   }
+  return null;
 }
 
 /**
  * 选一个订阅：单集列表整份换掉，并让索引指向这一批对象
  * （这样进度改动直接落在当前渲染的那几个对象上，列表能立刻刷新）。
+ * 选完如果数据已经陈旧，就在后台静默补拉一次最新单集。
  */
 function selectShow(showId: string): void {
+  const changed = selectedId.value != showId;
   selectedId.value = showId;
   const list = listPodcastEpisodes(showId);
   episodes.value = list;
+  if (changed) episodeLimit.value = EPISODE_BATCH_SIZE;
   for (let i = 0; i < list.length; i++) {
     epByUrl.set(list[i].audioUrl, list[i]);
   }
+  // 网络解析也让开首屏；快速切走时不再为已卸载页面启动刷新。
+  if (autoRefreshTimer != null) clearTimeout(autoRefreshTimer);
+  autoRefreshTimer = setTimeout(() => {
+    autoRefreshTimer = null;
+    if (!disposed && selectedId.value == showId) autoRefreshIfStale(showId);
+  }, 350);
+}
+
+/**
+ * 进入页面/切换订阅时的静默补拉：用户先看到存储里的快照（即时可交互），
+ * 拉取完成后列表自动换成最新单集——不点那个小刷新按钮也能拿到最新内容。
+ * 失败不打断（弱网下页面刚打开报错很吓人）；手动刷新按钮仍然可用并展示原因。
+ */
+function autoRefreshIfStale(showId: string): void {
+  if (refreshingId.value.length > 0) return;
+  const show = findShow(showId);
+  if (show == null) return;
+  // lastFetchedAt 由 add/refresh 服务层维护；15 分钟内拉过就算新鲜
+  if (show.lastFetchedAt > 0 && Date.now() - show.lastFetchedAt < AUTO_REFRESH_MIN_INTERVAL_MS) {
+    return;
+  }
+  void refreshShow(showId, true);
 }
 
 /** 重新读订阅列表；`preferId` 是刚订阅/刚刷新的那条，优先选中它 */
 function loadShows(preferId: string = ""): void {
   shows.value = listPodcastShows();
-  indexAllEpisodes();
+  lookedUpUrl = "";
   if (shows.value.length == 0) {
     selectedId.value = "";
     episodes.value = [];
@@ -333,6 +389,11 @@ function loadShows(preferId: string = ""): void {
   const wanted = preferId.length > 0 ? preferId : selectedId.value;
   const target = findShow(wanted) != null ? wanted : shows.value[0].id;
   selectShow(target);
+}
+
+function loadMoreEpisodes(): void {
+  if (disposed || !hasMoreEpisodes.value) return;
+  episodeLimit.value = Math.min(episodes.value.length, episodeLimit.value + EPISODE_BATCH_SIZE);
 }
 
 function onListScroll(e: any): void {
@@ -370,14 +431,15 @@ async function subscribe(): Promise<void> {
   noticeMsg.value = "";
   try {
     const show = await addPodcastShow(address);
+    if (disposed) return;
     urlInput.value = "";
     noticeMsg.value = "已订阅「" + show.title + "」，共 " + show.episodeCount.toString() + " 集";
     loadShows(show.id);
   } catch (e) {
     // 失败原因（HTTP 码、不是 RSS、没找到频道标题……）由服务层给出，原样展示
-    errorMsg.value = (e as Error).message || "订阅失败";
+    if (!disposed) errorMsg.value = (e as Error).message || "订阅失败";
   } finally {
-    busy.value = false;
+    if (!disposed) busy.value = false;
   }
 }
 
@@ -385,22 +447,36 @@ function onRefreshTap(showId: string): void {
   void refreshShow(showId);
 }
 
-async function refreshShow(showId: string): Promise<void> {
+/**
+ * 刷新某个订阅。`silent=true`（自动补拉）时不改提示条：成功只是安静地
+ * 换列表，失败也不打断用户（页面刚打开弱网报错很吓人）；
+ * 手动刷新（silent=false）成功/失败都提示，原因原样展示。
+ */
+async function refreshShow(showId: string, silent: boolean = false): Promise<void> {
   if (refreshingId.value.length > 0) return;
   const show = findShow(showId);
   if (show == null) return;
   refreshingId.value = showId;
-  errorMsg.value = "";
-  noticeMsg.value = "";
+  if (!silent) {
+    errorMsg.value = "";
+    noticeMsg.value = "";
+  }
   try {
     const next = await refreshPodcastShow(showId);
+    if (disposed) return;
     // 刷新会换掉 shows 数组里的对象，但 played/positionMs 由服务层按 id 保留下来
-    noticeMsg.value = "「" + next.title + "」已更新，共 " + next.episodeCount.toString() + " 集";
-    loadShows(showId);
+    if (!silent) {
+      noticeMsg.value = "「" + next.title + "」已更新，共 " + next.episodeCount.toString() + " 集";
+    }
+    // 请求期间用户可能已经切到另一档节目，刷新完成不能抢回选择。
+    shows.value = listPodcastShows();
+    if (selectedId.value == showId) selectShow(showId);
   } catch (e) {
-    errorMsg.value = (e as Error).message || "刷新失败";
+    if (!disposed && !silent) {
+      errorMsg.value = (e as Error).message || "刷新失败";
+    }
   } finally {
-    refreshingId.value = "";
+    if (!disposed) refreshingId.value = "";
   }
 }
 
@@ -414,7 +490,7 @@ function onRemoveTap(showId: string): void {
     confirmText: "移除",
     danger: true,
   }).then((ok: boolean) => {
-    if (!ok) return;
+    if (!ok || disposed) return;
     // 移除前先把正在听的那一集进度落盘（订阅没了就找不回这一集了）
     flushTracked(true);
     removePodcastShow(showId);
@@ -484,7 +560,7 @@ function trackTick(): void {
  */
 function flushTracked(force: boolean = false): void {
   if (trackedUrl.length == 0) return;
-  const ep = epByUrl.get(trackedUrl);
+  const ep = findTrackedEpisode();
   if (ep == null) return;
   const positionMs = Math.round(trackedSec * 1000);
   let totalMs = ep.durationMs;
@@ -499,18 +575,24 @@ function flushTracked(force: boolean = false): void {
   // 索引与列表可能是两批对象（切订阅时重建过），按 id 同步回去并让列表重渲染
   const list = episodes.value;
   for (let i = 0; i < list.length; i++) {
-    if (list[i].id == ep.id) {
+    if (list[i].id == ep.id && list[i].showId == ep.showId) {
       list[i].positionMs = positionMs;
       list[i].played = played;
       epByUrl.set(list[i].audioUrl, list[i]);
+      episodes.value = list.slice();
       break;
     }
   }
-  episodes.value = list.slice();
 }
 
 onMounted(() => {
-  loadShows();
+  // 先提交页面框架，再读当前订阅，避免阻塞导航切换的第一帧。
+  loadTimer = setTimeout(() => {
+    loadTimer = null;
+    if (disposed) return;
+    loadShows();
+    initialLoading.value = false;
+  }, 32);
   saveTimer = setInterval(() => {
     // 心跳：跟着播放器换集/落进度，页面离开后定时器就没了（进度由进页面/切集兜底）
     trackTick();
@@ -519,6 +601,9 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  disposed = true;
+  if (loadTimer != null) clearTimeout(loadTimer);
+  if (autoRefreshTimer != null) clearTimeout(autoRefreshTimer);
   // 离开页面时把最后几秒也存下来，否则这一段进度就白听了
   trackTick();
   flushTracked(true);
@@ -611,15 +696,6 @@ watch(
   min-width: 0;
   margin-left: 10rpx;
   height: 76rpx;
-  font-size: 25rpx;
-}
-.sub-ph {
-  font-size: 25rpx;
-  color: #8b92a1;
-}
-.sub-ph-wide {
-  font-size: 14px;
-  color: #8b92a1;
 }
 .sub-btn {
   flex-direction: row;
@@ -663,7 +739,7 @@ watch(
   margin-left: 12rpx;
 }
 .show-item {
-  margin: 0 26rpx 12rpx 26rpx;
+  padding: 0 26rpx 12rpx 26rpx;
 }
 .show {
   flex-direction: row;
@@ -780,4 +856,37 @@ watch(
 .foot-space-wide {
   height: 80px;
 }
+/* Complete wide px density without introducing a separate master/detail layout. */
+.hero-item-wide { padding: 14px 0 0; }
+.hero-wide { border-width: 1px; border-radius: 16px; padding: 18px 20px 20px; }
+.hero-title-wide { margin-left: 8px; }
+.hero-desc-wide { margin-top: 8px; }
+.sub-row-wide { margin-top: 12px; }
+.sub-field-wide { height: 40px; padding: 0 12px; border-width: 1px; border-radius: 20px; }
+.sub-input-wide { margin-left: 6px; height: 40px; }
+.sub-btn-wide { height: 40px; padding: 0 20px; margin-left: 8px; border-radius: 20px; border-width: 1px; flex-shrink: 0; }
+.notice-item-wide { padding: 10px 0 0; }
+.notice-wide { border-width: 1px; border-radius: 12px; padding: 10px 12px; }
+.notice-text-wide { margin-left: 6px; }
+.sec-head-wide { padding: 18px 0 6px; flex-wrap: wrap; }
+.sec-sub-wide { margin-left: 8px; }
+.show-item-wide { margin: 0; padding: 0 0 8px; }
+.show-wide { border-width: 1px; border-radius: 14px; padding: 12px; }
+.show-cover-wide { width: 52px; height: 52px; border-radius: 9px; flex-shrink: 0; }
+.show-info-wide { margin-left: 10px; }
+.show-meta-wide { margin-top: 4px; }
+.show-act-wide { width: 36px; height: 36px; border-width: 1px; border-radius: 18px; margin-left: 8px; flex-shrink: 0; }
+.empty-item-wide { padding: 18px 0 0; }
+.empty-wide { padding: 16px 4px; }
+.empty-text-wide { margin-left: 8px; }
+.detail-item-wide { padding: 12px 0 0; }
+.detail-wide { border-width: 1px; border-radius: 14px; padding: 14px 16px; }
+.detail-desc-wide { margin-top: 6px; }
+.detail-meta-wide { margin-top: 6px; }
+.ep-item-wide { padding: 8px 0 0; }
+.ep-wide { border-width: 1px; border-radius: 13px; padding: 12px; }
+.ep-play-wide { width: 40px; height: 40px; border-width: 1px; border-radius: 20px; flex-shrink: 0; }
+.ep-info-wide { margin-left: 10px; }
+.ep-meta-wide { margin-top: 4px; }
+.ep-flag-wide { margin-left: 8px; }
 </style>

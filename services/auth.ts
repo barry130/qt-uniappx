@@ -10,16 +10,30 @@ const REFRESH_TOKEN_KEY = "qt-refresh-token";
 const TOKEN_EXPIRY_KEY = "qt-token-expiry";
 /** 当前登录用户 id（收藏缓存归属标记，退出登录不清除，供换号检测） */
 const USER_ID_KEY = "qt-user-id";
+let sessionEpoch = 0;
+
+/** 登录、退出和换号会使所有旧异步提交失效；正常续期保留会话代次。 */
+export function getSessionEpoch(): number { return sessionEpoch; }
+export function sessionIsCurrent(epoch: number): boolean { return epoch == sessionEpoch; }
 
 /** Token 信息 */
-interface TokenInfo {
+export interface TokenInfo {
   accessToken: string;
   refreshToken: string;
   expiresAt: number; // UNIX 时间戳（毫秒）
 }
 
+/** 异步续期开始时捕获的会话身份；提交时必须仍然匹配。 */
+export interface AuthSessionSnapshot {
+  epoch: number;
+  accessToken: string;
+  refreshToken: string;
+  userId: string;
+}
+
 /** 保存 token 信息 */
-export function saveTokens(tokens: TokenInfo): void {
+export function saveTokens(tokens: TokenInfo, renewal = false): void {
+  if (!renewal) sessionEpoch++;
   uni.setStorageSync(ACCESS_TOKEN_KEY, tokens.accessToken);
   uni.setStorageSync(REFRESH_TOKEN_KEY, tokens.refreshToken);
   uni.setStorageSync(TOKEN_EXPIRY_KEY, tokens.expiresAt);
@@ -28,6 +42,11 @@ export function saveTokens(tokens: TokenInfo): void {
 /** 读取 access token */
 export function getAccessToken(): string {
   return (uni.getStorageSync(ACCESS_TOKEN_KEY) as string) || "";
+}
+
+/** 读取 refresh token */
+export function getRefreshToken(): string {
+  return (uni.getStorageSync(REFRESH_TOKEN_KEY) as string) || "";
 }
 
 /** 获取 token 过期时间 */
@@ -52,6 +71,7 @@ export function shouldRefreshToken(): boolean {
 
 /** 清除所有 token 信息（登出） */
 export function clearTokens(): void {
+  sessionEpoch++;
   uni.removeStorageSync(ACCESS_TOKEN_KEY);
   uni.removeStorageSync(REFRESH_TOKEN_KEY);
   uni.removeStorageSync(TOKEN_EXPIRY_KEY);
@@ -74,6 +94,32 @@ export function getUserId(): string {
   } catch (_) {
     return "";
   }
+}
+
+/** 捕获一次异步认证操作所属的会话。 */
+export function captureAuthSession(): AuthSessionSnapshot {
+  return {
+    epoch: sessionEpoch,
+    accessToken: getAccessToken(),
+    refreshToken: getRefreshToken(),
+    userId: getUserId(),
+  };
+}
+
+/** 仅当发起续期的会话仍是当前会话且 token 未被并发替换时提交新 token。 */
+export function renewTokensIfCurrent(session: AuthSessionSnapshot, tokens: TokenInfo): boolean {
+  if (!sessionIsCurrent(session.epoch)) return false;
+  if (getAccessToken() != session.accessToken || getRefreshToken() != session.refreshToken) return false;
+  saveTokens(tokens, true);
+  return true;
+}
+
+/** 仅当发起刷新/失效处理的会话仍是当前会话且 token 未被并发替换时清除。 */
+export function clearTokensIfCurrent(session: AuthSessionSnapshot): boolean {
+  if (!sessionIsCurrent(session.epoch)) return false;
+  if (getAccessToken() != session.accessToken || getRefreshToken() != session.refreshToken) return false;
+  clearTokens();
+  return true;
 }
 
 /** 检查是否已登录 */

@@ -54,15 +54,18 @@
 import { computed } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { useQtLayout, qtRpx, qtTabBarHeightPx, QT_PLAYER_BAR_HEIGHT_PX } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtLayout, qtRpx, qtTabBarHeightPx, qtPlayerBarHeightPx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtToastItems } from "@/uni_modules/qt-ui/stores/toast";
 import type { QtToastItem } from "@/uni_modules/qt-ui/stores/toast";
+import { useMiniPlayerSettings } from "@/uni_modules/qt-ui/stores/mini-player";
+import { qtMiniDockReservePx } from "@/uni_modules/qt-ui/composables/mini-player-layout";
 import { usePlayerStore } from "@/stores/player";
 
 const theme = useThemeStore();
 const layout = useQtLayout();
 const player = usePlayerStore();
+const miniSettings = useMiniPlayerSettings();
 
 /**
  * 直接拿 store 里的 reactive 数组：模板遍历时按索引/length 追踪，push 与 splice
@@ -86,8 +89,10 @@ const items = qtToastItems();
  */
 const hostStyle = computed((): string => {
   let lift = 0;
-  if (layout.isWide) {
-    lift = player.current != null ? QT_PLAYER_BAR_HEIGHT_PX + 24 : 24;
+  if (miniSettings.mode == "docked" && player.current != null) {
+    lift = qtMiniDockReservePx(!layout.isWide) + (layout.isWide ? 24 : qtRpx(24));
+  } else if (layout.isWide) {
+    lift = layout.safeBottomPx + 24;
   } else {
     lift = qtTabBarHeightPx() + qtRpx(24);
   }

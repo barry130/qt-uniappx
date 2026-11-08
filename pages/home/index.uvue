@@ -1,5 +1,5 @@
 <template>
-<qt-page-frame width-kind="grid" inset-top>
+<qt-page-frame current="/pages/home/index" width-kind="grid" inset-top>
     <view class="home-page">
       <view class="home-body">
       <scroll-view class="home-scroll" direction="vertical" :show-scrollbar="false" :scroll-top="scrollTop" @scroll="onListScroll">
@@ -7,9 +7,9 @@
           <!-- 头部不放品牌块（2026-10 用户定稿：整块删掉「轻听 / 你的私人音乐台」）。竖屏一行
                原来塞了四块，太挤；现在只留三个控件，顺序 音源、搜索、通知 -->
           <SourceSwitcher class="home-source" @change="ensureLoad" />
-          <view class="home-search" :class="[layout.isWide ? 'home-search-wide' : '']" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'" @click="goSearch">
+          <view class="home-search" :class="[layout.isWide ? 'home-search-wide' : '']" :style="homeSearchStyle" @click="goSearch">
             <QtIcon name="search" :size="layout.isWide ? 16 : 24" :color="themeStore.skin.iconMuted" />
-            <text class="home-search-text" :class="[layout.isWide ? 'home-search-text-wide' : '']" :style="('color:' + themeStore.skin.placeholder + ';') + qtFontDual(23, 13)" :max-lines="1">搜索</text>
+            <text class="home-search-text" :class="[layout.isWide ? 'home-search-text-wide' : '']" :style="('color:' + themeStore.skin.placeholder + ';') + qtFontDual(23, 13)" :max-lines="1">{{ layout.isWide ? '搜索歌曲、歌手、专辑、歌单' : '搜索' }}</text>
           </view>
           <view class="home-bell" :class="[layout.isWide ? 'home-bell-wide' : '']" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'" @click="goNoticeCenter">
             <QtIcon name="bell" :size="layout.isWide ? 18 : 26" :color="themeStore.skin.icon" />
@@ -51,12 +51,12 @@
             </view>
             <view class="hero-scrim" :style="'background-color:' + themeStore.skin.mediaScrim + ';'"></view>
             <view class="portrait-hero-copy">
-              <text class="hero-kicker" :style="('color:rgba(255,255,255,0.72);') + qtFont(20)">TODAY · 今日精选</text>
-              <text class="hero-title" :style="('color:#ffffff;') + qtFont(40)" :max-lines="2">{{ featuredName }}</text>
+              <text class="hero-kicker" :style="('color:rgba(255,255,255,0.72);') + qtFont(20)">今日精选</text>
+              <text class="hero-title" :style="('color:#ffffff;line-height:' + 54 * fontScale.scale + 'rpx;') + qtFont(40)" :max-lines="2">{{ featuredName }}</text>
               <text class="hero-desc" :style="('color:rgba(255,255,255,0.78);') + qtFont(22)" :max-lines="1">{{ playlists.length > 0 ? "精选歌单 · 好音乐每日更新" : "好音乐会自动出现" }}</text>
               <view class="hero-play" @click.stop="playFeatured">
-                <QtIcon name="play" :size="18" :color="themeStore.skin.accent" />
-                <text class="hero-play-text" :style="('color:' + themeStore.skin.accent + ';') + qtFont(24)">立即播放</text>
+                <QtIcon name="disc" :size="28" :color="themeStore.skin.accent" />
+                <text class="hero-play-text" :style="('color:' + themeStore.skin.accent + ';') + qtFont(24)">打开歌单</text>
               </view>
             </view>
           </view>
@@ -93,7 +93,7 @@
             <QtLocalMixes :mixes="localMixes" :embedded="true" :content-width="portraitSectionInner" :card-width="shelfCardWidth" />
           </view>
           <view v-if="showPlaylists" class="section" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
-            <view class="section-head"><view class="section-copy"><text class="section-kicker" :style="('color:' + themeStore.skin.accent + ';') + qtFont(19)">Curated</text><text class="section-title" :style="('color:' + themeStore.skin.text + ';') + qtFont(34)">推荐歌单</text></view><view class="section-more" @click="goPlaylists"><text class="section-more-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFont(21)">全部</text><QtIcon name="chevron-right" :size="15" :color="themeStore.skin.iconMuted" /></view></view>
+            <view class="section-head"><view class="section-copy"><text class="section-title" :style="('color:' + themeStore.skin.text + ';') + qtFont(34)">推荐歌单</text></view><view class="section-more" @click="goPlaylists"><text class="section-more-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFont(21)">全部</text><QtIcon name="chevron-right" :size="15" :color="themeStore.skin.iconMuted" /></view></view>
             <!-- 骨架屏：横向歌单架是「一行 2.5 张卡横滑」，用 tile 形状 + nowrap，
                  卡宽/间距/架高全部复用真实卡的计算值，数据到达时不会跳一下 -->
             <view v-if="loading && playlists.length == 0" class="shelf-skel" :style="'height:' + shelfHeightPx + 'px;'">
@@ -101,34 +101,34 @@
             </view>
             <scroll-view v-else class="shelf-scroll" direction="horizontal" :show-scrollbar="false" :style="'height:' + shelfHeightPx + 'px;'">
               <view class="shelf-row" :style="'width:' + shelfWidthPx + 'px;'">
-                <view v-for="list in playlists.slice(0, 10)" :key="list.id + list.platform" class="shelf-card" :style="'width:' + shelfCardWidth + 'px;margin-right:' + shelfGapPx + 'px;'" :hover-class="layout.isWide ? 'shelf-card-hover' : 'none'" @click="openPlaylist(list)">
+                <view v-for="list in homePlaylists" :key="list.id + list.platform" class="shelf-card" :style="'width:' + shelfCardWidth + 'px;margin-right:' + shelfGapPx + 'px;'" :hover-class="layout.isWide ? 'shelf-card-hover' : 'none'" @click="openPlaylist(list)">
                   <image class="shelf-cover" :style="'width:' + shelfCardWidth + 'px;height:' + shelfCardWidth + 'px;background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="list.picUrl" mode="aspectFill" />
-                  <text class="shelf-name" :style="('color:' + themeStore.skin.text + ';') + qtFont(32)" :max-lines="2">{{ list.name }}</text>
-                  <text class="shelf-count" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFont(23)" :max-lines="1">{{ formatCount(list.playCount) }} 次播放</text>
+                  <text class="shelf-name" :style="('color:' + themeStore.skin.text + ';line-height:' + 42 * fontScale.scale + 'rpx;') + qtFont(32)" :max-lines="2">{{ list.name }}</text>
+                  <text class="shelf-count" :style="('color:' + themeStore.skin.textSubtle + ';line-height:' + 30 * fontScale.scale + 'rpx;') + qtFont(23)" :max-lines="1">{{ formatCount(list.playCount) }} 次播放</text>
                 </view>
-                <view v-if="playlists.length == 0" class="home-empty"><text class="home-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFont(23)">暂无推荐内容</text></view>
+                <view v-if="playlists.length == 0" class="home-empty"><text class="home-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';line-height:' + 30 * fontScale.scale + 'rpx;') + qtFont(23)">暂无推荐内容</text></view>
               </view>
             </scroll-view>
           </view>
           <view v-if="showCharts" class="section" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
-            <view class="section-head"><view class="section-copy"><text class="section-kicker" :style="('color:' + themeStore.skin.accent + ';') + qtFont(19)">Trending</text><text class="section-title" :style="('color:' + themeStore.skin.text + ';') + qtFont(34)">热门榜单</text></view><view class="section-more" @click="showChart"><text class="section-more-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFont(21)">更多</text><QtIcon name="chevron-right" :size="15" :color="themeStore.skin.iconMuted" /></view></view>
+            <view class="section-head"><view class="section-copy"><text class="section-title" :style="('color:' + themeStore.skin.text + ';') + qtFont(34)">热门榜单</text></view><view class="section-more" @click="showChart"><text class="section-more-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFont(21)">更多</text><QtIcon name="chevron-right" :size="15" :color="themeStore.skin.iconMuted" /></view></view>
             <view class="chart-list">
-              <!-- 骨架屏：4 行与 charts.slice(0, 4) 同数，行高/封面/箭头全部由 row 形状对齐 -->
+              <!-- 骨架屏：4 行与 homeCharts 同数，行高/封面/箭头全部由 row 形状对齐 -->
               <QtSkeletonList v-if="loading && charts.length == 0" kind="row" :rows="4" />
-              <view v-for="chart in charts.slice(0, 4)" :key="chart.id + chart.platform" class="chart-row" :style="'border-bottom-color:' + themeStore.skin.divider + ';'" :hover-class="layout.isWide ? 'chart-row-hover' : 'none'" @click="openChart(chart)">
+              <view v-for="chart in homeCharts" :key="chart.id + chart.platform" class="chart-row" :style="'border-bottom-color:' + themeStore.skin.divider + ';'" :hover-class="layout.isWide ? 'chart-row-hover' : 'none'" @click="openChart(chart)">
                 <image class="chart-cover" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="chart.picUrl" mode="aspectFill" />
                 <view class="chart-info"><text class="chart-name" :style="('color:' + themeStore.skin.text + ';') + qtFont(30)" :max-lines="1">{{ chart.name }}</text><text class="chart-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFont(23)" :max-lines="1">{{ chart.description || "热门榜单" }}</text></view>
                 <QtIcon name="chevron-right" :size="24" :color="themeStore.skin.iconMuted" />
               </view>
-              <view v-if="!loading && charts.length == 0" class="home-empty"><text class="home-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFont(23)">暂无榜单</text></view>
+              <view v-if="!loading && charts.length == 0" class="home-empty"><text class="home-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';line-height:' + 30 * fontScale.scale + 'rpx;') + qtFont(23)">暂无榜单</text></view>
             </view>
           </view>
           <view v-if="showLatest" class="section section-last" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
-            <view class="section-head"><view class="section-copy"><text class="section-kicker" :style="('color:' + themeStore.skin.accent + ';') + qtFont(19)">New</text><text class="section-title" :style="('color:' + themeStore.skin.text + ';') + qtFont(34)">新歌速递</text></view></view>
+            <view class="section-head"><view class="section-copy"><text class="section-title" :style="('color:' + themeStore.skin.text + ';') + qtFont(34)">新歌速递</text></view></view>
             <view class="song-list">
-              <!-- 骨架屏：8 行与 songs.slice(0, 8) 同数 -->
+              <!-- 骨架屏：8 行与 homeSongs 同数 -->
               <QtSkeletonList v-if="loading && songs.length == 0" kind="row" :rows="8" />
-              <view v-for="song in songs.slice(0, 8)" :key="song.id + song.platform" class="song-row" :style="'border-bottom-color:' + themeStore.skin.divider + ';'">
+              <view v-for="song in homeSongs" :key="song.id + song.platform" class="song-row" :style="'border-bottom-color:' + themeStore.skin.divider + ';'">
                 <image class="song-cover" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
                 <view class="song-info"><text class="song-name" :style="('color:' + themeStore.skin.text + ';') + qtFont(30)" :max-lines="1">{{ song.name }}</text><text class="song-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFont(23)" :max-lines="1">{{ song.singer }}{{ song.album.length > 0 ? " · " + song.album : "" }}</text></view>
                 <view class="play-hit" @click="play(song)">
@@ -137,102 +137,74 @@
                   </view>
                 </view>
               </view>
-              <view v-if="!loading && songs.length == 0" class="home-empty"><text class="home-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFont(23)">暂无新歌</text></view>
+              <view v-if="!loading && songs.length == 0" class="home-empty"><text class="home-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';line-height:' + 30 * fontScale.scale + 'rpx;') + qtFont(23)">暂无新歌</text></view>
             </view>
           </view>
         </view>
         <view v-else class="wide-home" :style="wideHomeStyle">
-          <view class="wide-shell" :class="wideCompact ? 'wide-shell-compact' : ''">
-            <view class="wide-main" :style="wideMainStyle">
-              <!-- 宽屏今日精选：封面整幅铺满 + 暗色蒙层 + 白字，与桌面音乐软件一致。
-                   早前只有一块 accent 纯色底 + 132px 小方图，在 1000dp 宽的卡里
-                   既空又冲（真机观感就是一大块红）。现在底图 aspectFill 铺满，
-                   蒙层用 mediaScrim 令牌保证任何封面上白字都读得清；
-                   封面没到货时露出的仍是 heroStyle 的 accent 底色。 -->
-              <view v-if="showPlaylists" class="wide-feature" :style="heroStyle">
-                <image v-if="featuredPicUrl != ''" class="wide-feature-bg" :src="featuredPicUrl" mode="aspectFill" />
-                <view v-if="featuredPicUrl != ''" class="wide-feature-scrim" :style="'background-color:' + themeStore.skin.mediaScrim + ';'"></view>
-                <image v-if="!wideCompact && featuredPicUrl != ''" class="wide-feature-cover" :style="'background-color:rgba(255,255,255,0.30);'" :src="featuredPicUrl" mode="aspectFill" />
-                <view class="wide-feature-copy">
-                  <text class="wide-feature-kicker" :style="('color:rgba(255,255,255,0.72);') + qtFontPx(11)">TODAY · 今日精选</text>
-                  <text class="wide-feature-title" :style="('color:#ffffff;') + qtFontPx(23)" :max-lines="2">{{ featuredName }}</text>
-                  <text class="wide-feature-desc" :style="('color:rgba(255,255,255,0.78);') + qtFontPx(13)">{{ playlists.length > 0 ? "精选歌单 · 点击开始播放" : "稍后回来，好音乐会自动出现" }}</text>
-                  <view class="wide-feature-actions">
-                    <view class="wide-primary" @click="playFeatured"><QtIcon name="play" :size="14" :color="themeStore.skin.accent" /><text class="wide-primary-text" :style="('color:' + themeStore.skin.accent + ';') + qtFontPx(12)">立即播放</text></view>
-                    <view class="wide-secondary" :style="'background-color:rgba(255,255,255,0.22);'" @click="goPlaylists"><text class="wide-secondary-text" :style="('color:#ffffff;') + qtFontPx(12)">浏览歌单</text></view>
-                  </view>
-                </view>
-              </view>
-              <view v-if="showLocalMixes" class="wide-panel" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
-                <QtLocalMixes :mixes="localMixes" :embedded="true" :content-width="widePanelInner" :card-width="widePlaylistCardWidth" />
-              </view>
-               <view v-if="showPlaylists" class="wide-panel" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
-                <view class="wide-panel-head"><view class="section-copy"><text class="wide-kicker" :style="qtFontPx(11)">Curated</text><text class="wide-panel-title" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(18)">推荐歌单</text></view><view class="section-more" @click="goPlaylists"><text class="wide-more-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(13)">全部</text><QtIcon name="chevron-right" :size="14" :color="themeStore.skin.iconMuted" /></view></view>
-                <view class="wide-playlist-grid">
-                  <!-- 骨架屏：换行网格，卡宽与真实卡同一个计算值；行数取首屏 8 张。
-                       .wide-playlist-grid 是 row+wrap，骨架必须包一层满宽容器，
-                       否则作为 flex item 会被压成内容宽，卡宽/换行全部失准 -->
-                  <view v-if="loading && playlists.length == 0" class="sk-fill">
-                    <QtSkeletonList kind="tile" :rows="8" :card-width="widePlaylistCardWidth" />
-                  </view>
-                  <view v-for="(row, ri) in widePlaylistRows" :key="'prow-' + ri" class="wide-playlist-row">
-                  <view v-for="list in row" :key="list.id + list.platform" class="wide-playlist-card" :style="'width:' + widePlaylistCardWidth + 'px;'" :hover-class="layout.isWide ? 'shelf-card-hover' : 'none'" @click="openPlaylist(list)">
-                    <image class="wide-playlist-cover" :style="'width:' + widePlaylistCardWidth + 'px;height:' + widePlaylistCardWidth + 'px;'" :src="list.picUrl" mode="aspectFill" />
-                    <text class="wide-playlist-name" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(13)" :max-lines="2">{{ list.name }}</text>
-                <text class="wide-playlist-count" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(11)" :max-lines="1">{{ formatCount(list.playCount) }} 次播放</text>
-              </view>
-                  </view>
-              <view v-if="!loading && playlists.length == 0" class="wide-empty"><text class="wide-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(12)">暂无推荐内容</text></view>
-                </view>
-              </view>
-              <view v-if="showLatest" class="wide-panel" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
-                <view class="wide-panel-head"><view class="section-copy"><text class="wide-kicker" :style="qtFontPx(11)">New</text><text class="wide-panel-title" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(18)">新歌速递</text></view></view>
-                <view class="wide-song-grid">
-                  <!-- 骨架屏：真实行是 50% 定宽两列，columns=2 让骨架按同一比例切。
-                       .wide-song-grid 是 row+wrap，骨架必须包一层满宽容器，
-                       否则作为 flex item 会被压成内容宽，50% 就按错的基准算 -->
-                  <view v-if="loading && songs.length == 0" class="sk-fill">
-                    <QtSkeletonList kind="row" :rows="8" :columns="2" />
-                  </view>
-                  <view v-for="song in songs.slice(0, 8)" :key="song.id + song.platform" class="wide-song-row" :style="'border-top-color:' + themeStore.skin.divider + ';'" :hover-class="layout.isWide ? 'wide-row-hover' : 'none'" @click="play(song)">
-                    <image class="wide-song-cover" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
-                <view class="wide-song-info"><text class="wide-song-name" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(13)" :max-lines="1">{{ song.name }}</text><text class="wide-song-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(11)" :max-lines="1">{{ song.singer }}{{ song.album.length > 0 ? " · " + song.album : "" }}</text></view>
-                <view class="wide-song-play" :style="'background-color:' + themeStore.skin.accentSoft + ';'">
-                  <QtIcon name="play" :size="14" :color="themeStore.skin.accent" />
-                </view>
-              </view>
-              <view v-if="!loading && songs.length == 0" class="wide-empty"><text class="wide-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(12)">暂无新歌</text></view>
+          <view class="wide-feature-row" :class="hdHome.featureSplit && showPlaylists ? 'wide-feature-row-split' : ''">
+            <view v-if="showPlaylists" class="wide-feature" :style="wideFeatureStyle">
+              <view v-if="featuredPicUrl != ''" class="wide-feature-backdrop"><image class="wide-feature-bg" :src="featuredPicUrl" mode="aspectFill" /></view>
+              <view class="wide-feature-scrim" :style="'background-color:' + themeStore.skin.mediaScrim + ';'" />
+              <image v-if="featuredPicUrl != ''" class="wide-feature-cover" :style="wideFeatureCoverStyle" :src="featuredPicUrl" mode="aspectFill" />
+              <view class="wide-feature-copy">
+                <text class="wide-feature-kicker" :style="qtFontPx(12)">今日精选</text>
+                <text class="wide-feature-title" :style="qtFontPx(23)" :max-lines="2">{{ featuredName }}</text>
+                <text class="wide-feature-desc" :style="qtFontPx(13)" :max-lines="1">{{ playlists.length > 0 ? '从一张好歌单，开始今天的音乐' : '正在寻找好音乐' }}</text>
+                <view class="wide-feature-actions">
+                  <view class="wide-primary" @click="playFeatured"><QtIcon name="disc" :size="16" :color="themeStore.skin.accent" /><text class="wide-primary-text" :style="('color:' + themeStore.skin.accent + ';') + qtFontPx(13)">打开歌单</text></view>
+                  <view class="wide-secondary" @click="goPlaylists"><text class="wide-secondary-text" :style="qtFontPx(13)">更多歌单</text><QtIcon name="chevron-right" :size="14" color="#ffffff" /></view>
                 </view>
               </view>
             </view>
-            <view v-if="!wideCompact && showCharts" class="wide-side" :style="wideSideStyle">
-              <view class="wide-panel" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
-                <view class="wide-panel-head"><view class="section-copy"><text class="wide-kicker" :style="qtFontPx(11)">Trending</text><text class="wide-panel-title" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(18)">热门榜单</text></view><view class="section-more" @click="showChart"><text class="wide-more-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(13)">更多</text><QtIcon name="chevron-right" :size="14" :color="themeStore.skin.iconMuted" /></view></view>
-                <view class="wide-chart-list">
-                  <!-- 骨架屏：宽屏侧栏首屏 7 行 -->
-                  <QtSkeletonList v-if="loading && charts.length == 0" kind="row" :rows="7" />
-                  <view v-for="chart in charts.slice(0, 7)" :key="chart.id + chart.platform" class="wide-chart-row" :style="'border-top-color:' + themeStore.skin.divider + ';'" :hover-class="layout.isWide ? 'wide-row-hover' : 'none'" @click="openChart(chart)">
-                    <image class="wide-chart-cover" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="chart.picUrl" mode="aspectFill" />
-                    <view class="wide-chart-info"><text class="wide-chart-name" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(13)" :max-lines="1">{{ chart.name }}</text><text class="wide-chart-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(11)" :max-lines="1">{{ chart.description || "热门榜单" }}</text></view>
-                    <QtIcon name="chevron-right" :size="13" :color="themeStore.skin.iconMuted" />
-                  </view>
-                  <view v-if="!loading && charts.length == 0" class="wide-empty"><text class="wide-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(12)">暂无榜单</text></view>
-                </view>
+            <view class="wide-shortcuts" :class="hdHome.featureSplit && showPlaylists ? 'wide-shortcuts-split' : ''" :style="wideShortcutGroupStyle">
+              <view v-for="(entry, index) in wideEntries" :key="entry.route" class="wide-shortcut" :class="!hdHome.featureSplit || !showPlaylists ? 'wide-shortcut-inline' : ''" :style="wideShortcutStyle(index)" hover-class="wide-row-hover" @click="openWideEntry(entry.route)">
+                <view class="wide-shortcut-icon" :style="'background-color:' + themeStore.skin.accentSoft + ';'"><QtIcon :name="entry.icon" :size="20" :color="themeStore.skin.accent" /></view>
+                <view class="wide-shortcut-copy" :class="!hdHome.featureSplit || !showPlaylists ? 'wide-shortcut-copy-inline' : ''"><text class="wide-shortcut-title" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(14)" :max-lines="1">{{ entry.title }}</text><text v-if="hdHome.featureSplit && showPlaylists" class="wide-shortcut-desc" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(12)" :max-lines="1">{{ entry.subtitle }}</text></view>
+                <QtIcon v-if="hdHome.featureSplit && showPlaylists" name="chevron-right" :size="14" :color="themeStore.skin.iconMuted" />
               </view>
             </view>
           </view>
-          <view v-if="wideCompact && showCharts" class="wide-panel" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
-            <view class="wide-panel-head"><view class="section-copy"><text class="wide-kicker" :style="qtFontPx(11)">Trending</text><text class="wide-panel-title" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(18)">热门榜单</text></view><view class="section-more" @click="showChart"><text class="wide-more-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(13)">更多</text><QtIcon name="chevron-right" :size="14" :color="themeStore.skin.iconMuted" /></view></view>
-            <view class="wide-chart-list">
-              <!-- 骨架屏：紧凑宽屏首屏 4 行 -->
-              <QtSkeletonList v-if="loading && charts.length == 0" kind="row" :rows="4" />
-              <view v-for="chart in charts.slice(0, 4)" :key="chart.id + chart.platform" class="wide-chart-row" :style="'border-top-color:' + themeStore.skin.divider + ';'" :hover-class="layout.isWide ? 'wide-row-hover' : 'none'" @click="openChart(chart)">
-                <image class="wide-chart-cover" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="chart.picUrl" mode="aspectFill" />
-                <view class="wide-chart-info"><text class="wide-chart-name" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(13)" :max-lines="1">{{ chart.name }}</text><text class="wide-chart-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(11)" :max-lines="1">{{ chart.description || "热门榜单" }}</text></view>
-                <QtIcon name="chevron-right" :size="13" :color="themeStore.skin.iconMuted" />
+          <view v-if="showLocalMixes" class="wide-panel">
+            <QtLocalMixes :mixes="localMixes" :embedded="true" :content-width="hdHome.innerPx" :card-width="hdHome.cardPx" />
+          </view>
+          <view v-if="showPlaylists" class="wide-panel">
+            <view class="wide-panel-head"><text class="wide-panel-title" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(20)">推荐歌单</text><view class="section-more" @click="goPlaylists"><text class="wide-more-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(13)">全部歌单</text><QtIcon name="chevron-right" :size="14" :color="themeStore.skin.iconMuted" /></view></view>
+            <scroll-view class="wide-playlist-scroll" direction="horizontal" :show-scrollbar="false" :style="wideShelfStyle">
+              <view class="wide-playlist-row" :style="wideShelfRowStyle">
+                <QtSkeletonList v-if="loading && playlists.length == 0" kind="tile" :nowrap="true" :rows="8" :card-width="hdHome.cardPx" :gap="hdHome.cardGapPx" />
+                <view v-for="list in homePlaylists" :key="list.id + list.platform" class="wide-playlist-card" :style="'width:' + hdHome.cardPx + 'px;'" hover-class="shelf-card-hover" @click="openPlaylist(list)">
+                  <image class="wide-playlist-cover" :style="'width:' + hdHome.cardPx + 'px;height:' + hdHome.cardPx + 'px;background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="list.picUrl" mode="aspectFill" />
+                  <text class="wide-playlist-name" :style="('color:' + themeStore.skin.text + ';line-height:' + 20 * fontScale.scale + 'px;') + qtFontPx(14)" :max-lines="2">{{ list.name }}</text>
+                  <text class="wide-playlist-count" :style="('color:' + themeStore.skin.textMuted + ';line-height:' + 17 * fontScale.scale + 'px;') + qtFontPx(12)" :max-lines="1">{{ formatCount(list.playCount) }} 次播放</text>
+                </view>
+                <view v-if="!loading && playlists.length == 0" class="wide-empty"><text class="wide-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(12)">暂无推荐内容</text></view>
               </view>
-              <view v-if="!loading && charts.length == 0" class="home-empty" :class="layout.isWide ? 'home-empty-wide' : ''"><text class="home-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(23, 13)">暂无榜单</text></view>
+            </scroll-view>
+          </view>
+          <view v-if="showLatest" class="wide-panel">
+            <view class="wide-panel-head"><text class="wide-panel-title" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(20)">新歌速递</text><view class="section-more" @click="showDaily"><text class="wide-more-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(13)">更多新歌</text><QtIcon name="chevron-right" :size="14" :color="themeStore.skin.iconMuted" /></view></view>
+            <QtSkeletonList v-if="loading && songs.length == 0" kind="row" :rows="6" :columns="hdHome.songColumns" />
+            <view v-for="(row, rowIndex) in wideSongRows" :key="'song-row-' + rowIndex" class="wide-song-grid">
+              <view v-for="(song, columnIndex) in row" :key="song.id + song.platform" class="wide-song-row" :style="wideMusicCellStyle(columnIndex)" hover-class="wide-row-hover" @click="play(song)">
+                <image class="wide-song-cover" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
+                <view class="wide-song-info"><text class="wide-song-name" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(14)" :max-lines="1">{{ song.name }}</text><text class="wide-song-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(12)" :max-lines="1">{{ song.singer }}</text></view>
+                <view class="wide-song-play"><QtIcon name="play" :size="16" :color="themeStore.skin.iconMuted" /></view>
+              </view>
             </view>
+            <view v-if="!loading && songs.length == 0" class="wide-empty"><text class="wide-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(12)">暂无新歌</text></view>
+          </view>
+          <view v-if="showCharts" class="wide-panel">
+            <view class="wide-panel-head"><text class="wide-panel-title" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(20)">热门榜单</text><view class="section-more" @click="showChart"><text class="wide-more-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(13)">全部榜单</text><QtIcon name="chevron-right" :size="14" :color="themeStore.skin.iconMuted" /></view></view>
+            <QtSkeletonList v-if="loading && charts.length == 0" kind="row" :rows="6" :columns="hdHome.songColumns" />
+            <view v-for="(row, rowIndex) in wideChartRows" :key="'chart-row-' + rowIndex" class="wide-song-grid">
+              <view v-for="(chart, columnIndex) in row" :key="chart.id + chart.platform" class="wide-chart-row" :style="wideMusicCellStyle(columnIndex) + 'border-bottom-color:' + themeStore.skin.divider + ';'" hover-class="wide-row-hover" @click="openChart(chart)">
+                <image class="wide-chart-cover" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="chart.picUrl" mode="aspectFill" />
+                <view class="wide-chart-info"><text class="wide-chart-name" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(14)" :max-lines="1">{{ chart.name }}</text><text class="wide-chart-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(12)" :max-lines="1">{{ chart.description || '热门榜单' }}</text></view>
+                <QtIcon name="chevron-right" :size="16" :color="themeStore.skin.iconMuted" />
+              </view>
+            </view>
+            <view v-if="!loading && charts.length == 0" class="wide-empty"><text class="wide-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(12)">暂无榜单</text></view>
           </view>
         </view>
       </scroll-view>
@@ -253,14 +225,14 @@
            （qt-ui 不再 import 业务页面）。单活动 pane：qtPaneOn＝当前托管
            路由匹配才挂载，切换即换挂 16~300ms，保活方案真机史见
            composables/qt-wide-workspace.ts 的 qtPaneOn 注释。 -->
-      <view v-if="qtPaneOn('/pages/search/index')" class="qtww-pane"><SearchPage /></view>
-      <view v-if="qtPaneOn('/pages/daily-recommend/index')" class="qtww-pane"><DailyRecommendPage /></view>
-      <view v-if="qtPaneOn('/pages/radio/index')" class="qtww-pane"><RadioPage /></view>
-      <view v-if="qtPaneOn('/pages/podcast/index')" class="qtww-pane"><PodcastPage /></view>
-      <view v-if="qtPaneOn('/pages/daily/index')" class="qtww-pane"><DailyPage /></view>
-      <view v-if="qtPaneOn('/pages/playlists/index')" class="qtww-pane"><PlaylistsPage /></view>
-      <view v-if="qtPaneOn('/pages/chart/index')" class="qtww-pane"><ChartPage /></view>
-      <view v-if="qtPaneOn('/pages/settings/index')" class="qtww-pane"><SettingsPage /></view>
+      <view v-if="homePaneOn('/pages/search/index')" class="qtww-pane"><SearchPage /></view>
+      <view v-if="homePaneOn('/pages/daily-recommend/index')" class="qtww-pane"><DailyRecommendPage /></view>
+      <view v-if="homePaneOn('/pages/radio/index')" class="qtww-pane"><RadioPage /></view>
+      <view v-if="homePaneOn('/pages/podcast/index')" class="qtww-pane"><PodcastPage /></view>
+      <view v-if="homePaneOn('/pages/daily/index')" class="qtww-pane"><DailyPage /></view>
+      <view v-if="homePaneOn('/pages/playlists/index')" class="qtww-pane"><PlaylistsPage /></view>
+      <view v-if="homePaneOn('/pages/chart/index')" class="qtww-pane"><ChartPage /></view>
+      <view v-if="homePaneOn('/pages/settings/index')" class="qtww-pane"><SettingsPage /></view>
     </qt-wide-workspace>
   </qt-page-frame>
 </template>
@@ -279,10 +251,14 @@ import ChartPage from "@/pages/chart/index.uvue";
 import SettingsPage from "@/pages/settings/index.uvue";
 import QtTabBar from "@/uni_modules/qt-ui/components/qt-tab-bar/qt-tab-bar.uvue";
 import { useQtTabBarSync } from "@/uni_modules/qt-ui/composables/use-qt-tab-bar";
-import { qtContentWidth, qtColumnCount } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { qtContentWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { qtHdHomeMetrics } from "@/uni_modules/qt-ui/composables/hd-layout";
+import { qtRailNavigate } from "@/uni_modules/qt-ui/composables/qt-nav";
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
-import { onShow, onBackPress } from "@dcloudio/uni-app";
-import { exitApp } from "@/services/app-native";
+import { onShow, onHide, onBackPress } from "@dcloudio/uni-app";
+import { exitApp, moveAppToBackground } from "@/services/app-native";
+import { useHomeBackSettings } from "@/uni_modules/qt-ui/stores/home-back";
+import { qtActionSheetState, qtActionSheetCancel } from "@/services/action-sheet";
 import SourceSwitcher from "@/uni_modules/qt-ui/components/qt-source-switcher/qt-source-switcher.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtNoticeBar from "@/uni_modules/qt-ui/components/qt-notice-bar/qt-notice-bar.uvue";
@@ -299,7 +275,7 @@ import { usePlayerStore } from "@/stores/player";
 import { useSourceStore } from "@/stores/source";
 import { useSourceRegistryStore } from "@/stores/source-registry";
 import { useSourceUpdateStore } from "@/stores/source-update";
-import { useThemeStore, qtAccentRgba } from "@/uni_modules/qt-ui/stores/theme";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useNoticeStore } from "@/stores/notice";
 import { isNoticeBarClosedInSession } from "@/services/notice";
@@ -310,15 +286,23 @@ import { qtTrackPage } from "@/uni_modules/qt-stat";
 import type { Notice } from "@/types/notice";
 import type { Playlist, Song } from "@/types/music";
 import type { Chart, Source } from "@/services/music-api";
-import { qtFontDual, qtFont, qtFontPx } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFont, qtFontPx, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { logMsgErr } from "@/services/logger";
 import { buildLocalMixes, shouldShowLocalMixes, type LocalMix } from "@/services/local-mixes";
 import { useListenStatsStore } from "@/stores/listen-stats";
 import { qtCloseWideTool, qtPaneOn, qtWideWorkspaceRefresh } from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
+import { closePlaybackQueue } from "@/uni_modules/qt-ui/composables/playback-queue-overlay";
 import { openPackInstallSheet, PACK_SHEET_UNAVAILABLE } from "@/services/pack-install-sheet";
 import { useHomePopupStore } from "@/stores/home-popup";
 
+// 两个 tab 根页都可能存活；只挂属于本宿主的活动工具，深页覆盖不改归属。
+function homePaneOn(route: string): boolean {
+  return qtPaneOn(route, "/pages/home/index");
+}
+
 const player = usePlayerStore();
+const homeBackSettings = useHomeBackSettings();
+const homeActionSheet = qtActionSheetState();
 const sourceStore = useSourceStore();
 const sourceUpdateStore = useSourceUpdateStore();
 // 「我的」tab 红点：音源包有新包待生效时亮
@@ -527,6 +511,10 @@ const headerPadStyle = computed((): string => "padding-top:" + (statusBarPx() + 
 const playlists = ref<Playlist[]>([]);
 const songs = ref<Song[]>([]);
 const charts = ref<Chart[]>([]);
+// Stable preview arrays: unrelated playback/notice updates need not allocate slices.
+const homePlaylists = computed((): Playlist[] => playlists.value.slice(0, 10));
+const homeCharts = computed((): Chart[] => charts.value.slice(0, 4));
+const homeSongs = computed((): Song[] => songs.value.slice(0, 8));
 /**
  * 首屏加载态的响应式镜像（模板要读，`homeLoading` 是普通 let 只用于请求去重）。
  * 初值必须是 true：加载在 onMounted/onShow 里发起，首帧若按 false 渲染会先闪一下
@@ -598,7 +586,7 @@ async function load(): Promise<void> {
       });
     await Promise.all([recsTask, chartsTask]);
     // 新歌放最后：与原来「无论推荐/榜单成败都拉新歌」一致
-    await runLatest();
+    if (!stale()) await runLatest();
   } finally {
     // 只有仍是当前那一轮才收尾：真换源时旧轮已被新轮顶掉（seq 不等），
     // 它不能再把 homeLoading 清掉，否则新轮就失去去重保护
@@ -614,6 +602,10 @@ async function load(): Promise<void> {
   }
 }
 function retryLoad(): void {
+  // loadedSource 也承担在途去重；显式重试必须作废上次失败的尝试标记。
+  if (homeLoading) return;
+  loadedSource = "";
+  loadedPackFp = "";
   ensureLoad();
 }
 function ensureLoad(): void {
@@ -708,6 +700,7 @@ onMounted(() => {
   uni.$on(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
 });
 onShow(() => {
+  resetHomeBack();
   qtTrackPage("pages/home/index");
   // 宽屏托管覆盖层的可见性里有非响应式 qtTopRoute()，回宿主的瞬间强制重估一次
   qtWideWorkspaceRefresh();
@@ -717,19 +710,31 @@ onShow(() => {
   applyNoticeBar();
   loadLocalMixes();
 });
-// 首页返回键：自绘 tab-bar 隐藏原生 tabBar 后，框架默认的「再按一次退出」不生效，
-// 返回键表现为完全无响应 —— 这里显式接管：2 秒内连按两次退出应用（退出时停止播放、
-// 撤掉媒体通知）。停播必须走 stopForExit：保留 current/queue/progress 供下次冷启动续播，
-// 用 stop() 会把「上次听到哪」一并清掉，重进后悬浮球消失、无法继续听
+// 首页返回由一个持久化单选偏好控制。关闭弹层/工具不计入退出次数，离开首页重置。
+// 退出仍走 stopForExit 保留队列和进度；回到后台只移动原生任务，不能停播。
 let lastBackAt = 0;
+function resetHomeBack(): void { lastBackAt = 0; }
+onHide(resetHomeBack);
+watch((): string => homeBackSettings.mode, resetHomeBack);
 onBackPress((options: OnBackPressOptions): boolean => {
   // 程序化 navigateBack 不拦截
   if (options.from != "backbutton") return false;
+  if (homeActionSheet.visible.value) {
+    resetHomeBack();
+    qtActionSheetCancel();
+    return true;
+  }
+  if (closePlaybackQueue()) { resetHomeBack(); return true; }
   // 宽屏就地托管的工具页先关：它是覆盖层、不在页面栈里，返回键要一层层退
-  if (qtCloseWideTool()) return true;
+  if (qtCloseWideTool()) { resetHomeBack(); return true; }
+  if (homeBackSettings.mode == "background") {
+    resetHomeBack();
+    moveAppToBackground();
+    return true;
+  }
   const now = Date.now();
-  if (now - lastBackAt < 2000) {
-    lastBackAt = 0;
+  if (lastBackAt > 0 && now >= lastBackAt && now - lastBackAt < 2000) {
+    resetHomeBack();
     player.stopForExit();
     exitApp();
     return true;
@@ -749,13 +754,13 @@ async function play(song: Song): Promise<void> {
     qtShowToast({ title: "该歌曲暂时无法播放", icon: "none" });
   }
 }
-function goSearch(): void { uni.navigateTo({ url: "/pages/search/index" }); }
-function showDaily(): void { uni.navigateTo({ url: "/pages/daily/index" }); }
-function goDailyRecommend(): void { uni.navigateTo({ url: "/pages/daily-recommend/index" }); }
-function goRadio(): void { uni.navigateTo({ url: "/pages/radio/index" }); }
-function goPodcast(): void { uni.navigateTo({ url: "/pages/podcast/index" }); }
-function showChart(): void { uni.navigateTo({ url: "/pages/chart/index" }); }
-function goPlaylists(): void { uni.navigateTo({ url: "/pages/playlists/index" }); }
+function goSearch(): void { qtRailNavigate("/pages/search/index"); }
+function showDaily(): void { qtRailNavigate("/pages/daily/index"); }
+function goDailyRecommend(): void { qtRailNavigate("/pages/daily-recommend/index"); }
+function goRadio(): void { qtRailNavigate("/pages/radio/index"); }
+function goPodcast(): void { qtRailNavigate("/pages/podcast/index"); }
+function showChart(): void { qtRailNavigate("/pages/chart/index"); }
+function goPlaylists(): void { qtRailNavigate("/pages/playlists/index"); }
 function openPlaylist(list: Playlist): void {
   uni.navigateTo({ url: "/pages/playlist/index?id=" + encodeURIComponent(list.id) + "&platform=" + encodeURIComponent(list.platform) });
 }
@@ -799,7 +804,7 @@ let featuredSource = "";
 let featuredId = "";
 /** 本轮推荐到货后确定今日精选；「一次加载只抽一次」由这里保证：
  *  同一音源下已抽中的歌单仍在列表里就沿用（不重抽），换源或它掉出前 10 才重抽。
- *  抽取范围限定在下方歌单架实际展示的前 10 个（playlists.slice(0, 10) 同一区间），
+ *  抽取范围限定在下方歌单架实际展示的前 10 个（homePlaylists 同一区间），
  *  避免 hero 抽到一张架子上根本看不到的歌单。 */
 function pickFeatured(list: Playlist[]): void {
   const n = Math.min(10, list.length);
@@ -832,68 +837,46 @@ function playFeatured(): void {
  * 现在只读同一个令牌函数，两边永远一致；页面自己不再写 padding-left。
  */
 const wideHomeWidth = computed<number>(() => qtContentWidth("grid"));
-const wideCompact = computed<boolean>(() => wideHomeWidth.value < 720);
-// 2026-10-25 对齐网易云 Pad：右栏 300→264，rail 收窄（208→96）腾出的宽度留给歌单网格加列
-const wideSideWidth = computed<number>(() => wideCompact.value ? 0 : 264);
-// wide-shell 自身有 16px（紧凑 12px）左右内边距，主列宽必须一并扣除，否则右栏溢出被裁。
-// 右栏（热门榜单）被功能面门控隐藏时不再为它让位，主列撑满剩余宽度
-const wideMainWidth = computed<number>(() => wideHomeWidth.value - (wideCompact.value ? 24 : 32) - (showCharts.value ? wideSideWidth.value : 0) - (wideCompact.value ? 0 : 16));
-/** 宽屏白色面板（.wide-panel）的内宽：主列宽 − 左右各 16px 内边距；歌单网格与「为你整理」共用 */
-const widePanelInner = computed<number>(() => Math.max(1, wideMainWidth.value - 32));
-/**
- * 按主列宽推列数：最小卡宽 150px，封顶 6 列，且卡宽超过 200px 时继续加列。
- *
- * 改造前除数是写死的 130，本意是「原 260 方案的一半，避免单卡时右侧留白」，
- * 但方向反了：窗口越宽列数越多、每张卡反而越小 —— 1280dp 窗口下主列 678dp
- * 算成 5 列、卡宽只有 116dp，比竖屏手机横滑架上的卡（约 135dp）还小，
- * 于是「宽屏」只增加了张数、没有放大内容。宽屏正确的做法是先让卡长到
- * 看得清封面与两行文案（≥128dp），再多出来的宽度才用于加列；
- * 同时给一个 200dp 上限，免得超宽窗口下只剩两三张巨卡。
- * 2026-10-25 用户实测 1097dp 窗口 2 列 218dp 仍嫌「图片太大」：下限 150→128
- * （网易云 Pad 同区域约 3 列 140dp），461dp 主列从 2 列 218dp 变 3 列 141dp。
- */
-const widePlaylistColumns = computed<number>(() => {
-  const inner = wideMainWidth.value - 32;
-  let cols = qtColumnCount(inner, 128, 12, 6);
-  // 上限 200dp 是「别只剩两三张巨卡」，但加列前必须确认加完还在自己定的
-  // 128dp 下限之上：旧写法只看「当前列宽 > 200」就加列，431dp 内容宽下
-  // 2 列 203dp → 加一列变 3 列 131dp，直接掉到下限以下。
-  while (cols < 6 && Math.floor((inner - 12 * (cols + 1)) / (cols + 1)) >= 128) {
-    const cur = Math.floor((inner - 12 * cols) / cols);
-    const next = Math.floor((inner - 12 * (cols + 1)) / (cols + 1));
-    if (cur <= 200 || next < 128) break;
-    cols = cols + 1;
-  }
-  return cols;
+const homeSearchStyle = computed((): string => {
+  const base = "background-color:" + themeStore.skin.surface + ";border-color:" + themeStore.skin.border + ";";
+  return base + (layout.isWide ? "flex:none;width:" + Math.max(100, Math.min(480, wideHomeWidth.value - 230)) + "px;" : "");
 });
-const widePlaylistCardWidth = computed<number>(() => {
-  const inner = wideMainWidth.value - 32;
-  const gap = 12;
-  // 末卡也带 margin-right，行宽按 cols 个 gap 计，避免最后一列被挤到换行
-  return Math.max(128, Math.floor((inner - gap * widePlaylistColumns.value) / widePlaylistColumns.value));
+const hdHome = computed(() => qtHdHomeMetrics(wideHomeWidth.value, fontScale.scale));
+const wideHomeStyle = computed((): string => "width:" + wideHomeWidth.value + "px;");
+const wideFeatureStyle = computed((): string => "width:" + hdHome.value.featurePx + "px;min-height:" + Math.round(196 * Math.max(1, fontScale.scale)) + "px;background-color:" + themeStore.skin.accent + ";");
+const wideFeatureCoverStyle = computed((): string => {
+  const size = Math.min(136, Math.round(hdHome.value.featurePx * 0.24));
+  return "width:" + size + "px;height:" + size + "px;";
 });
-/**
- * 歌单网格按行切开（数据层），不用 flex-wrap。
- *
- * 用 wrap 时「4 张卡正好等于容器宽」这种整数拟合对亚像素取整非常敏感：
- * 149*4 + 12*4 = 644 恰好等于容器内容宽，任何舍入都会把第 4 张挤到下一行，
- * 真机表现是网格只排 3 列、右侧空出约 180dp 的底色。行结构写死之后就不再依赖
- * 布局引擎的取整行为（这也是本项目多列一律「数据层切行、禁 flex-wrap」的原因）。
- */
-const widePlaylistRows = computed<Playlist[][]>(() => {
-  const src = playlists.value.slice(0, 8);
-  const cols = widePlaylistColumns.value;
-  const rows: Playlist[][] = [];
-  let i = 0;
-  while (i < src.length) {
-    rows.push(src.slice(i, i + cols));
-    i = i + cols;
-  }
+const wideShortcutGroupStyle = computed((): string => "width:" + (hdHome.value.featureSplit && showPlaylists.value ? hdHome.value.shortcutPx : hdHome.value.innerPx) + "px;");
+const wideShelfStyle = computed((): string => "width:" + hdHome.value.innerPx + "px;height:" + Math.ceil(hdHome.value.cardPx + 18 + 57 * fontScale.scale) + "px;");
+const wideShelfRowStyle = computed((): string => "width:" + Math.max(hdHome.value.innerPx, (hdHome.value.cardPx + 12) * (loading.value && playlists.value.length == 0 ? 8 : Math.min(10, playlists.value.length))) + "px;");
+const wideEntries = [
+  { title: "每日推荐", subtitle: "按你的口味发现音乐", icon: "sparkles", route: "/pages/daily-recommend/index" },
+  { title: "私人 FM", subtitle: "让喜欢的音乐接着播放", icon: "music", route: "/pages/radio/index" },
+  { title: "播客", subtitle: "继续收听你的订阅", icon: "mic", route: "/pages/podcast/index" },
+];
+function openWideEntry(route: string): void { qtRailNavigate(route); }
+function wideShortcutStyle(index: number): string {
+  const stacked = hdHome.value.featureSplit && showPlaylists.value;
+  const width = stacked ? hdHome.value.shortcutPx : Math.floor((hdHome.value.innerPx - 24) / 3);
+  return "width:" + width + "px;min-height:" + Math.round(60 * Math.max(1, fontScale.scale)) + "px;margin-right:" + (!stacked && index < 2 ? 12 : 0) + "px;background-color:" + themeStore.skin.surface + ";";
+}
+const wideSongRows = computed<Song[][]>(() => {
+  const rows: Song[][] = [];
+  const list = songs.value.slice(0, hdHome.value.songColumns * 3);
+  for (let i = 0; i < list.length; i += hdHome.value.songColumns) rows.push(list.slice(i, i + hdHome.value.songColumns));
   return rows;
 });
-const wideHomeStyle = computed<string>(() => "width:" + wideHomeWidth.value + "px;");
-const wideMainStyle = computed<string>(() => "width:" + wideMainWidth.value + "px;");
-const wideSideStyle = computed<string>(() => "width:" + wideSideWidth.value + "px;");
+const wideChartRows = computed<Chart[][]>(() => {
+  const rows: Chart[][] = [];
+  const list = charts.value.slice(0, hdHome.value.songColumns * 2);
+  for (let i = 0; i < list.length; i += hdHome.value.songColumns) rows.push(list.slice(i, i + hdHome.value.songColumns));
+  return rows;
+});
+function wideMusicCellStyle(column: number): string {
+  return "width:" + hdHome.value.songPx + "px;min-height:" + Math.ceil(64 * Math.max(1, fontScale.scale)) + "px;margin-right:" + (column < hdHome.value.songColumns - 1 ? 24 : 0) + "px;";
+}
 /** 横滑架卡间距：与歌单网格同宽 14rpx，卡宽用 px 时它也必须换算成 px 才能对齐。
     换算规则与 qtRpx 一致（1rpx = windowWidth / 750，uni-app x 没有任何封顶），
     但必须显式读 layout.windowWidth，否则这个 computed 没有响应式依赖，
@@ -925,12 +908,8 @@ const shelfWidthPx = computed<number>(() => {
  * 与 .shelf-name / .shelf-count 的字号行高一一对应。
  * 矮了会裁掉封面，高了会在卡下留出一大片空白（原先写死 370rpx，长屏上空白尤其明显）。
  */
-const shelfHeightPx = computed<number>(() => Math.round(shelfCardWidth.value + qtRpx(140)));
-/** 今日精选 hero：accent 渐变底（第二段取 accent 弱化，随皮肤联动） */
-const heroStyle = computed<string>(() => {
-  const acc = themeStore.skin.accent;
-  return "background-color:" + acc + ";background-image:linear-gradient(135deg," + acc + " 0%," + qtAccentRgba(themeStore.skin, 0.72) + " 100%);";
-});
+const shelfHeightPx = computed<number>(() => Math.round(shelfCardWidth.value + qtRpx(26 + 114 * fontScale.scale)));
+const heroStyle = computed<string>(() => "background-color:" + themeStore.skin.accent + ";");
 /** 快捷磁贴宽：每行固定 2 枚（2026-10-24 起 4 枚改 2 行 2 列，用户嫌一行 4 枚太挤）。
  *  磁贴带 margin-right 14rpx（含行尾），因此每行减 2 份间距；flex-wrap 按 2 枚换行
  *  （2026-11-04 起磁贴共 6 枚常显时排 3 行：原四枚在前，私人 FM / 播客 随后换行）。 */
@@ -964,7 +943,7 @@ const formatCount = formatBigCount;
 .home-fail-btn { margin-left: 16rpx; padding: 0 20rpx; height: 56rpx; align-items: center; justify-content: center; border-radius: 28rpx; }
 .home-fail-btn-text { font-weight: 600; }
 .home-header { padding: 26rpx 26rpx 18rpx; flex-direction: row; align-items: center; }
-.home-search { flex: 1; min-width: 0; height: 88rpx; margin-left: 20rpx; padding: 0 20rpx; flex-direction: row; align-items: center;  border-width: 1px; border-style: solid; border-radius: 16rpx; }
+.home-search { flex: 1; min-width: 0; height: 88rpx; margin-left: 12rpx; padding: 0 20rpx; flex-direction: row; align-items: center;  border-width: 1px; border-style: solid; border-radius: 16rpx; }
 .home-search-text { margin-left: 12rpx; color: #737b8e; font-size: 23rpx; }
 .home-bell { position: relative; width: 88rpx; height: 88rpx; margin-left: 12rpx; align-items: center; justify-content: center;  border-width: 1px; border-style: solid; border-radius: 16rpx; }
 .home-bell-dot { position: absolute; top: 8rpx; right: 8rpx; min-width: 26rpx; height: 26rpx; padding: 0 6rpx; align-items: center; justify-content: center; background-color: #1f2430; border-radius: 13rpx; }
@@ -986,11 +965,11 @@ const formatCount = formatBigCount;
 .hero-bg-wrap { position: absolute; left: 0; top: 0; right: 0; bottom: 0; border-radius: 28rpx; }
 .hero-bg { width: 100%; height: 100%; border-radius: 28rpx; }
 .hero-scrim { position: absolute; left: 0; top: 0; right: 0; bottom: 0; border-radius: 28rpx; }
-.portrait-hero-copy { flex: 1; min-width: 0; }
+.portrait-hero-copy { position: relative; flex: 1; min-width: 0; }
 .hero-kicker { color: rgba(255,255,255,0.72); font-size: 20rpx; font-weight: 700; }
 .hero-title { margin-top: 10rpx; color: #ffffff; font-size: 40rpx; line-height: 52rpx; font-weight: 800; }
 .hero-desc { margin-top: 10rpx; color: rgba(255,255,255,0.78); font-size: 22rpx; }
-.hero-play { margin-top: 24rpx; align-self: flex-start; height: 64rpx; padding: 0 28rpx; flex-direction: row; align-items: center; background-color: #ffffff; border-radius: 32rpx; }
+.hero-play { margin-top: 24rpx; align-self: flex-start; min-height: 72rpx; padding: 12rpx 28rpx; flex-direction: row; align-items: center; background-color: #ffffff; border-radius: 32rpx; }
 .hero-play-text { margin-left: 8rpx; font-size: 24rpx; font-weight: 700; }
 .quick-grid { margin-top: 20rpx; flex-direction: row; flex-wrap: wrap; }
 /* 私人 FM / 播客磁贴与其余磁贴同一套 .quick-pill 样式、参与同一个 flex-wrap 换行，
@@ -1000,8 +979,8 @@ const formatCount = formatBigCount;
 .section { margin-top: 18rpx; padding: 26rpx;  border-width: 1px; border-style: solid; border-radius: 26rpx; }
 .section-head { flex-direction: row; align-items: flex-end; justify-content: space-between; }
 .section-copy { flex-direction: column; }
-.section-kicker { font-size: 19rpx; font-weight: 800; }
-.section-title { margin-top: 6rpx; font-size: 34rpx; font-weight: 800; }
+
+.section-title { margin-top: 0; font-size: 34rpx; font-weight: 700; }
 /* 尺寸由脚本按窗口宽度算出（shelfCardWidth / shelfHeightPx）：卡宽随窗口缩放，
    字号改用 rpx 与页面其余文本一致——原先写死 104px 卡 + 13px/11px 字，
    在长屏手机上页面其余部分随 rpx 放大、只有这一排不变，看起来就偏小 */
@@ -1050,7 +1029,7 @@ const formatCount = formatBigCount;
    间距按宽屏 px 重给（外壳 .wide-shell 自身已有 16px 内边距，这里不再叠 34px）。 */
 .source-tip-wide { margin: 12px 16px 0 16px; padding: 12px 14px; border-radius: 10px; }
 .source-tip-copy-wide { margin-left: 10px; }
-.home-empty-wide { height: 88px; }
+
 .home-bell-dot-wide { min-width: 18px; height: 18px; border-radius: 9px; top: 3px; right: 3px; padding-left: 4px; padding-right: 4px; }
 .home-bell-dot-text-wide { font-size: 11px; }
 .wide-kicker { color: #8a919f; font-size: 11px; font-weight: 700; }
@@ -1058,54 +1037,56 @@ const formatCount = formatBigCount;
 .wide-empty { height: 48px; align-items: center; justify-content: center; }
 .wide-empty-text { color: #929aa8; font-size: 12px; }
 .home-header-wide { padding-left: 16px; padding-right: 16px; padding-bottom: 8px; }
-.home-search-wide { height: 40px; border-radius: 10px; margin-left: 14px; padding-left: 14px; padding-right: 14px; }
+.home-search-wide { height: 40px; border-radius: 10px; margin-left: 10px; padding-left: 14px; padding-right: 14px; }
 .home-search-text-wide { margin-left: 8px; font-size: 13px; }
 .home-bell-wide { width: 40px; height: 40px; border-radius: 10px; margin-left: 10px; }
-.wide-home { align-self: center; padding-bottom: 28px; }
-.wide-shell { flex-direction: row; align-items: flex-start; padding: 0 16px; }
-.wide-shell-compact { flex-direction: column; padding: 0 12px; }
-.wide-main { flex-direction: column; }
-.wide-side { margin-left: 16px; flex-direction: column; }
-/* 宽屏 hero：底图/蒙层绝对铺满，内容行用 z-index 压在上面。
-   绝对层的 <image> 必须显式写 width/height:100%（uni-app x 对四边拉伸不稳，
-   player 的 .bg 与 qt-page-frame 壁纸都踩过同一个坑）。 */
-.wide-feature { position: relative; padding: 18px; min-height: 140px; flex-direction: row; align-items: center; border-radius: 16px; overflow: hidden; }
-.wide-feature-bg { position: absolute; left: 0; top: 0; width: 100%; height: 100%; z-index: 0; }
-.wide-feature-scrim { position: absolute; left: 0; top: 0; width: 100%; height: 100%; z-index: 1; }
-.wide-feature-cover { position: relative; z-index: 2; width: 100px; height: 100px; border-radius: 10px; background-color: #2d333f; }
-.wide-feature-copy { position: relative; z-index: 2; flex: 1; min-width: 0; margin-left: 20px; }
-.wide-feature-kicker { color: rgba(255,255,255,0.62); font-size: 11px; font-weight: 700; }
-.wide-feature-title { margin-top: 6px; color: #ffffff; font-size: 23px; line-height: 29px; font-weight: 700; }
-.wide-feature-desc { margin-top: 7px; color: rgba(255,255,255,0.68); font-size: 13px; }
-.wide-feature-actions { margin-top: 16px; flex-direction: row; }
-.wide-primary { height: 34px; padding: 0 14px; flex-direction: row; align-items: center; background-color: #ffffff; border-radius: 17px; }
-.wide-primary-text { margin-left: 5px; font-size: 12px; font-weight: 700; }
-.wide-secondary { height: 34px; padding: 0 12px; margin-left: 8px; align-items: center; justify-content: center; background-color: rgba(255,255,255,0.12); border-radius: 9px; }
-.wide-secondary-text { color: #ffffff; font-size: 12px; }
-.wide-panel { margin-top: 14px; padding: 16px;  border-width: 1px; border-style: solid; border-radius: 14px; }
-.wide-panel-head { flex-direction: row; align-items: flex-end; justify-content: space-between; margin-bottom: 12px; }
-.wide-panel-title { margin-top: 3px; color: #12151d; font-size: 18px; font-weight: 700; }
-/* 行由 widePlaylistRows 在数据层切好，这里只做纵向堆叠 */
-.wide-playlist-grid { flex-direction: column; }
+.wide-home { align-self: center; padding: 8px 16px 32px; }
+.wide-feature-row { flex-direction: column; }
+.wide-feature-row-split { flex-direction: row; align-items: stretch; }
+.wide-feature { position: relative; padding: 24px; flex-direction: row; align-items: center; border-radius: 16px; overflow: hidden; flex-shrink: 0; }
+.wide-feature-backdrop { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
+.wide-feature-bg { width: 100%; height: 100%; }
+.wide-feature-scrim { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
+.wide-feature-cover { position: relative; border-radius: 10px; margin-right: 24px; flex-shrink: 0; }
+.wide-feature-copy { position: relative; flex: 1; min-width: 0; }
+.wide-feature-kicker { color: rgba(255,255,255,0.80); font-weight: 500; }
+.wide-feature-title { margin-top: 8px; color: #ffffff; font-weight: 700; }
+.wide-feature-desc { margin-top: 8px; color: rgba(255,255,255,0.80); }
+/* 两个入口共用 44px 触达高度；不要用 min-height + 纵向 padding 撑开原生 flex 行。 */
+.wide-feature-actions { margin-top: 18px; min-height: 44px; flex-direction: row; align-items: center; flex-wrap: wrap; flex-shrink: 0; }
+.wide-primary { height: 44px; padding: 0 16px; flex-direction: row; align-items: center; justify-content: center; flex-shrink: 0; background-color: #ffffff; border-radius: 22px; margin-right: 12px; }
+.wide-primary-text { margin-left: 6px; font-weight: 600; }
+.wide-secondary { height: 44px; flex-direction: row; align-items: center; justify-content: center; flex-shrink: 0; }
+.wide-secondary-text { color: #ffffff; margin-right: 4px; }
+.wide-shortcuts { flex-direction: row; margin-top: 12px; }
+.wide-shortcuts-split { flex-direction: column; margin-left: 16px; margin-top: 0; justify-content: space-between; }
+.wide-shortcut { flex-direction: row; align-items: center; padding: 10px; border-radius: 12px; }
+.wide-shortcut-inline { flex-direction: column; justify-content: center; }
+.wide-shortcut-icon { width: 36px; height: 36px; border-radius: 10px; align-items: center; justify-content: center; flex-shrink: 0; }
+.wide-shortcut-copy { flex: 1; min-width: 0; margin-left: 10px; }
+.wide-shortcut-copy-inline { flex: none; margin-left: 0; margin-top: 8px; }
+.wide-shortcut-title { font-weight: 600; }
+.wide-shortcut-desc { margin-top: 4px; }
+.wide-panel { margin-top: 28px; }
+.wide-panel-head { flex-direction: row; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.wide-panel-title { font-weight: 600; }
 .wide-playlist-row { flex-direction: row; }
-.wide-playlist-card { margin-right: 12px; margin-bottom: 14px; }
-.wide-playlist-cover { border-radius: 10px;  }
-.wide-playlist-name { margin-top: 7px; color: #1b202b; font-size: 13px; line-height: 17px; font-weight: 600; }
-.wide-playlist-count { margin-top: 3px; color: #737b8e; font-size: 11px; }
-.wide-song-grid { flex-direction: row; flex-wrap: wrap; }
-.wide-song-row { width: 50%; height: 54px; flex-direction: row; align-items: center; }
-.wide-song-cover { width: 38px; height: 38px; border-radius: 8px;  }
-.wide-song-info { flex: 1; min-width: 0; margin-left: 10px; }
-/* 与竖屏 song-row 的播放按钮一致：accentSoft 圆底 + accent 播放图标；
-   margin-right 拉开与右列封面的距离（行是 50% 定宽，不能加 padding 免得换行） */
-.wide-song-play { width: 28px; height: 28px; border-radius: 14px; margin-left: 10px; margin-right: 14px; flex-shrink: 0; justify-content: center; align-items: center; }
-.wide-song-name { color: #1b202b; font-size: 13px; font-weight: 600; text-overflow: ellipsis; }
-.wide-song-meta { margin-top: 3px; color: #737b8e; font-size: 11px; text-overflow: ellipsis; }
-.wide-chart-row { height: 54px; flex-direction: row; align-items: center; border-top-width: 1px; border-top-style: solid; }
-.wide-chart-cover { width: 38px; height: 38px; margin-left: 5px; border-radius: 8px;  }
-.wide-chart-info { flex: 1; min-width: 0; margin-left: 10px; }
-.wide-chart-name { color: #1b202b; font-size: 13px; font-weight: 600; text-overflow: ellipsis; }
-.wide-chart-meta { margin-top: 3px; color: #737b8e; font-size: 11px; text-overflow: ellipsis; }
+.wide-playlist-card { margin-right: 12px; flex-shrink: 0; }
+.wide-playlist-cover { border-radius: 10px; }
+.wide-playlist-name { margin-top: 9px; font-weight: 500; }
+.wide-playlist-count { margin-top: 4px; }
+.wide-song-grid { flex-direction: row; }
+.wide-song-row { flex-direction: row; align-items: center; flex-shrink: 0; padding: 6px 0; }
+.wide-song-cover { width: 46px; height: 46px; border-radius: 8px; flex-shrink: 0; }
+.wide-song-info { flex: 1; min-width: 0; margin-left: 12px; }
+.wide-song-play { width: 40px; height: 40px; margin-left: 4px; flex-shrink: 0; justify-content: center; align-items: center; }
+.wide-song-name { font-weight: 500; text-overflow: ellipsis; }
+.wide-song-meta { margin-top: 5px; text-overflow: ellipsis; }
+.wide-chart-row { flex-direction: row; align-items: center; padding: 8px 0; border-bottom-width: 1px; border-bottom-style: solid; flex-shrink: 0; }
+.wide-chart-cover { width: 48px; height: 48px; border-radius: 8px; flex-shrink: 0; }
+.wide-chart-info { flex: 1; min-width: 0; margin-left: 12px; margin-right: 8px; }
+.wide-chart-name { font-weight: 500; text-overflow: ellipsis; }
+.wide-chart-meta { margin-top: 5px; text-overflow: ellipsis; }
 /* 桌面指针反馈：只在宽屏启用（手机上 hover-class 会在点按瞬间闪一下） */
 .shelf-card-hover { background-color: rgba(255, 255, 255, 0.06); border-radius: 12px; }
 .chart-row-hover { background-color: rgba(255, 255, 255, 0.06); }

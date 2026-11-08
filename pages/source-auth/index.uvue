@@ -106,7 +106,7 @@
         <view class="sheet-btn-row" :class="layout.isWide ? 'sheet-btn-row-wide' : ''">
           <qt-button class="sheet-btn" label="取消" variant="ghost" size="sm" @click="closeQrSheet" />
           <qt-button v-if="qrImage.length > 0 && qrStatus != 'expired'" class="sheet-btn" label="保存二维码" variant="secondary" size="sm" @click="saveQrImage" />
-          <qt-button v-if="qrStatus == 'expired'" class="sheet-btn" label="重新生成" variant="secondary" size="sm" @click="regenerateQr" />
+          <qt-button v-if="qrStatus == 'expired' || qrStatus == 'save-failed'" class="sheet-btn" label="重新生成" variant="secondary" size="sm" @click="regenerateQr" />
         </view>
       </scroll-view>
     </qt-sheet>
@@ -257,7 +257,7 @@
   </qt-page-frame>
 </template>
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, onUnmounted } from "vue";
 import { onLoad, onShow, onUnload } from "@dcloudio/uni-app";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtCard from "@/uni_modules/qt-ui/components/qt-card/qt-card.uvue";
@@ -292,6 +292,9 @@ import {
   authLoginByPassword,
   authCheckUser,
   saveSourceAuthAccount,
+  rotateSourceAuthAccount,
+  sourceAuthRevision,
+  sourceAuthAccountMatches,
   removeSourceAuthAccount,
   readSourceAuthEntries,
   readSourceAuthTogglesFor,
@@ -564,10 +567,28 @@ const qrImageError = ref(false);
 /** waiting / scanned / expired */
 const qrStatus = ref("waiting");
 let pollTimer: number | null = null;
+/** 页面离开后，已发出的扫码请求不得恢复弹层或计时器。 */
+let qrPageAlive = true;
+/** 每次打开、取消或重生同步作废旧请求；clearInterval 不会取消在途 Promise。 */
+let qrSessionGeneration = 0;
+/** 一个代次只允许一个在途轮询；旧代次 finally 不得解锁新代次。 */
+let qrPollGeneration = -1;
+function qrSessionIsCurrent(generation: number): boolean {
+  return qrPageAlive && generation == qrSessionGeneration;
+}
+/** 账号退出/其他登录会推进凭据代次，同样撤回未确认的扫码授权。 */
+let qrAccountRevision = 0;
+function qrAccountIsCurrent(generation: number, source: string, revision: number): boolean {
+  if (!qrSessionIsCurrent(generation)) return false;
+  if (sourceAuthRevision(source) == revision) return true;
+  closeQrSheet();
+  return false;
+}
 
 const qrStatusText = computed((): string => {
   if (qrStatus.value == "scanned") return "已扫码，请在手机上确认";
   if (qrStatus.value == "expired") return "二维码已过期，可重新生成";
+  if (qrStatus.value == "save-failed") return "登录保存失败，请重新生成二维码后重试";
   return "打开官方 App 扫码登录";
 });
 const qrStatusColor = computed((): string => {
@@ -647,10 +668,15 @@ function qrImageToPath(dataUrl: string): string {
 }
 
 function startQr(source: string, name: string): void {
-  if (qrBusy.value) return;
+  if (!qrPageAlive || qrBusy.value) return;
+  const generation = ++qrSessionGeneration;
+  const revision = sourceAuthRevision(source);
+  stopPolling();
   qrBusy.value = true;
   authQrCreate(source)
     .then((session) => {
+      if (!qrAccountIsCurrent(generation, source, revision)) return;
+      qrAccountRevision = revision;
       qrSource.value = source;
       qrName.value = name;
       qrKey.value = session.key;
@@ -667,10 +693,11 @@ function startQr(source: string, name: string): void {
       startPolling();
     })
     .catch((e) => {
+      if (!qrAccountIsCurrent(generation, source, revision)) return;
       qtShowToast({ title: "创建二维码失败：" + errText(e), icon: "none" });
     })
     .finally(() => {
-      qrBusy.value = false;
+      if (qrSessionIsCurrent(generation)) qrBusy.value = false;
     });
 }
 function regenerateQr(): void {
@@ -693,10 +720,18 @@ function stopPolling(): void {
   }
 }
 function pollOnce(): void {
+  const generation = qrSessionGeneration;
+  if (!qrSessionIsCurrent(generation) || !qrVisible.value || qrKey.value.length == 0) return;
+  if (qrPollGeneration == generation || qrStatus.value == "confirmed" || qrStatus.value == "expired") return;
+  qrPollGeneration = generation;
   const source = qrSource.value;
   const key = qrKey.value;
+  const name = qrName.value;
+  const revision = qrAccountRevision;
+  if (!qrAccountIsCurrent(generation, source, revision)) return;
   authQrPoll(source, key)
     .then((r) => {
+      if (!qrAccountIsCurrent(generation, source, revision)) return;
       if (r.status == "confirmed") {
         stopPolling();
         const user = r.user;
@@ -704,6 +739,8 @@ function pollOnce(): void {
           qrStatus.value = "expired";
           return;
         }
+        // 先消费本次确认，保存/引擎注入等待期间不能再次提交。无需等待网络才能取消。
+        qrStatus.value = "confirmed";
         const nickname = user.nickname;
         // confirmed 时随 credential 下发的副键（bili refresh_token）并入 extras 落库
         let extrasJson = "";
@@ -712,16 +749,36 @@ function pollOnce(): void {
           extras.set("refresh_token", r.refreshToken);
           extrasJson = JSON.stringify(extras);
         }
-        saveSourceAuthAccount(source, r.cookie, user, extrasJson)
+        const saving = saveSourceAuthAccount(source, r.cookie, user, extrasJson);
+        // save 同步推进一次 revision；原生写入期间若退出/换号，不能接纳它推进的额外代次。
+        const savedRevision = revision + 1;
+        saving
           .then(() => {
+            if (!qrAccountIsCurrent(generation, source, savedRevision)) return;
+            // storageWrite 会吞原生写入异常；Promise 完成不等于凭据真实落库。
+            const entries = readSourceAuthEntries();
+            let persisted = false;
+            for (let i = 0; i < entries.length; i++) {
+              const account = entries[i].account;
+              if (entries[i].source == source && account.cookie == r.cookie && account.extrasJson == extrasJson
+                && account.user.id == user.id && account.user.nickname == user.nickname
+                && account.user.avatar == user.avatar && account.user.vip == user.vip && account.user.vipLabel == user.vipLabel) {
+                persisted = true;
+                break;
+              }
+            }
+            if (!persisted) throw new Error("账号凭据未成功写入本地存储");
+            if (!qrAccountIsCurrent(generation, source, savedRevision)) return;
             closeQrSheet();
             removeFromStale(source);
             refreshFromStorage();
             qtShowToast({ title: "已登录：" + nickname, icon: "none" });
             // 登录顺手看一眼平台侧歌单：有本地没有的就提示同步（qrName 不随弹层关闭清空）
-            maybeAutoSync(source, qrName.value);
+            maybeAutoSync(source, name);
           })
           .catch((e) => {
+            if (!qrAccountIsCurrent(generation, source, savedRevision)) return;
+            qrStatus.value = "save-failed";
             qtShowToast({ title: "保存登录失败：" + errText(e), icon: "none" });
           });
         return;
@@ -734,6 +791,7 @@ function pollOnce(): void {
       qrStatus.value = r.status;
     })
     .catch((e) => {
+      if (!qrAccountIsCurrent(generation, source, revision)) return;
       // 确定性失败继续轮询没有意义（旧包缺入口/引擎下线），停下让用户重新生成；
       // 普通网络抖动保持轮询（下一次 2s 后自然重试）
       const message = errText(e);
@@ -742,10 +800,15 @@ function pollOnce(): void {
         qrStatus.value = "expired";
         qtShowToast({ title: message, icon: "none" });
       }
+    })
+    .finally(() => {
+      if (qrPollGeneration == generation) qrPollGeneration = -1;
     });
 }
 function closeQrSheet(): void {
+  qrSessionGeneration++;
   stopPolling();
+  qrBusy.value = false;
   qrVisible.value = false;
   qrImage.value = "";
   qrFilePath.value = "";
@@ -1206,14 +1269,16 @@ function validateAccounts(): void {
   const entries = readSourceAuthEntries();
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i];
+    const revision = sourceAuthRevision(e.source);
     authCheckUser(e.source, e.account.cookie, e.account.extrasJson)
       .then((r) => {
+        if (!sourceAuthAccountMatches(e.source, e.account, revision)) return;
         // 包侧轮换出新凭据：连同副键合并落库（引擎内存副本随保存同步注入）
         if (r.ok && r.credential.length > 0) {
           const user = r.user != null ? r.user : e.account.user;
           const extrasJson = mergeCredentialExtras(e.account.extrasJson, r.refreshToken);
-          return saveSourceAuthAccount(e.source, r.credential, user, extrasJson).then(() => {
-            refreshTick.value++;
+          return rotateSourceAuthAccount(e.source, e.account, revision, r.credential, user, extrasJson).then((saved) => {
+            if (saved) refreshTick.value++;
           });
         }
         if (r.ok && r.user != null) return;
@@ -1246,10 +1311,14 @@ onShow(() => {
 onLoad(() => {
   uni.$on(WEB_LOGIN_DONE_EVENT, onWebLoginDone);
 });
-onUnload(() => {
-  stopPolling();
+function disposeAuthPage(): void {
+  qrPageAlive = false;
+  closeQrSheet();
   uni.$off(WEB_LOGIN_DONE_EVENT, onWebLoginDone);
-});
+}
+onUnload(() => disposeAuthPage());
+// 宽屏设置内嵌页面不一定触发路由 onUnload，Vue 卸载同样必须作废扫码会话。
+onUnmounted(() => disposeAuthPage());
 
 // ── 样式常量（对齐音源包管理页的弹层口径）──
 const rowBorderStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");

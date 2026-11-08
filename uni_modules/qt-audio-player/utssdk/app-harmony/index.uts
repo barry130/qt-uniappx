@@ -37,6 +37,7 @@ import { wantAgent, WantAgent, common, Want } from '@kit.AbilityKit'
 import { audio } from '@kit.AudioKit'
 import { image } from '@kit.ImageKit'
 import { http } from '@kit.NetworkKit'
+import { fileIo } from '@kit.CoreFileKit'
 import { notificationManager } from '@kit.NotificationKit'
 import { BusinessError } from '@kit.BasicServicesKit'
 
@@ -747,6 +748,10 @@ function releaseCoverSlot(assetId: string): void {
  * 失败静默——封面缺失不该影响播放。
  */
 function loadCoverIntoSession(session: avSession.AVSession, url: string, assetId: string): void {
+	if (!url.startsWith('https://') && !url.startsWith('http://')) {
+		loadLocalCoverIntoSession(session, url, assetId).catch((_e: Error) => {})
+		return
+	}
 	try {
 		const req = http.createHttp()
 		// 必须显式声明要 ArrayBuffer：HttpResponse.result 是 string | Object | ArrayBuffer，
@@ -848,6 +853,27 @@ function loadCoverIntoSession(session: avSession.AVSession, url: string, assetId
 	} catch (e) {
 		// 忽略
 		releaseCoverSlot(assetId)
+	}
+}
+
+/** 内嵌/持久缓存封面直接从本机解码，不交给 HTTP。 */
+async function loadLocalCoverIntoSession(session: avSession.AVSession, url: string, assetId: string): Promise<void> {
+	let file: fileIo.File | null = null
+	let source: image.ImageSource | null = null
+	let bitmap: image.PixelMap | null = null
+	try {
+		file = fileIo.openSync(url, fileIo.OpenMode.READ_ONLY)
+		source = image.createImageSource(file.fd)
+		bitmap = await source.createPixelMap()
+		const item = currentItem()
+		if (item == null || item.mediaId != assetId || item.coverUrl != url) return
+		await session.setAVMetadata(buildMetadata(assetId, item.title, item.artist, item.album, url, gDurationMs, bitmap))
+	} catch (e) {
+		// 静默：本地封面读不到不影响音频播放。
+	} finally {
+		if (source != null) source.release()
+		if (file != null) fileIo.closeSync(file)
+		if (bitmap != null) bitmap.release()
 	}
 }
 
@@ -1777,6 +1803,10 @@ export function audioStop(): void {
 }
 
 export function audioSeek(seconds: number): void {
+	// 初载期间保留 seek 意图，prepared 后统一应用。
+	if (gIndex < 0) return
+	gPendingPositionSec = Math.max(0, seconds)
+	if (gPendingMid.length > 0 || gAwaitPrepare || gNextUri.length > 0) return
 	const p = gPlayer
 	if (p == null) return
 	// 只有真正「有媒体在手」的状态才转发 seek：
@@ -1789,6 +1819,7 @@ export function audioSeek(seconds: number): void {
 		console.log('[QT Audio H] seek 忽略：播放器状态为 ' + st)
 		return
 	}
+	gPendingPositionSec = 0.0
 	seekTo(p, seconds * 1000.0)
 }
 
@@ -2215,4 +2246,19 @@ export function audioSetEnhanceEnabled(on: boolean): void {
 }
 
 export function audioSetEnhanceGain(gainMb: number): void {
+}
+
+// Optional Android Bluetooth metadata fallback; capability is false on Harmony.
+export function audioSetCarLyricMode(mode: number): void {}
+export function audioCarLyricToken(): number { return 0 }
+export function audioSetCarLyricFor(mediaId: string, token: number, text: string, offsetMs: number): void {}
+export function audioSetCarLyricOffset(mediaId: string, token: number, offsetMs: number): void {}
+
+export function audioSetTrackCover(mediaId: string, cover: string): void {
+  const item = currentItem()
+  if (item == null || item.mediaId != mediaId || item.coverUrl == cover) return
+  item.coverUrl = cover
+  gCoverUrl = cover
+  gCoverLoadingFor = ''
+  applySessionMetadata()
 }

@@ -36,35 +36,48 @@ import { qtLayout, qtRailWidth } from "./use-qt-layout";
  * 均衡器（非设置页，上限 0）比播放设置晚挂载，它卸载后若直接清零，回到播放设置时
  * 三栏还在但页面已按全宽排版，右列被裁。
  *
- * 栈的语义：每层框架 push 自己需要的一次上限；生效值取**最后一个仍存活的条目**
- * （= 页面栈最上层那页的诉求）。0 表示该页不限宽，它压在上面时就确实不限宽。
+ * 栈的语义：每层框架 push 自己需要的一次上限；生效值取**最后一个可见条目**。
+ * 存活不等于可见：tab 根页和被覆盖的原生页面仍保留，onShow/onHide 与工具路由
+ * 负责更新 active，隐藏页面不能把三栏上限传给首页。0 表示可见页不限宽。
  *
  * 框架自己（qt-page-frame）必须走 qtContentWidthRaw —— 否则会读到自己设的上限，
  * 内容列被越缩越小（限 → 缩 → 再限）。
  */
-type CapEntry = { token: number; px: number };
+type CapEntry = { token: number; px: number; active: boolean };
 
-/** 存活的上限条目，按挂载先后排列 */
+/** 存活的上限条目，按挂载先后排列；隐藏 owner 保留宽度但不参与生效判定。 */
 let capEntries: CapEntry[] = [];
 /** 版本号：条目数组是普通数组，靠它触发 computed 重算 */
 const capVersion = ref<number>(0);
 let capTokenSeq = 1;
 
-/** 申请一层上限：返回 owner token，卸载时原样传给 qtClearContentWidthCap */
-export function qtPushContentWidthCap(px: number): number {
+function visibleContentWidthCap(): number {
+  for (let i = capEntries.length - 1; i >= 0; i--) {
+    if (capEntries[i].active) return capEntries[i].px;
+  }
+  return 0;
+}
+
+/** 申请一层上限：返回 owner token；隐藏页应传 active=false。 */
+export function qtPushContentWidthCap(px: number, active: boolean = true): number {
   const token = capTokenSeq++;
-  capEntries.push({ token: token, px: px > 0 ? Math.floor(px) : 0 });
-  capVersion.value = capVersion.value + 1;
+  const previous = visibleContentWidthCap();
+  const next = px > 0 ? Math.floor(px) : 0;
+  capEntries.push({ token: token, px: next, active: active });
+  if (visibleContentWidthCap() != previous) capVersion.value = capVersion.value + 1;
   return token;
 }
 
-/** 就地更新某层上限（窗口尺寸、栏宽变化时用，不能再 push 否则栈会一直涨） */
-export function qtUpdateContentWidthCap(token: number, px: number): void {
+/** 就地更新宽度与可见性，不重新 push；仅有效宽度变化时广播。 */
+export function qtUpdateContentWidthCap(token: number, px: number, active: boolean = true): void {
   const next = px > 0 ? Math.floor(px) : 0;
   for (let i = 0; i < capEntries.length; i++) {
     if (capEntries[i].token == token) {
+      if (capEntries[i].px == next && capEntries[i].active == active) return;
+      const previous = visibleContentWidthCap();
       capEntries[i].px = next;
-      capVersion.value = capVersion.value + 1;
+      capEntries[i].active = active;
+      if (visibleContentWidthCap() != previous) capVersion.value = capVersion.value + 1;
       return;
     }
   }
@@ -72,6 +85,7 @@ export function qtUpdateContentWidthCap(token: number, px: number): void {
 
 /** 释放某层上限（按 token 定位，允许非 LIFO 顺序销毁） */
 export function qtClearContentWidthCap(token: number): void {
+  const previous = visibleContentWidthCap();
   const kept: CapEntry[] = [];
   let removed = false;
   for (let i = 0; i < capEntries.length; i++) {
@@ -83,7 +97,8 @@ export function qtClearContentWidthCap(token: number): void {
   }
   if (!removed) return;
   capEntries = kept;
-  capVersion.value = capVersion.value + 1;
+  const next = visibleContentWidthCap();
+  if (next != previous) capVersion.value = capVersion.value + 1;
 }
 
 /** 当前生效上限（0 表示无限制）；诊断与外壳计算用 */
@@ -91,7 +106,7 @@ export function qtContentWidthCap(): number {
   // 读版本号建立依赖，否则 computed 追踪不到条目变化
   const v = capVersion.value;
   if (v < 0) return 0;
-  return capEntries.length == 0 ? 0 : capEntries[capEntries.length - 1].px;
+  return visibleContentWidthCap();
 }
 
 /**
@@ -151,6 +166,7 @@ export const QT_MIN_COLUMN_WIDTH = {
  */
 export function qtContentWidth(kind: string = "flow"): number {
   const raw = qtContentWidthRaw(kind);
+  if (!qtLayout().isWide) return raw;
   const cap = qtContentWidthCap();
   if (cap <= 0) return raw;
   return cap < raw ? cap : raw;
@@ -162,6 +178,8 @@ export function qtContentWidth(kind: string = "flow"): number {
  */
 export function qtContentWidthRaw(kind: string = "flow"): number {
   const l = qtLayout();
+  // 手机 frame 本身铺满窗口；宽屏 gutter / 旧三栏 cap 不能参与首帧宽度。
+  if (!l.isWide) return l.windowWidth;
   const range = rangeOf(kind);
   if (kind == "full") return l.windowWidth;
   const rail = qtRailWidth();

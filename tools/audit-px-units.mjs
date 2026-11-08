@@ -29,7 +29,8 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 function walk(dir, out = []) {
   for (const entry of readdirSync(dir)) {
-    if (entry === "node_modules" || entry === "unpackage" || entry.startsWith(".")) continue;
+    // _tmp 是截图/构建日志/临时工作区（含项目文件副本），不参与门禁扫描
+    if (entry === "node_modules" || entry === "unpackage" || entry === "_tmp" || entry.startsWith(".")) continue;
     const full = join(dir, entry);
     if (statSync(full).isDirectory()) walk(full, out);
     else if (entry.endsWith(".uvue")) out.push(full);

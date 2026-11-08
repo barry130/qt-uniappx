@@ -1,0 +1,70 @@
+<template>
+  <scroll-view direction="vertical" class="fl-scroll" :show-scrollbar="false">
+    <view class="fl-stage" :style="'min-height:' + heightPx + 'px;'">
+      <view v-for="row in rows" :key="row.index" class="fl-row" :class="layout.isWide ? 'fl-row-wide' : ''" @longpress.stop="emit('copy', row.line, row.index)">
+        <view v-if="row.index == currentIndex && currentWords.length > 0" class="fl-words">
+          <text v-for="(word, index) in currentWords" :key="index" :style="wordStyle(word.startMs, word.durationMs)" class="fl-word">{{ word.text.replace(/ /g, '\u00a0') }}</text>
+        </view>
+        <text v-else class="fl-text" :style="lineStyle(row.index)">{{ row.line.text.trim().length > 0 ? row.line.text : '···' }}</text>
+        <text v-if="row.index == currentIndex && row.line.romanization" class="fl-sub" :style="subStyle">{{ row.line.romanization }}</text>
+        <text v-if="row.index == currentIndex && row.line.translation" class="fl-sub" :style="subStyle">{{ row.line.translation }}</text>
+      </view>
+      <text v-if="rows.length == 0" class="fl-text" :style="subStyle">{{ loading ? '正在加载歌词' : '纯音乐，请欣赏' }}</text>
+    </view>
+  </scroll-view>
+</template>
+<script setup lang="ts">
+import { computed } from "vue";
+import type { LyricLine, LyricWord } from "@/types/music";
+import { useQtLayout } from "../../composables/use-qt-layout";
+import { qtFontDual, useFontScaleStore } from "@/uni_modules/qt-ui/stores/font-scale";
+import { playingLyricNeighbours, playingWordPulse } from "../../composables/playing-style";
+const props = defineProps<{ lines: LyricLine[]; activeIndex: number; position: number; rhythm: boolean; ink: string; muted: string; heightPx: number; loading: boolean }>();
+const emit = defineEmits<{ copy: [line: LyricLine, index: number] }>();
+const layout = useQtLayout();
+const fontScale = useFontScaleStore();
+const currentIndex = computed((): number => Math.max(0, props.activeIndex));
+const currentWords = computed((): LyricWord[] => {
+  const line = props.lines[currentIndex.value];
+  if (line == null || line.text.trim().length == 0) return [];
+  if (line.words != null && line.words.length > 0) return line.words;
+  // LRC has only line timing. Spread a restrained pulse across that interval;
+  // word-timed sources keep their original timestamps. Bound long credit lines.
+  if (!props.rhythm || line.text.length > 100) return [];
+  const next = props.lines[currentIndex.value + 1];
+  const duration = Math.max(500, ((next?.time ?? (line.time + 5)) - line.time) * 1000);
+  const glyphs = Array.from(line.text);
+  return glyphs.map((text, index) => ({ text, startMs: index * duration / glyphs.length, durationMs: duration / glyphs.length }));
+});
+const rows = computed(() => playingLyricNeighbours(props.lines, props.activeIndex)
+  .filter(index => !props.rhythm || index >= currentIndex.value)
+  .map(index => ({ index, line: props.lines[index] })));
+const currentSize = computed((): number => {
+  const text = props.lines[currentIndex.value]?.text ?? "";
+  const density = text.length > 80 ? 0.68 : text.length > 40 ? 0.84 : 1;
+  return (layout.isWide ? (props.rhythm ? 36 : 27) : (props.rhythm ? 52 : 42)) * density * fontScale.scale;
+});
+const subStyle = computed((): string => "color:" + props.muted + ";" + qtFontDual(24, 14));
+function lineStyle(index: number): string {
+  return index == currentIndex.value
+    ? "color:" + props.ink + ";font-weight:600;font-size:" + Math.round(currentSize.value) + (layout.isWide ? "px;" : "rpx;")
+    : "color:" + props.muted + ";opacity:0.65;" + qtFontDual(28, 18);
+}
+function wordStyle(startMs: number, durationMs: number): string {
+  const line = props.lines[currentIndex.value];
+  const elapsed = props.activeIndex < 0 || line == null ? -1 : (props.position - line.time) * 1000;
+  const pulse = props.rhythm ? playingWordPulse(elapsed, startMs, durationMs) : 0;
+  return "font-size:" + Math.round(currentSize.value) + (layout.isWide ? "px;" : "rpx;")
+    + "color:" + (elapsed >= startMs ? props.ink : props.muted) + ";transform:translateY(" + (-pulse * 5).toFixed(2) + "px);";
+}
+</script>
+<style>
+.fl-scroll { flex: 1; min-height: 0; }
+.fl-stage { justify-content: center; padding: 16rpx; }
+.fl-row { padding: 22rpx 0; flex-shrink: 0; }
+.fl-row-wide { padding: 20px 0; }
+.fl-text { text-align: center; line-height: 1.5; }
+.fl-sub { text-align: center; line-height: 1.5; margin-top: 8px; }
+.fl-words { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: center; }
+.fl-word { font-weight: 600; line-height: 1.5; }
+</style>

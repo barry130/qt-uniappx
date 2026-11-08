@@ -22,3 +22,23 @@ export function turntableMetrics(heightRpx: number): TurntableMetrics {
     coverRpx: record * 0.46,
   };
 }
+
+export type TurntableStyles = {
+  canvasSize: string;
+  recordSize: string;
+  plate: string;
+  cover: string;
+};
+
+/** 原生 image 和旋转容器使用同一组明确尺寸，不依赖绝对定位中的百分比高度。 */
+export function turntableStyles(metrics: TurntableMetrics, unit: number): TurntableStyles {
+  const px = (rpx: number): string => (rpx * unit).toFixed(2) + "px";
+  const recordSize = "width:" + px(metrics.recordRpx) + ";height:" + px(metrics.recordRpx) + ";border-radius:" + px(metrics.recordRpx / 2) + ";";
+  const coverOffset = (metrics.recordRpx - metrics.coverRpx) / 2;
+  return {
+    canvasSize: "width:" + px(metrics.widthRpx) + ";height:" + px(metrics.heightRpx) + ";",
+    recordSize,
+    plate: "position:absolute;left:" + px(metrics.recordLeftRpx) + ";top:" + px(metrics.recordTopRpx) + ";" + recordSize,
+    cover: "position:absolute;left:" + px(coverOffset) + ";top:" + px(coverOffset) + ";width:" + px(metrics.coverRpx) + ";height:" + px(metrics.coverRpx) + ";border-radius:" + px(metrics.coverRpx / 2) + ";",
+  };
+}

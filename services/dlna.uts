@@ -1,0 +1,70 @@
+import { ref } from "vue";
+import { audioPlayer, PLAYER_VOLUME_CHANGED_EVENT } from "@/services/audio-player";
+import { usePlayerStore } from "@/stores/player";
+import type { AudioDlnaDevice, AudioDlnaState } from "@/uni_modules/qt-audio-player";
+import { qtShowToast } from "@/services/toast";
+// #ifdef APP-ANDROID
+import { audioDlnaDiscover, audioDlnaConnect, audioDlnaDisconnect, audioDlnaOnState } from "@/uni_modules/qt-audio-player";
+// #endif
+
+const visible = ref(false), searching = ref(false);
+const devices = ref<AudioDlnaDevice[]>([]);
+const error = ref(""), state = ref<AudioDlnaState | null>(null);
+let searchGeneration = 0, lastError = "";
+export function dlnaSupported(): boolean {
+  // #ifdef APP-ANDROID
+  return true;
+  // #endif
+  // #ifndef APP-ANDROID
+  return false;
+  // #endif
+}
+export function dlnaUiState() { return { visible, searching, devices, error, state }; }
+export function initDlna(): void {
+  // #ifdef APP-ANDROID
+  audioDlnaOnState((snapshot: AudioDlnaState): void => {
+    state.value = snapshot;
+    uni.$emit(PLAYER_VOLUME_CHANGED_EVENT);
+    if (snapshot.error.length > 0 && snapshot.error != lastError) {
+      lastError = snapshot.error;
+      qtShowToast({ title: snapshot.error, icon: "none" });
+    } else if (snapshot.error.length == 0) lastError = "";
+  });
+  // #endif
+}
+export function openDlna(): void {
+  if (!dlnaSupported()) return;
+  initDlna(); visible.value = true; discoverDlna();
+}
+export function closeDlna(): void { visible.value = false; }
+export function discoverDlna(): void {
+  if (!dlnaSupported()) return;
+  const generation = ++searchGeneration;
+  searching.value = true; error.value = "";
+  // #ifdef APP-ANDROID
+  audioDlnaDiscover((found: AudioDlnaDevice[], failure: string): void => {
+    if (generation != searchGeneration) return;
+    devices.value = found; error.value = failure; searching.value = false;
+  });
+  // #endif
+}
+export function connectDlna(device: AudioDlnaDevice): void {
+  // #ifdef APP-ANDROID
+  const player = usePlayerStore(), current = player.current;
+  const expectedId = current == null ? "" : current.platform + ":" + current.id;
+  const position = player.progress, autoPlay = player.playing;
+  initDlna();
+  audioPlayer.prepareDlna();
+  if (audioDlnaConnect(device.id)) {
+    player.adoptDlnaTarget(expectedId, position, autoPlay);
+    closeDlna();
+  }
+  else error.value = "设备已失效，请刷新设备列表";
+  // #endif
+}
+export function disconnectDlna(returnToLocal: boolean): void {
+  // #ifdef APP-ANDROID
+  audioDlnaDisconnect(returnToLocal);
+  // #endif
+  closeDlna();
+}

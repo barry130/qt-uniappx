@@ -22,6 +22,8 @@ export type DownloadItem = {
   time: number;
   /** 成品字节数（0 = 未知，老记录/兜底路径）。列表里显示「12.3 MB」用 */
   size: number;
+  /** 本次下载实际发布成功的封面/歌词路径；旧记录无法可靠推断，保持空数组。 */
+  sidecars: string[];
 };
 
 export type DownloadTask = {
@@ -70,6 +72,17 @@ export type QtBatchRemoveResult = {
 type QtChunkResult = {
   temp: string;
   whole: boolean;
+  rangeStart: number;
+  rangeEnd: number;
+  rangeTotal: number;
+  etag: string;
+  lastModified: string;
+};
+
+/** saveToDisk 真正发布的音频与侧车路径；提交与取消清理都只认这份结果。 */
+type QtPublishResult = {
+  path: string;
+  sidecars: string[];
 };
 
 /** 单个下载文件的整体限时：防底层挂起占死下载队列 */
@@ -125,6 +138,60 @@ function partKey(song: Song): string {
   return (song.platform + "__" + song.id).replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
+function resourceKeyOf(song: Song, quality: string): string {
+  return partKey(song) + "__" + quality.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function endpointOfUrl(url: string): string {
+  let endpoint = url;
+  const hash = endpoint.indexOf("#");
+  if (hash >= 0) endpoint = endpoint.substring(0, hash);
+  const query = endpoint.indexOf("?");
+  if (query >= 0) endpoint = endpoint.substring(0, query);
+  return endpoint;
+}
+
+type QtContentRange = {
+  start: number;
+  end: number;
+  total: number;
+};
+
+function headerValue(headers: any, name: string): string {
+  if (headers == null) return "";
+  try {
+    if (typeof headers.get == "function") {
+      const direct = headers.get(name);
+      if (direct != null) return direct.toString();
+    }
+  } catch (_) {
+    // 静默：不同平台 header 类型不一致，继续扫描普通对象键
+  }
+  try {
+    const keys = Object.keys(headers);
+    const wanted = name.toLowerCase();
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i].toLowerCase() == wanted) {
+        const value = headers[keys[i]];
+        return value != null ? value.toString() : "";
+      }
+    }
+  } catch (_) {
+    // 静默：无 header 时按空串处理
+  }
+  return "";
+}
+
+function parseContentRange(value: string): QtContentRange | null {
+  const match = /^bytes\s+(\d+)-(\d+)\/(\d+)$/i.exec(value);
+  if (match == null) return null;
+  let start = parseInt(match[1]);
+  let end = parseInt(match[2]);
+  let total = parseInt(match[3]);
+  if (isNaN(start) || isNaN(end) || isNaN(total) || start < 0 || end < start || total <= end) return null;
+  return { start, end, total };
+}
+
 /** 歌词落盘前的临时文件（私有目录，写完交给原生插件搬进公共目录） */
 function lyricTempPath(song: Song): string | null {
   const base = uni.env.USER_DATA_PATH;
@@ -150,26 +217,6 @@ function coverExtOf(url: string): string {
 function plainPath(p: string): string {
   if (p.indexOf("file://") == 0) return p.substring(7);
   return p;
-}
-
-/**
- * 音频同 basename 的侧车候选路径（封面 + 歌词）。扩展名只能猜——封面按图床
- * 可能是 png/webp，歌词在旧原生层还留下过 `.lrc.txt` 双扩展名——所以这些
- * 路径**只用于尽力而为的删除**，不能按「删不掉」计数（见 deleteSidecars）。
- */
-function sidecarPathsOf(path: string): string[] {
-  const plain = plainPath(path);
-  const slash = plain.lastIndexOf("/");
-  const dot = plain.lastIndexOf(".");
-  const base = dot > slash ? plain.substring(0, dot) : plain;
-  return [
-    base + ".jpg",
-    base + ".jpeg",
-    base + ".png",
-    base + ".webp",
-    base + ".lrc",
-    base + ".lrc.txt",
-  ];
 }
 
 /**
@@ -354,6 +401,124 @@ function songFromJson(text: string): Song | null {
   }
 }
 
+/**
+ * 老版下载台账是 `songJson||path||size`。歌名可能合法地包含 `||`，因此不能取
+ * 第一个分隔符；逐个候选边界尝试解析 JSON，找到真正的 envelope 结尾。
+ */
+function legacyDownloadItem(text: string): DownloadItem | null {
+  if (typeof text != "string" || text.length == 0) return null;
+  let searchFrom = 0;
+  while (searchFrom < text.length) {
+    const sep = text.indexOf("||", searchFrom);
+    if (sep <= 0) return null;
+    const song = songFromJson(text.substring(0, sep));
+    if (song == null) {
+      searchFrom = sep + 2;
+      continue;
+    }
+    let rest = text.substring(sep + 2);
+    let size = 0;
+    const tail = rest.lastIndexOf("||");
+    if (tail > 0) {
+      const maybe = rest.substring(tail + 2);
+      let numeric = maybe.length > 0;
+      for (let c = 0; c < maybe.length; c++) {
+        const ch = maybe.charCodeAt(c);
+        if (ch < 48 || ch > 57) {
+          numeric = false;
+          break;
+        }
+      }
+      if (numeric) {
+        size = parseInt(maybe);
+        rest = rest.substring(0, tail);
+      }
+    }
+    if (rest.length == 0) return null;
+    return { song, path: rest, time: Date.now(), size, sidecars: [] };
+  }
+  return null;
+}
+
+function stringArray(value: any): string[] {
+  const paths: string[] = [];
+  if (!Array.isArray(value)) return paths;
+  for (let i = 0; i < value.length; i++) {
+    if (typeof value[i] == "string" && value[i].length > 0) paths.push(value[i]);
+  }
+  return paths;
+}
+
+function v2DownloadItem(value: any): DownloadItem | null {
+  if (value == null || typeof value != "object" || Array.isArray(value)) return null;
+  const song = songFromJson(JSON.stringify(value.song));
+  const path = typeof value.path == "string" ? value.path : "";
+  if (song == null || path.length == 0) return null;
+  const time = typeof value.time == "number" && value.time > 0 ? value.time : Date.now();
+  const size = typeof value.size == "number" && value.size > 0 ? value.size : 0;
+  return { song, path, time, size, sidecars: stringArray(value.sidecars) };
+}
+
+function legacyTask(value: string): DownloadTask | null {
+  if (typeof value != "string" || value.length == 0) return null;
+  let searchFrom = 0;
+  while (searchFrom < value.length) {
+    const sep = value.indexOf("||", searchFrom);
+    if (sep <= 0) return null;
+    const song = songFromJson(value.substring(0, sep));
+    if (song == null) {
+      searchFrom = sep + 2;
+      continue;
+    }
+    let statusText = value.substring(sep + 2);
+    let error = "";
+    const sep2 = statusText.indexOf("||");
+    if (sep2 >= 0) {
+      error = statusText.substring(sep2 + 2);
+      statusText = statusText.substring(0, sep2);
+    }
+    return {
+      song,
+      status: statusText == "failed" ? "failed" : "paused",
+      path: "",
+      error,
+      progress: 0,
+      doneBytes: 0,
+      totalBytes: 0,
+      speed: 0,
+      lastBytes: 0,
+      retryCount: 0,
+      retryAt: 0,
+      cancelled: false,
+      runId: 0,
+      abortHandle: null,
+    };
+  }
+  return null;
+}
+
+function v2Task(songValue: any, statusValue: any, errorValue: any): DownloadTask | null {
+  const song = songFromJson(JSON.stringify(songValue));
+  if (song == null) return null;
+  const status = statusValue == "failed" ? "failed" : "paused";
+  return {
+    song,
+    status,
+    path: "",
+    error: typeof errorValue == "string" ? errorValue : "",
+    progress: 0,
+    doneBytes: 0,
+    totalBytes: 0,
+    speed: 0,
+    lastBytes: 0,
+    retryCount: 0,
+    retryAt: 0,
+    cancelled: false,
+    runId: 0,
+    abortHandle: null,
+  };
+}
+
 class DownloadsStore {
   items: DownloadItem[] = [];
   tasks: DownloadTask[] = [];
@@ -414,37 +579,18 @@ class DownloadsStore {
     try {
       const raw = uni.getStorageSync(DOWNLOAD_KEY) as string;
       if (raw.length > 0) {
-        const arr = JSON.parse(raw) as string[];
+        const decoded = JSON.parse(raw) as any;
         const items: DownloadItem[] = [];
-        for (let index = 0; index < arr.length; index++) {
-          const text = arr[index] as string;
-          const sep = text.indexOf("||");
-          if (sep <= 0) continue;
-          const songText = text.substring(0, sep);
-          let rest = text.substring(sep + 2);
-          // 第三段（字节数）是可选的：老记录只有 song||path。
-          // 用 lastIndexOf 取尾段并校验是纯数字，路径里万一有 "||" 也不会误切。
-          let size = 0;
-          const tail = rest.lastIndexOf("||");
-          if (tail > 0) {
-            const maybe = rest.substring(tail + 2);
-            let numeric = maybe.length > 0;
-            for (let c = 0; c < maybe.length; c++) {
-              const ch = maybe.charCodeAt(c);
-              if (ch < 48 || ch > 57) {
-                numeric = false;
-                break;
-              }
-            }
-            if (numeric) {
-              size = parseInt(maybe);
-              rest = rest.substring(0, tail);
-            }
+        if (decoded != null && decoded.version == 2 && Array.isArray(decoded.items)) {
+          for (let index = 0; index < decoded.items.length; index++) {
+            const item = v2DownloadItem(decoded.items[index]);
+            if (item != null) items.push(item);
           }
-          const path = rest;
-          const song = songFromJson(songText);
-          if (song != null && path.length > 0)
-            items.push({ song, path, time: Date.now(), size });
+        } else if (Array.isArray(decoded)) {
+          for (let index = 0; index < decoded.length; index++) {
+            const item = legacyDownloadItem(decoded[index]);
+            if (item != null) items.push(item);
+          }
         }
         this.items = items;
       }
@@ -648,13 +794,18 @@ class DownloadsStore {
 
   private save(): void {
     try {
-      const arr: string[] = [];
+      const rows: any[] = [];
       for (let index = 0; index < this.items.length; index++) {
         const item = this.items[index];
-        // 第三段是字节数（老记录没有这一段，读的时候按 0 处理）
-        arr.push(songToJson(item.song) + "||" + item.path + "||" + item.size);
+        rows.push({
+          song: item.song,
+          path: item.path,
+          time: item.time,
+          size: item.size,
+          sidecars: item.sidecars,
+        });
       }
-      uni.setStorageSync(DOWNLOAD_KEY, JSON.stringify(arr));
+      uni.setStorageSync(DOWNLOAD_KEY, JSON.stringify({ version: 2, items: rows }));
     } catch (_) {
       logWarn("Downloads", "下载列表持久化失败（本次已生效，重启后丢失）");
     }
@@ -881,7 +1032,27 @@ class DownloadsStore {
     );
   }
 
+  /** 任务仍在队列且未被暂停/移除、代次仍属于当前传输。 */
+  private taskIsCurrent(task: DownloadTask, myRun: number): boolean {
+    return !task.cancelled && task.runId == myRun && this.tasks.indexOf(task) >= 0;
+  }
+
+  /** 只清理本代次实际发布的路径；不按 basename 猜测任何侧车。 */
+  private discardPublished(published: QtPublishResult | null): void {
+    if (published == null) return;
+    const paths: string[] = [];
+    if (published.path.length > 0) paths.push(published.path);
+    for (let i = 0; i < published.sidecars.length; i++) paths.push(published.sidecars[i]);
+    if (paths.length == 0) return;
+    try {
+      deleteMediaByPath(paths);
+    } catch (e) {
+      logErrV("Download", "取消下载后的成品清理失败", e);
+    }
+  }
+
   private async runTaskInner(task: DownloadTask, myRun: number): Promise<void> {
+    let published: QtPublishResult | null = null;
     try {
       let url = task.song.url;
       // 歌曲上带的地址可能已过期（平台链接带时效签名），过期/为空就重新取址再下载。
@@ -908,6 +1079,7 @@ class DownloadsStore {
           }
           throw new Error("取不到下载地址（音源暂无该歌曲资源）");
         }
+        if (!this.taskIsCurrent(task, myRun)) return;
       }
       // 取址失败（音源没给链接/该档位无资源）就直接说清楚，别把空串丢给
       // uni.downloadFile——底层只会回一句 "invalid URL"，用户看不出原因
@@ -931,11 +1103,13 @@ class DownloadsStore {
       let tempPath = "";
       const dir = partDirOf();
       let total = 0;
-      const cached = dir != null ? this.readPartTotal(task.song) : 0;
+      const resourceKey = resourceKeyOf(task.song, wanted);
+      const cached = dir != null ? this.readPartTotal(task.song, resourceKey) : 0;
       if (cached > 0) {
         total = cached;
       } else if (dir != null) {
         total = await this.headTotal(url, task.song.platform);
+        if (!this.taskIsCurrent(task, myRun)) return;
       }
       // 排查续传是否真的生效：dir 为 null 说明 USER_DATA_PATH 拿不到（整下兜底），
       // total 为 0 说明探不到长度（音源不认 Range 且无断点，也是整下兜底）
@@ -944,7 +1118,7 @@ class DownloadsStore {
         " cached=" + cached);
       if (total > 0 && dir != null) {
         this.noteBytes(task, cached, total);
-        const assembled = await this.fetchResumable(url, task.song, total, dir, task, myRun);
+        const assembled = await this.fetchResumable(url, task.song, total, resourceKey, dir, task, myRun);
         // 暂停/移除：.part 已保留在私有目录，静默退出（恢复时续传）
         if (assembled == null) return;
         tempPath = assembled;
@@ -956,11 +1130,23 @@ class DownloadsStore {
           this.noteBytes(task, done, total);
           this.setProgress(task, progress);
         });
+        if (!this.taskIsCurrent(task, myRun)) {
+          try {
+            uni.getFileSystemManager().unlinkSync(plainPath(tempPath));
+          } catch (_) {
+            // 静默：取消后临时文件删不掉由平台缓存清理兜底
+          }
+          return;
+        }
       }
       // 下载期间被用户移除/暂停：直接丢弃，不落盘、不写已下载列表
-      if (task.cancelled || task.runId != myRun) return;
-      const savedPath = await this.saveToDisk(tempPath, task.song, url, wanted);
-      if (task.cancelled || task.runId != myRun) return;
+      if (!this.taskIsCurrent(task, myRun)) return;
+      published = await this.saveToDisk(tempPath, task.song, url, wanted);
+      if (!this.taskIsCurrent(task, myRun)) {
+        this.discardPublished(published);
+        return;
+      }
+      const savedPath = published.path;
       // 成品已落盘：清掉续传残留（整下路径没有残留，调用幂等）。
       // **但绝不能删掉成品本身**：续传路径的 tempPath 就是 .part，若 saveFile
       // 在某个平台把文件原地留下、savedFilePath 又指回同一个路径，这里一刀就把
@@ -980,8 +1166,14 @@ class DownloadsStore {
       // 拿不到再用引擎报的字节数兜底（0 = 未知，列表显示占位）
       let size = await this.fileSizeOf(savedPath);
       if (size <= 0) size = task.totalBytes > 0 ? task.totalBytes : task.doneBytes;
+      // 文件系统 stat 是最后一个 await；期间 removeTask/pause/新代次都可能发生。
+      // 此处拒绝提交，并且只删本次 saveToDisk 返回的音频/侧车路径。
+      if (!this.taskIsCurrent(task, myRun)) {
+        this.discardPublished(published);
+        return;
+      }
       this.items = [
-        { song, path: savedPath, time: Date.now(), size },
+        { song, path: savedPath, time: Date.now(), size, sidecars: published.sidecars },
         ...this.items,
       ];
       this.save();
@@ -996,7 +1188,10 @@ class DownloadsStore {
       this.saveTasks();
     } catch (e) {
       // 移除/暂停标记或代次被顶掉：静默丢弃，不污染当前状态
-      if (task.cancelled || task.runId != myRun) return;
+      if (!this.taskIsCurrent(task, myRun)) {
+        this.discardPublished(published);
+        return;
+      }
       let message = e != null && (e as Error).message != null
         ? (e as Error).message
         : "";
@@ -1233,7 +1428,7 @@ class DownloadsStore {
     song?: Song,
     url?: string,
     quality?: string
-  ): Promise<string> {
+  ): Promise<QtPublishResult> {
     // 扩展名提前算好：内嵌写入器按扩展名挑（mp3/flac），不能等公共目录权限
     // 弹窗（异步用户交互）之后才决定；fileName 也复用这一次计算
     const ext = this.resolveExt(url != null ? url : "", tempPath, song, quality);
@@ -1253,7 +1448,7 @@ class DownloadsStore {
         uni.getFileSystemManager().saveFile({
           tempFilePath: publishTemp,
           success: (res) => {
-            resolve(res.savedFilePath);
+            resolve({ path: res.savedFilePath, sidecars: [] });
           },
           fail: (error) => {
             logErrV("Download", "保存到私有目录失败", error);
@@ -1289,13 +1484,13 @@ class DownloadsStore {
               // 但编译器推不出来，这里防一手空引用
               const tag = song != null ? song.platform + ":" + song.id + " " : "";
               qtDiag("[Download] 内嵌完成 " + tag + publishTemp);
+              resolve({ path: saved, sidecars: [] });
             } else {
-              // 封面 / 歌词落在同一目录、同一基名下（不 await：附带资源失败不能影响
-              // 歌曲本身已完成的落盘与「已下载」记录）。内嵌模式下走到这里 =
-              // 格式白名单外 / 内嵌失败——「不支持的格式自动存为同目录文件」的降级
-              this.saveSidecars(name, song);
+              // 侧车失败在内部吸收；按实际返回路径登记所有权，供精确删除。
+              this.saveSidecars(name, song).then((sidecars) => {
+                resolve({ path: saved, sidecars });
+              });
             }
-            resolve(saved);
             return;
           }
           // 公共目录写入失败：回退私有目录
@@ -1368,6 +1563,7 @@ class DownloadsStore {
    */
   removeMany(songs: Song[], alsoDeleteFiles: boolean): QtBatchRemoveResult {
     const paths: string[] = [];
+    const ownedSidecars: string[] = [];
     const next: DownloadItem[] = [];
     for (let index = 0; index < this.items.length; index++) {
       const item = this.items[index];
@@ -1380,9 +1576,26 @@ class DownloadsStore {
       }
       if (hit) {
         if (item.path != null && item.path.length > 0) paths.push(item.path);
+        if (item.sidecars != null) {
+          for (let k = 0; k < item.sidecars.length; k++) ownedSidecars.push(item.sidecars[k]);
+        }
       } else {
         next.push(item);
       }
+    }
+    const sidecarsToDelete: string[] = [];
+    for (let i = 0; i < ownedSidecars.length; i++) {
+      const sidecar = ownedSidecars[i];
+      if (sidecarsToDelete.indexOf(sidecar) >= 0) continue;
+      let shared = false;
+      for (let k = 0; k < next.length; k++) {
+        const refs = next[k].sidecars;
+        if (refs != null && refs.indexOf(sidecar) >= 0) {
+          shared = true;
+          break;
+        }
+      }
+      if (!shared) sidecarsToDelete.push(sidecar);
     }
     const result: QtBatchRemoveResult = {
       removed: this.items.length - next.length,
@@ -1391,29 +1604,28 @@ class DownloadsStore {
     };
     this.items = next;
     this.save();
-    if (alsoDeleteFiles && paths.length > 0) {
+    const deletePaths = paths.concat(sidecarsToDelete);
+    if (alsoDeleteFiles && deletePaths.length > 0) {
       try {
-        const r = deleteMediaByPath(paths);
+        const r = deleteMediaByPath(deletePaths);
         result.filesDeleted = r.deleted;
         result.filesFailed = r.failed;
       } catch (e) {
         logErrV("Download", "批量删除文件失败", e);
-        result.filesFailed = paths.length;
+        result.filesFailed = deletePaths.length;
       }
-      // 侧车（封面/歌词）单独删，且不影响计数：没下过就什么都不做
-      for (let i = 0; i < paths.length; i++) this.deleteSidecars(paths[i]);
     }
     return result;
   }
 
   /**
-   * 未完成任务队列落盘（pending/failed；在途的按 pending 记）。progress 不记：
-   * uni.downloadFile 没有断点续传，重启后只能从头下，进度归零才是真实状态。
+   * 未完成任务队列落盘（pending/failed；在途的按 pending 记）。结构化按行恢复，
+   * 单行损坏不会拖掉整张表；进度由 .part 重启后重新探测。
    * 只在结构变化时写（入队/重试/移除/完成/失败/取消），进度回调不写。
    */
   private saveTasks(): void {
     try {
-      const arr: string[] = [];
+      const rows: any[] = [];
       for (let index = 0; index < this.tasks.length; index++) {
         const task = this.tasks[index];
         if (task.status == "done") continue;
@@ -1422,19 +1634,21 @@ class DownloadsStore {
           : task.status == "paused"
             ? "paused"
             : "pending";
-        let text = songToJson(task.song) + "||" + status;
-        if (status == "failed" && task.error.length > 0) text = text + "||" + task.error;
-        arr.push(text);
+        rows.push({
+          song: task.song,
+          status,
+          error: status == "failed" ? task.error : "",
+        });
       }
-      uni.setStorageSync(DOWNLOAD_TASKS_KEY, JSON.stringify(arr));
+      uni.setStorageSync(DOWNLOAD_TASKS_KEY, JSON.stringify({ version: 2, tasks: rows }));
     } catch (_) {
       logWarn("Downloads", "任务队列持久化失败（重启后未完成任务不恢复）");
     }
   }
 
   /**
-   * 重启后恢复未完成任务队列。落盘时在途已归一成 pending：没有断点续传，
-   * 恢复出来的任务一律从头下；failed 连同错误文案一起恢复，等用户手动重试。
+   * 重启后恢复未完成任务队列。failed 连同错误文案恢复；其余统一 paused，
+   * 等用户继续后再用 .part/.meta 校验并续传。
    * **恢复后一律停着（paused），不自动续传**——「退出 App 就该暂停下载」是明确
    * 需求，硬杀后台时 onHide 不保证执行，所以这里才是那条硬保证。
    */
@@ -1442,44 +1656,23 @@ class DownloadsStore {
     try {
       const raw = uni.getStorageSync(DOWNLOAD_TASKS_KEY) as string;
       if (raw.length == 0) return;
-      const arr = JSON.parse(raw) as string[];
+      const decoded = JSON.parse(raw) as any;
       const restored: DownloadTask[] = [];
-      for (let index = 0; index < arr.length; index++) {
-        const text = arr[index] as string;
-        const sep = text.indexOf("||");
-        if (sep <= 0) continue;
-        const song = songFromJson(text.substring(0, sep));
-        if (song == null) continue;
-        let statusText = text.substring(sep + 2);
-        let error = "";
-        const sep2 = statusText.indexOf("||");
-        if (sep2 >= 0) {
-          error = statusText.substring(sep2 + 2);
-          statusText = statusText.substring(0, sep2);
+      const legacyRows: any[] = Array.isArray(decoded) ? decoded : [];
+      const v2Rows: any[] = decoded != null && decoded.version == 2 && Array.isArray(decoded.tasks)
+        ? decoded.tasks : [];
+      const rows = v2Rows.length > 0 ? v2Rows : legacyRows;
+      for (let index = 0; index < rows.length; index++) {
+        const row = rows[index];
+        let task: DownloadTask | null = null;
+        if (v2Rows.length > 0) {
+          if (row == null || typeof row != "object" || Array.isArray(row)) continue;
+          task = v2Task(row.song, row.status, row.error);
+        } else {
+          task = legacyTask(row);
         }
-        // 已下载/已在队列里的不重复恢复（旧数据兜底）
-        if (this.isDownloaded(song) || this.isQueued(song)) continue;
-        restored.push({
-          song,
-          // 除 failed 外一律恢复成 paused：**退出 App（含直接杀后台）必须暂停下载**。
-          // 落盘时在途任务已被归一成 pending，而杀后台时 onHide 不保证执行，
-          // 所以「恢复即 paused」是唯一能覆盖硬杀的兜底——重启后不会自己跑起来，
-          // 要用户点「全部继续」才继续。
-          status: statusText == "failed" ? "failed" : "paused",
-          path: "",
-          error,
-          progress: 0,
-          // 字节数不落盘（重启后要重新探测），恢复出来一律清零
-          doneBytes: 0,
-          totalBytes: 0,
-          speed: 0,
-          lastBytes: 0,
-          retryCount: 0,
-          retryAt: 0,
-          cancelled: false,
-          runId: 0,
-          abortHandle: null,
-        });
+        if (task == null || this.isDownloaded(task.song) || this.isQueued(task.song)) continue;
+        restored.push(task);
       }
       if (restored.length == 0) return;
       // 恢复后**不 pump**：退出 App（含杀后台）就该停着，等用户点「全部继续」。
@@ -1615,7 +1808,7 @@ class DownloadsStore {
    * 大小超过它（侧车与残留对不上、被别的路径改过），调用方会照 total 发 Range
    * 而被服务器回 416。这里对不上就返回 0，让调用方重新探测。
    */
-  private readPartTotal(song: Song): number {
+  private readPartTotal(song: Song, resourceKey: string): number {
     const dir = partDirOf();
     if (dir == null) return 0;
     const partPath = dir + "/" + partKey(song) + ".part";
@@ -1627,8 +1820,17 @@ class DownloadsStore {
       const meta = parseJsonToUtso(uni.getFileSystemManager().readFileSync(partPath + ".meta", "utf-8") as string);
       const total = meta.get("total") as number | null;
       if (total == null || total <= 0) return 0;
+      const savedKey = meta.get("resourceKey") as string | null;
+      const savedUrl = meta.get("url") as string | null;
+      const savedEtag = meta.get("etag") as string | null;
+      const savedModified = meta.get("lastModified") as string | null;
+      const strongValidator = (savedEtag != null && savedEtag.length > 0 && savedEtag.indexOf("W/") != 0) ||
+        (savedModified != null && savedModified.length > 0);
+      if (savedKey != resourceKey) return 0;
+      if (savedUrl == null || savedUrl.length == 0 || endpointOfUrl(savedUrl) != endpointOfUrl(url)) return 0;
+      if (!strongValidator) return 0;
       const size = this.partSizeOf(partPath);
-      if (size < 0 || size > total) return 0;
+      if (size < 0 || size >= total) return 0;
       return total;
     } catch (_) {
       // 静默：断点元信息读不出按无断点处理，该任务从头下
@@ -1736,20 +1938,6 @@ class DownloadsStore {
       fs.unlinkSync(metaPath);
     } catch (_) {
       // 静默：meta 是小文件，删不掉不影响清理结果
-    }
-  }
-
-  /**
-   * 顺手删掉音频旁边的封面/歌词侧车。**尽力而为**：文件可能压根没下（用户没开
-   * 同时下载封面/歌词）、也可能在公共目录里 FS 接口读不到（MediaStore 分区存储），
-   * 所以删不掉不算失败，不计入 filesFailed——否则用户会看到「N 个文件未删除」
-   * 却怎么删都删不掉。走原生按路径删除，它内部有 MediaStore 反查 + File 兜底。
-   */
-  private deleteSidecars(audioPath: string): void {
-    try {
-      deleteMediaByPath(sidecarPathsOf(audioPath));
-    } catch (_) {
-      // 静默：删不掉不算失败（可能没下过或在公共目录不可见），见上注
     }
   }
 
@@ -1899,6 +2087,7 @@ class DownloadsStore {
     doneBytes: number,
     task: DownloadTask,
     myRun: number,
+    ifRange: string,
   ): Promise<QtChunkResult> {
     return new Promise<QtChunkResult>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -1908,20 +2097,52 @@ class DownloadsStore {
       const referer = musicApi.refererOf(platform as Source);
       if (referer.length > 0) header.set("Referer", referer);
       header.set("Range", "bytes=" + start + "-" + end);
+      if (ifRange.length > 0) header.set("If-Range", ifRange);
       const dt = uni.downloadFile({
         url,
         header,
         success: (res) => {
           clearTimeout(timer);
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            // 200 且带 Range 起点说明服务器没按 Range 来，返回的是整个文件
-            resolve({ temp: res.tempFilePath, whole: res.statusCode == 200 && start > 0 });
-          } else {
+          task.abortHandle = null;
+          if (res.statusCode < 200 || res.statusCode >= 300) {
             reject(new Error(describeHttpStatus(res.statusCode)));
+            return;
           }
+          if (res.statusCode == 200) {
+            // If-Range 不匹配或服务器不支持 Range：返回的是完整文件，作为成品使用。
+            resolve({
+              temp: res.tempFilePath,
+              whole: true,
+              rangeStart: 0,
+              rangeEnd: 0,
+              rangeTotal: 0,
+              etag: headerValue(res.header, "ETag"),
+              lastModified: headerValue(res.header, "Last-Modified"),
+            });
+            return;
+          }
+          if (res.statusCode == 206) {
+            const range = parseContentRange(headerValue(res.header, "Content-Range"));
+            if (range == null) {
+              reject(new Error("续传响应缺少有效 Content-Range"));
+              return;
+            }
+            resolve({
+              temp: res.tempFilePath,
+              whole: false,
+              rangeStart: range.start,
+              rangeEnd: range.end,
+              rangeTotal: range.total,
+              etag: headerValue(res.header, "ETag"),
+              lastModified: headerValue(res.header, "Last-Modified"),
+            });
+            return;
+          }
+          reject(new Error("不支持的分块响应（HTTP " + res.statusCode + "）"));
         },
         fail: (error) => {
           clearTimeout(timer);
+          task.abortHandle = null;
           logErrV("Download", "分块下载失败", error);
           // 416 必须原样带出去：下面 describeNetError 会把它糊成「网络错误」，
           // 上层就认不出「该丢残留重来」和「网络抖动重试」的区别了。
@@ -1956,8 +2177,8 @@ class DownloadsStore {
 
   /**
    * 断点续传主循环：按 .part 现存量发 Range 分块，逐块追加落盘。
-   * .part 旁的 .meta 侧车记 url+总长：URL 会过期重取（同一首歌换新链接很
-   * 常见），所以只按总长校验是否同一个文件，对不上就整个重来。
+   * .meta 记录 song+品质键、总长和 ETag/Last-Modified；首个 206 的
+   * Content-Range 负责再次校验身份，任何不一致都丢弃旧前缀并安全重下。
    * 暂停/移除中途退出返回 null（.part 保留，恢复时续传）；
    * 正常走完返回成品文件路径（.part，或服务器无视 Range 时那块的临时文件）。
    */
@@ -1965,6 +2186,7 @@ class DownloadsStore {
     url: string,
     song: Song,
     total: number,
+    resourceKey: string,
     dir: string,
     task: DownloadTask,
     myRun: number,
@@ -1979,14 +2201,32 @@ class DownloadsStore {
     }
     let partSize = 0;
     let metaOk = false;
+    let etag = "";
+    let lastModified = "";
     try {
       const meta = parseJsonToUtso(fs.readFileSync(metaPath, "utf-8") as string);
       const mTotal = meta.get("total") as number | null;
-      if (mTotal != null && mTotal == total) metaOk = true;
+      const savedKey = meta.get("resourceKey") as string | null;
+      const savedUrl = meta.get("url") as string | null;
+      const savedEtag = meta.get("etag") as string | null;
+      const savedModified = meta.get("lastModified") as string | null;
+      const strongValidator = (savedEtag != null && savedEtag.length > 0 && savedEtag.indexOf("W/") != 0) ||
+        (savedModified != null && savedModified.length > 0);
+      if (mTotal != null && mTotal == total &&
+          savedKey == resourceKey &&
+          savedUrl != null && savedUrl.length > 0 &&
+          endpointOfUrl(savedUrl) == endpointOfUrl(url) &&
+          strongValidator) {
+        metaOk = true;
+        if (savedEtag != null) etag = savedEtag;
+        if (savedModified != null) lastModified = savedModified;
+      }
     } catch (_) {
       // 静默：断点元信息读不出按无断点处理，从头续传
     }
     if (metaOk) partSize = this.partSizeOf(partPath);
+    // 完整 .part 没有可靠的内容回读校验；宁可重下，也不能把它直接当成品。
+    if (metaOk && partSize >= total) metaOk = false;
     if (!metaOk || partSize > total) {
       // 新文件 / 换过音源 / 异常残留：清掉重来
       try {
@@ -2000,6 +2240,8 @@ class DownloadsStore {
         // 静默：旧 meta 删不掉会被下方新 meta 覆盖
       }
       partSize = 0;
+      etag = "";
+      lastModified = "";
     }
     if (partSize == 0) {
       // 建空 .part：appendFileSync 只能往已有文件里追加
@@ -2009,14 +2251,21 @@ class DownloadsStore {
         // 静默：建失败由追加分块时报「分块写入失败」可见
       }
     }
-    try {
-      const meta = new UTSJSONObject();
-      meta.set("url", url);
-      meta.set("total", total);
-      fs.writeFileSync(metaPath, JSON.stringify(meta));
-    } catch (_) {
-      // 静默：meta 写不上仅损失断点（下次从头下），不影响本次
-    }
+    let ifRange = etag.length > 0 && etag.indexOf("W/") != 0 ? etag : lastModified;
+    const writeMeta = (): void => {
+      try {
+        const meta = new UTSJSONObject();
+        meta.set("url", url);
+        meta.set("total", total);
+        meta.set("resourceKey", resourceKey);
+        if (etag.length > 0) meta.set("etag", etag);
+        if (lastModified.length > 0) meta.set("lastModified", lastModified);
+        fs.writeFileSync(metaPath, JSON.stringify(meta));
+      } catch (_) {
+        // 静默：meta 写不上仅损失断点（下次从头下），不影响本次
+      }
+    };
+    writeMeta();
     // 继续时先把断点百分比刷回界面
     this.noteBytes(task, partSize, total);
     this.setProgress(task, (partSize * 100) / total);
@@ -2029,7 +2278,7 @@ class DownloadsStore {
       const end = Math.min(start + DOWNLOAD_CHUNK_BYTES, total) - 1;
       let chunk: QtChunkResult;
       try {
-        chunk = await this.fetchChunk(url, song.platform, start, end, total, partSize, task, myRun);
+        chunk = await this.fetchChunk(url, song.platform, start, end, total, partSize, task, myRun, ifRange);
       } catch (e) {
         // 416：侧车记的总长与这次新链接的实际大小对不上，重试同一段永远是 416。
         // 清掉残留后**抛出去**（不能 return null——那是「暂停/已移除」的语义，
@@ -2074,15 +2323,79 @@ class DownloadsStore {
         }
         return chunk.temp;
       }
+      if (chunk.rangeStart != start || chunk.rangeTotal <= 0) {
+        try {
+          fs.unlinkSync(partPath);
+          fs.unlinkSync(metaPath);
+          fs.unlinkSync(plainPath(chunk.temp));
+        } catch (_) {
+          // 静默：协议不匹配时丢弃不可信的本地块，自动重试重新探测
+        }
+        throw new Error("续传响应起点不匹配（已丢弃断点）");
+      }
+      const etagChanged = etag.length > 0 && chunk.etag.length > 0 && chunk.etag != etag;
+      const modifiedChanged = etag.length == 0 && lastModified.length > 0 &&
+        chunk.lastModified.length > 0 && chunk.lastModified != lastModified;
+      const validatorMissing = (etag.length > 0 && chunk.etag.length == 0) ||
+        (etag.length == 0 && lastModified.length > 0 && chunk.lastModified.length == 0);
+      if (chunk.rangeTotal != total || etagChanged || modifiedChanged || validatorMissing) {
+        // 旧 total/验证器只用于探测；资源长度或身份变化时丢弃旧前缀重下。
+        qtDiag("[Download] 续传资源已变化 " + song.platform + ":" + song.id +
+          " total=" + total + "→" + chunk.rangeTotal + "，丢弃旧前缀重下");
+        total = chunk.rangeTotal;
+        partSize = 0;
+        etag = chunk.etag;
+        lastModified = chunk.lastModified;
+        ifRange = etag.length > 0 && etag.indexOf("W/") != 0 ? etag : lastModified;
+        try {
+          fs.unlinkSync(partPath);
+          fs.writeFileSync(partPath, new ArrayBuffer(0));
+        } catch (_) {
+          // 静默：后续 append/写入会把失败暴露为可重试错误
+        }
+        try {
+          fs.unlinkSync(plainPath(chunk.temp));
+        } catch (_) {
+          // 静默：旧资源响应块已不再需要
+        }
+        writeMeta();
+        this.noteBytes(task, 0, total);
+        this.setProgress(task, 0);
+        continue;
+      }
+      if (chunk.rangeEnd != end) {
+        try {
+          fs.unlinkSync(partPath);
+          fs.unlinkSync(metaPath);
+          fs.unlinkSync(plainPath(chunk.temp));
+        } catch (_) {
+          // 静默：同一资源却没有返回请求的块长度，断点不可信
+        }
+        throw new Error("续传响应块长度不匹配（已丢弃断点）");
+      }
+      etag = chunk.etag.length > 0 ? chunk.etag : etag;
+      lastModified = chunk.lastModified.length > 0 ? chunk.lastModified : lastModified;
+      ifRange = etag.length > 0 && etag.indexOf("W/") != 0 ? etag : lastModified;
+      writeMeta();
       const chunkPath = plainPath(chunk.temp);
       // 不传 encoding 读出 ArrayBuffer，再整体追加到 .part 尾部
+      const expectedBytes = chunk.rangeEnd - chunk.rangeStart + 1;
       const wrote = await this.appendChunkToPart(chunkPath, partPath);
       try {
         fs.unlinkSync(chunkPath);
       } catch (_) {
         // 静默：临时块删不掉仅残留少量缓存，不影响成品
       }
-      if (wrote <= 0) throw new Error("分块写入失败");
+      if (task.cancelled || task.runId != myRun) return null;
+      if (wrote != expectedBytes) {
+        try {
+          fs.unlinkSync(partPath);
+          fs.unlinkSync(metaPath);
+        } catch (_) {
+          // 静默：已判定断点不可信，失败由自动重试重新开始
+        }
+        throw new Error("分块长度不一致（已丢弃断点）");
+      }
       partSize = partSize + wrote;
       // 逐块日志原来按 info 落盘：一个 33MB 的 flac 就是 16 行，每行都要过脱敏 +
       // 一次原生追加。进度条本身已经反映了同样的信息，这里降到 debug 级。
@@ -2174,20 +2487,37 @@ class DownloadsStore {
    * 落进同一公共子目录，这样文件管理器里「歌手 - 歌名.mp3/.lrc/.jpg」是挨着的。
    * 全程不抛：附带资源失败只记诊断日志，绝不回滚已完成的正片。
    */
-  private saveSidecars(baseName: string, song?: Song): void {
-    if (song == null) return;
-    if (this.downloadCover) this.saveCoverSidecar(baseName, song).catch(() => {});
-    if (this.downloadLyric) this.saveLyricSidecar(baseName, song).catch(() => {});
+  private async saveSidecars(baseName: string, song?: Song): Promise<string[]> {
+    const paths: string[] = [];
+    if (song == null) return paths;
+    if (this.downloadCover) {
+      try {
+        const saved = await this.saveCoverSidecar(baseName, song);
+        if (saved.length > 0) paths.push(saved);
+      } catch (_) {
+        // 静默：封面是附带资源，失败不影响正片提交
+      }
+    }
+    if (this.downloadLyric) {
+      try {
+        const saved = await this.saveLyricSidecar(baseName, song);
+        if (saved.length > 0) paths.push(saved);
+      } catch (_) {
+        // 静默：歌词是附带资源，失败不影响正片提交
+      }
+    }
+    return paths;
   }
 
   /** 封面：先下到临时文件再交给原生写公共目录（不改动 song.picUrl） */
-  private async saveCoverSidecar(baseName: string, song: Song): Promise<void> {
+  private async saveCoverSidecar(baseName: string, song: Song): Promise<string> {
     const temp = await this.fetchCoverTemp(song);
-    if (temp == null) return;
+    if (temp == null) return "";
     try {
-      await saveToPublicMedia(temp, "download", baseName + coverExtOf(song.picUrl), DOWNLOAD_DIR_SUB, this.dirArgs());
+      return await saveToPublicMedia(temp, "download", baseName + coverExtOf(song.picUrl), DOWNLOAD_DIR_SUB, this.dirArgs());
     } catch (e) {
       logErrV("Download", "封面写公共目录失败", e);
+      return "";
     }
   }
 
@@ -2219,30 +2549,31 @@ class DownloadsStore {
    * .lrc 再搬进公共目录，最后删掉临时文件。取不到歌词（纯音乐 / 音源没有资源）
    * 就静默跳过——这不该让用户看到一条失败。
    */
-  private async saveLyricSidecar(baseName: string, song: Song): Promise<void> {
+  private async saveLyricSidecar(baseName: string, song: Song): Promise<string> {
     const temp = lyricTempPath(song);
-    if (temp == null) return;
+    if (temp == null) return "";
     let text = "";
     try {
       text = await musicApi.lyrics(song);
     } catch (e) {
       qtDiag("[Download] 歌词获取失败 " + song.platform + ":" + song.id + " " + describeNetError(e));
-      return;
+      return "";
     }
-    if (text.length == 0) return;
+    if (text.length == 0) return "";
     const fs = uni.getFileSystemManager();
     try {
       fs.writeFileSync(temp, text, "utf-8");
     } catch (e) {
       logErrV("Download", "写歌词临时文件失败", e);
-      return;
+      return "";
     }
+    let savedPath = "";
     try {
       const saved = await saveToPublicMedia(temp, "download", baseName + ".lrc", DOWNLOAD_DIR_SUB, this.dirArgs());
-      // 成功也留一条：歌词侧车是「不 await 的附带资源」，失败只落日志，
-      // 没有这条就没有任何证据能证明它真的落盘了（排查「歌词没生效」全靠它）。
+      // 成功也留一条诊断：失败只落日志，不能回滚已经提交的正片。
       if (saved != null && saved.length > 0) {
         qtDiag("[Download] 歌词已保存 " + saved);
+        savedPath = saved;
       } else {
         logErrV("Download", "歌词写公共目录返回空 " + baseName, null);
       }
@@ -2254,6 +2585,7 @@ class DownloadsStore {
     } catch (_) {
       // 静默：歌词临时文件删不掉仅残留少量缓存
     }
+    return savedPath;
   }
 
   /**

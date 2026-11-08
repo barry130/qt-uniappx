@@ -1,33 +1,37 @@
 <template>
   <view
-    v-if="!layout.isWide"
+    v-if="!layout.isWide && (frameDock || miniSettings.mode != 'docked')"
     class="tab-bar"
-    :style="'background-color:' + theme.skin.tabSurface + ';border-color:' + theme.skin.border + ';bottom:' + bottomPx + 'px;'"
+    :class="joined ? 'tab-bar-joined' : ''"
+    :style="'background-color:' + (joined ? 'transparent' : theme.skin.tabSurface) + ';border-color:' + theme.skin.border + ';' + positionStyle"
   >
     <view
       v-for="item in tabs"
       :key="item.path"
       class="tab-item"
+      :class="joined ? 'tab-item-joined' : ''"
       @click="go(item.path)"
     >
       <view
         class="tab-chip"
+        :class="joined ? 'tab-chip-joined' : ''"
         :style="active(item.path) ? 'background-color:' + theme.skin.accentSoft + ';' : 'background-color:transparent;'"
       >
-        <view class="tab-icon-wrap">
+        <view class="tab-icon-wrap" :class="joined ? 'tab-icon-wrap-joined' : ''">
           <!-- 图标 48rpx：与 .tab-icon-wrap 的 56 x 52rpx 配套。原先写 24 是
                24rpx = 375dp 手机上只有 12dp，正好是容器的一半（容器当时写的是
                28px，px 与 rpx 混排的另一处老账），720dp 窗口上才偶然对上 -->
           <QtIcon
             :name="item.icon"
-            :size="48"
+            :size="joined ? 36 : 48"
             :color="active(item.path) ? theme.skin.accent : theme.skin.iconMuted"
           />
           <view v-if="hasDot(item.path)" class="tab-dot" />
         </view>
         <text
           class="tab-label"
-          :style="('color:' + (active(item.path) ? theme.skin.accent : theme.skin.textMuted) + ';') + qtFont(22)"
+          :class="joined ? 'tab-label-joined' : ''"
+          :style="('color:' + (active(item.path) ? theme.skin.accent : theme.skin.textMuted) + ';') + qtFont(joined ? 24 : 22)"
         >{{ item.label }}</text>
       </view>
     </view>
@@ -38,7 +42,8 @@
 import { computed } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useMiniPlayerSettings } from "@/uni_modules/qt-ui/stores/mini-player";
+import { useQtLayout, qtTabBarFloatGapPx, qtTabBarHeightPx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtSwitchTab } from "@/uni_modules/qt-ui/composables/qt-nav";
 import { qtFont } from "@/uni_modules/qt-ui/stores/font-scale";
 
@@ -46,12 +51,9 @@ import { qtFont } from "@/uni_modules/qt-ui/stores/font-scale";
  * 竖屏底部导航：悬浮胶囊（2026-10-19 起从通栏改为悬浮 pill，参照用户给的
  * 悬浮导航设计稿）：左右各一个入口「发现 / 我的」，中间不放发布按钮。
  *
- * 几何契约：离地 64rpx + 高 120rpx（合计 184rpx）+ 底部安全区（三键导航 /
- * 虚拟导航条，见 use-qt-layout.ts 的 safeBottomPx），总占位写进 use-qt-layout.ts
- * 的 QT_TAB_BAR_HEIGHT_RPX，由 qtTabBarHeightPx() 按窗口宽折算并叠加安全区
- * ——qt-toast-host 的让位、qt-mini-player 悬浮球的初始边距都按它取值，
- * 三处必须同源（tools/check-toast.mjs 断言 qtTabBarHeightPx() 被 toast-host
- * 使用、常量等于 184）。
+ * 几何契约：普通导航高 120rpx，joined 固定底座导航高 88rpx。
+ * 离地量统一由 qtTabBarFloatGapPx 提供，完整系统栏已有间隔时不额外悬空。
+ * qtTabBarHeightPx(joined) 与播放栏、toast 的预留同源，安全区只叠一次。
  *
  * 2026-10-20 起这里的尺寸改用 rpx（设计 px × 2）而不是写死 px：本组件只在
  * `!layout.isWide` 的手机档渲染，而手机档整页内容都是 rpx（随窗口宽度线性放大）。
@@ -66,11 +68,16 @@ import { qtFont } from "@/uni_modules/qt-ui/stores/font-scale";
  */
 const props = defineProps<{
   current: string;
+  /** Frame hosts navigation outside the reserved dock content area. */
+  frameDock?: boolean;
+  /** Compact navigation row sharing the fixed player's outer surface. */
+  joined?: boolean;
   /** 需要亮红点的 tab 路径列表（不带前导斜杠，如 pages/profile/index） */
   dots?: string[];
 }>();
 
 const theme = useThemeStore();
+const miniSettings = useMiniPlayerSettings();
 const layout = useQtLayout();
 
 type TabItem = { path: string; label: string; icon: string };
@@ -83,43 +90,11 @@ function active(path: string): boolean {
   return props.current == path;
 }
 
-/**
- * 离地高度（px）。两种形态，用户 2026-10-31 真机定稿：
- *
- * 1. **有系统导航栏（三键导航）**：qt-page-frame 的 padding-bottom 已经把内容
- *    容器整体抬到导航条上沿，绝对定位子节点锚的就是这个收短后的容器底边（安卓
- *    真机实测：容器 1440x3011、胶囊 76,2577-1364,2807）。所以三键机离地量必须
- *    收成 0 = 胶囊直接贴着导航条；再叠 64rpx 就会「太高」（用户 2026-10-31 实拍
- *    反馈：全面屏那档刚好、三键这档偏高）。
- *
- * 2. **全面屏手势 / 没有导航栏**：系统遮挡区=0（实测 raw=0、容器=全屏 3168），
- *    容器等于没被抬，离地量就纯粹是 TAB_BOTTOM_RPX。用户三轮口径：24rpx
- *    （≈2.4mm）贴底、100rpx（≈10mm）有点高，中间取 64rpx（≈6.7mm）用户确认
- *    「全面屏高度合适」。⚠️ 调这个值步子要大：24→40 只差 1.6mm 肉眼几乎无感。
- *
- * ⚠️ 历史的坑别再踩第二遍：2026-10-31 曾判定「按 safeBottomPx 做分支会翻车、
- * 手势档瞬时 inset>0 会把离地吃掉」，于是改成固定值——那是误判。真凶是 qtRpx()
- * 冷启动读到 windowWidth=0（日志 win=0x742）算出 0，computed 又永不重算，导致
- * 怎么调 rpx 都渲染成 bottom:0。分支逻辑本身是对的，见下面的 reactive 写法。
- */
-const TAB_BOTTOM_RPX = 64;
-
-/**
- * ⚠️ 这里必须依赖响应式的 layout.windowWidth，不能只靠 qtRpx()（它内部直读
- * uni.getWindowInfo()，非响应式）。vivo V2505A 实锤：冷启动首帧 getWindowInfo()
- * 返回 win=0x742（宽=0），qtRpx(64) 算出 0，而 computed 若只依赖 isWide（手机上
- * 恒 false）→ 宽度纠正后永不重算，bottom 永久 0 = 胶囊贴屏底。2026-10-31 用户
- * 连续三轮调 24/40/64rpx 全「没有任何效果」就是它（dumpsys：胶囊底边恰为屏高
- * 3168）。读一次 win 建立依赖，refreshQtLayout 把窗口宽改成 384 后本值必然重算出
- * 64rpx 真值。
- */
-const bottomPx = computed((): number => {
-  const win = layout.windowWidth;
-  // 宽屏走常驻播放栏的几何，不吃手机档的导航条让位
-  // 三键导航：容器已被 padding 抬到导航条上沿 → 离地 0（贴导航条）
-  // 手势全屏：容器未被抬 → 固定 64rpx 离地
-  const rpx = layout.isWide ? 24 : (layout.safeBottomPx > 0 ? 0 : TAB_BOTTOM_RPX);
-  return rpx * (win / 750);
+const positionStyle = computed((): string => {
+  // Frame root can resize before JS. Use the same snapshot-based top as the
+  // joined playback row/background; page-owned tabs already live in its shell.
+  if (props.frameDock == true) return "top:" + Math.max(0, layout.windowHeight - qtTabBarHeightPx(props.joined == true)) + "px;bottom:auto;";
+  return "top:auto;bottom:" + qtTabBarFloatGapPx() + "px;";
 });
 
 function hasDot(path: string): boolean {
@@ -139,7 +114,7 @@ function hasDot(path: string): boolean {
  * 走普通页路由，实测可切换。
  */
 function go(path: string): void {
-  if (active(path)) return;
+  // 过渡期间 props.current 仍是旧页面；当前项也要交给共享导航保留最后一次点击。
   qtSwitchTab("/" + path);
 }
 
@@ -154,15 +129,11 @@ function go(path: string): void {
      压在内容上。absolute 锚定到页面根（容器均无定位上下文），视觉与 fixed 一致，
      且非 fixed 节点的 v-if 拆除在全仓都是可靠的。 */
   position: absolute;
+  z-index: 900;
   left: 40rpx;
   right: 40rpx;
-  /* 离地值走内联 style（bottomPx = 固定 64rpx）：容器由 page-frame 的
-     padding-bottom 让到系统遮挡区上沿，所以三键机的虚拟导航条不会盖住胶囊
-     下半截；手势机则纯粹是这 64rpx 的离地量。 */
+  /* Frame-hosted navigation uses a snapshot-based top; page-owned tabs use bottom. */
   height: 120rpx;
-  /* 总占位 = 64rpx 离地 + 120rpx 高 = 184rpx（375dp 基准下 = 92px），与
-     use-qt-layout.ts 的 QT_TAB_BAR_HEIGHT_RPX 保持一致（toast 让位、悬浮球初始边距都按它算；
-     2026-10-29 起非全面屏再叠加 safeBottomPx，见 use-qt-layout.ts） */
   flex-direction: row;
   align-items: center;
   border-radius: 60rpx;
@@ -203,4 +174,9 @@ function go(path: string): void {
   font-size: 22rpx;
   font-weight: 500;
 }
+.tab-bar-joined { left: 24rpx; right: 24rpx; height: 88rpx; border-width: 0; border-radius: 0 0 28rpx 28rpx; padding-left: 20rpx; padding-right: 20rpx; }
+.tab-item-joined { height: 88rpx; }
+.tab-chip-joined { flex-direction: row; height: 64rpx; padding: 0 32rpx; border-radius: 18rpx; }
+.tab-icon-wrap-joined { width: 40rpx; height: 40rpx; }
+.tab-label-joined { margin-top: 0; margin-left: 12rpx; }
 </style>

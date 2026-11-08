@@ -1,22 +1,8 @@
 /**
- * 本地优先播放（qt-pc DESIGN §7.13 的 uni-app x 端移植）。
- *
- * 两条链共一把总开关（settings 存储 `qt-playback-local-first`，键不存在按**开**）：
- * 1. 在线歌解析链：每次懒解析取链之前先全本地查一遍——
- *    ① 下载账本（身份级：platform:id 精确，文件确实在盘上才命中）
- *    ⑤ 本地曲库（元数据级：标题归一化全等 + 歌手 token 相交 + 时长差 ≤3s）
- *    命中直接把本地文件交给原生层，跳过全部取链（断网/地址过期都不怕）。
- * 2. 本地歌替身链：本地歌文件不在了（被移动/删除，收藏死条目的主要来源）：
- *    A 本地曲库同元数据的另一条 → B 下载账本同曲文件 → C 在线搜索第一条
- *    （前 5 条里时长最接近的，护栏 ≤5s，都不接近取第 1 条兜底——qt-pc 口径）。
- *
- * 与 qt-pc 的差异：移动端没有应用侧文件账本孤儿索引（orphan_files），
- * 池 B 只有下载账本；content:// URI 无法低成本 stat，本地曲库命中不做
- * 存在性预检（真失效由原生 prepare 错误 → 替身链/失败路径兜住）。
- *
- * 替身链不改收藏（用户 2026-10-28 定案）：只决定本次播什么，
- * 收藏/歌单归属一律不动——收藏是用户自己落的选择，失效时自动顶播可以，
- * 替用户做主重链不行。
+ * 全入口本地优先：显式文件 → 下载身份 → 本地曲库身份 → 元数据匹配。
+ * 候选必须可读取；匹配保留歌名/歌手/时长护栏。缺失或已失败文件才回落在线。
+ * LocalAudioLookup 每轮时间线共用索引与 stat 结果，不逐曲重读存储。
+ * 不改变在线歌曲身份或收藏归属；旧版本关闭开关不再绕过本地资源。
  */
 import { musicApi } from "@/services/music-api";
 import { logMsg } from "@/services/logger";
@@ -38,17 +24,14 @@ const SEARCH_PICK_LIMIT = 5;
 
 /** 开关读：键不存在按开（新功能默认生效，与 qt-pc play.localFirst 口径一致） */
 export function localFirstEnabled(): boolean {
-  try {
-    return uni.getStorageSync(LOCAL_FIRST_KEY) !== false;
-  } catch (_) {
-    return true;
-  }
+  // 所有入口统一本地优先；旧版保存的 false 不再让下载歌曲走在线。
+  return true;
 }
 
 /** 开关写：设置页「本地优先播放」行用 */
 export function setLocalFirst(on: boolean): void {
   try {
-    uni.setStorageSync(LOCAL_FIRST_KEY, on);
+    uni.setStorageSync(LOCAL_FIRST_KEY, true);
   } catch (_) {
     // 静默：写不进持久化本次会话内仍生效（内存行为每次现读）
   }
@@ -260,7 +243,7 @@ export function localFileSizeOf(filePath: string): Promise<number> {
 }
 
 /** 本地曲库扫描存档（qt-local-audio-v1，与 playReportSongs 同源同口径解析） */
-function readLocalAudioItems(): LocalAudioItem[] {
+export function readLocalAudioItems(): LocalAudioItem[] {
   try {
     const raw = uni.getStorageSync(LOCAL_AUDIO_KEY);
     const items = raw as LocalAudioItem[];
@@ -290,42 +273,106 @@ function localItemToSong(item: LocalAudioItem): Song {
  * 或本地曲库 content:// URI），查不到返回 null 走原在线取链。
  * 全本地查询（+下载成品一次异步 stat），无网络。
  */
-export async function localFileFor(song: Song): Promise<string | null> {
-  if (!localFirstEnabled()) return null;
-  // ① 下载账本：身份级（platform:id 精确命中，任务列表删了它也还在账上）
-  const dl = useDownloadsStore().find(song);
-  if (dl != null && dl.path != null && dl.path.length > 0 && await fileExists(dl.path)) {
-    logMsg("[LocalFirst] 下载账本命中: " + song.platform + ":" + song.id + " -> " + dl.path);
-    return dl.path;
-  }
-  // ② 下载账本：元数据级跨源（在 A 源下载、在 B 源的歌单里点播同一首：身份对不上，
-  //    但歌名+歌手+时长三关一致且文件在盘 → 同样交本地文件。门与替身链 B 池同款
-  //    metaMatches：标题归一全等 + 歌手 token 相交 + 时长差 ≤3s，任一侧未知放行）
-  const dls = useDownloadsStore().items;
-  for (let i = 0; i < dls.length; i++) {
-    const item = dls[i];
-    if (item == null || item.path == null || item.path.length == 0) continue;
-    // ① 已按身份试过同一条（fileExists 也已失败），不重复 stat
-    if (item.song.platform == song.platform && item.song.id == song.id) continue;
-    if (!metaMatches(song.name, song.singer, song.duration, item.song.name, item.song.singer, item.song.duration)) {
-      continue;
-    }
-    if (await fileExists(item.path)) {
-      logMsg("[LocalFirst] 下载账本跨源命中: " + song.platform + ":" + song.id + " -> " + item.song.platform + ":" + item.song.id + " " + item.path);
-      return item.path;
+export async function localFileFor(song: Song, rejectedPath = ""): Promise<string | null> {
+  const explicit = song.url ?? "";
+  if (explicit != rejectedPath && isLocalAudioPath(explicit)) {
+    try { if (localAudioReadable(explicit)) return explicit; } catch (_) {
+      // 静默：失效路径继续查询下载记录与曲库。
     }
   }
-  // ⑤ 本地曲库：元数据级（K2 三关）。content:// 不做存在性预检（见文件头注释）
-  const items = readLocalAudioItems();
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    if (item == null || item.uri == null || item.uri.length == 0) continue;
-    if (metaMatchesEither(song.name, song.singer, song.duration, item.title, item.singer, item.duration)) {
-      logMsg("[LocalFirst] 本地曲库命中: " + song.platform + ":" + song.id + " -> " + item.uri);
-      return item.uri;
+  return new LocalAudioLookup().find(song, rejectedPath);
+}
+
+/** 只接受本机资源，不能把过期 HTTP 地址当成本地文件。 */
+export function isLocalAudioPath(path: string | null | undefined): boolean {
+  if (path == null || path.length == 0) return false;
+  const lower = path.toLowerCase();
+  return path.indexOf("/") == 0 || lower.indexOf("content://") == 0 || lower.indexOf("file://") == 0 || lower.indexOf("unifile://") == 0;
+}
+
+export function localAudioReadable(path: string): boolean {
+  if (!isLocalAudioPath(path)) return false;
+  if (statLocalFile(path) >= 0) return true;
+  // iOS/Web 与私有 unifile 路径由 uni 文件系统兜底，不能因原生空实现漏掉本地文件。
+  try {
+    const stats = uni.getFileSystemManager().statSync(path, false);
+    return stats != null && stats.length == 1 && stats[0].stats.isFile();
+  } catch (_) { return false; }
+}
+
+/** 一次时间线共用候选索引和 stat 结果，避免逐曲重读曲库、重复磁盘检查。 */
+export class LocalAudioLookup {
+  private exact = new Map<string, string[]>();
+  private candidates = new Map<string, Song[]>();
+  private available = new Map<string, boolean>();
+
+  constructor() {
+    const downloads = useDownloadsStore().items;
+    for (let i = 0; i < downloads.length; i++) {
+      const item = downloads[i];
+      if (item == null || !isLocalAudioPath(item.path)) continue;
+      this.add(item.song, item.path);
+    }
+    const local = readLocalAudioItems();
+    for (let i = 0; i < local.length; i++) {
+      const item = local[i];
+      if (item == null || !isLocalAudioPath(item.uri)) continue;
+      this.add(localItemToSong(item), item.uri);
     }
   }
-  return null;
+
+  private add(song: Song, path: string): void {
+    const key = song.platform + ":" + song.id;
+    const paths = this.exact.get(key) ?? [];
+    paths.push(path);
+    this.exact.set(key, paths);
+    const candidate = { ...song, url: path } as Song;
+    const title = normalizeForMatch(song.name);
+    const rows = this.candidates.get(title) ?? [];
+    rows.push(candidate);
+    this.candidates.set(title, rows);
+    // 扫描文件名可能把歌名与歌手读反；仍需完整元数据护栏才能命中。
+    if (song.platform == "local") {
+      const reversed = normalizeForMatch(song.singer);
+      if (reversed != title && reversed.length > 0) {
+        const swapped = this.candidates.get(reversed) ?? [];
+        swapped.push(candidate);
+        this.candidates.set(reversed, swapped);
+      }
+    }
+  }
+
+  private usable(path: string, rejected: string): boolean {
+    if (path == rejected || !isLocalAudioPath(path)) return false;
+    const cached = this.available.get(path);
+    if (cached != null) return cached;
+    let valid = false;
+    try { valid = localAudioReadable(path); } catch (_) {
+      // 静默：文件或 URI 权限失效，继续查下一候选。
+    }
+    this.available.set(path, valid);
+    return valid;
+  }
+
+  find(song: Song, rejectedPath = ""): string | null {
+    const explicit = song.url ?? "";
+    if (this.usable(explicit, rejectedPath)) return explicit;
+    const paths = this.exact.get(song.platform + ":" + song.id) ?? [];
+    for (let i = 0; i < paths.length; i++) if (this.usable(paths[i], rejectedPath)) return paths[i];
+    const title = normalizeForMatch(song.name);
+    if (title.length == 0) return null;
+    const rows = this.candidates.get(title) ?? [];
+    for (let i = 0; i < rows.length; i++) {
+      const candidate = rows[i];
+      const matches = candidate.platform == "local"
+        ? metaMatchesEither(song.name, song.singer, song.duration, candidate.name, candidate.singer, candidate.duration)
+        : metaMatches(song.name, song.singer, song.duration, candidate.name, candidate.singer, candidate.duration);
+      if (!matches) continue;
+      const path = candidate.url ?? "";
+      if (this.usable(path, rejectedPath)) return path;
+    }
+    return null;
+  }
 }
 
 /**
@@ -406,15 +453,16 @@ export async function localFirstDiagnose(song: Song): Promise<string> {
  *   → C 在线搜索（前 5 条里时长最接近的，护栏 ≤5s，都不接近取第 1 条兜底）。
  * 查不到 / 开关关 / 不是本地歌 → null（调用方走原失败路径）。
  */
-export async function findSubstituteSong(song: Song): Promise<Song | null> {
+export async function findSubstituteSong(song: Song, rejectedPath = ""): Promise<Song | null> {
   if (song.platform != "local") return null;
-  if (!localFirstEnabled()) return null;
+  const local = new LocalAudioLookup().find(song, rejectedPath);
+  if (local != null) return { ...song, url: local } as Song;
   // A 本地曲库
   const items = readLocalAudioItems();
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     if (item == null || item.id == song.id) continue;
-    if (item.uri == null || item.uri.length == 0) continue;
+    if (item.uri == null || item.uri.length == 0 || item.uri == rejectedPath || !(await fileExists(item.uri))) continue;
     if (metaMatchesEither(song.name, song.singer, song.duration, item.title, item.singer, item.duration)) {
       logMsg("[LocalFirst] 替身链A·本地曲库: " + song.id + " -> local:" + item.id);
       return localItemToSong(item);
@@ -425,7 +473,7 @@ export async function findSubstituteSong(song: Song): Promise<Song | null> {
   const dls = useDownloadsStore().items;
   for (let i = 0; i < dls.length; i++) {
     const item = dls[i];
-    if (item.path == null || item.path.length == 0) continue;
+    if (item.path == null || item.path.length == 0 || item.path == rejectedPath) continue;
     if (!metaMatches(song.name, song.singer, song.duration, item.song.name, item.song.singer, item.song.duration)) {
       continue;
     }

@@ -42,6 +42,9 @@
  *     返回 false，调用方按原样走原生 navigateTo（见 qt-nav.ts）；
  *   - back 键先关托管（宿主页的 onBackPress 里调 qtCloseWideTool）。关闭/切 tab
  *     即卸载该 pane：下次打开重挂（16~300ms，各页幂等 ensureLoad 保证正确性）。
+ *   - 已打开的活动 pane 跨宽窄断点仍在当前宿主全屏展示，不改 route/openSeq，
+ *     保留输入、结果与滚动；窄屏仅撤掉停靠 chrome，标题返回先关闭可见工具。
+ *     这不是多 pane 常驻保活；窄屏新开工具仍按原生页面导航。
  */
 import { reactive, ref } from "vue";
 import { qtTopRoute } from "./qt-page-chrome";
@@ -71,6 +74,8 @@ export const QT_WIDE_TOOL_HOSTS: string[] = [
 export type QtWideWorkspaceState = {
   /** 当前被托管的工具路由；空串＝没有托管 */
   route: string;
+  /** 打开时的宿主身份；深页覆盖或转屏不改它，避免两份 tab 宿主重复挂载工具。 */
+  hostRoute: string;
   /**
    * 「打开/切换工具」的递增序号，每次 qtOpenWideTool 都 +1（即使路由值没变）。
    * 覆盖层盯的是它而不是路由值 —— 见 qt-wide-workspace.uvue 的 watch 注释。
@@ -78,7 +83,7 @@ export type QtWideWorkspaceState = {
   openSeq: number;
 };
 
-const state = reactive<QtWideWorkspaceState>({ route: "", openSeq: 0 });
+const state = reactive<QtWideWorkspaceState>({ route: "", hostRoute: "", openSeq: 0 });
 
 /** 响应式状态（模板/computed 里读 route 即可订阅） */
 export function qtWideWorkspace(): QtWideWorkspaceState {
@@ -114,8 +119,14 @@ export function qtWideToolActive(): boolean {
  * SIGSEGV；渲染器对「已存在节点改 visibility」不可靠、对「新挂节点」一直可靠，
  * 故只挂当前工具页，代价是每次切换重建一页。
  */
-export function qtPaneOn(route: string): boolean {
-  return state.route == route;
+export function qtPaneOn(route: string, hostRoute: string = ""): boolean {
+  // 属于打开时的宿主；深页覆盖只隐藏 stage，不卸载输入/滚动状态。
+  return state.route == route && (hostRoute.length == 0 || state.hostRoute == hostRoute);
+}
+
+/** 当前活动工具的固定宿主身份，不用非响应式栈顶重新绑定。 */
+export function qtWideToolHostRoute(): string {
+  return state.hostRoute;
 }
 
 /**
@@ -141,6 +152,7 @@ export function qtOpenWideTool(url: string): boolean {
   if (!qtIsWideToolRoute(url)) return false;
   if (!qtWideHostReady()) return false;
   state.openSeq = state.openSeq + 1;
+  state.hostRoute = qtTopRoute();
   state.route = url;
   return true;
 }
@@ -152,6 +164,7 @@ export function qtOpenWideTool(url: string): boolean {
 export function qtCloseWideTool(): boolean {
   if (state.route.length == 0) return false;
   state.route = "";
+  state.hostRoute = "";
   return true;
 }
 

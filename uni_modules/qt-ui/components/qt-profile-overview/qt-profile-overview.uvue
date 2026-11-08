@@ -16,9 +16,10 @@
     <view class="profile" :class="[layout.isWide ? 'profile-wide' : '', twoColumn ? 'card-col' : '', inPane ? 'profile-pane' : '']" :style="cardStyleFor('/pages/user/index')" @click="onProfileTap">
       <view class="avatar" :class="[layout.isWide ? 'avatar-wide' : '', inPane ? 'avatar-pane' : '']" :style="'background-color:' + themeStore.skin.accent + ';'">
         <image
-          :src="avatarUrl.length > 0 ? avatarUrl : DEFAULT_AVATAR_ASSET"
+          :src="avatarSource"
           class="avatar-img" :class="[layout.isWide ? 'avatar-img-wide' : '', inPane ? 'avatar-img-pane' : '']"
           mode="aspectFill"
+          @error="onAvatarError"
         />
       </view>
       <view class="info" :class="[layout.isWide ? 'info-wide' : '', inPane ? 'info-pane' : '']">
@@ -123,8 +124,8 @@ import { usePlayerStore } from "@/stores/player";
 import { useDownloadsStore } from "@/stores/downloads";
 import { useSourceUpdateStore } from "@/stores/source-update";
 import { accountApi, persistUserRoles } from "@/services/music-api";
-import { getAccessToken } from "@/services/auth";
-import { getCachedAvatar, DEFAULT_AVATAR_ASSET } from "@/services/media";
+import { getAccessToken, getSessionEpoch, sessionIsCurrent } from "@/services/auth";
+import { useQtAvatar } from "@/uni_modules/qt-ui/composables/use-qt-avatar";
 import { meCached } from "@/services/user-cache";
 
 /**
@@ -172,23 +173,24 @@ const sourceUpdateStore = useSourceUpdateStore();
 const token = ref("");
 const userInfo = ref<any>(null);
 const storedNickname = ref("");
-// 展示头像：先取缓存（上传成功时已写入），refreshKey 变更时再向 /me 刷新
-const avatarUrl = ref(getCachedAvatar());
+const { avatarSource, refreshAvatar, onAvatarError } = useQtAvatar();
 
 async function fetchUserInfo() {
+  refreshAvatar();
+  const epoch = getSessionEpoch();
   const accessToken = getAccessToken();
   if (!accessToken) {
     token.value = "";
     userInfo.value = null;
-    // 退出登录/未登录时清掉本组件缓存的展示头像与昵称：否则「我的」总览常驻内存，
-    // avatarUrl 仍是上一账号的头像 URL，模板就走不到默认 logo 回退。
-    avatarUrl.value = "";
+    // 总览常驻内存，退出登录后昵称也必须同步清空。
     if (storedNickname.value.length > 0) storedNickname.value = "";
     return;
   }
   token.value = accessToken;
   // /me 走启动/登录时写入的缓存（本次运行只查一次接口），缓存缺失才联网补拉
   const res = await meCached();
+  if (!sessionIsCurrent(epoch)) return;
+  refreshAvatar();
   if (res == null) {
     const localNick = uni.getStorageSync("qt-nickname") as string;
     if (localNick != null && localNick.length > 0) storedNickname.value = localNick;
@@ -206,11 +208,6 @@ async function fetchUserInfo() {
     }
     const email = user.get("email") as string | null;
     if (email != null && email.length > 0) uni.setStorageSync("qt-email", email);
-    // 头像只在是 http(s) 直链时展示，其他形态（旧服务端路径/空）回退本地默认资源
-    const rawAvatar = user.get("avatar") as string | null;
-    const avatar = rawAvatar != null ? rawAvatar : "";
-    avatarUrl.value = avatar.startsWith("http") ? avatar : "";
-    if (avatarUrl.value.length > 0) uni.setStorageSync("qt-avatar", avatarUrl.value);
   }
 }
 

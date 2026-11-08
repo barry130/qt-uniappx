@@ -10,6 +10,11 @@
  */
 
 import type { AudioPlayerVoidCallback, AudioPlayerTimeCallback, AudioPlayerErrorCallback, AudioPlayerStateCallback, EnsureNotificationPermission, AudioPlaylistItem, AudioResolveRequestCallback, AudioTrackChangedCallback, AudioRatingRequestCallback } from '../interface.uts'
+import { parseCarLyric, carLyricAt, carLyricFields } from '../car-lyric.uts'
+import type { CarLyricLine } from '../car-lyric.uts'
+import type { AudioDlnaDevice, AudioDlnaState, AudioDlnaDiscoverCallback, AudioDlnaStateCallback, AudioDlnaResolveCallback } from '../interface.uts'
+import { dlnaActive, dlnaState, dlnaPositionMs, dlnaDiscover, dlnaConnect, dlnaDisconnect, dlnaOnState, dlnaOnResolve, dlnaOnNativeState, dlnaOnEnded, dlnaResolveDone, dlnaResolveFailed, dlnaPlay, dlnaPause, dlnaStop, dlnaSeek, dlnaSetVolume } from './dlna.uts'
+import { DlnaSessionPlayer, dlnaPlayerHooks, dlnaPlayerSetPlaylist, dlnaPlayerPlayIndex, dlnaPlayerSyncTimeline, dlnaPlayerCurrentMediaId, dlnaPlayerTimelineSize, dlnaPlayerIntendingToPlay } from './dlna-player.uts'
 
 import {
   nativeHasOverlayPermission,
@@ -43,6 +48,7 @@ import BroadcastReceiver from 'android.content.BroadcastReceiver'
 import ComponentName from 'android.content.ComponentName'
 import Uri from 'android.net.Uri'
 import AudioManager from 'android.media.AudioManager'
+import AudioDeviceInfo from 'android.media.AudioDeviceInfo'
 import AudioFocusRequest from 'android.media.AudioFocusRequest'
 import ExoPlayer from 'androidx.media3.exoplayer.ExoPlayer'
 import DefaultMediaSourceFactory from 'androidx.media3.exoplayer.source.DefaultMediaSourceFactory'
@@ -129,6 +135,11 @@ const REFERER: string = 'https://music.163.com/'
 let sharedPlayer: QtAudioPlayer | null = null
 let gMediaPlayer: ExoPlayer | null = null
 let gMediaSession3: MediaSession | null = null
+let gDlnaSessionPlayer: DlnaSessionPlayer | null = null
+let gDlnaReturnRevision: number = 0
+let gLastTimelineItems: AudioPlaylistItem[] = []
+let gLastRepeatMode = 0
+let gLastTimelineIndex = 0
 let gMediaController: MediaController | null = null
 // MediaController 建连中标志：ensureMediaController 在首播路径可能被连续调用，
 // 而真正赋值 gMediaController 在后台建连线程里 —— 无标志时两条建连线程并发，
@@ -152,11 +163,11 @@ let gHandler: Handler = new Handler(Looper.getMainLooper())
 let gFocusListener: QtAudioFocusListener | null = null
 let gFocusHeld: boolean = false
 let gPausedByFocusLoss: boolean = false
-// 现代音频焦点 API（API 26+）：abandonAudioFocus 必须传同一个请求对象，因此缓存单例。
+// 现代音频焦点 API（API 26+）：释放时必须传原请求对象；持有期间复用。
 let gFocusRequest: AudioFocusRequest | null = null
 // 同时播放模式：0 不允许（默认，独占焦点）/ 1 部分场景（可让路时压低音量继续）/ 2 全部场景（任何焦点变化都不打断）。
 let gConcurrentMode: number = 0
-// gFocusRequest 是按模式对应的 gain 类型构建的；模式变化时用该字段判断缓存失效。
+// 模式变化后更换请求和 listener，让已排队的旧回调失效。
 let gFocusRequestGainMode: number = -1
 // 部分场景下已被要求让路（音量压低），焦点恢复时还原。
 let gDucked: boolean = false
@@ -181,6 +192,16 @@ let gCarLyricGen: number = 0
 let gCarLyricTextGen: number = 0
 let gCarLyricMid: string = ''
 let gCarLyricText: string | null = null
+let gCarLyricMode: number = 0
+let gCarTrackEpoch: number = 0
+let gCarTrackMid: string = ''
+let gCarLines: CarLyricLine[] = []
+let gCarLinesReady: boolean = false
+let gCarOffsetMs: number = 0
+let gCarLastPublishAt: number = 0
+const CAR_ORIGINAL_TITLE = 'qt.car.original.title'
+const CAR_ORIGINAL_ARTIST = 'qt.car.original.artist'
+const CAR_ORIGINAL_DISPLAY = 'qt.car.original.display'
 
 // ==================== 音频磁盘缓存（SimpleCache + LRU） ====================
 // 缓存目录：应用 cacheDir/audio_cache；LRU 淘汰，上限由设置页下发（默认 1G，不设上限）。
@@ -359,6 +380,7 @@ function getContext(): Context | null {
 }
 
 function isPlaying(): boolean {
+  if (dlnaActive()) return dlnaPlayerIntendingToPlay()
   const mp = gMediaPlayer
   if (mp == null) return false
   try {
@@ -394,6 +416,8 @@ function isStopped(): boolean {
 
 class QtAudioFocusListener extends AudioManager.OnAudioFocusChangeListener {
   override onAudioFocusChange(focusChange: Int): void {
+    // abandon 之前已经排入主线程的事件仍可能送达；不能影响新请求或新模式。
+    if (gFocusListener != this) return
     // 焦点变化频率很低（仅在别的应用抢/还焦点时触发），保留日志便于排查播放被谁打断
     console.log('[QT Audio] 音频焦点变化: ' + focusChange + ' (mode=' + gConcurrentMode + ')')
     // 全部场景：不因任何应用的播放/抢焦点而中断自己（含通话、游戏、其他音乐）
@@ -476,6 +500,7 @@ function applyVolume(mp: ExoPlayer): void {
 
 /** 设置用户音量（0–1）：播放中立即生效并跨曲目/跨播放器重建保持 */
 function nativeSetVolume(volume: number): void {
+  if (dlnaActive()) { dlnaSetVolume(volume); return }
   let v = volume
   // NaN 用 !(v >= 0) 拦下（NaN 参与任何比较都是 false，写成 v < 0 会漏过）
   if (!(v >= 0)) v = 1.0
@@ -510,16 +535,20 @@ function restoreVolume(): void {
 /** 申请焦点用的 gain 类型：全部场景(2) 永不申请焦点，这里只服务 0/1 两档 */
 function buildFocusRequest(): AudioFocusRequest {
   return new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-    .setOnAudioFocusChangeListener(getFocusListener())
+    // Android 8+ 默认会直接压低 AudioTrack 而不发 CAN_DUCK 回调，导致
+    // gDucked 无法感知、切到全部场景时 setVolume 也恢复不了系统的压低。
+    // 交由应用处理：mode0 暂停，mode1 按用户音量压低，mode2 不申请焦点。
+    .setWillPauseWhenDucked(true)
+    .setOnAudioFocusChangeListener(getFocusListener(), getHandler())
     .build()
 }
 
 /**
- * 构建并缓存 AudioFocusRequest（listener 与 request 均为模块级单例）。
+ * 构建并缓存 AudioFocusRequest（同一次申请期间复用 listener 与 request）。
  * 用 Builder(int focusGain)：该重载只吃一个 int，无需 import android.media.AudioAttributes，
  * 规避与 media3 同名类的冲突（UTS 不支持 import 别名）——这正是原先被迫用 deprecated 重载的原因。
  * 音频属性走默认值（USAGE_MEDIA），与播放器的 media3 AudioAttributes 同为媒体用途。
- * gain 类型随「同时播放」模式变化，缓存按模式校验。
+ * 两种参与仲裁的模式都请求 GAIN；切档时重建，避免旧事件串入新模式。
  */
 function getFocusRequest(): AudioFocusRequest {
   const existing = gFocusRequest
@@ -539,25 +568,22 @@ function nativeSetConcurrentMode(mode: number): void {
     m = 2
   }
   const wasMode = gConcurrentMode
-  const wasHeld = gFocusHeld
   if (m == gConcurrentMode) return
+  // 只接续因临时让路暂停的播放；用户主动暂停、永久丢失后的暂停都保持原样。
+  const resumeInterrupted = m == 2 && gPausedByFocusLoss
   gConcurrentMode = m
   console.log('[QT Audio] 同时播放模式: ' + wasMode + ' -> ' + m)
-  // 焦点请求的 gain 类型随模式变化，旧请求对象作废。
-  // 只要在播放中就按新模式重新申请焦点：全部场景忽略焦点丢失后我们已不再持有焦点，
-  // 此时切回「不允许/部分场景」必须重新拿回焦点，否则之后别的应用播放时收不到通知、不会暂停。
-  if (wasHeld) abandonAudioFocus()
-  gFocusRequest = null
-  gFocusRequestGainMode = -1
+  // LOSS 后 held=false 也仍须注销原请求/回调；不能仅以持有标记决定清理。
+  abandonAudioFocus()
   restoreVolume()
-  // 全部场景(2)：只放弃已持有的焦点（上面的 wasHeld 分支），不再申请。
-  // 否则切档瞬间就会把正在播放的其他应用压低一下，属于同一类打扰。
+  if (resumeInterrupted) resumeFromFocus()
+  // 全部场景不申请；切回其他模式时，有播放意图（包括缓冲中）才申请。
   if (m != 2 && isPlaying()) requestAudioFocusIfNeeded()
 }
 
 function requestAudioFocusIfNeeded(): void {
   // 全部场景(2)：彻底不参与焦点仲裁——不申请，因此也不会收到 LOSS、不会让任何应用让路。
-  // 这是「与其他应用完全同时播放」的必要条件（见文件头 368 行附近的三档说明）。
+  // 这是「与其他应用完全同时播放」的必要条件。
   if (gConcurrentMode == 2) return
   if (gFocusHeld) return
   const context = getContext()
@@ -576,14 +602,17 @@ function requestAudioFocusIfNeeded(): void {
 
 function abandonAudioFocus(): void {
   gPausedByFocusLoss = false
-  if (!gFocusHeld) return
+  const req = gFocusRequest
+  // 先让旧 listener 失效，再调用系统：既拦已排队事件，也拦释放中的回调。
   gFocusHeld = false
+  gFocusListener = null
+  gFocusRequest = null
+  gFocusRequestGainMode = -1
+  if (req == null) return
   const context = getContext()
   if (context == null) return
   const am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
   if (am == null) return
-  const req = gFocusRequest
-  if (req == null) return
   try {
     // 注意：新 API 方法名是 abandonAudioFocusRequest（非 abandonAudioFocus 重载），
     // 传 listener 的那个才是 deprecated 版本。
@@ -843,8 +872,8 @@ export function audioResolveDone(mediaId: string, url: string): void {
   const req = gPendingResolves.get(mediaId)
   console.log('[QT Audio] resolveDone: ' + mediaId + ' 命中=' + (req != null ? 'true' : 'false'))
   if (req == null) return
-  gResolvedUrls.put(mediaId, url)
-  req.url = url
+  gResolvedUrls.put(mediaId, nativeMediaUri(url))
+  req.url = nativeMediaUri(url)
   req.ok = true
   req.latch.countDown()
 }
@@ -919,6 +948,7 @@ class QtPreloadRunnable implements Runnable {
 
 /** JS 触发下一首预取：uri 必须是 qt-resolve:// 占位地址（本地歌无需预取） */
 export function audioPreloadTrack(uri: string): void {
+  if (dlnaActive()) return
   if (!uri.startsWith('qt-resolve://')) return
   if (gPreloadRunning) return
   gPreloadRunning = true
@@ -988,7 +1018,7 @@ function buildPlaylistMediaItem(item: AudioPlaylistItem): MediaItem {
     .setTitle(item.title)
     .setArtist(item.artist)
     .setAlbumTitle(item.album)
-    .setArtworkUri(Uri.parse(item.coverUrl))
+    .setArtworkUri(item.coverUrl.length > 0 ? Uri.parse(nativeMediaUri(item.coverUrl)) : null)
     // 声明红心评分样式：系统媒体卡片/车机/原子随身听的 ♡ 只在元数据带 userRating
     // 时才渲染（LegacyConversions → METADATA_KEY_USER_RATING；MediaSessionLegacyStub
     // 的 setRatingType 也只认 userRating）。这里先给「未收藏」，
@@ -1010,7 +1040,7 @@ function buildPlaylistMediaItem(item: AudioPlaylistItem): MediaItem {
   const meta = metaBuilder.build()
   return new MediaItem.Builder()
     .setMediaId(item.mediaId)
-    .setUri(item.uri)
+    .setUri(nativeMediaUri(item.uri))
     .setMediaMetadata(meta)
     .build()
 }
@@ -1022,6 +1052,10 @@ function buildPlaylistMediaItem(item: AudioPlaylistItem): MediaItem {
  * 注意导出函数参数一律 number（JS 侧无 Int/Long），进原生 API 前显式 toInt/toLong。
  */
 export function audioSetPlaylist(items: AudioPlaylistItem[], startIndex: number, autoPlay: boolean, startPositionSec: number): void {
+  gDlnaReturnRevision++
+  gLastTimelineItems = items.slice()
+  gLastTimelineIndex = Math.max(0.0, Math.min((items.length - 1).toDouble(), Math.floor(startIndex.toDouble())))
+  if (dlnaActive()) { dlnaPlayerSetPlaylist(items, startIndex.toDouble(), autoPlay, Math.max(0.0, startPositionSec.toDouble()) * 1000); gDlnaSessionPlayer?.refresh(); return }
   const context = getContext()
   if (context == null) return
   // 整条重推 = 新一轮取址：清掉旧条目的解析记忆，refetch 流程才能拿到新地址
@@ -1075,6 +1109,8 @@ export function audioSetPlaylist(items: AudioPlaylistItem[], startIndex: number,
 
 /** 定位到时间线下标并播放（JS 的上一首/下一首/点选执行端） */
 export function audioPlayTimelineIndex(index: number): void {
+  gDlnaReturnRevision++
+  if (dlnaActive()) { dlnaPlayerPlayIndex(index); gDlnaSessionPlayer?.refresh(); return }
   const mp = gMediaPlayer
   if (mp == null) return
   try {
@@ -1095,6 +1131,8 @@ export function audioPlayTimelineIndex(index: number): void {
  * 随机模式的播放顺序由 JS 洗牌后按需重推队列实现，原生只管顺序衔接。
  */
 export function audioSetRepeatMode(mode: number): void {
+  gLastRepeatMode = mode
+  if (dlnaActive()) return // 远端结束由 JS 按现有队列/模式推进，设备不持有临时链接列表。
   const mp = gMediaPlayer
   if (mp == null) return
   const m = mode.toInt()
@@ -1109,6 +1147,7 @@ export function audioSetRepeatMode(mode: number): void {
 
 /** 当前条目 mediaId（空串 = 无）：store 对账探针用它核对「底层加载的是不是这首歌」 */
 export function audioCurrentMediaId(): string {
+  if (dlnaActive()) return dlnaPlayerCurrentMediaId()
   const mp = gMediaPlayer
   if (mp == null) return ''
   const item = mp.getCurrentMediaItem()
@@ -1117,6 +1156,7 @@ export function audioCurrentMediaId(): string {
 
 /** 时间线条目数（JS 推队列后可校验） */
 export function audioTimelineSize(): Int {
+  if (dlnaActive()) return dlnaPlayerTimelineSize().toInt()
   const mp = gMediaPlayer
   if (mp == null) return 0
   return mp.getMediaItemCount()
@@ -1129,6 +1169,8 @@ export function audioTimelineSize(): Int {
  * （说明 JS 与原生已脱钩，下次 play() 的整条重推才是权威）。播放器未创建时静默忽略。
  */
 export function audioSyncTimeline(items: AudioPlaylistItem[], expectedCurrentMid: string): void {
+  gLastTimelineItems = items.slice()
+  if (dlnaActive()) { dlnaPlayerSyncTimeline(items, expectedCurrentMid); gDlnaSessionPlayer?.refresh(); return }
   const mp = gMediaPlayer
   if (mp == null) return
   try {
@@ -1189,6 +1231,7 @@ function attachPlayerListener(exo: ExoPlayer): void {
 
 class QtPlayerListener extends Player.Listener {
   override onPlaybackStateChanged(state: Int): void {
+    if (dlnaActive()) return
     if (state == Player.STATE_READY) {
       // 首个条目就绪 = 音频会话 id 已可用，这里惰性补挂 EQ 与音量增强
       attachEqualizerIfNeeded()
@@ -1214,9 +1257,21 @@ class QtPlayerListener extends Player.Listener {
     }
   }
   override onMediaItemTransition(mediaItem: MediaItem | null, reason: Int): void {
+    if (dlnaActive()) return
+    if (gMediaPlayer != null) gLastTimelineIndex = gMediaPlayer!!.getCurrentMediaItemIndex().toDouble()
     // 队列切换的事实来源：原生自动切歌（reason=AUTO，播完衔接）、JS 定位跳转（SEEK）、
     // 重推队列（PLAYLIST_CHANGED）都汇到这里，JS 侧按 mediaId 对账更新当前曲目/封面/UI
     const mid = mediaItem != null ? mediaItem.mediaId : ''
+    // Invalidate pending bridge deliveries even for A -> B -> A and same-id reloads.
+    if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) {
+      gCarTrackEpoch++
+      gCarTrackMid = mid
+      gCarLyricText = null
+      gCarLines = []
+      gCarLinesReady = false
+      gCarOffsetMs = 0
+    }
+    scheduleCarLyricTick()
     // naturalEnd = 播到头自然引发的切换（AUTO=衔接下一首 / REPEAT=循环重启本条目）。
     // JS 靠它识别「内容提前结束」：截断流/坏缓存时 media3 视为正常播完，无错误事件
     const naturalEnd = reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO
@@ -1226,6 +1281,7 @@ class QtPlayerListener extends Player.Listener {
     updateWidgetFromPlayer()
   }
   override onIsPlayingChanged(isPlaying: boolean): void {
+    if (dlnaActive()) return
     // 桌面小部件播放/暂停图标跟随
     updateWidgetFromPlayer()
     // 用 getPlayWhenReady(用户播放意图) 而非实际 isPlaying，避免拖进度条/缓冲时
@@ -1252,6 +1308,7 @@ class QtPlayerListener extends Player.Listener {
     }
   }
   override onPlayerError(error: PlaybackException): void {
+    if (dlnaActive()) return
     // 平台类的继承成员（getCause/cause）UTS 解析不到（error18：直调和 as Throwable 都不行），
     // 根因分类靠 errorCode（PlaybackException 自有字段）+ 解析桥自己的日志：
     // 2004=HTTP 状态错(403/416) 2001/2002=网络连接失败/超时 2000=IO 未分类（配合
@@ -1424,7 +1481,7 @@ function cmdToggleFav(): SessionCommand {
 
 /** 当前曲是否已收藏：读当前条目的 userRating（HeartRating 实心即收藏） */
 function currentLiked(): boolean {
-  const mp = gMediaPlayer
+  const mp: Player | null = dlnaActive() ? gDlnaSessionPlayer : gMediaPlayer
   if (mp == null) return false
   const cur = mp.getCurrentMediaItem()
   if (cur == null) return false
@@ -1438,7 +1495,7 @@ function currentLiked(): boolean {
 /** 通知栏 ♡ 点击 → JS 默认收藏歌单链路（与系统媒体卡片 ♡ 同一出口 cbRating） */
 function dispatchFavToggle(): void {
   let mediaId = ''
-  const mp = gMediaPlayer
+  const mp: Player | null = dlnaActive() ? gDlnaSessionPlayer : gMediaPlayer
   if (mp != null) {
     const cur = mp.getCurrentMediaItem()
     if (cur != null) mediaId = cur.mediaId
@@ -1744,7 +1801,7 @@ function ensureMediaSession(): void {
   const appContext = UTSAndroid.getAppContext()
   if (appContext == null) return
   if (gMediaSession3 != null) return
-  const player = gMediaPlayer
+  const player: Player | null = dlnaActive() ? gDlnaSessionPlayer : gMediaPlayer
   if (player == null) return
   try {
     // MediaSession 由服务的 onGetSession 返回给系统；播放后 MediaSessionService 自动发布媒体通知。
@@ -1765,7 +1822,7 @@ function ensureMediaSession(): void {
       .setReadTimeoutMs(15000)
       .setAllowCrossProtocolRedirects(true)
     const coverLoader = new DataSourceBitmapLoader.Builder(appContext)
-      .setDataSourceFactory(coverHttpFactory)
+      .setDataSourceFactory(new DefaultDataSource.Factory(appContext, coverHttpFactory))
       .build()
     sessionBuilder.setBitmapLoader(coverLoader)
     // 点通知/系统媒体卡片回到应用：DefaultMediaNotificationProvider 的 contentIntent
@@ -2122,6 +2179,8 @@ function loadAndPlay(url: string): void {
 }
 
 function nativePlay(): void {
+  gDlnaReturnRevision++
+  if (dlnaActive()) { dlnaPlay(); return }
   if (gSrc.length == 0) {
     fireError('音频地址为空')
     return
@@ -2175,6 +2234,8 @@ function startPlayback(): void {
 }
 
 function nativePause(): void {
+  gDlnaReturnRevision++
+  if (dlnaActive()) { dlnaPause(); return }
   // 用户主动暂停：清除「焦点丢失自动续播」标记，避免瞬时焦点恢复后误自动播放
   gPausedByFocusLoss = false
   const mp = gMediaPlayer
@@ -2190,7 +2251,17 @@ function nativePause(): void {
 }
 
 function nativeStop(): void {
+  gDlnaReturnRevision++
+  if (dlnaActive()) { dlnaStop(); return }
   stopProgressPolling()
+  getHandler().removeCallbacks(carLyricTicker)
+  // Remove compatibility text before releasing the media session.
+  publishCarLyricFields('', false)
+  gCarTrackEpoch++
+  gCarTrackMid = ''
+  gCarLyricText = null
+  gCarLines = []
+  gCarLinesReady = false
   const mp = gMediaPlayer
   if (mp != null) {
     try {
@@ -2258,11 +2329,13 @@ function nativeStop(): void {
 }
 
 function nativeSeek(seconds: number): void {
+  if (dlnaActive()) { dlnaSeek(seconds * 1000); return }
   const mp = gMediaPlayer
   if (mp == null) return
   try {
     let target: Long = Math.round((seconds * 1000).toDouble())
     mp.seekTo(target)
+    scheduleCarLyricTick()
   } catch (e) {
     fireError('跳转失败: ' + (e != null ? e.toString() : 'unknown'))
   }
@@ -2529,6 +2602,14 @@ class QtAudioService extends MediaSessionService {
   }
 
   override onDestroy(): void {
+    if (dlnaActive()) dlnaDisconnect()
+    gDlnaSessionPlayer = null
+    getHandler().removeCallbacks(carLyricTicker)
+    gCarTrackEpoch++
+    gCarTrackMid = ''
+    gCarLyricText = null
+    gCarLines = []
+    gCarLinesReady = false
     // 系统主动销毁服务时兜底释放（用户主动停止走 nativeStop，此处 net 保护）
     const sp = gMediaSession3
     if (sp != null) {
@@ -2616,6 +2697,8 @@ export function audioPlay(): void { nativePlay() }
 /** 恢复播放（media3 时间线路径）：只恢复播放意图，不经过旧 gSrc 单曲链路
  *  （队列迁移后 gSrc 不再被写入，resume 走 nativePlay 会报「音频地址为空」） */
 export function audioResume(): void {
+  gDlnaReturnRevision++
+  if (dlnaActive()) { dlnaPlay(); return }
   const mp = gMediaPlayer
   if (mp == null) return
   try {
@@ -2630,10 +2713,11 @@ export function audioResume(): void {
 }
 export function audioPause(): void { nativePause() }
 export function audioStop(): void { nativeStop() }
-export function audioSeek(seconds: number): void { nativeSeek(seconds) }
+export function audioSeek(seconds: number): void { gDlnaReturnRevision++; nativeSeek(seconds) }
 /** 原生是否「意图播放」（playWhenReady）：暂停=false；缓冲中 isPlaying 同样为 false
  *  但播放意图仍是 true。store 的状态对账探针用它区分「真暂停」和「缓冲中」。 */
 export function audioIsIntendingToPlay(): boolean {
+  if (dlnaActive()) return dlnaPlayerIntendingToPlay()
   const mp = gMediaPlayer
   if (mp == null) return false
   try {
@@ -2658,6 +2742,7 @@ export function audioSetCover(url: string): void {
 
 /** 当前播放位置（秒）；播放器未创建时返回 0 */
 export function audioGetCurrentTime(): number {
+  if (dlnaActive()) return dlnaPositionMs() / 1000
   const mp = gMediaPlayer
   if (mp == null) return 0.0
   try {
@@ -2912,8 +2997,9 @@ function updateWidgetFromPlayer(): void {
     const item = mp.getCurrentMediaItem()
     if (item != null) {
       const meta = item.mediaMetadata
-      const t = meta.title
-      const a = meta.artist
+      const extras = meta.extras
+      const t = extras != null && extras.containsKey(CAR_ORIGINAL_TITLE) ? extras.getString(CAR_ORIGINAL_TITLE) : meta.title?.toString()
+      const a = extras != null && extras.containsKey(CAR_ORIGINAL_ARTIST) ? extras.getString(CAR_ORIGINAL_ARTIST) : meta.artist?.toString()
       if (t != null && t.toString().length > 0) gWidgetTitle = t.toString()
       if (a != null && a.toString().length > 0) gWidgetArtist = a.toString()
     } else {
@@ -2937,6 +3023,7 @@ function updateWidgetFromPlayer(): void {
 
 /** 小部件播放/暂停：有播放意图即暂停，否则申请焦点恢复播放 */
 function widgetTogglePlay(): void {
+  if (dlnaActive()) { if (dlnaPlayerIntendingToPlay()) dlnaPause(); else dlnaPlay(); return }
   const mp = gMediaPlayer
   if (mp == null) return
   try {
@@ -2954,6 +3041,7 @@ function widgetTogglePlay(): void {
 
 /** 小部件上一首/下一首：按时间线下标定位，越界忽略 */
 function widgetStep(delta: Int): void {
+  if (dlnaActive()) { if (delta > 0) fireNext(); else firePrev(); return }
   const mp = gMediaPlayer
   if (mp == null) return
   try {
@@ -3229,21 +3317,9 @@ export function audioMonotonicTime(): number { return SystemClock.elapsedRealtim
 // ==================== 车机蓝牙 AVRCP 歌词（android.media.metadata.LYRICS） ====================
 // 追加在文件**最末尾**（methodId 顺序，同上文各处注释）。
 //
-// 背景：AVRCP 1.3+ 的车机（如各品牌车机屏）普遍从媒体元数据 bundle 里读裸 key
-// "android.media.metadata.LYRICS" 来展示整首歌词（事实标准 key，media3 与 compat
-// 都没有对应常量，车机按原始字符串读）。本 API 把歌词全文写进当前条目的
-// MediaMetadata.extras，下面的链路（对着 media3 1.11.1 AAR 字节码逐条核实，非推测）：
-//   MediaMetadata.extras（String 值原样保留）
-//   → LegacyConversions.convertToMediaMetadataCompat：遍历 extras，CharSequence 值走
-//     MediaMetadataCompat.Builder.putText(key, value) 写进 compat 元数据包
-//     （无 key 白名单；LYRICS 未注册进 METADATA_KEYS_TYPE，putText 不抛
-//      IllegalArgumentException——它只对「已注册且类型非 TEXT」的 key 抛异常）；
-//   → MediaSessionLegacyStub$ControllerLegacyCbForBroadcast.onMediaMetadataChanged
-//     → MediaSessionLegacyStub.setMetadata → MediaSessionCompat.setMetadata
-//     → framework android.media.session.MediaSession.setMetadata：MediaMetadataCompat
-//       .getMediaMetadata() 对未注册 key（含 LYRICS）走 default 分支
-//       framework Builder.putText → 车机蓝牙栈收到整包元数据。
-// 通知栏/系统卡片/桌面歌词不读这个 key，本 API 不影响它们。
+// LYRICS 是应用扩展字段，不是标准 AVRCP 歌词传输能力。媒体会话保留它供支持
+// 的本机控制器消费；普通车机通常只读取 title/artist/album 等标准字段。
+// 下方可选兼容模式通过标准 title/artist 发送当前行，不承诺专用歌词区域可用。
 //
 // 更新方式与 audioSetLiked 同构：replaceMediaItem 原地更新（URI 不变、仅元数据变 →
 // ExoPlayerImpl.java:3187-3222 原地替换——不重建 MediaSource、不重新缓冲、不误报切歌）。
@@ -3255,10 +3331,13 @@ const CAR_LYRIC_KEY = 'android.media.metadata.LYRICS'
 /** 非主线程调用时经主 looper 派发的载体（QtResolveFire 同款 Runnable 形态） */
 class QtCarLyricPush implements Runnable {
   private text: string
+  private epoch: number
   constructor(text: string) {
     this.text = text
+    this.epoch = gCarTrackEpoch
   }
   override run(): void {
+    if (this.epoch != gCarTrackEpoch) return
     applyCarLyric(this.text)
   }
 }
@@ -3291,6 +3370,9 @@ function applyCarLyric(text: string): void {
     gCarLyricTextGen = gCarLyricGen
     gCarLyricMid = cur.mediaId
     gCarLyricText = text
+    gCarLinesReady = false
+    gCarLines = []
+    scheduleCarLyricTick()
   } catch (e) {
     // 静默：车机歌词是增强项，失败不影响播放与其他元数据通道
     console.log('[QT Audio] 车机歌词下发失败: ' + (e != null ? e.toString() : 'unknown'))
@@ -3298,9 +3380,9 @@ function applyCarLyric(text: string): void {
 }
 
 /**
- * 下发整首歌词到车机蓝牙（AVRCP 1.3+，key "android.media.metadata.LYRICS"）。
+ * 保留整首歌词到扩展元数据；普通 AVRCP 车机不保证读取该字段。
  *
- * @param text 歌词全文（JS 侧通常传整首 LRC 原文或纯文本歌词，车机自行解析/滚动）。
+ * @param text 歌词全文，供支持扩展字段的控制器读取；不保证车机解析或显示。
  *             空串也允许下发：表示「本曲无词」，用于清掉车机上一首残留的歌词。
  *
  * 幂等性：当前条目 + 时间线代数 + 文本三者都未变时为 no-op（整包重发只会让车机
@@ -3385,4 +3467,247 @@ export function audioSetEnhanceGain(gainMb: number): void {
   } catch (e) {
     console.log('[QT Audio] 音量增强增益下发失败: ' + (e != null ? e.toString() : 'unknown'))
   }
+}
+
+// ==================== 可选蓝牙歌词兼容模式（新增导出只追加） ====================
+// 500ms 原生时钟在 JS 挂起/锁屏时仍跟随；相同行不重发，歌词变化限最多 1 次/秒。
+// 关闭模式不保留轮询。保持会话的 URI、评分、封面及所有其他 extras 不变。
+function carBluetoothConnected(): boolean {
+  const context = getContext()
+  if (context == null || Build.VERSION.SDK_INT < 23) return false
+  try {
+    const manager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    const outputs = manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+    for (let i = 0; i < outputs.size; i++) {
+      if (outputs[i.toInt()].getType() == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP) return true
+    }
+  } catch (e) {
+    // 静默：蓝牙设备查询失败时恢复普通元数据，不假定已连接。
+  }
+  return false
+}
+
+/** Restore originals from the item itself, including after returning to an old queue entry. */
+function publishCarLyricFields(line: string, bluetooth: boolean): void {
+  const mp = gMediaPlayer
+  if (mp == null) return
+  try {
+    const item = mp.getCurrentMediaItem()
+    if (item == null) return
+    const old = item.mediaMetadata
+    const extras = old.extras != null ? new Bundle(old.extras) : new Bundle()
+    const title = extras.containsKey(CAR_ORIGINAL_TITLE) ? (extras.getString(CAR_ORIGINAL_TITLE) ?? '') : (old.title?.toString() ?? '')
+    const artist = extras.containsKey(CAR_ORIGINAL_ARTIST) ? (extras.getString(CAR_ORIGINAL_ARTIST) ?? '') : (old.artist?.toString() ?? '')
+    const display = extras.containsKey(CAR_ORIGINAL_DISPLAY) ? (extras.getString(CAR_ORIGINAL_DISPLAY) ?? '') : (old.displayTitle?.toString() ?? '')
+    const fields = carLyricFields(gCarLyricMode, bluetooth, line, title, artist, display)
+    const active = bluetooth && line.length > 0 && gCarLyricMode != 0
+    if ((old.title?.toString() ?? '') == fields.title && (old.artist?.toString() ?? '') == fields.artist && (old.displayTitle?.toString() ?? '') == fields.displayTitle && (active || !extras.containsKey(CAR_ORIGINAL_TITLE))) return
+    if (active) {
+      extras.putString(CAR_ORIGINAL_TITLE, title)
+      extras.putString(CAR_ORIGINAL_ARTIST, artist)
+      extras.putString(CAR_ORIGINAL_DISPLAY, display)
+    } else {
+      extras.remove(CAR_ORIGINAL_TITLE)
+      extras.remove(CAR_ORIGINAL_ARTIST)
+      extras.remove(CAR_ORIGINAL_DISPLAY)
+    }
+    const builder = old.buildUpon()
+    builder.setTitle(fields.title)
+    builder.setArtist(fields.artist)
+    builder.setDisplayTitle(fields.displayTitle.length > 0 ? fields.displayTitle : null)
+    builder.setExtras(extras)
+    mp.replaceMediaItem(mp.getCurrentMediaItemIndex(), item.buildUpon().setMediaMetadata(builder.build()).build())
+    gCarLastPublishAt = SystemClock.elapsedRealtime().toDouble()
+  } catch (e) {
+    console.log('[QT Audio] 蓝牙歌词元数据更新失败: ' + (e != null ? e.toString() : 'unknown'))
+  }
+}
+
+function tickCarLyric(): void {
+  const mp = gMediaPlayer
+  if (mp == null) return
+  if (gCarLyricMode == 0 || !carBluetoothConnected()) {
+    publishCarLyricFields('', false)
+    return
+  }
+  const item = mp.getCurrentMediaItem()
+  if (item == null) return
+  if (item.mediaId != gCarTrackMid || gCarLyricText == null) {
+    publishCarLyricFields('', false)
+    return
+  }
+  if (!gCarLinesReady) {
+    gCarLines = parseCarLyric(gCarLyricText ?? '')
+    gCarLinesReady = true
+  }
+  const line = carLyricAt(gCarLines, mp.getCurrentPosition().toDouble(), gCarOffsetMs)
+  // Empty lines, disconnects and disabled mode restore immediately; dense lyrics coalesce.
+  if (line.length > 0 && SystemClock.elapsedRealtime().toDouble() - gCarLastPublishAt < 1000) return
+  publishCarLyricFields(line, true)
+}
+
+class QtCarLyricTicker implements Runnable {
+  override run(): void {
+    try { tickCarLyric() } catch (e) {
+      // 静默：播放器刚释放或路由查询暂时失败，下轮重新检查。
+    }
+    if (gCarLyricMode != 0 && gMediaPlayer != null) getHandler().postDelayed(this, 500)
+  }
+}
+const carLyricTicker = new QtCarLyricTicker()
+function scheduleCarLyricTick(): void {
+  getHandler().removeCallbacks(carLyricTicker)
+  if (gCarLyricMode != 0 && gMediaPlayer != null) getHandler().post(carLyricTicker)
+  else publishCarLyricFields('', false)
+}
+
+/** One main-thread command path preserves mode/data/offset ordering. */
+class QtCarLyricCommand implements Runnable {
+  private action: number
+  private mid: string
+  private token: number
+  private text: string
+  private value: number
+  constructor(action: number, mid: string, token: number, text: string, value: number) {
+    this.action = action
+    this.mid = mid
+    this.token = token
+    this.text = text
+    this.value = value
+  }
+  override run(): void {
+    if (this.action == 0) {
+      gCarLyricMode = this.value == 1 || this.value == 2 ? this.value : 0
+      gCarLastPublishAt = 0
+      if (gCarLyricMode == 0) publishCarLyricFields('', false)
+      scheduleCarLyricTick()
+      return
+    }
+    const mp = gMediaPlayer
+    if (mp == null) return
+    const item = mp.getCurrentMediaItem()
+    if (item == null || item.mediaId != this.mid || this.token != gCarTrackEpoch) return
+    gCarOffsetMs = this.value >= -10000 && this.value <= 10000 ? this.value : 0
+    if (this.action == 1) {
+      applyCarLyric(this.text)
+    }
+    gCarLastPublishAt = 0
+    scheduleCarLyricTick()
+  }
+}
+function dispatchCarCommand(command: QtCarLyricCommand): void {
+  if (Looper.myLooper() == Looper.getMainLooper()) command.run()
+  else getHandler().post(command)
+}
+
+/** 0=off, 1=current line in artist, 2=current line in title. */
+export function audioSetCarLyricMode(mode: number): void {
+  dispatchCarCommand(new QtCarLyricCommand(0, '', 0, '', mode))
+}
+/** Capture before async lyric work; the token changes on native track transitions. */
+export function audioCarLyricToken(): number { return gCarTrackEpoch }
+export function audioSetCarLyricFor(mediaId: string, token: number, text: string, offsetMs: number): void {
+  dispatchCarCommand(new QtCarLyricCommand(1, mediaId, token, text.substring(0, 262144), offsetMs))
+}
+export function audioSetCarLyricOffset(mediaId: string, token: number, offsetMs: number): void {
+  dispatchCarCommand(new QtCarLyricCommand(2, mediaId, token, '', offsetMs))
+}
+
+class QtTrackCoverPush implements Runnable {
+  private mid: string
+  private cover: string
+  constructor(mid: string, cover: string) { this.mid = mid; this.cover = nativeMediaUri(cover) }
+  override run(): void {
+    const mp = gMediaPlayer
+    if (mp == null) return
+    const item = mp.getCurrentMediaItem()
+    if (item == null || item.mediaId != this.mid) return
+    if ((item.mediaMetadata.artworkUri?.toString() ?? '') == this.cover) return
+    const metadata = item.mediaMetadata.buildUpon().setArtworkUri(this.cover.length > 0 ? Uri.parse(this.cover) : null).build()
+    mp.replaceMediaItem(mp.getCurrentMediaItemIndex(), item.buildUpon().setMediaMetadata(metadata).build())
+  }
+}
+/** 本地内嵌/缓存封面就绪后补入当前媒体项，不改播放地址或歌词 extras。 */
+export function audioSetTrackCover(mediaId: string, cover: string): void {
+  if (dlnaActive()) return
+  const task = new QtTrackCoverPush(mediaId, cover)
+  if (Looper.myLooper() == Looper.getMainLooper()) task.run()
+  else getHandler().post(task)
+}
+
+function nativeMediaUri(value: string): string {
+  if (value.startsWith('unifile://')) return Uri.fromFile(new File(UTSAndroid.convert2AbsFullPath(value))).toString()
+  if (value.startsWith('/')) return Uri.fromFile(new File(value)).toString()
+  return value
+}
+
+// DLNA 是独立远端 Player，复用同一个 MediaSessionService。桥接只导出模块函数。
+function bindDlnaNativeHooks(): void {
+dlnaPlayerHooks((mediaId: string) => {
+  const index = gLastTimelineItems.findIndex((item: AudioPlaylistItem): boolean => item.mediaId == mediaId)
+  if (index >= 0) gLastTimelineIndex = index
+  fireTrackChanged(mediaId, false)
+}, () => { fireNext() }, () => { firePrev() })
+dlnaOnEnded(() => { fireEnded() })
+dlnaOnNativeState(() => {
+  gDlnaSessionPlayer?.refresh()
+  if (!dlnaActive()) return
+  const state = dlnaState()
+  if (state.mediaId.length > 0) fireTimeUpdate(state.positionMs / 1000, state.durationMs / 1000)
+  if (dlnaPlayerIntendingToPlay()) firePlay(); else firePause()
+  // 只刷新元数据，不读取已停止的本地 ExoPlayer 位置。
+  const current = gLastTimelineItems.find((item: AudioPlaylistItem): boolean => item.mediaId == state.mediaId)
+  if (current != null) { gWidgetTitle = current.title; gWidgetArtist = current.artist; gWidgetCoverUrl = current.coverUrl }
+  gWidgetPlaying = state.phase == 'playing'; refreshWidgetViews()
+})
+}
+export function audioDlnaSupported(): boolean { return true }
+export function audioDlnaActive(): boolean { return dlnaActive() }
+export function audioDlnaState(): AudioDlnaState { return dlnaState() }
+export function audioDlnaDiscover(callback: AudioDlnaDiscoverCallback): void { dlnaDiscover(callback) }
+export function audioDlnaOnState(callback: AudioDlnaStateCallback | null): void { dlnaOnState(callback) }
+export function audioDlnaOnResolveRequest(callback: AudioDlnaResolveCallback | null): void { dlnaOnResolve(callback) }
+export function audioDlnaResolveDone(mediaId: string, uri: string, referer: string, generation: number): void { dlnaResolveDone(mediaId, nativeMediaUri(uri), referer, generation) }
+export function audioDlnaResolveFail(mediaId: string, generation: number): void { dlnaResolveFailed(mediaId, generation) }
+export function audioDlnaConnect(id: string): boolean {
+  gDlnaReturnRevision++
+  const context = getContext()
+  if (context == null) return false
+  bindDlnaNativeHooks()
+  const mp = gMediaPlayer
+  const wasCasting = dlnaActive()
+  const previous = dlnaState()
+  const hasLocalTimeline = mp != null && mp.getMediaItemCount() > 0
+  const position = wasCasting ? previous.positionMs : hasLocalTimeline ? Math.max(0.0, mp!!.getCurrentPosition().toDouble()) : 0.0
+  const index = wasCasting ? gLastTimelineItems.findIndex((item: AudioPlaylistItem): boolean => item.mediaId == previous.mediaId) : hasLocalTimeline ? mp!!.getCurrentMediaItemIndex().toDouble() : gLastTimelineIndex
+  const autoplay = wasCasting ? dlnaPlayerIntendingToPlay() : mp != null && mp.getPlayWhenReady()
+  if (!dlnaConnect(id)) return false
+  // 此后本地回调全部忽略：取消原生加载与自动队列推进，绝不静音继续解码。
+  stopProgressPolling(); abandonAudioFocus()
+  if (mp != null) { mp.pause(); mp.stop() }
+  gPrepared = false; gAwaitPrepare = false
+  if (gMediaPlayer == null) buildPlayerOnce()
+  if (gDlnaSessionPlayer == null) gDlnaSessionPlayer = new DlnaSessionPlayer()
+  ensureMediaSession()
+  gMediaSession3?.setPlayer(gDlnaSessionPlayer!!)
+  startMediaService(context); ensureMediaController()
+  if (gLastTimelineItems.length > 0) dlnaPlayerSetPlaylist(gLastTimelineItems, index, autoplay, position)
+  gDlnaSessionPlayer!!.refresh()
+  return true
+}
+export function audioDlnaDisconnect(returnToLocal: boolean): void {
+  const state = dlnaState()
+  const index = gLastTimelineItems.findIndex((item: AudioPlaylistItem): boolean => item.mediaId == state.mediaId)
+  if (index >= 0) gLastTimelineIndex = index
+  const revision = ++gDlnaReturnRevision
+  dlnaDisconnect((stopped: boolean): void => {
+    if (!returnToLocal || !stopped || revision != gDlnaReturnRevision || dlnaActive()) return
+    const currentIndex = gLastTimelineItems.findIndex((item: AudioPlaylistItem): boolean => item.mediaId == state.mediaId)
+    if (currentIndex < 0) return
+    audioSetPlaylist(gLastTimelineItems, currentIndex, true, state.positionMs / 1000)
+    audioSetRepeatMode(gLastRepeatMode)
+  })
+  const mp = gMediaPlayer
+  if (mp != null) { gMediaSession3?.setPlayer(mp); mp.pause(); mp.stop(); mp.clearMediaItems() }
+  firePause()
 }

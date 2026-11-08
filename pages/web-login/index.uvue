@@ -9,7 +9,7 @@
           :style="('color:' + statusColor + ';') + qtFontDual(23, 13)"
         >{{ statusText }}</text>
         <qt-button
-          v-if="phase == 'timeout'"
+          v-if="phase == 'timeout' || phase == 'cancelled'"
           class="wl-retry"
           label="重新加载"
           variant="outline"
@@ -34,6 +34,7 @@
 </template>
 
 <script setup lang="ts">
+import { onUnmounted } from "vue";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
@@ -42,8 +43,9 @@ import { qtShowToast } from "@/services/toast";
 import { logErrV } from "@/services/logger";
 import { useSourceRegistryStore } from "@/stores/source-registry";
 import { isAndroidOs, getWebCookies, openAuthWebView, closeAuthWebView } from "@/services/app-native";
-import { authImportCookie, saveSourceAuthAccount, type SourceAuthUser } from "@/services/source-auth";
+import { authImportCookie, saveSourceAuthAccount, sourceAuthRevision, readSourceAuthEntries, type SourceAuthUser } from "@/services/source-auth";
 import { mergeCookies, markerHit, captureUrlsOf, WEB_LOGIN_DONE_EVENT } from "@/services/source-web-login";
+import { claimSourceWebLogin, sourceWebLoginIsCurrent, sourceWebLoginIsAvailable, releaseSourceWebLogin } from "@/services/source-web-login-session";
 import type { RegistryWebLogin } from "@/services/music-api";
 
 /**
@@ -64,7 +66,7 @@ const registry = useSourceRegistryStore();
 const sourceId = ref("");
 const sourceName = ref("");
 const webUrl = ref("");
-/** loading：启动中 / polling：轮询中 / timeout：到期限 / done：成功收摊 */
+/** loading：启动中 / polling：轮询中 / timeout：到期限 / cancelled：已撤销 / done：成功收摊 */
 const phase = ref("loading");
 const remainSec = ref(180);
 /** 轮询期内读到过非空 Cookie（超时文案分流用） */
@@ -76,10 +78,47 @@ let webLogin: RegistryWebLogin | null = null;
 let captureUrls: string[] = [];
 let deadlineAt = 0;
 let pollTimer: number | null = null;
+let returnTimer: number | null = null;
 /** 校验失败只提示一次（PC failNotified 同款） */
 let failNotified = false;
-/** 上一轮 authImportCookie 未返回时不叠加打（避免每 1.5s 一串校验请求） */
-let importing = false;
+/** 从 Cookie 读取到校验完成都单飞；旧轮次 finally 不能解锁重试后的新请求。 */
+let flowGeneration = 0;
+let pollRequestGeneration = -1;
+/** 页面注销后，注册表加载与凭据回调不能恢复登录流程。 */
+let pageAlive = true;
+let flowCredentialRevision = 0;
+let nativeViewGeneration = 0;
+let webLoginOwner = 0;
+function pageIsCurrent(): boolean {
+  return pageAlive && sourceWebLoginIsCurrent(webLoginOwner);
+}
+function flowIsCurrent(generation: number): boolean {
+  return pageIsCurrent() && generation == flowGeneration;
+}
+function closeNativeLogin(): void {
+  nativeViewGeneration++;
+  if (!nativeOpen.value) return;
+  nativeOpen.value = false;
+  if (sourceWebLoginIsCurrent(webLoginOwner)) closeAuthWebView();
+}
+function accountFlowIsCurrent(generation: number, source: string, revision: number): boolean {
+  if (!flowIsCurrent(generation)) return false;
+  if (sourceAuthRevision(source) == revision) return true;
+  // 移除/替换账号会撤销旧交互；只能通过重新加载显式开始新一轮。
+  flowGeneration++;
+  stopPolling();
+  phase.value = "cancelled";
+  closeNativeLogin();
+  return false;
+}
+/** Cookie/校验返回也必须查截止时刻，不能等下一次 interval 才判过期。 */
+function pollFlowIsCurrent(generation: number, source: string, revision: number): boolean {
+  if (!accountFlowIsCurrent(generation, source, revision) || phase.value != "polling") return false;
+  if (Date.now() < deadlineAt) return true;
+  stopPolling();
+  phase.value = "timeout";
+  return false;
+}
 
 /**
  * 安卓走原生「可控登录 WebView」（services/app-native 的 openAuthWebView）：
@@ -108,6 +147,7 @@ const nativeTip = computed((): string => {
  * 两种情况都不停轮询：Cookie 可能已经种上了。
  */
 function onNativeClosed(message: string): void {
+  if (!pageIsCurrent()) return;
   nativeOpen.value = false;
   nativeClosedByUser.value = true;
   if (message.length > 0) qtShowToast({ title: message, icon: "none" });
@@ -129,10 +169,14 @@ function webLoginUa(): string {
 
 /** 打开（或重新打开）原生登录页 */
 function openNativeLogin(): void {
-  if (webUrl.value.length == 0) return;
+  if (!pageIsCurrent() || phase.value == "done" || webUrl.value.length == 0) return;
   nativeClosedByUser.value = false;
   nativeOpen.value = true;
-  openAuthWebView(webUrl.value, onNativeClosed, webLoginUa());
+  const generation = ++nativeViewGeneration;
+  openAuthWebView(webUrl.value, (message: string) => {
+    if (generation != nativeViewGeneration) return;
+    onNativeClosed(message);
+  }, webLoginUa());
 }
 
 /** 与 source-auth 页同一组常量（PC：1500ms / 180s） */
@@ -148,6 +192,7 @@ const statusColor = computed((): string => {
 const statusText = computed((): string => {
   if (phase.value == "loading") return "正在打开官方登录页…";
   if (phase.value == "done") return "登录成功，正在返回…";
+  if (phase.value == "cancelled") return "登录状态已变化，本次登录已取消。需要继续时点「重新加载」";
   if (phase.value == "polling" && nativeClosedByUser.value) return "登录页已关闭，仍在等待登录凭据；需要继续时可点「重新打开官方登录页」";
   if (phase.value == "timeout") {
     if (markerSeen.value) return "已捕获官方登录 Cookie，但账号校验未通过。请在网页确认账号状态后点「重新加载」";
@@ -199,12 +244,18 @@ function failBack(message: string): void {
   markerSeen.value = false;
   webUrl.value = "";
   qtShowToast({ title: message, icon: "none" });
-  setTimeout(() => {
+  const generation = flowGeneration;
+  returnTimer = setTimeout(() => {
+    returnTimer = null;
+    if (!flowIsCurrent(generation)) return;
     uni.navigateBack({});
-  }, 350);
+  }, 350) as number;
 }
 
 function beginPolling(): void {
+  if (!pageIsCurrent()) return;
+  flowGeneration++;
+  flowCredentialRevision = sourceAuthRevision(sourceId.value);
   phase.value = "polling";
   capturedSeen.value = false;
   markerSeen.value = false;
@@ -228,21 +279,24 @@ function tick(): void {
     return;
   }
   remainSec.value = Math.floor((deadlineAt - now) / 1000);
-  if (importing) return;
+  const generation = flowGeneration;
+  const source = sourceId.value;
+  const revision = flowCredentialRevision;
+  if (!accountFlowIsCurrent(generation, source, revision)) return;
+  if (pollRequestGeneration == generation) return;
   const wl = webLogin;
   if (wl == null) return;
+  pollRequestGeneration = generation;
   getWebCookies(captureUrls).then((chunks: string[]) => {
-    if (phase.value != "polling") return;
+    if (!pollFlowIsCurrent(generation, source, revision)) return;
     const cookie = mergeCookies(chunks);
     if (cookie.length > 0) capturedSeen.value = true;
     if (!markerHit(cookie, wl.cookieMarkers)) return;
-    importing = true;
-    authImportCookie(sourceId.value, cookie)
+    return authImportCookie(source, cookie)
       .then((user: SourceAuthUser | null) => {
-        importing = false;
-        if (phase.value != "polling") return;
+        if (!pollFlowIsCurrent(generation, source, revision)) return;
         if (user != null) {
-          finishLogin(cookie, user);
+          finishLogin(generation, source, cookie, user);
           return;
         }
         // 校验未过：继续轮询（PC 同语义），用户把账号状态弄对后下一轮自动重试
@@ -253,35 +307,58 @@ function tick(): void {
         }
       })
       .catch((e) => {
-        importing = false;
+        if (!pollFlowIsCurrent(generation, source, revision)) return;
         logErrV("WebLogin", "authImportCookie", e);
       });
+  }).finally(() => {
+    if (pollRequestGeneration == generation) pollRequestGeneration = -1;
   });
 }
 
 /** 校验通过：落库 → 广播 → 返回账号页（账号页监听广播触发登录即自动同步） */
-function finishLogin(cookie: string, user: SourceAuthUser): void {
+function finishLogin(generation: number, source: string, cookie: string, user: SourceAuthUser): void {
   phase.value = "done";
   stopPolling();
   // 登录已成，立即收掉原生登录页（不等 navigateBack）：
   // 否则用户在「登录成功」toast 期间还能操作网页，容易误触
-  if (nativeOpen.value) {
-    nativeOpen.value = false;
-    closeAuthWebView();
-  }
-  saveSourceAuthAccount(sourceId.value, cookie, user, "")
+  closeNativeLogin();
+  if (!accountFlowIsCurrent(generation, source, flowCredentialRevision)) return;
+  const sourceNameAtSave = sourceName.value;
+  // 此次保存只推进一个 revision；不能把原生写入边界内的撤销收纳为本次版本。
+  const savedRevision = flowCredentialRevision + 1;
+  const saving = saveSourceAuthAccount(source, cookie, user, "");
+  saving
     .then(() => {
-      uni.$emit(WEB_LOGIN_DONE_EVENT, sourceId.value);
+      if (!accountFlowIsCurrent(generation, source, savedRevision)) return;
+      // source-auth 的存储边界会吞写入错误；成功回执必须确认凭据确实可读。
+      const entries = readSourceAuthEntries();
+      let persisted = false;
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i];
+        if (entry.source == source && entry.account.cookie == cookie && entry.account.user.id == user.id
+          && entry.account.user.nickname == user.nickname && entry.account.user.avatar == user.avatar
+          && entry.account.user.vip == user.vip && entry.account.user.vipLabel == user.vipLabel
+          && entry.account.extrasJson == "") {
+          persisted = true;
+          break;
+        }
+      }
+      if (!accountFlowIsCurrent(generation, source, savedRevision)) return;
+      if (!persisted) throw new Error("账号凭据未成功写入本地存储");
+      uni.$emit(WEB_LOGIN_DONE_EVENT, source);
       const vipText = user.vipLabel.length > 0 ? user.vipLabel : (user.vip ? "会员" : "非会员");
-      const who = user.nickname.length > 0 ? user.nickname : sourceName.value;
+      const who = user.nickname.length > 0 ? user.nickname : sourceNameAtSave;
       qtShowToast({ title: "已登录" + who + "（" + vipText + "）", icon: "none" });
-      setTimeout(() => {
+      returnTimer = setTimeout(() => {
+        returnTimer = null;
+        if (!accountFlowIsCurrent(generation, source, savedRevision)) return;
         uni.navigateBack({});
-      }, 400);
+      }, 400) as number;
     })
     .catch((e) => {
-      // 落库失败不放弃：回到轮询，Cookie 仍在系统库里，下一轮重新导入
-      phase.value = "polling";
+      if (!accountFlowIsCurrent(generation, source, savedRevision)) return;
+      // 落库失败不放弃：重启实际轮询，Cookie 仍在系统库里，下一轮重新导入。
+      beginPolling();
       logErrV("WebLogin", "saveSourceAuthAccount", e);
       qtShowToast({ title: "保存登录失败：" + errText(e), icon: "none" });
     });
@@ -289,7 +366,8 @@ function finishLogin(cookie: string, user: SourceAuthUser): void {
 
 /** 超时后续测：WebView 不重开（用户可能已填到一半），只重启轮询与时钟 */
 function retry(): void {
-  if (webUrl.value.length == 0) return;
+  if (!pageIsCurrent()) return;
+  if (webUrl.value.length == 0 && !startFromRegistry()) return;
   beginPolling();
 }
 
@@ -298,6 +376,9 @@ function onWebError(e: any): void {
 }
 
 onLoad((options: Record<string, string> | null) => {
+  if (!pageAlive) return;
+  webLoginOwner = claimSourceWebLogin();
+  const loadOwner = webLoginOwner;
   if (options != null) {
     const raw = options["source"];
     if (raw != null) sourceId.value = raw;
@@ -314,22 +395,46 @@ onLoad((options: Record<string, string> | null) => {
   registry
     .ensure()
     .then(() => {
+      if (!pageIsCurrent() || webLoginOwner != loadOwner) return;
       if (startFromRegistry()) beginPolling();
       else failBack("该音源暂不支持网页登录");
     })
     .catch((e) => {
+      if (!pageIsCurrent() || webLoginOwner != loadOwner) return;
       failBack("打开失败：" + errText(e));
     });
 });
 
-onUnload(() => {
+onShow(() => {
+  // 同页官方 App/浏览器来回不换代。只有后来 owner 已卸载才恢复 retained 页。
+  if (!pageAlive || pageIsCurrent() || !sourceWebLoginIsAvailable()) return;
+  webLoginOwner = claimSourceWebLogin();
+  flowGeneration++;
   stopPolling();
-  // 页面被返回/关闭：连带收掉原生登录页，避免 Dialog 挂在已销毁的页面上
-  if (nativeOpen.value) {
-    nativeOpen.value = false;
-    closeAuthWebView();
+  nativeViewGeneration++;
+  nativeOpen.value = false;
+  nativeClosedByUser.value = true;
+  if (returnTimer != null) {
+    clearTimeout(returnTimer);
+    returnTimer = null;
   }
+  phase.value = "cancelled";
 });
+
+function disposeWebLogin(): void {
+  pageAlive = false;
+  flowGeneration++;
+  stopPolling();
+  if (returnTimer != null) {
+    clearTimeout(returnTimer);
+    returnTimer = null;
+  }
+  // 页面被返回/关闭：只收掉自身仍持有的原生登录页，不影响后来打开的页面。
+  closeNativeLogin();
+  releaseSourceWebLogin(webLoginOwner);
+}
+onUnload(() => disposeWebLogin());
+onUnmounted(() => disposeWebLogin());
 </script>
 
 <style lang="css" scoped>
