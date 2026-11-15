@@ -88,6 +88,18 @@ export function carLyricAt(lines: CarLyricLine[], positionMs: number, offsetMs: 
   return found >= 0 ? lines[found].text : ''
 }
 
+/** Wall-clock delay until the next lyric boundary, -1 when no further update is needed. */
+export function nextCarLyricDelay(lines: CarLyricLine[], positionMs: number, offsetMs: number, speed: number): number {
+  if (!Number.isFinite(positionMs) || !Number.isFinite(offsetMs) || !Number.isFinite(speed) || speed <= 0) return -1;
+  const at = positionMs - offsetMs;
+  let lo = 0, hi = lines.length;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (lines[mid].timeMs <= at) lo = mid + 1; else hi = mid;
+  }
+  return lo < lines.length ? Math.max(40, Math.ceil((lines[lo].timeMs - at) / speed)) : -1;
+}
+
 /** 0 off; 1 artist field; 2 title field. Untimed/empty lyrics restore the real song. */
 export function carLyricFields(mode: number, bluetooth: boolean, line: string, title: string, artist: string, displayTitle: string): CarLyricFields {
   const active = bluetooth && line.length > 0

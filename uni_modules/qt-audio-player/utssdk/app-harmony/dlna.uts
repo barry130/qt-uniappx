@@ -1,0 +1,982 @@
+/**
+ * HarmonyOS NEXT 普通 DLNA 发送端。NetworkKit 执行 SSDP、SOAP 与媒体中继；
+ * 本模块不创建 AVPlayer。队列及 AVSession 仍由 index.uts 管理。
+ *
+ * ArkTS 回调在同一事件循环更新状态；串行控制队列与独立的播放/定位/音量轮次
+ * 隔离延迟回执。媒体 TCP 请求独立于控制队列，按块读取，不把整首音乐装进内存。
+ */
+import { socket, connection, http } from '@kit.NetworkKit'
+import { util, url, xml } from '@kit.ArkTS'
+import { fileIo } from '@kit.CoreFileKit'
+import type { ReadOptions, WriteOptions } from '@kit.CoreFileKit'
+import type { AudioDlnaDevice, AudioDlnaState, AudioDlnaDiscoverCallback, AudioDlnaStateCallback, AudioDlnaResolveCallback, AudioPlaylistItem } from '../interface.uts'
+import { dlnaByteRange, dlnaDidl, dlnaMimeFromPath, dlnaMimeSupported, dlnaNaturalEnd, dlnaTimeMs, dlnaTimeText, dlnaXmlEscape } from '../dlna-protocol.uts'
+
+const INSTANCE = '<InstanceID>0</InstanceID>'
+const XML_LIMIT = 1024 * 1024
+const BLOCK_SIZE = 256 * 1024
+const STAGE_LIMIT = 256 * 1024 * 1024
+const MAX_CLIENTS = 4
+const encoder = new util.TextEncoder()
+const decoder = new util.TextDecoder('utf-8')
+let sessionEpoch = 0
+let mediaEpoch = 0
+let playEpoch = 0
+let seekEpoch = 0
+let volumeEpoch = 0
+let discoveryEpoch = 0
+let readySession = -1
+let intendPlay = false
+let anchorAt = 0
+let observedPlaying = false
+let previousTransport = ''
+let manualStop = false
+let requestedStartMs = 0
+let currentResourceUri = ''
+let pollFailures = 0
+let resolveTimer = -1
+let pollTimer = -1
+let refreshUsed = false
+let currentDevice: Renderer | null = null
+let currentItem: AudioPlaylistItem | null = null
+let stateListener: AudioDlnaStateCallback | null = null
+let resolveListener: AudioDlnaResolveCallback | null = null
+let nativeStateListener: (() => void) | null = null
+let endListener: (() => void) | null = null
+const devices = new Map<string, Renderer>()
+const resources = new Map<string, MediaResource>()
+const pendingResources: MediaResource[] = []
+const clients: RelayClient[] = []
+const networkTasks: (() => Promise<void>)[] = []
+let networkRunning = false
+let relayServer: socket.TCPSocketServer | null = null
+let relayCreating: Promise<void> | null = null
+let relayPort = 0
+let publicState: AudioDlnaState = {
+	target: 'local', sessionId: 0, generation: 0, deviceId: '', deviceName: '', phase: 'disconnected',
+	mediaId: '', positionMs: 0, durationMs: 0, volume: 1, canSeek: false, canSetVolume: false, error: '',
+}
+
+function enqueue(work: () => Promise<void>): void {
+	networkTasks.push(work)
+	if (!networkRunning) drainNetwork()
+}
+async function drainNetwork(): Promise<void> {
+	if (networkRunning) return
+	networkRunning = true
+	try {
+		while (networkTasks.length > 0) {
+			const work = networkTasks.shift()
+			if (work == null) continue
+			try { await work() }
+			catch (e) { console.log('[QT DLNA H] 控制任务已结束') }
+		}
+	} finally { networkRunning = false }
+}
+function sessionActive(session: number): boolean { return sessionEpoch == session && dlnaActive() }
+function active(session: number, generation: number): boolean { return sessionActive(session) && mediaEpoch == generation }
+function notify(resetClock: boolean = true): void {
+	if (resetClock) anchorAt = Date.now()
+	nativeStateListener?.()
+	stateListener?.(dlnaState())
+}
+export function dlnaActive(): boolean { return publicState.target == 'dlna' }
+export function dlnaIntendingToPlay(): boolean { return dlnaActive() && intendPlay }
+export function dlnaPositionMs(): number {
+	const elapsed = publicState.phase == 'playing' ? Math.min(1250, Math.max(0, Date.now() - anchorAt)) : 0
+	const position = publicState.positionMs + elapsed
+	return publicState.durationMs > 0 ? Math.min(position, publicState.durationMs) : position
+}
+export function dlnaState(): AudioDlnaState {
+	return {
+		target: publicState.target, sessionId: publicState.sessionId, generation: publicState.generation,
+		deviceId: publicState.deviceId, deviceName: publicState.deviceName, phase: publicState.phase,
+		mediaId: publicState.mediaId, positionMs: dlnaPositionMs(), durationMs: publicState.durationMs,
+		volume: publicState.volume, canSeek: publicState.canSeek, canSetVolume: publicState.canSetVolume, error: publicState.error,
+	}
+}
+export function dlnaOnState(callback: AudioDlnaStateCallback | null): void { stateListener = callback; callback?.(dlnaState()) }
+export function dlnaOnResolve(callback: AudioDlnaResolveCallback | null): void { resolveListener = callback }
+export function dlnaOnNativeState(callback: () => void): void { nativeStateListener = callback }
+export function dlnaOnEnded(callback: () => void): void { endListener = callback }
+
+class XmlNode {
+	name: string
+	text: string = ''
+	children: XmlNode[] = []
+	constructor(name: string) { this.name = name }
+	child(name: string): XmlNode | null {
+		for (const node of this.children) if (node.name == name) return node
+		return null
+	}
+	value(name: string): string { return this.child(name)?.text.trim() ?? '' }
+	find(name: string): XmlNode | null {
+		if (this.name == name) return this
+		for (const node of this.children) { const hit = node.find(name); if (hit != null) return hit }
+		return null
+	}
+}
+function parseXml(text: string): XmlNode {
+	if (text.length > XML_LIMIT || text.toUpperCase().indexOf('<!DOCTYPE') >= 0) throw new Error('设备 XML 无效')
+	const root = new XmlNode('root'), stack: XmlNode[] = [root]
+	let count = 0
+	const bytes = encoder.encodeInto(text)
+	const parser = new xml.XmlPullParser(bytes.buffer as ArrayBuffer, 'utf-8')
+	const options: xml.ParseOptions = {
+		supportDoctype: false,
+		ignoreNameSpace: true,
+		tokenValueCallbackFunction: (event: xml.EventType, info: xml.ParseInfo): boolean => {
+			if (event == xml.EventType.START_TAG) {
+				count++
+				if (count > 10000 || stack.length > 64) throw new Error('设备 XML 过深')
+				const qualified = info.getName(), colon = qualified.indexOf(':')
+				const node = new XmlNode(colon >= 0 ? qualified.substring(colon + 1) : qualified)
+				stack[stack.length - 1].children.push(node)
+				stack.push(node)
+			} else if (event == xml.EventType.END_TAG) {
+				if (stack.length > 1) stack.pop()
+			} else if (event == xml.EventType.TEXT || event == xml.EventType.CDSECT || event == xml.EventType.ENTITY_REFERENCE) {
+				stack[stack.length - 1].text += info.getText()
+			}
+			return true
+		},
+	}
+	parser.parse(options)
+	return root
+}
+function rendererNode(node: XmlNode): XmlNode | null {
+	if (node.name == 'device' && node.value('deviceType').indexOf(':MediaRenderer:') >= 0) return node
+	for (const child of node.children) { const found = rendererNode(child); if (found != null) return found }
+	return null
+}
+class Renderer {
+	id: string = ''
+	name: string = ''
+	ip: string = ''
+	localIp: string = ''
+	avUrl: string = ''
+	avType: string = ''
+	renderUrl: string = ''
+	renderType: string = ''
+	connectionUrl: string = ''
+	connectionType: string = ''
+	protocols: string = ''
+	canSeek: boolean = false
+	canVolume: boolean = false
+	minVolume: number = 0
+	maxVolume: number = 100
+	snapshot(): AudioDlnaDevice { return { id: this.id, name: this.name, canSeek: this.canSeek, canSetVolume: this.canVolume } }
+}
+function parsedUrl(raw: string, base: string = ''): url.URL {
+	const parsed = base.length > 0 ? url.URL.parseURL(raw, base) : url.URL.parseURL(raw)
+	if ((parsed.protocol != 'http:' && parsed.protocol != 'https:') || parsed.username.length > 0 || parsed.password.length > 0) {
+		throw new Error('地址协议无效')
+	}
+	return parsed
+}
+async function sameDeviceUrl(raw: string, ip: string, base: string = ''): Promise<string> {
+	const parsed = parsedUrl(raw, base)
+	const host = parsed.hostname
+	if (host != ip) {
+		const addresses = await connection.getAddressesByName(host)
+		if (addresses.length == 0 || addresses.some((address: connection.NetAddress): boolean => address.address != ip)) {
+			throw new Error('设备服务地址与发现来源不符')
+		}
+	}
+	return parsed.toString()
+}
+function headerValue(raw: Object, wanted: string): string {
+	const object = new UTSJSONObject(raw)
+	for (const key of UTSJSONObject.keys(object)) {
+		if (key.toLowerCase() == wanted) return object.getString(key) ?? ''
+	}
+	return ''
+}
+async function deviceRequest(address: string, method: http.RequestMethod, body: string = '', action: string = ''): Promise<http.HttpResponse> {
+	const request = http.createHttp()
+	const headers = new UTSJSONObject()
+	headers.set('Content-Type', 'text/xml; charset="utf-8"')
+	if (action.length > 0) headers.set('SOAPAction', action)
+	const options: http.HttpRequestOptions = {
+		method, header: headers, connectTimeout: 4000, readTimeout: 4000,
+		expectDataType: http.HttpDataType.STRING, usingCache: false, usingProxy: false, maxLimit: XML_LIMIT,
+	}
+	if (body.length > 0) options.extraData = body
+	try { return await request.request(address, options) }
+	finally { request.destroy() }
+}
+async function deviceGet(address: string): Promise<XmlNode> {
+	const response = await deviceRequest(address, http.RequestMethod.GET)
+	if (response.responseCode < 200 || response.responseCode >= 300) throw new Error('设备描述读取失败')
+	if (response.resultType != http.HttpDataType.STRING) throw new Error('设备描述不是 XML')
+	return parseXml(response.result as string)
+}
+async function parseRenderer(location: string, ip: string, localIp: string): Promise<Renderer> {
+	const description = await sameDeviceUrl(location, ip)
+	const descriptionNode = await deviceGet(description), node = rendererNode(descriptionNode)
+	if (node == null) throw new Error('不是 DLNA 音频接收设备')
+	const renderer = new Renderer()
+	renderer.id = node.value('UDN'); renderer.name = node.value('friendlyName'); renderer.ip = ip; renderer.localIp = localIp
+	if (renderer.id.length == 0) throw new Error('设备缺少 UDN')
+	if (renderer.name.length == 0) renderer.name = ip
+	const baseText = descriptionNode.find('URLBase')?.text.trim() ?? ''
+	const base = baseText.length > 0 ? await sameDeviceUrl(baseText, ip) : description
+	const services = node.child('serviceList')
+	if (services != null) for (const service of services.children) {
+		const type = service.value('serviceType'), control = service.value('controlURL')
+		if (control.length == 0) continue
+		const endpoint = await sameDeviceUrl(control, ip, base)
+		if (type.indexOf(':AVTransport:') >= 0) { renderer.avType = type; renderer.avUrl = endpoint }
+		else if (type.indexOf(':RenderingControl:') >= 0) { renderer.renderType = type; renderer.renderUrl = endpoint }
+		else if (type.indexOf(':ConnectionManager:') >= 0) { renderer.connectionType = type; renderer.connectionUrl = endpoint }
+		else continue
+		const scpd = service.value('SCPDURL')
+		if (scpd.length == 0 || type.indexOf(':ConnectionManager:') >= 0) continue
+		try {
+			const schema = await deviceGet(await sameDeviceUrl(scpd, ip, base))
+			const actionList = schema.find('actionList')
+			if (actionList != null) for (const action of actionList.children) {
+				if (type.indexOf(':AVTransport:') >= 0 && action.value('name') == 'Seek') renderer.canSeek = true
+				if (type.indexOf(':RenderingControl:') >= 0 && action.value('name') == 'SetVolume') renderer.canVolume = true
+			}
+			if (type.indexOf(':RenderingControl:') >= 0) {
+				const variables = schema.find('serviceStateTable')
+				if (variables != null) for (const variable of variables.children) {
+					if (variable.value('name') != 'Volume') continue
+					const range = variable.child('allowedValueRange')
+					if (range == null) continue
+					const minimum = parseFloat(range.value('minimum')), maximum = parseFloat(range.value('maximum'))
+					if (minimum >= 0 && maximum > minimum && maximum <= 65535) { renderer.minVolume = minimum; renderer.maxVolume = maximum }
+				}
+			}
+		} catch (e) {
+			// 静默：可选 SCPD 不可读时保持保守能力，基本播放仍可使用。
+		}
+	}
+	if (renderer.avUrl.length == 0) throw new Error('设备没有 AVTransport')
+	return renderer
+}
+async function soap(renderer: Renderer, action: string, args: string, rendering: boolean = false, manager: boolean = false): Promise<XmlNode> {
+	const address = manager ? renderer.connectionUrl : rendering ? renderer.renderUrl : renderer.avUrl
+	const type = manager ? renderer.connectionType : rendering ? renderer.renderType : renderer.avType
+	if (address.length == 0) throw new Error('设备不支持该控制')
+	const body = '<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:' +
+		action + ' xmlns:u="' + type + '">' + args + '</u:' + action + '></s:Body></s:Envelope>'
+	const response = await deviceRequest(await sameDeviceUrl(address, renderer.ip), http.RequestMethod.POST, body, '"' + type + '#' + action + '"')
+	const result = parseXml(response.result as string), fault = result.find('Fault')
+	if (fault != null) throw new Error('DLNA ' + (fault.find('errorCode')?.text ?? '') + ' ' + (fault.find('errorDescription')?.text ?? '控制失败'))
+	if (response.responseCode < 200 || response.responseCode >= 300) throw new Error('设备控制失败 HTTP ' + response.responseCode.toString())
+	return result
+}
+
+class DiscoveryLocation {
+	location: string
+	ip: string
+	localIp: string
+	constructor(location: string, ip: string, localIp: string) { this.location = location; this.ip = ip; this.localIp = localIp }
+}
+async function ipv4Interfaces(): Promise<string[]> {
+	const found: string[] = []
+	const nets = await connection.getAllNets()
+	for (const net of nets) {
+		try {
+			const properties = await connection.getConnectionProperties(net)
+			for (const link of properties.linkAddresses) {
+				const address = link.address.address
+				if (address.indexOf(':') < 0 && address != '0.0.0.0' && !address.startsWith('127.') && !found.includes(address)) found.push(address)
+			}
+		} catch (e) {
+			// 静默：网络接口已消失时继续搜索其余接口。
+		}
+	}
+	return found.length > 0 ? found.slice(0, 8) : ['0.0.0.0']
+}
+async function collectDiscovery(localIp: string, output: DiscoveryLocation[], epoch: number): Promise<void> {
+	const udp = socket.constructUDPSocketInstance()
+	try {
+		udp.on('message', (message: socket.SocketMessageInfo): void => {
+			if (epoch != discoveryEpoch || message.message.byteLength > 8192 || output.length >= 32) return
+			const text = decoder.decodeToString(new Uint8Array(message.message))
+			if (!text.startsWith('HTTP/1.1 200') && !text.startsWith('HTTP/1.0 200')) return
+			for (const line of text.split('\r\n')) {
+				const colon = line.indexOf(':')
+				if (colon <= 0 || line.substring(0, colon).toLowerCase() != 'location') continue
+				const location = line.substring(colon + 1).trim()
+				if (location.length == 0 || output.some((entry: DiscoveryLocation): boolean => entry.location == location)) continue
+				output.push(new DiscoveryLocation(location, message.remoteInfo.address, localIp))
+			}
+		})
+		udp.on('error', (): void => { /* 发送/绑定错误由 Promise 回执处理。 */ })
+		const bound: socket.NetAddress = { address: localIp, family: 1, port: 0 }
+		await udp.bind(bound)
+		const types = ['urn:schemas-upnp-org:device:MediaRenderer:1', 'urn:schemas-upnp-org:service:AVTransport:1']
+		for (const type of types) {
+			const data = 'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: "ssdp:discover"\r\nMX: 2\r\nST: ' + type + '\r\n\r\n'
+			const multicast: socket.NetAddress = { address: '239.255.255.250', family: 1, port: 1900 }
+			const options: socket.UDPSendOptions = { data, address: multicast }
+			await udp.send(options)
+		}
+		await new Promise<void>((resolve): void => { setTimeout((): void => { resolve() }, 3000) })
+	} finally {
+		udp.off('message')
+		try { await udp.close() } catch (e) { /* 静默：已关闭的 UDP 无需重复回收。 */ }
+	}
+}
+export function dlnaDiscover(callback: AudioDlnaDiscoverCallback): void { runDiscovery(callback) }
+async function runDiscovery(callback: AudioDlnaDiscoverCallback): Promise<void> {
+	const epoch = ++discoveryEpoch, locations: DiscoveryLocation[] = [], found: AudioDlnaDevice[] = [], ids = new Set<string>()
+	let failure = ''
+	try {
+		const interfaces = await ipv4Interfaces()
+		let succeeded = 0
+		await Promise.all(interfaces.map(async (ip: string): Promise<void> => {
+			try { await collectDiscovery(ip, locations, epoch); succeeded++ }
+			catch (e) { /* 静默：单个网卡不可用不影响 Wi-Fi 接口。 */ }
+		}))
+		if (succeeded == 0) throw new Error('请连接与电视相同的 Wi-Fi')
+		const deadline = Date.now() + 12000
+		for (const entry of locations) {
+			if (epoch != discoveryEpoch || Date.now() > deadline) break
+			try {
+				const renderer = await parseRenderer(entry.location, entry.ip, entry.localIp)
+				if (epoch != discoveryEpoch) break
+				if (!ids.has(renderer.id)) { ids.add(renderer.id); devices.set(renderer.id, renderer); found.push(renderer.snapshot()) }
+			} catch (e) { /* 静默：不完整描述、非接收设备不加入设备列表。 */ }
+		}
+	} catch (e) { failure = '搜索投屏设备失败，请检查局域网和网络权限' }
+	if (epoch == discoveryEpoch) callback(found, failure)
+}
+
+class MediaResource {
+	token: string = util.generateRandomUUID()
+	uri: string
+	referer: string
+	session: number
+	generation: number
+	size: number = -1
+	mime: string
+	rangeReadable: boolean = false
+	localUri: string = ''
+	stagePath: string = ''
+	requests: http.HttpRequest[] = []
+	cancelStage: (() => void) | null = null
+	disposed: boolean = false
+	constructor(uri: string, referer: string, session: number, generation: number) {
+		this.uri = uri; this.referer = referer; this.session = session; this.generation = generation; this.mime = dlnaMimeFromPath(uri)
+	}
+}
+function resourceActive(resource: MediaResource): boolean { return !resource.disposed && active(resource.session, resource.generation) }
+function privateAddress(address: string): boolean {
+	const clean = address.toLowerCase()
+	if (clean.indexOf(':') >= 0) {
+		if (clean.startsWith('::ffff:')) {
+			const tail = clean.substring(7)
+			if (tail.indexOf('.') >= 0) return privateAddress(tail)
+			const words = tail.split(':')
+			if (words.length != 2) return true
+			const high = parseInt(words[0], 16), low = parseInt(words[1], 16)
+			return privateAddress(((high >> 8) & 255).toString() + '.' + (high & 255).toString() + '.' +
+				((low >> 8) & 255).toString() + '.' + (low & 255).toString())
+		}
+		return clean.startsWith('::') || clean.startsWith('fc') || clean.startsWith('fd') || clean.startsWith('fe8') ||
+			clean.startsWith('fe9') || clean.startsWith('fea') || clean.startsWith('feb') || clean.startsWith('ff')
+	}
+	const pieces = clean.split('.')
+	if (pieces.length != 4) return true
+	const first = parseInt(pieces[0]), second = parseInt(pieces[1])
+	return first == 0 || first == 10 || first == 127 || first >= 224 || (first == 169 && second == 254) ||
+		(first == 172 && second >= 16 && second <= 31) || (first == 192 && second == 168) || (first == 100 && second >= 64 && second <= 127)
+}
+async function publicMediaUrl(raw: string): Promise<string> {
+	const parsed = parsedUrl(raw), addresses = await connection.getAddressesByName(parsed.hostname)
+	if (addresses.length == 0 || addresses.some((address: connection.NetAddress): boolean => privateAddress(address.address))) throw new Error('拒绝代理非公网音频地址')
+	return parsed.toString()
+}
+function mediaHeaders(resource: MediaResource, range: string = ''): UTSJSONObject {
+	const headers = new UTSJSONObject()
+	headers.set('User-Agent', 'Mozilla/5.0')
+	headers.set('Accept-Encoding', 'identity')
+	if (resource.referer.length > 0 && resource.referer.indexOf('\r') < 0 && resource.referer.indexOf('\n') < 0) headers.set('Referer', resource.referer)
+	if (range.length > 0) headers.set('Range', range)
+	return headers
+}
+async function mediaRequest(resource: MediaResource, range: string, head: boolean = false, limit: number = BLOCK_SIZE): Promise<http.HttpResponse> {
+	if (!resourceActive(resource)) throw new Error('投屏媒体已失效')
+	const address = await publicMediaUrl(resource.uri)
+	if (!resourceActive(resource)) throw new Error('投屏媒体已失效')
+	const request = http.createHttp()
+	resource.requests.push(request)
+	const options: http.HttpRequestOptions = {
+		method: head ? http.RequestMethod.HEAD : http.RequestMethod.GET,
+		header: mediaHeaders(resource, range), expectDataType: http.HttpDataType.ARRAY_BUFFER,
+		connectTimeout: 8000, readTimeout: 12000, usingCache: false, usingProxy: false, maxLimit: limit,
+	}
+	try {
+		const response = await request.request(address, options)
+		if (!resourceActive(resource)) throw new Error('投屏媒体已失效')
+		if (response.responseCode == 401 || response.responseCode == 403) throw new Error('HTTP ' + response.responseCode.toString())
+		if (response.responseCode != 200 && response.responseCode != 206) throw new Error('音频读取失败 HTTP ' + response.responseCode.toString())
+		if (headerValue(response.header, 'content-encoding').length > 0 && headerValue(response.header, 'content-encoding') != 'identity') throw new Error('音频响应使用了不支持的压缩')
+		return response
+	} finally {
+		const index = resource.requests.indexOf(request)
+		if (index >= 0) resource.requests.splice(index, 1)
+		request.destroy()
+	}
+}
+function mimeFromBytes(bytes: Uint8Array, fallback: string): string {
+	if (bytes.length >= 4 && bytes[0] == 102 && bytes[1] == 76 && bytes[2] == 97 && bytes[3] == 67) return 'audio/flac'
+	if (bytes.length >= 12 && bytes[0] == 82 && bytes[1] == 73 && bytes[2] == 70 && bytes[3] == 70 &&
+		bytes[8] == 87 && bytes[9] == 65 && bytes[10] == 86 && bytes[11] == 69) return 'audio/wav'
+	if (bytes.length >= 12 && bytes[4] == 102 && bytes[5] == 116 && bytes[6] == 121 && bytes[7] == 112) return 'audio/mp4'
+	if (bytes.length >= 4 && bytes[0] == 79 && bytes[1] == 103 && bytes[2] == 103 && bytes[3] == 83) return 'audio/ogg'
+	if (bytes.length >= 3 && bytes[0] == 73 && bytes[1] == 68 && bytes[2] == 51) return 'audio/mpeg'
+	if (bytes.length >= 2 && bytes[0] == 255 && (bytes[1] & 246) == 240) return 'audio/aac'
+	if (bytes.length >= 2 && bytes[0] == 255 && (bytes[1] & 224) == 224) return 'audio/mpeg'
+	if (bytes.length >= 3 && bytes[0] == 255 && bytes[1] == 216 && bytes[2] == 255) return 'image/jpeg'
+	if (bytes.length >= 8 && bytes[0] == 137 && bytes[1] == 80 && bytes[2] == 78 && bytes[3] == 71) return 'image/png'
+	return fallback
+}
+class ContentRange {
+	start: number
+	end: number
+	total: number
+	constructor(start: number, end: number, total: number) { this.start = start; this.end = end; this.total = total }
+}
+function contentRange(raw: string): ContentRange | null {
+	const match = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(raw.trim())
+	if (match == null) return null
+	const start = parseFloat(match[1]), end = parseFloat(match[2]), total = parseFloat(match[3])
+	if (!(start >= 0) || !(end >= start) || !(total > end)) return null
+	return new ContentRange(start, end, total)
+}
+async function localProbe(resource: MediaResource): Promise<void> {
+	const file = await fileIo.open(resource.localUri, fileIo.OpenMode.READ_ONLY)
+	try {
+		const stat = fileIo.statSync(file.fd)
+		if (!stat.isFile() || !(stat.size > 0)) throw new Error('本地音乐文件不可读取')
+		resource.size = stat.size
+		const buffer = new ArrayBuffer(Math.min(8192, resource.size))
+		const options: ReadOptions = { length: buffer.byteLength }
+		const count = await fileIo.read(file.fd, buffer, options)
+		resource.mime = mimeFromBytes(new Uint8Array(buffer, 0, count), resource.mime)
+		resource.rangeReadable = true
+	} finally { fileIo.closeSync(file) }
+}
+async function probe(resource: MediaResource): Promise<void> {
+	if (resource.uri.startsWith('/') || resource.uri.startsWith('file://') || resource.uri.startsWith('unifile://')) {
+		resource.localUri = resource.uri.startsWith('unifile://') ? UTSHarmony.convert2AbsFullPath(resource.uri) : resource.uri
+		await localProbe(resource)
+		return
+	}
+	try {
+		const response = await mediaRequest(resource, 'bytes=0-8191', false, 64 * 1024)
+		const declared = headerValue(response.header, 'content-type').split(';')[0].trim()
+		if (declared.startsWith('audio/') || declared.startsWith('image/')) resource.mime = declared
+		const bytes = new Uint8Array(response.result as ArrayBuffer)
+		resource.mime = mimeFromBytes(bytes, resource.mime)
+		const range = contentRange(headerValue(response.header, 'content-range'))
+		if (response.responseCode == 206 && range != null && range.start == 0 && range.end + 1 == bytes.length) {
+			resource.size = range.total; resource.rangeReadable = true
+			return
+		}
+	} catch (e) {
+		if (!resourceActive(resource)) throw new Error('投屏媒体已失效')
+		const message: string = e != null ? (e as Error).toString() : ''
+		if (message.indexOf('HTTP 401') >= 0 || message.indexOf('HTTP 403') >= 0) throw new Error(message)
+		// 忽略 Range 的服务可能触发小响应上限，改用有界磁盘暂存。
+	}
+	await stageMedia(resource)
+	await localProbe(resource)
+}
+async function stageMedia(resource: MediaResource): Promise<void> {
+	const address = await publicMediaUrl(resource.uri), context = UTSHarmony.getUIAbilityContext()
+	if (context == null) throw new Error('投屏临时目录不可用')
+	if (!resourceActive(resource)) throw new Error('投屏媒体已失效')
+	resource.stagePath = context.cacheDir + '/qt-dlna-' + resource.token + '.media'
+	resource.localUri = resource.stagePath
+	const file = fileIo.openSync(resource.stagePath, fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.TRUNC)
+	const request = http.createHttp()
+	resource.requests.push(request)
+	let count = 0, interrupted = false, declaredSize = -1, status = 0
+	let finishStream: (() => void) | null = null
+	let rejectStream: ((error: Error) => void) | null = null
+	const ended = new Promise<void>((resolve, reject): void => { finishStream = resolve; rejectStream = reject })
+	resource.cancelStage = (): void => { rejectStream?.(new Error('投屏媒体已失效')); request.destroy() }
+	const timeout = setTimeout((): void => {
+		interrupted = true; rejectStream?.(new Error('音频暂存超时')); request.destroy()
+	}, 120000) as number
+	request.on('dataEnd', (): void => { finishStream?.() })
+	request.on('headersReceive', (headers: Object): void => {
+		const declared = headerValue(headers, 'content-type').split(';')[0].trim()
+		if (declared.startsWith('audio/') || declared.startsWith('image/')) resource.mime = declared
+		const size = parseFloat(headerValue(headers, 'content-length'))
+		if (size >= 0) declaredSize = size
+		if (size > STAGE_LIMIT) { interrupted = true; rejectStream?.(new Error('音频超出投屏大小上限')); request.destroy() }
+	})
+	request.on('dataReceive', (bytes: ArrayBuffer): void => {
+		if (interrupted || !resourceActive(resource) || count + bytes.byteLength > STAGE_LIMIT) {
+			interrupted = true; rejectStream?.(new Error('投屏媒体已失效或过大')); request.destroy()
+			return
+		}
+		try {
+			const options: WriteOptions = { length: bytes.byteLength }
+			const written = fileIo.writeSync(file.fd, bytes, options)
+			if (written != bytes.byteLength) { interrupted = true; rejectStream?.(new Error('音频暂存写入失败')); request.destroy(); return }
+			count += written
+		} catch (e) { interrupted = true; rejectStream?.(new Error('音频暂存写入失败')); request.destroy() }
+	})
+	const options: http.HttpRequestOptions = {
+		method: http.RequestMethod.GET, header: mediaHeaders(resource), connectTimeout: 8000,
+		readTimeout: 20000, usingCache: false, usingProxy: false, maxLimit: 100 * 1024 * 1024,
+	}
+	try {
+		await Promise.all([
+			request.requestInStream(address, options).then((code: number): void => { status = code }),
+			ended,
+		])
+		if (status == 401 || status == 403) throw new Error('HTTP ' + status.toString())
+		if (status != 200 || interrupted || !resourceActive(resource) || count == 0 || (declaredSize >= 0 && declaredSize != count)) {
+			throw new Error('音频暂存失败、响应截断或超出投屏大小上限')
+		}
+		resource.size = count
+	} finally {
+		clearTimeout(timeout)
+		request.off('headersReceive'); request.off('dataReceive'); request.off('dataEnd'); request.destroy()
+		const index = resource.requests.indexOf(request)
+		if (index >= 0) resource.requests.splice(index, 1)
+		resource.cancelStage = null
+		fileIo.closeSync(file)
+	}
+}
+function disposeResource(resource: MediaResource): void {
+	if (resource.disposed) return
+	resource.disposed = true
+	resource.cancelStage?.()
+	for (const request of resource.requests) request.destroy()
+	resource.requests.splice(0)
+	if (resource.stagePath.length > 0) {
+		try { fileIo.unlinkSync(resource.stagePath) }
+		catch (e) { /* 静默：只回收本模块生成的临时文件；已经回收时无需重复。 */ }
+	}
+}
+function retireMedia(): void {
+	resources.clear()
+	for (const resource of pendingResources) disposeResource(resource)
+	pendingResources.splice(0)
+	for (const client of clients.slice()) client.close()
+	if (pollTimer >= 0) clearTimeout(pollTimer)
+	pollTimer = -1
+}
+
+class RelayClient {
+	connection: socket.TCPSocketConnection
+	header: string = ''
+	reading: boolean = false
+	closed: boolean = false
+	timeout: number = -1
+	constructor(connection: socket.TCPSocketConnection) { this.connection = connection }
+	close(): void {
+		if (this.closed) return
+		this.closed = true
+		if (this.timeout >= 0) clearTimeout(this.timeout)
+		const index = clients.indexOf(this)
+		if (index >= 0) clients.splice(index, 1)
+		this.connection.off('message')
+		this.connection.close().catch((): void => { /* 对端先关闭也完成回收。 */ })
+	}
+}
+async function sendText(client: RelayClient, text: string): Promise<void> {
+	if (client.closed) throw new Error('媒体连接已关闭')
+	const options: socket.TCPSendOptions = { data: text, encoding: 'UTF-8' }
+	await client.connection.send(options)
+}
+async function rejectClient(client: RelayClient, status: string, extra: string = ''): Promise<void> {
+	try { await sendText(client, 'HTTP/1.1 ' + status + '\r\nConnection: close\r\nContent-Length: 0\r\n' + extra + '\r\n') }
+	catch (e) { /* 静默：拒绝响应发送失败时仍关闭该连接。 */ }
+	finally { client.close() }
+}
+function touchClient(client: RelayClient): void {
+	if (client.timeout >= 0) clearTimeout(client.timeout)
+	// 这是无活动超时，持续拉流不会在长曲目中途被固定总时长截断。
+	client.timeout = setTimeout((): void => { client.close() }, 30000) as number
+}
+function acceptClient(connection: socket.TCPSocketConnection): void {
+	const client = new RelayClient(connection)
+	if (!dlnaActive() || clients.length >= MAX_CLIENTS) { rejectClient(client, '503 Service Unavailable'); return }
+	clients.push(client)
+	client.timeout = setTimeout((): void => { client.close() }, 8000) as number
+	connection.on('close', (): void => { client.close() })
+	connection.on('error', (): void => { client.close() })
+	connection.on('message', (message: socket.SocketMessageInfo): void => {
+		if (client.closed || client.reading) return
+		client.header += decoder.decodeToString(new Uint8Array(message.message))
+		if (client.header.length > 16384) { rejectClient(client, '431 Request Header Fields Too Large'); return }
+		if (client.header.indexOf('\r\n\r\n') < 0) return
+		client.reading = true
+		clearTimeout(client.timeout)
+		touchClient(client)
+		serveClient(client).catch((): void => { client.close() })
+	})
+}
+async function relayBlock(resource: MediaResource, start: number, end: number): Promise<ArrayBuffer> {
+	const response = await mediaRequest(resource, 'bytes=' + start.toString() + '-' + end.toString(), false, BLOCK_SIZE)
+	const range = contentRange(headerValue(response.header, 'content-range')), buffer = response.result as ArrayBuffer
+	if (response.responseCode != 206 || range == null || range.start != start || range.end != end ||
+		range.total != resource.size || buffer.byteLength != end - start + 1) throw new Error('音频源返回了不一致的字节区间')
+	return buffer
+}
+async function serveClient(client: RelayClient): Promise<void> {
+	const lines = client.header.split('\r\n'), first = lines[0].split(' ')
+	if (first.length != 3 || (first[0] != 'GET' && first[0] != 'HEAD')) { await rejectClient(client, '405 Method Not Allowed', 'Allow: GET, HEAD\r\n'); return }
+	const path = first[1]
+	if (!/^\/dlna\/[0-9a-f-]{36}$/i.test(path)) { await rejectClient(client, '404 Not Found'); return }
+	const resource = resources.get(path.substring(6))
+	if (resource == null || !resourceActive(resource)) { await rejectClient(client, '404 Not Found'); return }
+	const remote = await client.connection.getRemoteAddress()
+	if (currentDevice == null || remote.address != currentDevice.ip) { await rejectClient(client, '403 Forbidden'); return }
+	let rangeText = ''
+	for (const line of lines.slice(1)) {
+		const colon = line.indexOf(':')
+		if (colon > 0 && line.substring(0, colon).toLowerCase() == 'range') {
+			if (rangeText.length > 0) { await rejectClient(client, '416 Range Not Satisfiable', 'Content-Range: bytes */' + resource.size.toString() + '\r\n'); return }
+			rangeText = line.substring(colon + 1).trim()
+		}
+	}
+	const range = dlnaByteRange(rangeText, resource.size)
+	if (range == null) { await rejectClient(client, '416 Range Not Satisfiable', 'Content-Range: bytes */' + resource.size.toString() + '\r\n'); return }
+	const length = range.end - range.start + 1
+	let header = 'HTTP/1.1 ' + (range.partial ? '206 Partial Content' : '200 OK') + '\r\nContent-Type: ' + resource.mime +
+		'\r\nContent-Length: ' + length.toString() + '\r\nAccept-Ranges: bytes\r\nConnection: close\r\ncontentFeatures.dlna.org: DLNA.ORG_OP=01;DLNA.ORG_CI=0\r\ntransferMode.dlna.org: Streaming\r\n'
+	if (range.partial) header += 'Content-Range: bytes ' + range.start.toString() + '-' + range.end.toString() + '/' + resource.size.toString() + '\r\n'
+	await sendText(client, header + '\r\n')
+	touchClient(client)
+	if (first[0] == 'HEAD') { client.close(); return }
+	let file: fileIo.File | null = null
+	try {
+		if (resource.localUri.length > 0) {
+			file = await fileIo.open(resource.localUri, fileIo.OpenMode.READ_ONLY)
+			fileIo.lseek(file.fd, range.start, fileIo.WhenceType.SEEK_SET)
+		}
+		let position = range.start
+		while (position <= range.end && !client.closed && resourceActive(resource)) {
+			const end = Math.min(range.end, position + BLOCK_SIZE - 1)
+			let block: ArrayBuffer
+			if (file != null) {
+				const size = Math.min(64 * 1024, end - position + 1), buffer = new ArrayBuffer(size)
+				const options: ReadOptions = { length: size }
+				const count = await fileIo.read(file.fd, buffer, options)
+				if (count <= 0) throw new Error('本地音频提前结束')
+				block = count == size ? buffer : buffer.slice(0, count)
+			} else block = await relayBlock(resource, position, end)
+			if (!resourceActive(resource) || client.closed) break
+			const options: socket.TCPSendOptions = { data: block }
+			await client.connection.send(options)
+			touchClient(client)
+			position += block.byteLength
+		}
+	} catch (e) {
+		const message: string = e != null ? (e as Error).toString() : ''
+		if (message.indexOf('HTTP 401') >= 0 || message.indexOf('HTTP 403') >= 0) requestRefresh(resource.session, resource.generation)
+	} finally {
+		if (file != null) fileIo.closeSync(file)
+		client.close()
+	}
+}
+async function createRelayServer(): Promise<void> {
+	const server = socket.constructTCPSocketServerInstance()
+	server.on('connect', (client: socket.TCPSocketConnection): void => { acceptClient(client) })
+	server.on('error', (): void => {
+		if (dlnaActive()) fail(sessionEpoch, mediaEpoch, '投屏媒体服务不可用，请重新连接')
+	})
+	const bound: socket.NetAddress = { address: '0.0.0.0', family: 1, port: 0 }
+	await server.listen(bound)
+	const local = await server.getLocalAddress()
+	const port = local.port ?? 0
+	if (!(port > 0)) throw new Error('无法取得媒体服务端口')
+	relayServer = server; relayPort = port
+}
+async function localAddress(renderer: Renderer): Promise<string> {
+	const route = socket.constructTCPSocketInstance(), target = parsedUrl(renderer.avUrl)
+	try {
+		const bound: socket.NetAddress = { address: '0.0.0.0', family: 1, port: 0 }
+		const remote: socket.NetAddress = { address: renderer.ip, family: 1, port: target.port.length > 0 ? parseInt(target.port) : target.protocol == 'https:' ? 443 : 80 }
+		const options: socket.TCPConnectOptions = { address: remote, timeout: 4000 }
+		await route.bind(bound)
+		await route.connect(options)
+		const local = await route.getLocalAddress()
+		if (local.address.length == 0 || local.address == '0.0.0.0') throw new Error('无法取得局域网地址')
+		return local.address
+	} finally { try { await route.close() } catch (e) { /* 静默：路由探测连接已关闭。 */ } }
+}
+async function mediaBase(renderer: Renderer): Promise<string> {
+	// 当前 SDK 的 TCPSocketServer 没有 close API；进程内只建一个监听器。
+	// 切歌/断开立即撤销全部令牌、请求和客户端；无会话时监听器只返回 503。
+	if (relayServer == null) {
+		if (relayCreating == null) relayCreating = createRelayServer()
+		try { await relayCreating } finally { relayCreating = null }
+	}
+	return 'http://' + await localAddress(renderer) + ':' + relayPort.toString()
+}
+
+function clearResolveTimer(): void { if (resolveTimer >= 0) clearTimeout(resolveTimer); resolveTimer = -1 }
+function fail(session: number, generation: number, message: string): void {
+	if (!active(session, generation)) return
+	publicState.positionMs = dlnaPositionMs(); publicState.phase = 'error'; publicState.error = message
+	intendPlay = false; playEpoch++; manualStop = true
+	clearResolveTimer()
+	retireMedia()
+	notify()
+}
+export function dlnaConnect(id: string): boolean {
+	const renderer = devices.get(id)
+	if (renderer == null) return false
+	const previous = currentDevice, session = ++sessionEpoch, volumeRevision = volumeEpoch
+	mediaEpoch++; playEpoch++; intendPlay = false; readySession = -1
+	clearResolveTimer(); retireMedia()
+	currentDevice = renderer; currentItem = null; currentResourceUri = ''; observedPlaying = false; previousTransport = ''; manualStop = false
+	publicState = {
+		target: 'dlna', sessionId: session, generation: mediaEpoch, deviceId: renderer.id, deviceName: renderer.name,
+		phase: 'connected', mediaId: '', positionMs: 0, durationMs: 0, volume: 1, canSeek: false, canSetVolume: renderer.canVolume, error: '',
+	}
+	notify()
+	enqueue(async (): Promise<void> => {
+		if (!sessionActive(session)) return
+		try {
+			if (previous != null) {
+				try { await soap(previous, 'Stop', INSTANCE) }
+				catch (e) { fail(session, mediaEpoch, '未能确认旧设备停止，请先停止旧设备再连接'); return }
+			}
+			if (!sessionActive(session)) return
+			if (renderer.connectionUrl.length > 0) {
+				try { renderer.protocols = (await soap(renderer, 'GetProtocolInfo', '', false, true)).find('Sink')?.text ?? '' }
+				catch (e) { /* 静默：格式清单可选，随后以实际装载为准。 */ }
+			}
+			let volume = 1
+			if (renderer.canVolume) {
+				try {
+					const raw = parseFloat((await soap(renderer, 'GetVolume', INSTANCE + '<Channel>Master</Channel>', true)).find('CurrentVolume')?.text ?? '')
+					if (!(raw >= renderer.minVolume && raw <= renderer.maxVolume)) throw new Error('设备音量无效')
+					volume = (raw - renderer.minVolume) / (renderer.maxVolume - renderer.minVolume)
+				} catch (e) { renderer.canVolume = false }
+			}
+			if (!sessionActive(session)) return
+			readySession = session
+			if (volumeRevision == volumeEpoch) publicState.volume = volume
+			publicState.canSetVolume = renderer.canVolume
+			notify(false)
+		} catch (e) { fail(session, mediaEpoch, '连接投屏设备失败') }
+	})
+	return true
+}
+export function dlnaLoad(item: AudioPlaylistItem, startMs: number, autoplay: boolean, refresh: boolean = false): void {
+	if (!dlnaActive()) return
+	clearResolveTimer(); retireMedia()
+	const generation = ++mediaEpoch, session = sessionEpoch
+	if (currentItem == null || currentItem.mediaId != item.mediaId) refreshUsed = false
+	currentItem = item; currentResourceUri = ''; requestedStartMs = Math.max(0, startMs)
+	intendPlay = autoplay; playEpoch++; manualStop = false; observedPlaying = false; previousTransport = ''; pollFailures = 0
+	publicState.generation = generation; publicState.mediaId = item.mediaId; publicState.positionMs = requestedStartMs
+	publicState.durationMs = Math.max(0, (item.duration ?? 0) * 1000); publicState.phase = 'loading'; publicState.error = ''; publicState.canSeek = false
+	notify()
+	if (!active(session, generation)) return
+	if (item.uri.startsWith('qt-resolve://')) {
+		resolveTimer = setTimeout((): void => { fail(session, generation, '投屏音乐地址解析超时，请重新播放') }, 18000) as number
+		resolveListener?.(item.mediaId, generation, refresh)
+	} else dlnaResolveDone(item.mediaId, item.uri, '', generation)
+}
+export function dlnaResolveFailed(mediaId: string, generation: number): void {
+	if (publicState.mediaId != mediaId || mediaEpoch != generation) return
+	clearResolveTimer(); fail(sessionEpoch, generation, '无法取得投屏播放地址，请重试或换源')
+}
+export function dlnaResolveDone(mediaId: string, uri: string, referer: string, generation: number): void {
+	const session = sessionEpoch, renderer = currentDevice, item = currentItem
+	if (!active(session, generation) || renderer == null || item == null || item.mediaId != mediaId) return
+	clearResolveTimer()
+	const resource = new MediaResource(uri, referer, session, generation), start = requestedStartMs
+	pendingResources.push(resource)
+	enqueue(async (): Promise<void> => {
+		try {
+			if (!active(session, generation) || readySession != session) return
+			await probe(resource)
+			if (!resource.mime.startsWith('audio/')) throw new Error('无法确定音频格式，请使用 MP3 等音乐')
+			if (!dlnaMimeSupported(renderer.protocols, resource.mime)) throw new Error('接收设备不支持此音频格式：' + resource.mime)
+			const base = await mediaBase(renderer), mediaUrl = base + '/dlna/' + resource.token
+			if (!active(session, generation)) return
+			resources.set(resource.token, resource)
+			let cover = ''
+			if (item.coverUrl.length > 0) {
+				const artwork = new MediaResource(item.coverUrl, referer, session, generation)
+				pendingResources.push(artwork)
+				try {
+					await probe(artwork)
+					if (artwork.mime.startsWith('image/') && active(session, generation)) { resources.set(artwork.token, artwork); cover = base + '/dlna/' + artwork.token }
+				} catch (e) { disposeResource(artwork) }
+			}
+			if (!active(session, generation)) return
+			const didl = dlnaDidl(item.mediaId, item.title, item.artist, item.album, cover, mediaUrl, resource.mime, resource.size, publicState.durationMs)
+			await soap(renderer, 'SetAVTransportURI', INSTANCE + '<CurrentURI>' + dlnaXmlEscape(mediaUrl) + '</CurrentURI><CurrentURIMetaData>' + dlnaXmlEscape(didl) + '</CurrentURIMetaData>')
+			if (!active(session, generation)) return
+			let remotePlaying = false
+			if (intendPlay) { await soap(renderer, 'Play', INSTANCE + '<Speed>1</Speed>'); remotePlaying = true }
+			if (!active(session, generation)) return
+			let seekable = renderer.canSeek && resource.rangeReadable
+			if (start > 0 && seekable) {
+				try { await soap(renderer, 'Seek', INSTANCE + '<Unit>REL_TIME</Unit><Target>' + dlnaTimeText(start) + '</Target>') }
+				catch (e) { seekable = false }
+			}
+			if (!active(session, generation)) return
+			if (remotePlaying && !intendPlay) { await soap(renderer, 'Pause', INSTANCE); remotePlaying = false }
+			if (!active(session, generation)) return
+			currentResourceUri = mediaUrl; publicState.canSeek = seekable
+			publicState.positionMs = start > 0 && !seekable ? 0 : start
+			publicState.phase = intendPlay && remotePlaying ? 'buffering' : 'paused'
+			if (intendPlay && !remotePlaying) control('Play', '<Speed>1</Speed>')
+			notify(); schedulePoll()
+		} catch (e) {
+			const message: string = e != null ? (e as Error).toString() : '网络不可用'
+			if (message.indexOf('HTTP 401') >= 0 || message.indexOf('HTTP 403') >= 0) requestRefresh(session, generation)
+			else fail(session, generation, '投屏播放失败：' + message)
+		} finally {
+			if (!active(session, generation) || !resources.has(resource.token)) disposeResource(resource)
+		}
+	})
+}
+function schedulePoll(): void {
+	if (pollTimer >= 0 || !dlnaActive() || publicState.phase == 'error' || publicState.phase == 'stopped' || currentResourceUri.length == 0) return
+	pollTimer = setTimeout((): void => {
+		pollTimer = -1
+		const renderer = currentDevice, session = sessionEpoch, generation = mediaEpoch, expected = currentResourceUri
+		if (renderer == null || expected.length == 0 || publicState.phase == 'error' || publicState.phase == 'loading') return
+		const playRevision = playEpoch, seekRevision = seekEpoch
+		enqueue(async (): Promise<void> => {
+			if (!active(session, generation)) return
+			try {
+				const transport = (await soap(renderer, 'GetTransportInfo', INSTANCE)).find('CurrentTransportState')?.text.trim() ?? ''
+				if (!active(session, generation)) return
+				const positions = await soap(renderer, 'GetPositionInfo', INSTANCE)
+				if (!active(session, generation) || currentResourceUri != expected) return
+				// 较早发出的轮询不得覆盖用户随后暂停/定位的回执。
+				if (playEpoch != playRevision || seekEpoch != seekRevision) { schedulePoll(); return }
+				const duration = dlnaTimeMs(positions.find('TrackDuration')?.text ?? ''), position = dlnaTimeMs(positions.find('RelTime')?.text ?? '')
+				const trackUri = positions.find('TrackURI')?.text.trim() ?? '', sameUri = trackUri == expected
+				pollFailures = 0
+				if (trackUri.length > 0 && !sameUri) { fail(session, generation, '电视已切换到其他媒体，轻听投屏已暂停'); return }
+				const ended = dlnaNaturalEnd(previousTransport, transport, Math.max(publicState.positionMs, position),
+					duration > 0 ? duration : publicState.durationMs, observedPlaying, manualStop, sameUri)
+				if (duration > 0) publicState.durationMs = duration
+				if (transport != 'STOPPED' || position > 0) publicState.positionMs = position
+				if (transport == 'PLAYING') { observedPlaying = true; publicState.phase = 'playing'; if (position > requestedStartMs + 2000) refreshUsed = false }
+				else if (transport == 'PAUSED_PLAYBACK') { publicState.phase = 'paused'; intendPlay = false }
+				else if (transport == 'TRANSITIONING') publicState.phase = 'buffering'
+				else if (transport == 'STOPPED') { publicState.phase = 'stopped'; intendPlay = false }
+				else if (transport == 'NO_MEDIA_PRESENT') { fail(session, generation, '电视没有正在播放的媒体'); return }
+				previousTransport = transport; notify()
+				if (ended && active(session, generation)) { manualStop = true; endListener?.() }
+				else if (transport == 'STOPPED' && !manualStop && observedPlaying) {
+					publicState.error = '设备停止播放；未确认自然结束，已停止自动切歌'; notify(false)
+				}
+				if (active(session, generation)) schedulePoll()
+			} catch (e) {
+				if (!active(session, generation)) return
+				pollFailures++
+				if (pollFailures >= 3) fail(session, generation, '投屏设备失去连接，请检查电视和局域网')
+				else schedulePoll()
+			}
+		})
+	}, 1000) as number
+}
+function controlRevision(action: string): number {
+	if (action == 'Play' || action == 'Pause') return playEpoch
+	if (action == 'Seek') return seekEpoch
+	if (action == 'SetVolume') return volumeEpoch
+	return 0
+}
+function control(action: string, args: string, rendering: boolean = false): void {
+	const renderer = currentDevice, session = sessionEpoch, generation = mediaEpoch, revision = controlRevision(action)
+	if (renderer == null || !dlnaActive()) return
+	enqueue(async (): Promise<void> => {
+		if (!active(session, generation) || controlRevision(action) != revision) return
+		try {
+			await soap(renderer, action, INSTANCE + args, rendering)
+			if (!active(session, generation) || controlRevision(action) != revision) return
+			if (action == 'Play') { publicState.phase = 'buffering'; manualStop = false }
+			else if (action == 'Pause') { publicState.positionMs = dlnaPositionMs(); publicState.phase = 'paused' }
+			else if (action == 'Stop') { publicState.positionMs = dlnaPositionMs(); publicState.phase = 'stopped' }
+			else if (action == 'Seek') publicState.positionMs = dlnaTimeMs(parseXml('<args>' + args + '</args>').find('Target')?.text ?? '')
+			publicState.error = ''
+			notify(action != 'SetVolume'); schedulePoll()
+		} catch (e) {
+			if (!active(session, generation) || controlRevision(action) != revision) return
+			if (action == 'Seek') { publicState.canSeek = false; publicState.error = '接收设备不支持当前位置跳转'; notify(false) }
+			else if (action == 'SetVolume') { publicState.canSetVolume = false; publicState.error = '接收设备不支持音量控制'; notify(false) }
+			else fail(session, generation, '投屏控制失败，请重新连接设备')
+		}
+	})
+}
+function requestRefresh(session: number, generation: number): void {
+	if (!active(session, generation)) return
+	const item = currentItem
+	if (item == null || !item.uri.startsWith('qt-resolve://') || refreshUsed) {
+		fail(session, generation, '投屏音乐地址已失效，请重新播放或换源')
+		return
+	}
+	refreshUsed = true
+	dlnaLoad(item, dlnaPositionMs(), intendPlay, true)
+}
+export function dlnaPlay(): void {
+	if (!dlnaActive()) return
+	intendPlay = true; playEpoch++; manualStop = false
+	if (currentItem != null && (currentResourceUri.length == 0 || publicState.phase == 'error' || publicState.phase == 'stopped')) {
+		const refresh = publicState.phase == 'error'
+		if (refresh) refreshUsed = false
+		dlnaLoad(currentItem, publicState.positionMs, true, refresh)
+		return
+	}
+	control('Play', '<Speed>1</Speed>')
+}
+export function dlnaPause(): void {
+	if (!dlnaActive()) return
+	publicState.positionMs = dlnaPositionMs()
+	intendPlay = false; playEpoch++; publicState.phase = 'paused'; notify()
+	if (currentResourceUri.length > 0) control('Pause', '')
+}
+export function dlnaStop(): void {
+	if (!dlnaActive()) return
+	publicState.positionMs = dlnaPositionMs()
+	intendPlay = false; playEpoch++; manualStop = true; publicState.generation = ++mediaEpoch
+	clearResolveTimer(); retireMedia(); currentResourceUri = ''; observedPlaying = false
+	publicState.phase = 'stopped'; notify()
+	control('Stop', '')
+}
+export function dlnaSeek(positionMs: number): void {
+	if (!publicState.canSeek || !(positionMs >= 0)) return
+	seekEpoch++
+	const position = Math.min(publicState.durationMs > 0 ? publicState.durationMs : positionMs, positionMs)
+	control('Seek', '<Unit>REL_TIME</Unit><Target>' + dlnaTimeText(position) + '</Target>')
+}
+export function dlnaSetVolume(volume: number): void {
+	if (!publicState.canSetVolume || !(volume >= 0)) return
+	volumeEpoch++; publicState.volume = Math.min(1, volume); notify(false)
+	const renderer = currentDevice
+	if (renderer != null) control('SetVolume', '<Channel>Master</Channel><DesiredVolume>' + Math.round(renderer.minVolume + publicState.volume * (renderer.maxVolume - renderer.minVolume)).toString() + '</DesiredVolume>', true)
+}
+export function dlnaDisconnect(onStopped: ((success: boolean) => void) | null = null): void {
+	const renderer = currentDevice
+	sessionEpoch++; mediaEpoch++; playEpoch++; intendPlay = false; manualStop = true; readySession = -1
+	clearResolveTimer(); retireMedia()
+	const retiredSession = sessionEpoch, retiredGeneration = mediaEpoch
+	currentDevice = null; currentItem = null; currentResourceUri = ''
+	publicState.target = 'local'; publicState.phase = 'disconnected'; publicState.deviceId = ''; publicState.deviceName = ''
+	publicState.sessionId = retiredSession; publicState.generation = retiredGeneration
+	publicState.canSeek = false; publicState.canSetVolume = false; publicState.error = ''
+	notify()
+	enqueue(async (): Promise<void> => {
+		let stopped = true
+		try { if (renderer != null) await soap(renderer, 'Stop', INSTANCE) }
+		catch (e) { stopped = false }
+		if (sessionEpoch != retiredSession || mediaEpoch != retiredGeneration || dlnaActive()) return
+		if (!stopped) { publicState.error = '未能确认电视停止，请先在电视上停止播放'; notify(false) }
+		onStopped?.(stopped)
+	})
+}

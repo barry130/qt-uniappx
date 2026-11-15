@@ -1,0 +1,648 @@
+/**
+ * iOS 音源引擎：UTS 串行驱动 + Swift 系统 WebKit / URLSession / 文件 / CryptoKit。
+ *
+ * 同目录 QtJsEngineNative.swift 自动参与 UTS Swift 混编。跨原生边界只传字符串；
+ * 大包通过 WKURLSchemeHandler 原样提供，ESM 的编译/执行由系统模块加载器完成。
+ * 包的异步任务仍使用 Android/Harmony 的 H/T/R 泵协议，原生定时器不依赖网页节流。
+ * 每次停止或隔离都会换 generation，旧 HTTP / 求值 / 定时器回执不能进入新实例。
+ */
+import { QT_JS_PRELUDE } from './prelude.uts'
+import { QT_IOS_BOOTSTRAP } from './bootstrap.uts'
+import type {
+  QtJsStart, QtJsStop, QtJsEvaluate, QtJsIsRunning, QtJsLoadBundle,
+  QtJsLoadPlayBundle, QtJsInvoke, QtJsDropOp, QtJsIsHealthy, QtJsDataDir,
+  QtJsReadTextFile, QtJsWriteTextFile, QtJsAppendTextFile, QtJsRenamePath,
+  QtJsExists, QtJsRemove, QtJsMkdirs, QtJsListDir, QtJsReadAssetText,
+  QtJsSpikeNativeTimer, QtJsVerifyPackSignature, QtJsStartOptions,
+  QtJsStartCallback, QtJsEvalCallback, QtJsVoidCallback, QtJsFileCallback,
+  QtJsSpikeTimerCallback, QtJsEngineInfo, QtJsEvalResult, QtJsVoidResult,
+} from '../interface.uts'
+
+const HOST_API_VERSION = 1
+const ENGINE_NAME = 'webkit-jsc'
+const PAGE_TIMEOUT_MS = 10000
+const EVAL_TIMEOUT_MS = 15000
+const LOAD_TIMEOUT_MS = 15000
+const PUMP_INTERVAL_MS = 20
+const LOAD_POLL_MS = 25
+const DEFAULT_INVOKE_TIMEOUT_MS = 20000
+const MAX_TIMER_MS = 24 * 60 * 60 * 1000
+
+type EvalBridgeCallback = (value: string, error: string) => void
+type OperationRun = (done: () => void) => void
+type OperationFail = (error: string) => void
+
+class EngineOperation {
+  run: OperationRun
+  fail: OperationFail
+  completed = false
+  constructor(run: OperationRun, fail: OperationFail) {
+    this.run = run
+    this.fail = fail
+  }
+}
+
+class EvalTask {
+  seq: number
+  generation: number
+  code: string
+  callback: EvalBridgeCallback
+  timer = 0
+  completed = false
+  constructor(seq: number, generation: number, code: string, callback: EvalBridgeCallback) {
+    this.seq = seq
+    this.generation = generation
+    this.code = code
+    this.callback = callback
+  }
+}
+
+class InvokeReceipt {
+  ticket: number
+  id = ''
+  generation: number
+  callback: QtJsEvalCallback
+  timer = 0
+  completed = false
+  constructor(ticket: number, generation: number, callback: QtJsEvalCallback) {
+    this.ticket = ticket
+    this.generation = generation
+    this.callback = callback
+  }
+}
+
+class NativeTimer {
+  id: string
+  handle: number
+  constructor(id: string, handle: number) {
+    this.id = id
+    this.handle = handle
+  }
+}
+
+let gStarted = false
+let gHealthy = true
+let gGeneration = 0
+let gVersion = ''
+let gOperations: EngineOperation[] = []
+let gActiveOperation: EngineOperation | null = null
+let gEvalQueue: EvalTask[] = []
+let gActiveEval: EvalTask | null = null
+let gEvalSeq = 0
+let gReceiptSeq = 0
+let gReceipts: InvokeReceipt[] = []
+let gNativeTimers: NativeTimer[] = []
+let gHttpIds: string[] = []
+let gPumpTimer = 0
+
+function fieldText(value: UTSJSONObject, key: string): string {
+  const item = value.get(key)
+  return item == null ? '' : `${item}`
+}
+
+function fieldNumber(value: UTSJSONObject, key: string, fallback: number): number {
+  const result = Number(fieldText(value, key))
+  return Number.isFinite(result) ? result : fallback
+}
+
+function parseObject(value: string): UTSJSONObject | null {
+  const result = JSON.parseObject(value)
+  if (result == null) console.warn('[qt-js-engine/ios] 原生回执不是 JSON 对象')
+  return result
+}
+
+/** JSON 字符串字面量也是 JS 字符串字面量，不改变 Unicode 或包体文本。 */
+function quoteJs(value: string): string {
+  return (JSON.stringify(value) ?? '""')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029')
+}
+
+function deliverEval(callback: QtJsEvalCallback, ok: boolean, value: string, error: string): void {
+  const result: QtJsEvalResult = { ok: ok, value: value, error: error }
+  setTimeout(() => callback(result), 0)
+}
+
+function deliverVoid(callback: QtJsVoidCallback, ok: boolean, error: string): void {
+  const result: QtJsVoidResult = { ok: ok, error: error }
+  setTimeout(() => callback(result), 0)
+}
+
+function deliverStart(callback: QtJsStartCallback, info: QtJsEngineInfo | null, error: string | null): void {
+  setTimeout(() => callback(info, error), 0)
+}
+
+function deliverSpike(callback: QtJsSpikeTimerCallback, value: string, error: string): void {
+  setTimeout(() => callback(value, error), 0)
+}
+
+function engineInfo(): QtJsEngineInfo {
+  const info: QtJsEngineInfo = { engine: ENGINE_NAME, version: gVersion, hostApiVersion: HOST_API_VERSION, probe: '2' }
+  return info
+}
+
+function readyError(): string {
+  if (!gHealthy || (gStarted && !QtJsEngineNative.isHealthy())) return '音源引擎已隔离，请停止后重新启动'
+  if (!gStarted) return '音源引擎未启动'
+  return ''
+}
+
+function drainOperations(): void {
+  if (gActiveOperation != null || gOperations.length == 0) return
+  const operation = gOperations.shift()!
+  gActiveOperation = operation
+  const done = (): void => {
+    if (operation.completed) return
+    operation.completed = true
+    gActiveOperation = null
+    setTimeout(() => drainOperations(), 0)
+  }
+  try {
+    operation.run(done)
+  } catch (error) {
+    done()
+    operation.fail(`${error}`)
+  }
+}
+
+function enqueueOperation(run: OperationRun, fail: OperationFail): void {
+  gOperations.push(new EngineOperation(run, fail))
+  drainOperations()
+}
+
+function failOperations(error: string): void {
+  const active = gActiveOperation
+  gActiveOperation = null
+  const pending = gOperations
+  gOperations = []
+  if (active != null && !active.completed) {
+    active.completed = true
+    active.fail(error)
+  }
+  for (let index = 0; index < pending.length; index++) {
+    const item = pending[index]
+    if (item.completed) continue
+    item.completed = true
+    item.fail(error)
+  }
+}
+
+function cancelEvaluations(error: string): void {
+  const pending = gEvalQueue
+  gEvalQueue = []
+  const active = gActiveEval
+  gActiveEval = null
+  if (active != null && !active.completed) {
+    active.completed = true
+    clearTimeout(active.timer)
+    active.callback('', error)
+  }
+  for (let index = 0; index < pending.length; index++) {
+    const item = pending[index]
+    if (item.completed) continue
+    item.completed = true
+    item.callback('', error)
+  }
+}
+
+function settleReceipt(receipt: InvokeReceipt, ok: boolean, value: string, error: string): void {
+  if (receipt.completed) return
+  receipt.completed = true
+  clearTimeout(receipt.timer)
+  gReceipts = gReceipts.filter((item: InvokeReceipt): boolean => item.ticket != receipt.ticket)
+  deliverEval(receipt.callback, ok, value, error)
+}
+
+function failReceipts(error: string): void {
+  const receipts = gReceipts
+  gReceipts = []
+  for (let index = 0; index < receipts.length; index++) {
+    settleReceipt(receipts[index], false, '', error)
+  }
+}
+
+function cancelNativeTimers(): void {
+  clearTimeout(gPumpTimer)
+  gPumpTimer = 0
+  for (let index = 0; index < gNativeTimers.length; index++) {
+    clearTimeout(gNativeTimers[index].handle)
+  }
+  gNativeTimers = []
+  gHttpIds = []
+}
+
+/** 看门狗不阻塞 UI；释放独立 WKWebView 后服务层可 stop + start 自愈。 */
+function poison(error: string): void {
+  if (!gHealthy) return
+  gHealthy = false
+  gGeneration++
+  cancelNativeTimers()
+  failReceipts(error)
+  cancelEvaluations(error)
+  failOperations(error)
+  QtJsEngineNative.stop((_value: string, _error: string) => {})
+  console.error('[qt-js-engine/ios] 引擎隔离:', error)
+}
+
+function drainEvaluations(): void {
+  if (gActiveEval != null || gEvalQueue.length == 0) return
+  const task = gEvalQueue.shift()!
+  if (task.generation != gGeneration || !gHealthy) {
+    task.completed = true
+    task.callback('', '音源引擎实例已过期')
+    drainEvaluations()
+    return
+  }
+  gActiveEval = task
+  task.timer = setTimeout(() => {
+    if (task.completed || task.generation != gGeneration) return
+    poison('脚本执行超时，音源引擎已隔离')
+  }, EVAL_TIMEOUT_MS)
+  QtJsEngineNative.evaluate(task.code, (value: string, error: string) => {
+    if (task.completed || task.generation != gGeneration) return
+    task.completed = true
+    clearTimeout(task.timer)
+    gActiveEval = null
+    try {
+      task.callback(value, error)
+    } finally {
+      drainEvaluations()
+    }
+  })
+}
+
+function evaluateRaw(code: string, callback: EvalBridgeCallback): void {
+  gEvalQueue.push(new EvalTask(++gEvalSeq, gGeneration, code, callback))
+  drainEvaluations()
+}
+
+function evaluateEnvelope(code: string, callback: EvalBridgeCallback): void {
+  evaluateRaw(code, (raw: string, error: string) => {
+    if (error.length > 0) {
+      callback('', error)
+      return
+    }
+    const result = parseObject(raw)
+    if (result == null) {
+      callback('', '音源引擎回执不是有效 JSON')
+    } else if (fieldText(result, 'ok') != '1') {
+      callback('', fieldText(result, 'e').length > 0 ? fieldText(result, 'e') : '脚本执行失败')
+    } else {
+      callback(fieldText(result, 'v'), '')
+    }
+  })
+}
+
+function schedulePump(delay: number): void {
+  if (!gStarted || !gHealthy || gPumpTimer != 0) return
+  const generation = gGeneration
+  gPumpTimer = setTimeout(() => {
+    gPumpTimer = 0
+    if (generation != gGeneration || !gStarted || !gHealthy) return
+    evaluateEnvelope('__qtEnvPump()', (lines: string, error: string) => {
+      if (generation != gGeneration || !gStarted || !gHealthy) return
+      if (error.length > 0) {
+        poison('音源引擎任务泵失败：' + error)
+        return
+      }
+      const rows = lines.split('\n')
+      for (let index = 0; index < rows.length; index++) {
+        if (rows[index].length == 0) continue
+        const row = parseObject(rows[index])
+        if (row == null) continue
+        const kind = fieldText(row, 'k')
+        if (kind == 'H') startHttp(rows[index], row, generation)
+        else if (kind == 'T') startTimer(row, generation)
+        else if (kind == 'R') finishInvoke(row, generation)
+      }
+      if (gReceipts.length > 0 || gHttpIds.length > 0) schedulePump(PUMP_INTERVAL_MS)
+    })
+  }, delay)
+}
+
+function startTimer(row: UTSJSONObject, generation: number): void {
+  const id = fieldText(row, 'id')
+  if (id.length == 0) return
+  const delay = Math.max(0, Math.min(MAX_TIMER_MS, fieldNumber(row, 'ms', 0)))
+  const handle = setTimeout(() => {
+    gNativeTimers = gNativeTimers.filter((timer: NativeTimer): boolean => timer.handle != handle)
+    if (generation != gGeneration || !gStarted || !gHealthy) return
+    evaluateEnvelope('__qtEnvFireTimer(' + quoteJs(id) + ')', (_value: string, error: string) => {
+      if (generation != gGeneration) return
+      if (error.length > 0) console.warn('[qt-js-engine/ios] 定时器回投失败:', error)
+      schedulePump(0)
+    })
+  }, delay)
+  gNativeTimers.push(new NativeTimer(id, handle))
+}
+
+function startHttp(raw: string, row: UTSJSONObject, generation: number): void {
+  const id = fieldText(row, 'id')
+  if (id.length == 0 || gHttpIds.indexOf(id) >= 0) return
+  gHttpIds.push(id)
+  QtJsEngineNative.request(raw, (value: string, bridgeError: string) => {
+    if (generation != gGeneration || !gStarted || !gHealthy) return
+    gHttpIds = gHttpIds.filter((item: string): boolean => item != id)
+    const result = bridgeError.length == 0 ? parseObject(value) : null
+    const status = result == null ? 0 : fieldNumber(result, 'statusCode', 0)
+    const headers = result == null ? '{}' : fieldText(result, 'headersJson')
+    const body = result == null ? '' : fieldText(result, 'body')
+    const error = result == null
+      ? (bridgeError.length > 0 ? bridgeError : 'HTTP 原生回执格式错误')
+      : fieldText(result, 'error')
+    const code = '__qtEnvResolveHttp(' + quoteJs(id) + ',' + String(status) + ',' +
+      quoteJs(headers) + ',' + quoteJs(body) + ',' + quoteJs(error) + ')'
+    evaluateEnvelope(code, (_reply: string, evalError: string) => {
+      if (generation != gGeneration) return
+      if (evalError.length > 0) console.warn('[qt-js-engine/ios] HTTP 回投失败:', evalError)
+      schedulePump(0)
+    })
+  })
+}
+
+function finishInvoke(row: UTSJSONObject, generation: number): void {
+  const id = fieldText(row, 'id')
+  for (let index = 0; index < gReceipts.length; index++) {
+    const receipt = gReceipts[index]
+    if (receipt.id != id || receipt.generation != generation) continue
+    settleReceipt(receipt, fieldText(row, 'ok') == '1', fieldText(row, 'value'), fieldText(row, 'error'))
+    return
+  }
+}
+
+function dropReceiptOp(receipt: InvokeReceipt): void {
+  if (receipt.id.length == 0 || receipt.generation != gGeneration || !gHealthy || !gStarted) return
+  evaluateEnvelope('__qtEnvDropOp(' + quoteJs(receipt.id) + ')', (_value: string, error: string) => {
+    if (error.length > 0) console.warn('[qt-js-engine/ios] 放弃调用失败:', error)
+    schedulePump(0)
+  })
+}
+
+export const start: QtJsStart = function (_options: QtJsStartOptions, callback: QtJsStartCallback): void {
+  enqueueOperation((done: () => void) => {
+    if (!gHealthy) {
+      done()
+      deliverStart(callback, null, readyError())
+      return
+    }
+    if (gStarted) {
+      done()
+      deliverStart(callback, engineInfo(), null)
+      return
+    }
+    const generation = ++gGeneration
+    const watchdog = setTimeout(() => {
+      if (generation == gGeneration && !gStarted) poison('iOS 音源引擎页面启动超时')
+    }, PAGE_TIMEOUT_MS)
+    QtJsEngineNative.prepare((version: string, error: string) => {
+      clearTimeout(watchdog)
+      if (generation != gGeneration) return
+      if (error.length > 0) {
+        done()
+        deliverStart(callback, null, error)
+        return
+      }
+      gVersion = version
+      evaluateRaw(QT_JS_PRELUDE + '\n' + QT_IOS_BOOTSTRAP, (_value: string, injectError: string) => {
+        if (generation != gGeneration) return
+        if (injectError.length > 0) {
+          done()
+          deliverStart(callback, null, injectError)
+          return
+        }
+        evaluateEnvelope('__qtEnvProbe()', (probe: string, probeError: string) => {
+          if (generation != gGeneration) return
+          if (probeError.length > 0 || probe != '2') {
+            done()
+            deliverStart(callback, null, probeError.length > 0 ? probeError : 'JavaScriptCore 启动探针失败')
+            return
+          }
+          gStarted = true
+          done()
+          deliverStart(callback, engineInfo(), null)
+          schedulePump(0)
+        })
+      })
+    })
+  }, (error: string) => deliverStart(callback, null, error))
+}
+
+/** 停止优先于所有排队操作；原生取消请求和模块页面，迟到回执按代次丢弃。 */
+export const stop: QtJsStop = function (callback: QtJsVoidCallback): void {
+  gGeneration++
+  gStarted = false
+  gHealthy = true
+  gVersion = ''
+  cancelNativeTimers()
+  failReceipts('音源引擎已停止')
+  cancelEvaluations('音源引擎已停止')
+  failOperations('音源引擎已停止')
+  QtJsEngineNative.stop((_value: string, error: string) => deliverVoid(callback, error.length == 0, error))
+}
+
+export const evaluate: QtJsEvaluate = function (code: string, callback: QtJsEvalCallback): void {
+  enqueueOperation((done: () => void) => {
+    const error = readyError()
+    if (error.length > 0) {
+      done()
+      deliverEval(callback, false, '', error)
+      return
+    }
+    const generation = gGeneration
+    evaluateEnvelope('__qtEnv(function () { return (0, eval)(' + quoteJs(code) + '); })', (value: string, evalError: string) => {
+      if (generation != gGeneration) return
+      done()
+      deliverEval(callback, evalError.length == 0, value, evalError)
+      schedulePump(0)
+    })
+  }, (error: string) => deliverEval(callback, false, '', error))
+}
+
+function loadModule(slot: string, code: string, callback: QtJsVoidCallback): void {
+  enqueueOperation((done: () => void) => {
+    const error = readyError()
+    if (error.length > 0) {
+      done()
+      deliverVoid(callback, false, error)
+      return
+    }
+    const generation = gGeneration
+    QtJsEngineNative.provideModule(slot, code, (url: string, nativeError: string) => {
+      if (generation != gGeneration) return
+      if (nativeError.length > 0) {
+        done()
+        deliverVoid(callback, false, nativeError)
+        return
+      }
+      const deadline = Date.now() + LOAD_TIMEOUT_MS
+      const importName = slot == 'meta' ? '__qtImportMeta' : '__qtImportPlay'
+      const statusName = slot == 'meta' ? '__qtMetaLoadStatus' : '__qtPlayLoadStatus'
+      let settled = false
+      const finish = (ok: boolean, loadError: string): void => {
+        if (settled || generation != gGeneration) return
+        settled = true
+        QtJsEngineNative.releaseModule(url)
+        done()
+        deliverVoid(callback, ok, loadError)
+      }
+      const poll = (): void => {
+        if (settled || generation != gGeneration || !gHealthy) return
+        if (Date.now() >= deadline) {
+          QtJsEngineNative.releaseModule(url)
+          poison('音源包装载超时，音源引擎已隔离')
+          return
+        }
+        evaluateEnvelope('__qtEnv(function () { return String(globalThis.' + statusName + '); })', (status: string, pollError: string) => {
+          if (settled || generation != gGeneration) return
+          if (pollError.length > 0) finish(false, pollError)
+          else if (status == 'ok' || status.startsWith('ok:')) finish(true, '')
+          else if (status.startsWith('err:')) finish(false, status.substring(4))
+          else setTimeout(() => poll(), LOAD_POLL_MS)
+          schedulePump(0)
+        })
+      }
+      evaluateEnvelope('__qtEnv(function () { return ' + importName + '(' + quoteJs(url) + '); })', (_status: string, importError: string) => {
+        if (generation != gGeneration) return
+        if (importError.length > 0) finish(false, importError)
+        else setTimeout(() => poll(), LOAD_POLL_MS)
+      })
+    })
+  }, (error: string) => deliverVoid(callback, false, error))
+}
+
+export const loadBundle: QtJsLoadBundle = function (code: string, callback: QtJsVoidCallback): void {
+  loadModule('meta', code, callback)
+}
+
+export const loadPlayBundle: QtJsLoadPlayBundle = function (code: string, callback: QtJsVoidCallback): void {
+  loadModule('play', code, callback)
+}
+
+export const invoke: QtJsInvoke = function (name: string, argsJson: string, timeoutMs: number, callback: QtJsEvalCallback): void {
+  const receipt = new InvokeReceipt(++gReceiptSeq, gGeneration, callback)
+  enqueueOperation((done: () => void) => {
+    const error = readyError()
+    if (error.length > 0) {
+      done()
+      settleReceipt(receipt, false, '', error)
+      return
+    }
+    receipt.generation = gGeneration
+    gReceipts.push(receipt)
+    const timeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_INVOKE_TIMEOUT_MS
+    receipt.timer = setTimeout(() => {
+      if (receipt.completed || receipt.generation != gGeneration) return
+      settleReceipt(receipt, false, '', 'timeout')
+      dropReceiptOp(receipt)
+    }, timeout)
+    evaluateEnvelope('__qtEnvCall(' + quoteJs(name) + ',' + quoteJs(argsJson) + ')', (id: string, invokeError: string) => {
+      if (receipt.generation != gGeneration) return
+      done()
+      if (invokeError.length > 0 || id.length == 0) {
+        settleReceipt(receipt, false, '', invokeError.length > 0 ? invokeError : '音源调用未返回操作编号')
+        return
+      }
+      receipt.id = id
+      if (receipt.completed) dropReceiptOp(receipt)
+      schedulePump(0)
+    })
+  }, (error: string) => settleReceipt(receipt, false, '', error))
+}
+
+export const dropOp: QtJsDropOp = function (opId: number): void {
+  const id = String(opId)
+  for (let index = 0; index < gReceipts.length; index++) {
+    if (gReceipts[index].id != id) continue
+    const receipt = gReceipts[index]
+    settleReceipt(receipt, false, '', '调用已放弃')
+    dropReceiptOp(receipt)
+    return
+  }
+}
+
+export const isRunning: QtJsIsRunning = function (): boolean { return gStarted }
+export const isHealthy: QtJsIsHealthy = function (): boolean {
+  return gHealthy && (!gStarted || QtJsEngineNative.isHealthy())
+}
+export const dataDir: QtJsDataDir = function (): string { return QtJsEngineNative.dataDir() }
+export const publicDataDir: QtJsDataDir = function (): string { return QtJsEngineNative.publicDataDir() }
+
+function fileOperation(operation: string, path: string, value: string, callback: QtJsFileCallback): void {
+  QtJsEngineNative.fileOperation(operation, path, value, (ok: string, result: string, error: string) => {
+    callback(ok == '1', result, error)
+  })
+}
+
+export const readTextFile: QtJsReadTextFile = function (path: string, callback: QtJsFileCallback): void {
+  fileOperation('read', path, '', callback)
+}
+export const writeTextFile: QtJsWriteTextFile = function (path: string, text: string, callback: QtJsFileCallback): void {
+  fileOperation('write', path, text, callback)
+}
+export const appendTextFile: QtJsAppendTextFile = function (path: string, text: string, callback: QtJsFileCallback): void {
+  fileOperation('append', path, text, callback)
+}
+export const renamePath: QtJsRenamePath = function (oldPath: string, newPath: string, callback: QtJsFileCallback): void {
+  fileOperation('rename', oldPath, newPath, callback)
+}
+export const exists: QtJsExists = function (path: string, callback: QtJsFileCallback): void {
+  fileOperation('exists', path, '', callback)
+}
+export const remove: QtJsRemove = function (path: string, callback: QtJsFileCallback): void {
+  fileOperation('remove', path, '', callback)
+}
+export const mkdirs: QtJsMkdirs = function (path: string, callback: QtJsFileCallback): void {
+  fileOperation('mkdirs', path, '', callback)
+}
+export const listDir: QtJsListDir = function (path: string, callback: QtJsFileCallback): void {
+  fileOperation('list', path, '', callback)
+}
+export const readAssetText: QtJsReadAssetText = function (path: string, callback: QtJsFileCallback): void {
+  if (path.length == 0 || path.startsWith('/') || path.indexOf('..') >= 0 || path.indexOf(':') >= 0) {
+    setTimeout(() => callback(false, '', '内置资源路径必须相对应用资源目录'), 0)
+    return
+  }
+  fileOperation('asset', UTSiOS.getResourcePath('/' + path), path, callback)
+}
+
+/** 使用正式的宿主定时器链路，不覆盖正在使用的 __qtFireTimer。 */
+export const spikeNativeTimer: QtJsSpikeNativeTimer = function (delayMs: number, callback: QtJsSpikeTimerCallback): void {
+  enqueueOperation((done: () => void) => {
+    const error = readyError()
+    if (error.length > 0) {
+      done()
+      deliverSpike(callback, '', error)
+      return
+    }
+    const generation = gGeneration
+    const delay = Math.max(0, Math.min(60000, Number.isFinite(delayMs) ? delayMs : 0))
+    const code = '__qtEnv(function () { globalThis.__qtTimerSpike = ""; ' +
+      'setTimeout(function () { globalThis.__qtTimerSpike = "7"; }, ' + String(delay) + '); return ""; })'
+    evaluateEnvelope(code, (_value: string, installError: string) => {
+      if (generation != gGeneration) return
+      if (installError.length > 0) {
+        done()
+        deliverSpike(callback, '', installError)
+        return
+      }
+      schedulePump(0)
+      setTimeout(() => {
+        if (generation != gGeneration) return
+        evaluateEnvelope('__qtEnv(function () { return globalThis.__qtTimerSpike; })', (fired: string, readError: string) => {
+          if (generation != gGeneration) return
+          done()
+          deliverSpike(callback, fired, readError)
+        })
+      }, delay + 200)
+    })
+  }, (error: string) => deliverSpike(callback, '', error))
+}
+
+export const verifyPackSignature: QtJsVerifyPackSignature = function (
+  content: string, signatureBase64: string, publicKeyHex: string, callback: QtJsEvalCallback
+): void {
+  QtJsEngineNative.verifyPackSignature(content, signatureBase64, publicKeyHex, (ok: string, value: string, error: string) => {
+    const result: QtJsEvalResult = { ok: ok == '1', value: value, error: error }
+    callback(result)
+  })
+}

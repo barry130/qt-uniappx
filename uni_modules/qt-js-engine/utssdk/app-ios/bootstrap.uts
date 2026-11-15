@@ -1,0 +1,124 @@
+/**
+ * WKWebView 的 JavaScriptCore 模块加载器。
+ * 模块只由 WKURLSchemeHandler 提供，源码保持原样，数据包/播放包独立装载。
+ * 返回值是一层 JSON 字符串；WKWebView 的原生 completion 不会再包 JSON 引号。
+ */
+export const QT_IOS_BOOTSTRAP = `
+(function () {
+  if (globalThis.__qtIOSReady) return;
+  globalThis.__qtIOSReady = true;
+
+  function deny(name) {
+    return function () { throw new Error('音源包环境禁止使用 ' + name); };
+  }
+  var denied = [
+    'fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource',
+    'Worker', 'SharedWorker', 'RTCPeerConnection', 'webkitRTCPeerConnection',
+    'RTCDataChannel', 'Notification'
+  ];
+  denied.forEach(function (name) {
+    try {
+      Object.defineProperty(globalThis, name, {
+        value: deny(name), writable: false, configurable: false
+      });
+    } catch (e) {
+      try { globalThis[name] = deny(name); } catch (ignored) {}
+    }
+  });
+  try {
+    if (typeof navigator !== 'undefined') {
+      Object.defineProperty(navigator, 'sendBeacon', {
+        value: deny('sendBeacon'), writable: false, configurable: false
+      });
+    }
+  } catch (e) {}
+
+  globalThis.__qtEnv = function (fn) {
+    try {
+      var value = fn();
+      return JSON.stringify({ ok: 1, v: value == null ? '' : String(value) });
+    } catch (e) {
+      return JSON.stringify({ ok: 0, e: String(e && e.stack ? e.stack : e) });
+    }
+  };
+  globalThis.__qtEnvProbe = function () {
+    return globalThis.__qtEnv(function () { return String(1 + 1); });
+  };
+  globalThis.__qtEnvPump = function () {
+    return globalThis.__qtEnv(function () { return globalThis.__qtPump(); });
+  };
+  globalThis.__qtEnvCall = function (name, args) {
+    return globalThis.__qtEnv(function () { return globalThis.__qtCall(name, args); });
+  };
+  globalThis.__qtEnvDropOp = function (id) {
+    return globalThis.__qtEnv(function () { globalThis.__qtDropOp(id); return ''; });
+  };
+  globalThis.__qtEnvResolveHttp = function (id, status, headers, body, error) {
+    return globalThis.__qtEnv(function () {
+      globalThis.__qtResolveHttp(id, status, headers, body, error);
+      return '';
+    });
+  };
+  globalThis.__qtEnvFireTimer = function (id) {
+    return globalThis.__qtEnv(function () { globalThis.__qtFireTimer(id); return ''; });
+  };
+
+  var metaSeq = 0;
+  var playSeq = 0;
+  globalThis.__qtMetaLoadStatus = 'pending';
+  globalThis.__qtPlayLoadStatus = 'pending';
+
+  function errorText(error) {
+    var name = error && error.name ? String(error.name) : '';
+    var message = String(error && error.message ? error.message : error);
+    return 'err:' + (name === 'SyntaxError' ? '语法错误：' : '') + message;
+  }
+  globalThis.__qtImportMeta = function (url) {
+    var token = ++metaSeq;
+    var previous = globalThis.__qtEntries;
+    globalThis.__qtEntries = {};
+    globalThis.__qtMetaLoadStatus = 'pending';
+    import(url).then(function () {
+      if (token !== metaSeq) return;
+      var entries = globalThis.__qtEntries || {};
+      var count = Object.keys(entries).filter(function (key) {
+        return typeof entries[key] === 'function';
+      }).length;
+      if (count > 0) {
+        globalThis.__qtMetaLoadStatus = 'ok:' + String(count);
+      } else {
+        globalThis.__qtEntries = previous;
+        globalThis.__qtMetaLoadStatus = 'err:数据包未注册任何入口';
+      }
+    }, function (error) {
+      if (token !== metaSeq) return;
+      globalThis.__qtEntries = previous;
+      globalThis.__qtMetaLoadStatus = errorText(error);
+    });
+    return 'pending';
+  };
+  globalThis.__qtImportPlay = function (url) {
+    var token = ++playSeq;
+    var entries = globalThis.__qtEntries;
+    globalThis.__qtPlayPackFactory = undefined;
+    globalThis.__qtPlayFactoryStash = undefined;
+    globalThis.__qtPlayLoadStatus = 'pending';
+    import(url).then(function () {
+      if (token !== playSeq) return;
+      globalThis.__qtEntries = entries;
+      var factory = globalThis.__qtPlayPackFactory;
+      if (typeof factory === 'function') {
+        globalThis.__qtPlayFactoryStash = factory;
+        globalThis.__qtPlayLoadStatus = 'ok';
+      } else {
+        globalThis.__qtPlayLoadStatus = 'err:该文件不是有效的播放音源包';
+      }
+    }, function (error) {
+      if (token !== playSeq) return;
+      globalThis.__qtEntries = entries;
+      globalThis.__qtPlayLoadStatus = errorText(error);
+    });
+    return 'pending';
+  };
+})();
+`;

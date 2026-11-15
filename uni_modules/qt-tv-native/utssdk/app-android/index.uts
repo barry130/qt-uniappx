@@ -1,0 +1,621 @@
+/** HBuilderX 5.34 / Vapor Android native seam; no business state or focus scoring here. */
+import { UTSAndroid } from "io.dcloud.uts";
+import Activity from "android.app.Activity";
+import ActivityInfo from "android.content.pm.ActivityInfo";
+import Configuration from "android.content.res.Configuration";
+import PackageManager from "android.content.pm.PackageManager";
+import Context from "android.content.Context";
+import Build from "android.os.Build";
+import Handler from "android.os.Handler";
+import Looper from "android.os.Looper";
+import Runnable from "java.lang.Runnable";
+import View from "android.view.View";
+import ViewGroup from "android.view.ViewGroup";
+import ViewTreeObserver from "android.view.ViewTreeObserver";
+import KeyEvent from "android.view.KeyEvent";
+import WindowInsets from "android.view.WindowInsets";
+import InputMethodManager from "android.view.inputmethod.InputMethodManager";
+import EditText from "android.widget.EditText";
+import WebView from "android.webkit.WebView";
+import Rect from "android.graphics.Rect";
+import Color from "android.graphics.Color";
+import GradientDrawable from "android.graphics.drawable.GradientDrawable";
+import ConcurrentHashMap from "java.util.concurrent.ConcurrentHashMap";
+import CEventManager from "io.dcloud.uniappxv.bridge.CEventManager";
+import UniPageActivity from "io.dcloud.uniappxv.activity.UniPageActivity";
+import { QtTvDevice, QtTvRemoteEvent, QtTvRemoteState, QtTvRemoteHandler, QtTvCandidate } from "../interface.uts";
+export { QtTvDevice, QtTvRemoteEvent, QtTvRemoteState, QtTvRemoteHandler, QtTvCandidate } from "../interface.uts";
+
+const SCAN_LIMIT = 512;
+type QtTvScanResume = { element: UniElement, index: number };
+const mainHandler = new Handler(Looper.getMainLooper());
+let remoteHandler: QtTvRemoteHandler | null = null;
+let remoteState: QtTvRemoteState = { enabled: false, captureBack: false, captureMenu: false, editing: false };
+let remoteGeneration = 0;
+let keyRegistered = false;
+let lifeRegistered = false;
+let presentationEnabled = false;
+const ownedKeys = new Set<string>();
+const orientations = new Map<Activity, number>();
+let candidateElements = new ConcurrentHashMap<string, UniElement>();
+let candidateScope: UniElement | null = null;
+let ringDecor: View | null = null;
+let ringDrawable: GradientDrawable | null = null;
+let ringObserver: ViewTreeObserver | null = null;
+let highlightedId = "";
+let editorView: EditText | null = null;
+let editorDecor: View | null = null;
+let editorObserver: ViewTreeObserver | null = null;
+let editorWasVisible = false;
+let editorDismissed = false;
+
+class QtTvUiTask implements Runnable {
+  action: () => void = () => {};
+  constructor(action: () => void) { this.action = action; }
+  override run(): void { this.action(); }
+}
+function onUi(action: () => void): void {
+  if (Looper.myLooper() == Looper.getMainLooper()) action();
+  else mainHandler.post(new QtTvUiTask(action));
+}
+function report(operation: string, error: any | null): void {
+  console.log("[QtTvNative] " + operation + ": " + (error != null ? error.toString() : "unknown"));
+}
+function deviceFor(context: Context | null): QtTvDevice {
+  const result: QtTvDevice = { television: false, leanback: false, uiModeType: 0, nativeAvailable: false };
+  if (context == null) return result;
+  try {
+    const type = context.getResources().getConfiguration().uiMode & Configuration.UI_MODE_TYPE_MASK;
+    const manager = context.getPackageManager();
+    result.television = type == Configuration.UI_MODE_TYPE_TELEVISION;
+    result.leanback = manager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) || manager.hasSystemFeature(PackageManager.FEATURE_LEANBACK_ONLY);
+    result.uiModeType = type.toDouble(); result.nativeAvailable = true;
+  } catch (error) { report("device", error); }
+  return result;
+}
+function currentActivity(): Activity | null { return UTSAndroid.getUniActivity(); }
+function keyboardVisible(activity: Activity): boolean {
+  try {
+    const decor = activity.getWindow().getDecorView();
+    if (Build.VERSION.SDK_INT >= 30) {
+      const insets = decor.getRootWindowInsets();
+      return insets != null && insets.isVisible(WindowInsets.Type.ime());
+    }
+    const visible = new Rect();
+    decor.getWindowVisibleDisplayFrame(visible);
+    const density = activity.getResources().getDisplayMetrics().density.toDouble();
+    const height = decor.getRootView().getHeight().toDouble();
+    return height - visible.height().toDouble() > Math.max(120 * density, height * 0.18);
+  } catch (error) { return false; }
+}
+function detachEditorWatch(): void {
+  const observer = editorObserver;
+  if (observer != null && observer.isAlive()) observer.removeOnGlobalLayoutListener(editorLayout);
+  editorObserver = null; editorView = null; editorDecor = null; editorWasVisible = false;
+}
+function dismissEditor(activity: Activity): void {
+  const focused = activity.getCurrentFocus();
+  const editor = editorView != null ? editorView : (focused instanceof EditText ? focused as EditText : null);
+  editorDismissed = true; remoteState.editing = false;
+  detachEditorWatch();
+  if (editor != null) {
+    const manager = activity.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager | null;
+    if (manager != null) manager.hideSoftInputFromWindow(editor.getWindowToken(), 0);
+    editor.clearFocus(); // Native blur releases the application's input mode as well.
+  }
+}
+class QtTvEditorLayout implements ViewTreeObserver.OnGlobalLayoutListener {
+  override onGlobalLayout(): void {
+    const decor = editorDecor;
+    if (decor == null) return;
+    const activity = currentActivity();
+    if (activity == null || activity.getWindow().getDecorView() != decor) { detachEditorWatch(); return; }
+    const visible = keyboardVisible(activity);
+    if (visible) editorWasVisible = true;
+    else if (editorWasVisible) dismissEditor(activity);
+  }
+}
+const editorLayout = new QtTvEditorLayout();
+function watchEditor(activity: Activity, editor: EditText | null): void {
+  if (editor == null) return;
+  const decor = activity.getWindow().getDecorView();
+  if (editorDecor != decor) {
+    detachEditorWatch();
+    const observer = decor.getViewTreeObserver(); editorObserver = observer; editorDecor = decor;
+    observer.addOnGlobalLayoutListener(editorLayout);
+  }
+  editorView = editor;
+  if (keyboardVisible(activity)) editorWasVisible = true;
+}
+function nativeEditing(activity: Activity, back: boolean): boolean {
+  const visible = keyboardVisible(activity);
+  const focused = activity.getCurrentFocus();
+  const editor = focused instanceof EditText ? focused as EditText : null;
+  // A late JS editing=true or native autofocus after BACK must not trap DPAD in the old editor.
+  if (editorDismissed) { if (editor != null || visible) dismissEditor(activity); return false; }
+  if (visible) watchEditor(activity, editor);
+  else if (editorWasVisible) { dismissEditor(activity); return false; }
+  if (back) return visible;
+  return remoteState.editing || visible || editor != null;
+}
+function keyName(code: number): string {
+  if (code == 19) return "up";
+  if (code == 20) return "down";
+  if (code == 21) return "left";
+  if (code == 22) return "right";
+  if (code == 23 || code == 66 || code == 160) return "ok";
+  if (code == 4 || code == 111) return "back";
+  if (code == 82) return "menu";
+  return ""; // HOME, volume and all MEDIA_* stay with Android / existing Media3 session.
+}
+function isDirection(key: string): boolean { return key == "up" || key == "down" || key == "left" || key == "right"; }
+function ownership(event: KeyEvent): string {
+  return event.getDeviceId().toString() + ":" + event.getKeyCode().toString() + ":" + event.getDownTime().toString();
+}
+class QtTvRemoteDelivery implements Runnable {
+  event: QtTvRemoteEvent = { key: "", code: 0, action: "down", repeat: 0 };
+  generation: number = 0;
+  constructor(event: QtTvRemoteEvent, generation: number) { this.event = event; this.generation = generation; }
+  override run(): void {
+    const sink = remoteHandler;
+    if (sink == null || this.generation != remoteGeneration || !remoteState.enabled) return;
+    try { sink(this.event); } catch (error) { report("remote-handler", error); }
+  }
+}
+function deliverRemote(key: string, code: number, repeat: number): void {
+  const event: QtTvRemoteEvent = { key: key, code: code, action: "down", repeat: repeat };
+  mainHandler.post(new QtTvRemoteDelivery(event, remoteGeneration));
+}
+function focusedWebView(activity: Activity): boolean {
+  let view = activity.getCurrentFocus();
+  let depth = 0;
+  while (view != null && depth < 32) {
+    if (view instanceof WebView) return true;
+    const parent = view.getParent();
+    view = parent instanceof View ? parent as View : null; depth++;
+  }
+  return false;
+}
+class QtTvWindowCallback extends UniActivityWindowCallback {
+  constructor() { super(); }
+  override dispatchPreKeyEvent(params: UniActivityParams, event: KeyEvent | null): void {
+    if (event == null) return;
+    const activity = params.activity;
+    const token = ownership(event);
+    const action = event.getAction();
+    if (action == KeyEvent.ACTION_UP) {
+      if (ownedKeys.has(token)) { ownedKeys.delete(token); params.returnResult = true; }
+      return;
+    }
+    if (action != KeyEvent.ACTION_DOWN) return;
+    const code = event.getKeyCode().toDouble();
+    const key = keyName(code);
+    if (key.length == 0) return;
+    // Keep ownership across mode/page changes until its matching UP; never replay an owned key natively.
+    if (ownedKeys.has(token)) {
+      params.returnResult = true;
+      if (remoteState.enabled && isDirection(key) && activity != null && !focusedWebView(activity) && !nativeEditing(activity, false)) {
+        deliverRemote(key, code, event.getRepeatCount().toDouble());
+      }
+      return;
+    }
+    if (remoteHandler == null || !remoteState.enabled || activity == null) return;
+    // Only new ownership passes through embedded browsers; owned repeats/UP keep their original consumption.
+    if (focusedWebView(activity)) return;
+    if (key == "back" && !keyboardVisible(activity) && !editorDismissed && (remoteState.editing || activity.getCurrentFocus() instanceof EditText)) {
+      // Hardware-keyboard / IME-already-hidden session: first BACK exits the editor, not the page.
+      dismissEditor(activity); ownedKeys.add(token); params.returnResult = true; return;
+    }
+    if (nativeEditing(activity, key == "back")) return;
+    if (key == "back" && !remoteState.captureBack) return;
+    if (key == "menu" && !remoteState.captureMenu) return;
+    if (event.getRepeatCount() > 0) return; // Do not acquire an orphan repeat after an IME/mode transition.
+    if (ownedKeys.size >= 64) ownedKeys.clear();
+    ownedKeys.add(token);
+    params.returnResult = true; // Synchronous native consumption, independent of the JS callback return.
+    deliverRemote(key, code, 0);
+  }
+}
+const windowCallback = new QtTvWindowCallback();
+function applyPresentation(activity: Activity): void {
+  if (!presentationEnabled || activity.isFinishing() || activity.isDestroyed()) return;
+  const device = deviceFor(activity);
+  if (!device.television && !device.leanback) return;
+  if (!orientations.has(activity)) orientations.set(activity, activity.getRequestedOrientation().toDouble());
+  if (activity.getRequestedOrientation() != ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE) {
+    activity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+  }
+}
+class QtTvLifeCallback extends UniActivityLifeCycleCallback {
+  constructor() { super(); }
+  override onResume(params: UniActivityParams): void {
+    const activity = params.activity;
+    if (activity != null) applyPresentation(activity);
+  }
+  override onPause(params: UniActivityParams): void {
+    const activity = params.activity;
+    if (activity == null) return;
+    if (ringDecor == activity.getWindow().getDecorView()) clearRing();
+    if (editorDecor == activity.getWindow().getDecorView()) detachEditorWatch();
+  }
+  override onDestroy(params: UniActivityParams): void {
+    const activity = params.activity;
+    if (activity == null) return;
+    orientations.delete(activity);
+    const scope = candidateScope;
+    if (scope != null && scope.getAndroidActivity() == activity) {
+      candidateElements.clear(); candidateScope = null; clearRing();
+    }
+  }
+}
+const lifeCallback = new QtTvLifeCallback();
+function syncLifecycle(): void {
+  const needed = remoteHandler != null || presentationEnabled;
+  if (needed && !lifeRegistered) { UTSAndroid.onActivityCallback(lifeCallback, null); lifeRegistered = true; }
+  if (!needed && lifeRegistered) { UTSAndroid.offActivityCallback(lifeCallback); lifeRegistered = false; }
+}
+function resolveScope(root: UniElement | null): UniElement | null {
+  if (root != null) return root;
+  // Native page body is an element; UniPageBody is only its geometry and is not used here.
+  const activity = currentActivity();
+  if (!(activity instanceof UniPageActivity)) return null;
+  const page = (activity as UniPageActivity).page;
+  return page != null ? page.bodyElement : null;
+}
+function inputElement(element: UniElement): boolean {
+  const tag = element.tagName.toLowerCase();
+  return tag == "input" || tag == "textarea";
+}
+function attributeDisabled(element: UniElement): boolean {
+  const value = element.getAnyAttribute("disabled");
+  return value == true || value == "true" || value == "disabled";
+}
+function concealed(element: UniElement): boolean {
+  return !element.isConnected || element.style.getPropertyValue("display") == "none" || element.style.getPropertyValue("visibility") == "hidden" || element.style.getPropertyValue("opacity") == "0";
+}
+function inScope(element: UniElement, scope: UniElement): boolean {
+  let cursor: UniElement | null = element;
+  let depth = 0;
+  while (cursor != null && depth < 96) { if (cursor == scope) return true; cursor = cursor.parentElement; depth++; }
+  return false;
+}
+function stableId(element: UniElement): string {
+  const custom = element.dataset.get("qtTvId");
+  const page = element.uniPage;
+  const prefix = "tv:" + page.appId.toString() + ":" + page.pageId.toString() + ":";
+  if (custom != null && custom.toString().length > 0) return prefix + "custom:" + custom.toString();
+  return prefix + "node:" + element.getNodeId().toString();
+}
+function canTap(element: UniElement): boolean {
+  return CEventManager.hasElementEventListener(element, "tap") || CEventManager.hasElementEventListener(element, "click");
+}
+function canLongPress(element: UniElement): boolean { return CEventManager.hasElementEventListener(element, "longpress"); }
+function scrollContainer(element: UniElement): boolean {
+  const tag = element.tagName.toLowerCase();
+  return tag == "scroll-view" || tag == "list-view" || tag == "swiper" || tag == "nested-scroll-body";
+}
+function readonlyScrollTarget(element: UniElement): boolean {
+  return element.classList.includes("qt-tv-scroll") && scrollContainer(element);
+}
+function scrollGroupFor(element: UniElement, scope: UniElement): string {
+  let ancestor: UniElement | null = readonlyScrollTarget(element) ? element : element.parentElement;
+  let depth = 0;
+  while (ancestor != null && depth < 96) {
+    if (!inScope(ancestor, scope)) break;
+    if (scrollContainer(ancestor)) return stableId(ancestor);
+    if (ancestor == scope) break;
+    ancestor = ancestor.parentElement; depth++;
+  }
+  return "";
+}
+/** Scope rect intersected with the decor viewport; the cheap phase-2 prefilter bound. */
+function scopeViewport(scope: UniElement): DOMRect | null {
+  if (concealed(scope)) return null;
+  const activity = scope.getAndroidActivity();
+  if (activity == null) return null;
+  const density = activity.getResources().getDisplayMetrics().density.toDouble();
+  const decor = activity.getWindow().getDecorView();
+  const scopeRect = scope.getBoundingClientRect();
+  const left = Math.max(scopeRect.left, 0);
+  const top = Math.max(scopeRect.top, 0);
+  const right = Math.min(scopeRect.right, decor.getWidth().toDouble() / density);
+  const bottom = Math.min(scopeRect.bottom, decor.getHeight().toDouble() / density);
+  if (right <= left || bottom <= top) return null;
+  return new DOMRect(left, top, right - left, bottom - top);
+}
+/** Logical viewport clipping, including explicit sheet roots and scroll ancestors. */
+function clippedRect(element: UniElement, scope: UniElement): DOMRect | null {
+  if (concealed(element)) return null;
+  const base = scopeViewport(scope);
+  if (base == null) return null;
+  const rect = element.getBoundingClientRect();
+  let left = Math.max(rect.left, base.left);
+  let top = Math.max(rect.top, base.top);
+  let right = Math.min(rect.right, base.right);
+  let bottom = Math.min(rect.bottom, base.bottom);
+  let parent = element.parentElement;
+  let depth = 0;
+  while (parent != null && parent != scope && depth < 96) {
+    if (concealed(parent)) return null;
+    if (scrollContainer(parent) || parent.style.getPropertyValue("overflow") == "hidden") {
+      const bounds = parent.getBoundingClientRect();
+      left = Math.max(left, bounds.left); top = Math.max(top, bounds.top);
+      right = Math.min(right, bounds.right); bottom = Math.min(bottom, bounds.bottom);
+    }
+    parent = parent.parentElement; depth++;
+  }
+  if (right <= left || bottom <= top) return null;
+  return new DOMRect(left, top, right - left, bottom - top);
+}
+function clearRing(): void {
+  const observer = ringObserver;
+  if (observer != null && observer.isAlive()) observer.removeOnPreDrawListener(ringPreDraw);
+  const decor = ringDecor;
+  const drawable = ringDrawable;
+  if (decor != null && drawable != null) decor.getOverlay().remove(drawable);
+  ringObserver = null; ringDecor = null; ringDrawable = null; highlightedId = "";
+}
+/** Calibrate DOM logical coordinates against a real ancestor, including status/window offsets. */
+function ringOffset(scope: UniElement, decor: View, density: number): number[] {
+  let anchor: UniElement | null = scope;
+  let depth = 0;
+  while (anchor != null && depth < 96) {
+    const view = anchor.getAndroidView<View>();
+    const rect = anchor.getBoundingClientRect();
+    if (view != null && Math.abs(view.getWidth().toDouble() / density - rect.width) < 2 && Math.abs(view.getHeight().toDouble() / density - rect.height) < 2) {
+      const xy = new IntArray(2); const decorXY = new IntArray(2);
+      view.getLocationOnScreen(xy); decor.getLocationOnScreen(decorXY);
+      return [xy[0].toDouble() - decorXY[0].toDouble() - rect.left * density, xy[1].toDouble() - decorXY[1].toDouble() - rect.top * density];
+    }
+    anchor = anchor.parentElement; depth++;
+  }
+  return [0, 0];
+}
+function updateRing(): void {
+  const scope = candidateScope; const decor = ringDecor; const drawable = ringDrawable;
+  const element = candidateElements.get(highlightedId);
+  if (scope == null || decor == null || drawable == null || element == null || !inScope(element, scope)) { clearRing(); return; }
+  const rect = clippedRect(element, scope);
+  if (rect == null) { drawable.setBounds(0, 0, 0, 0); return; }
+  const density = decor.getResources().getDisplayMetrics().density.toDouble();
+  const offset = ringOffset(scope, decor, density);
+  drawable.setBounds(Math.round(rect.left * density + offset[0]).toInt(), Math.round(rect.top * density + offset[1]).toInt(), Math.round(rect.right * density + offset[0]).toInt(), Math.round(rect.bottom * density + offset[1]).toInt());
+}
+class QtTvRingPreDraw implements ViewTreeObserver.OnPreDrawListener {
+  override onPreDraw(): boolean { try { updateRing(); } catch (error) { clearRing(); } return true; }
+}
+const ringPreDraw = new QtTvRingPreDraw();
+function findEditor(view: View | null, depth: number = 0): EditText | null {
+  if (view == null || depth > 24) return null;
+  if (view instanceof EditText) return view as EditText;
+  if (view instanceof ViewGroup) {
+    const group = view as ViewGroup;
+    for (let index = 0; index < group.getChildCount(); index++) {
+      const found = findEditor(group.getChildAt(index.toInt()), depth + 1);
+      if (found != null) return found;
+    }
+  }
+  return null;
+}
+function focusEditor(element: UniElement): void {
+  editorDismissed = false;
+  element.focus();
+  const editor = findEditor(element.getAndroidView<View>());
+  if (editor == null || !editor.isEnabled()) return;
+  const activity = currentActivity();
+  if (activity != null) watchEditor(activity, editor);
+  editor.requestFocus();
+  const manager = editor.getContext().getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager | null;
+  if (manager != null) manager.showSoftInput(editor, InputMethodManager.SHOW_IMPLICIT);
+}
+
+export function readTvDevice(): QtTvDevice { return deviceFor(UTSAndroid.getAppContext()); }
+@UTSJS.keepAlive
+export function startTvRemote(handler: QtTvRemoteHandler): void {
+  remoteGeneration++; remoteHandler = handler;
+  if (!keyRegistered) { UTSAndroid.onActivityCallback(windowCallback, null); keyRegistered = true; }
+  syncLifecycle();
+}
+export function setTvRemoteState(state: QtTvRemoteState): void {
+  if (remoteState.enabled && !state.enabled) remoteGeneration++;
+  const nextState: QtTvRemoteState = { enabled: state.enabled, captureBack: state.captureBack, captureMenu: state.captureMenu, editing: state.editing };
+  remoteState = nextState;
+  if (!state.enabled) onUi(() => { clearRing(); detachEditorWatch(); editorDismissed = false; });
+}
+export function stopTvRemote(): void {
+  remoteGeneration++; remoteHandler = null;
+  const nextState: QtTvRemoteState = { enabled: false, captureBack: false, captureMenu: false, editing: false };
+  remoteState = nextState;
+  if (keyRegistered) { UTSAndroid.offActivityCallback(windowCallback); keyRegistered = false; }
+  ownedKeys.clear(); candidateElements.clear(); candidateScope = null;
+  onUi(() => { clearRing(); detachEditorWatch(); editorDismissed = false; }); syncLifecycle();
+}
+/** Cheap scope-viewport prefilter; a miss can never hide a node that full clipping would keep. */
+function quickInView(element: UniElement, base: DOMRect): boolean {
+  const rect = element.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0 && rect.right > base.left && rect.left < base.right && rect.bottom > base.top && rect.top < base.bottom;
+}
+/** Phase-2 child expansion shares the leaf-skip rule; the queue keeps its own bound. */
+function expandVisible(element: UniElement, queue: UniElement[]): void {
+  const children = element.children;
+  for (let index = 0; index < children.length && queue.length < SCAN_LIMIT; index++) {
+    const child = children[index];
+    const tag = child.tagName.toLowerCase();
+    if ((tag == "text" || tag == "image") && child.children.length == 0 && !canTap(child) && !canLongPress(child)) continue;
+    queue.push(child);
+  }
+}
+/** Shared candidate publication for both scan phases; false means the subtree is concealed. */
+function visitCandidate(element: UniElement, scope: UniElement, registry: ConcurrentHashMap<string, UniElement>, out: QtTvCandidate[]): boolean {
+  if (concealed(element)) return false;
+  const rect = element.getBoundingClientRect();
+  const input = inputElement(element);
+  const longPress = canLongPress(element);
+  // Bare stop-propagation/frame targets are excluded, their business descendants are retained.
+  if (rect.width > 0 && rect.height > 0 && !element.classList.includes("qt-tv-skip") && (input || canTap(element) || longPress || readonlyScrollTarget(element))) {
+    const clip = clippedRect(element, scope);
+    if (clip != null) {
+      const view = element.getAndroidView<View>();
+      const id = stableId(element);
+      if (!registry.containsKey(id)) {
+        registry.put(id, element);
+        const candidate: QtTvCandidate = { id: id, left: rect.left, top: rect.top, width: rect.width, height: rect.height, visible: true, enabled: !attributeDisabled(element) && (view == null || view.isEnabled()), input: input, longPress: longPress, scrollGroup: scrollGroupFor(element, scope) };
+        out.push(candidate);
+      }
+    }
+  }
+  return true;
+}
+export function collectTvCandidates(root: UniElement | null): QtTvCandidate[] {
+  const result: QtTvCandidate[] = [];
+  const scope = resolveScope(root);
+  const nextElements = new ConcurrentHashMap<string, UniElement>();
+  if (scope == null || concealed(scope)) {
+    candidateScope = scope; candidateElements = nextElements;
+    onUi(() => { clearRing(); }); return result;
+  }
+  const queue: UniElement[] = [];
+  const deferred: QtTvScanResume[] = [];
+  const initial = scope.children;
+  let initialIndex = 0;
+  while (initialIndex < initial.length) {
+    if (queue.length >= SCAN_LIMIT) { deferred.push({ element: scope, index: initialIndex }); break; }
+    queue.push(initial[initialIndex]); initialIndex++;
+  }
+  // Breadth-first preserves later rail/dock siblings. Empty text/image leaves consume no layout budget.
+  let visited = 0; let cursor = 0; let inspectedChildren = 0;
+  while (cursor < queue.length && visited < SCAN_LIMIT) {
+    const element = queue[cursor]; cursor++; visited++;
+    if (!visitCandidate(element, scope, nextElements, result)) continue;
+    const children = element.children;
+    let childIndex = 0;
+    while (childIndex < children.length) {
+      if (queue.length >= SCAN_LIMIT || inspectedChildren >= SCAN_LIMIT * 8) { deferred.push({ element: element, index: childIndex }); break; }
+      const child = children[childIndex]; childIndex++; inspectedChildren++;
+      const tag = child.tagName.toLowerCase();
+      if ((tag == "text" || tag == "image") && child.children.length == 0 && !canTap(child) && !canLongPress(child)) continue;
+      queue.push(child);
+    }
+  }
+  // The fixed budget starves the visible tail of huge non-virtual lists. Phase 2
+  // completes exactly what the caps skipped: offscreen wrappers never consume the
+  // visible budget, so every refresh re-reaches the current viewport rows and
+  // offscreen/removed candidates from the previous pass are evicted by recompute.
+  if (cursor < queue.length || deferred.length > 0) {
+    const base = scopeViewport(scope);
+    if (base != null) {
+      let budget = SCAN_LIMIT * 16;
+      const phase2: UniElement[] = [];
+      let phase2Cursor = 0;
+      while (budget > 0 && cursor < queue.length) {
+        const element = queue[cursor]; cursor++; budget--;
+        if (!quickInView(element, base) || !visitCandidate(element, scope, nextElements, result)) continue;
+        expandVisible(element, phase2);
+      }
+      for (let deferredIndex = 0; deferredIndex < deferred.length && budget > 0; deferredIndex++) {
+        const resume = deferred[deferredIndex];
+        const children = resume.element.children;
+        while (resume.index < children.length && budget > 0) {
+          const child = children[resume.index]; resume.index++; budget--;
+          const tag = child.tagName.toLowerCase();
+          if ((tag == "text" || tag == "image") && child.children.length == 0 && !canTap(child) && !canLongPress(child)) continue;
+          if (!quickInView(child, base) || !visitCandidate(child, scope, nextElements, result)) continue;
+          expandVisible(child, phase2);
+        }
+      }
+      while (budget > 0 && phase2Cursor < phase2.length) {
+        const element = phase2[phase2Cursor]; phase2Cursor++; budget--;
+        if (!quickInView(element, base) || !visitCandidate(element, scope, nextElements, result)) continue;
+        expandVisible(element, phase2);
+      }
+    }
+  }
+  const changedScope = scope != candidateScope;
+  // Publish a completed registry; preDraw never sees a transient empty map on same-scope refresh.
+  candidateElements = nextElements; candidateScope = scope;
+  if (changedScope || (highlightedId.length > 0 && !nextElements.containsKey(highlightedId))) {
+    onUi(() => { if (changedScope || !candidateElements.containsKey(highlightedId)) clearRing(); });
+  }
+  return result;
+}
+export function highlightTvElement(id: string, color: string): void {
+  onUi(() => {
+    clearRing();
+    const scope = candidateScope; const element = candidateElements.get(id);
+    if (id.length == 0 || scope == null || element == null || clippedRect(element, scope) == null) return;
+    const activity = scope.getAndroidActivity();
+    if (activity == null) return;
+    const decor = activity.getWindow().getDecorView();
+    const density = decor.getResources().getDisplayMetrics().density.toDouble();
+    const drawable = new GradientDrawable();
+    let ringColor = Color.parseColor("#57BDD0");
+    try { ringColor = Color.parseColor(color); } catch (error) { /* 静默：非法焦点颜色沿用默认青色 */ }
+    drawable.setColor(Color.TRANSPARENT); drawable.setCornerRadius((8 * density).toFloat());
+    drawable.setStroke(Math.max(2, Math.round(3 * density)).toInt(), ringColor);
+    ringDecor = decor; ringDrawable = drawable; highlightedId = id;
+    decor.getOverlay().add(drawable);
+    const observer = decor.getViewTreeObserver(); ringObserver = observer;
+    observer.addOnPreDrawListener(ringPreDraw); updateRing();
+  });
+}
+export function activateTvElement(id: string, longPress: boolean = false): void {
+  const element = candidateElements.get(id); const scope = candidateScope;
+  if (element == null || scope == null || !inScope(element, scope) || attributeDisabled(element) || clippedRect(element, scope) == null) return;
+  onUi(() => {
+    try {
+      if (!element.isConnected || candidateScope != scope || !inScope(element, scope)) return;
+      if (readonlyScrollTarget(element)) return; // Focusable document viewport: OK never creates a business action.
+      if (inputElement(element)) { if (!longPress) focusEditor(element); return; }
+      if (longPress) { if (canLongPress(element)) element.dispatchEvent(new UniTouchEvent("longpress", [], [])); return; }
+      if (!canTap(element)) return;
+      const name = CEventManager.hasElementEventListener(element, "tap") ? "tap" : "click";
+      // Vapor @tap is a bridge event, not Android View.OnClickListener. Dispatch exactly once.
+      element.dispatchEvent(new UniTouchEvent(name, [], []));
+    } catch (error) { report("activate", error); }
+  });
+}
+export function scrollTvAncestor(id: string, direction: string): boolean {
+  const element = candidateElements.get(id); const scope = candidateScope;
+  if (element == null || scope == null || !inScope(element, scope)) return false;
+  const horizontal = direction == "left" || direction == "right";
+  if (!horizontal && direction != "up" && direction != "down") return false;
+  const sign = direction == "left" || direction == "up" ? -1 : 1;
+  let ancestor: UniElement | null = readonlyScrollTarget(element) ? element : element.parentElement; let depth = 0;
+  while (ancestor != null && depth < 96) {
+    if (!inScope(ancestor, scope)) break;
+    if (scrollContainer(ancestor)) {
+      const rect = ancestor.getBoundingClientRect();
+      const extent = horizontal ? ancestor.scrollWidth : ancestor.scrollHeight;
+      const viewport = horizontal ? rect.width : rect.height;
+      const before = horizontal ? ancestor.scrollLeft : ancestor.scrollTop;
+      const after = Math.max(0, Math.min(Math.max(0, extent - viewport), before + sign * viewport * 0.7));
+      if (viewport > 0 && Math.abs(after - before) >= 1) {
+        const target = ancestor;
+        onUi(() => { if (target.isConnected && candidateScope == scope) target.scrollTo(horizontal ? after : target.scrollLeft, horizontal ? target.scrollTop : after); });
+        return true;
+      }
+    }
+    if (ancestor == scope) break;
+    ancestor = ancestor.parentElement; depth++;
+  }
+  return false;
+}
+export function setTvPresentation(enabled: boolean): void {
+  presentationEnabled = enabled; syncLifecycle();
+  onUi(() => {
+    try {
+      if (enabled) { const activity = currentActivity(); if (activity != null) applyPresentation(activity); return; }
+      orientations.forEach((orientation: number, activity: Activity) => {
+        if (!activity.isFinishing() && !activity.isDestroyed()) activity.setRequestedOrientation(orientation.toInt());
+      });
+      orientations.clear();
+    } catch (error) { report("presentation", error); }
+  });
+}
+// Android 13 以下没有公开的返回分发器，androidx 自身的兜底也是调用这个弃用入口；
+// 仅静音这一个兼容函数，不屏蔽其余代码的弃用诊断（同 qt-audio-player dlna.uts 先例）。
+@Suppress("DEPRECATION")
+function activityLegacyBack(activity: Activity): void { activity.onBackPressed(); }
+export function performTvBack(): void {
+  onUi(() => { const activity = currentActivity(); if (activity != null && !activity.isFinishing()) activityLegacyBack(activity); });
+}

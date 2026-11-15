@@ -1,0 +1,373 @@
+/**
+ * iOS native audio facade. QtIOSAudio.swift is compiled with this plugin by
+ * HBuilderX's native Swift mixing support; only module functions cross to JS.
+ *
+ * AVPlayer + AVAudioSession own local playback. MPRemoteCommandCenter and
+ * MPNowPlayingInfoCenter supply background/lock-screen/headset controls.
+ */
+import type {
+	AudioPlayerVoidCallback, AudioPlayerTimeCallback, AudioPlayerErrorCallback,
+	AudioPlayerStateCallback, AudioPlaylistItem, AudioResolveRequestCallback,
+	AudioTrackChangedCallback, AudioRatingRequestCallback,
+	AudioDlnaState, AudioDlnaDevice, AudioDlnaDiscoverCallback,
+	AudioDlnaStateCallback, AudioDlnaResolveCallback,
+} from '../interface.uts'
+
+let cbPlay: AudioPlayerVoidCallback | null = null
+let cbPause: AudioPlayerVoidCallback | null = null
+let cbStop: AudioPlayerVoidCallback | null = null
+let cbEnded: AudioPlayerVoidCallback | null = null
+let cbCanplay: AudioPlayerVoidCallback | null = null
+let cbWaiting: AudioPlayerVoidCallback | null = null
+let cbTime: AudioPlayerTimeCallback | null = null
+let cbError: AudioPlayerErrorCallback | null = null
+let cbPrev: AudioPlayerVoidCallback | null = null
+let cbNext: AudioPlayerVoidCallback | null = null
+let cbResolve: AudioResolveRequestCallback | null = null
+let cbTrack: AudioTrackChangedCallback | null = null
+let cbRating: AudioRatingRequestCallback | null = null
+let nativeBound = false
+let dlnaBound = false
+let cbDlnaState: AudioDlnaStateCallback | null = null
+let cbDlnaResolve: AudioDlnaResolveCallback | null = null
+let lastItems: AudioPlaylistItem[] = []
+let lastIndex = -1
+let lastRepeat = 0
+let returnRevision = 0
+
+function matchingTimelineIndex(mediaId: string, preferred: number): number {
+	if (mediaId.length == 0) return -1
+	if (preferred >= 0 && preferred < lastItems.length && lastItems[preferred].mediaId == mediaId) return preferred
+	if (lastIndex >= 0 && lastIndex < lastItems.length && lastItems[lastIndex].mediaId == mediaId) return lastIndex
+	let selected = -1
+	let distance = 0
+	const anchor = preferred >= 0 ? preferred : Math.max(0, lastIndex)
+	for (let i = 0; i < lastItems.length; i++) {
+		if (lastItems[i].mediaId != mediaId) continue
+		const candidateDistance = Math.abs(i - anchor)
+		if (selected < 0 || candidateDistance < distance) {
+			selected = i
+			distance = candidateDistance
+		}
+	}
+	return selected
+}
+
+// A queue can contain the same mediaId more than once. Keep the occurrence
+// ordinal when insertions shift its index, then fall back to the closest item.
+function preserveTimelineOccurrence(previousItems: AudioPlaylistItem[], previous: number, items: AudioPlaylistItem[], mediaId: string): number {
+	if (previous >= 0 && previous < previousItems.length && previousItems[previous].mediaId == mediaId) {
+		let ordinal = 0
+		for (let i = 0; i <= previous; i++) {
+			if (previousItems[i].mediaId == mediaId) ordinal++
+		}
+		let occurrence = 0
+		for (let i = 0; i < items.length; i++) {
+			if (items[i].mediaId != mediaId) continue
+			occurrence++
+			if (occurrence == ordinal) return i
+		}
+	}
+	let selected = -1
+	let distance = 0
+	const anchor = previous >= 0 ? previous : 0
+	for (let i = 0; i < items.length; i++) {
+		if (items[i].mediaId != mediaId) continue
+		const candidateDistance = Math.abs(i - anchor)
+		if (selected < 0 || candidateDistance < distance) {
+			selected = i
+			distance = candidateDistance
+		}
+	}
+	return selected
+}
+
+function currentTimelineIndex(): number {
+	if (audioDlnaActive()) return parseFloat(QtIOSDLNA.shared.currentTimelineIndex())
+	return parseFloat(QtIOSAudio.shared.currentTimelineIndex())
+}
+
+function parseDlnaState(json: string): AudioDlnaState {
+	const raw = JSON.parse(json) as UTSJSONObject
+	return {
+		target: raw['target'] as string,
+		sessionId: raw['sessionId'] as number,
+		generation: raw['generation'] as number,
+		deviceId: raw['deviceId'] as string,
+		deviceName: raw['deviceName'] as string,
+		phase: raw['phase'] as string,
+		mediaId: raw['mediaId'] as string,
+		positionMs: raw['positionMs'] as number,
+		durationMs: raw['durationMs'] as number,
+		volume: raw['volume'] as number,
+		canSeek: raw['canSeek'] as boolean,
+		canSetVolume: raw['canSetVolume'] as boolean,
+		error: raw['error'] as string,
+	}
+}
+
+function dlnaStateEvent(json: string): void {
+	const state = parseDlnaState(json)
+	const selected = matchingTimelineIndex(state.mediaId, parseFloat(QtIOSDLNA.shared.currentTimelineIndex()))
+	if (selected >= 0) lastIndex = selected
+	cbDlnaState?.(state)
+}
+function dlnaResolveEvent(mediaId: string, generation: string, refresh: boolean): void {
+	cbDlnaResolve?.(mediaId, parseFloat(generation), refresh)
+}
+function dlnaTrackEvent(mediaId: string, natural: boolean): void {
+	const selected = matchingTimelineIndex(mediaId, parseFloat(QtIOSDLNA.shared.currentTimelineIndex()))
+	if (selected >= 0) lastIndex = selected
+	cbTrack?.(mediaId, natural)
+}
+
+function remoteCommand(command: string, value: string): void {
+	if (command != 'volume') returnRevision++
+	switch (command) {
+		case 'play': QtIOSDLNA.shared.play(); break
+		case 'pause': QtIOSDLNA.shared.pause(); break
+		case 'toggle':
+			if (QtIOSDLNA.shared.isIntendingToPlay()) QtIOSDLNA.shared.pause()
+			else QtIOSDLNA.shared.play()
+			break
+		case 'stop': QtIOSDLNA.shared.stop(); break
+		case 'seek': QtIOSDLNA.shared.seek(value); break
+		case 'volume': QtIOSDLNA.shared.setVolume(value); break
+		case 'prev':
+			if (cbPrev != null) cbPrev?.(); else remoteMove(-1)
+			break
+		case 'next':
+			if (cbNext != null) cbNext?.(); else remoteMove(1)
+			break
+	}
+}
+function remoteMove(offset: number): void {
+	let selected = lastIndex + offset
+	if (selected < 0 || selected >= lastItems.length) {
+		if (lastRepeat != 2 || lastItems.length == 0) return
+		selected = (selected + lastItems.length) % lastItems.length
+	}
+	QtIOSDLNA.shared.playTimelineIndex(selected.toString())
+}
+function bindDlna(): void {
+	if (dlnaBound) return
+	dlnaBound = true
+	QtIOSAudio.shared.setRemoteCommandListener(remoteCommand)
+	QtIOSDLNA.shared.setListeners(dlnaStateEvent, dlnaResolveEvent, dlnaTrackEvent)
+}
+
+function nativeEvent(event: string, mediaId: string, value: string, extra: string, flag: boolean): void {
+	switch (event) {
+		case 'play': cbPlay?.(); break
+		case 'pause': cbPause?.(); break
+		case 'stop': cbStop?.(); break
+		case 'ended': cbEnded?.(); break
+		case 'canplay': cbCanplay?.(); break
+		case 'waiting': cbWaiting?.(); break
+		case 'timeupdate': cbTime?.(parseFloat(value), parseFloat(extra)); break
+		case 'error': cbError?.(value); break
+		case 'resolve': cbResolve?.(mediaId); break
+		case 'trackchanged':
+			const selected = matchingTimelineIndex(mediaId, parseFloat(QtIOSAudio.shared.currentTimelineIndex()))
+			if (selected >= 0) lastIndex = selected
+			cbTrack?.(mediaId, flag)
+			break
+		case 'rating': cbRating?.(mediaId, flag); break
+		case 'prev':
+			if (cbPrev != null) cbPrev?.(); else QtIOSAudio.shared.previous()
+			break
+		case 'next':
+			if (cbNext != null) cbNext?.(); else QtIOSAudio.shared.next()
+			break
+	}
+}
+
+function bindNative(): void {
+	if (nativeBound) return
+	nativeBound = true
+	QtIOSAudio.shared.setEventListener(nativeEvent)
+}
+
+export function ensureNotificationPermission(onGranted: (granted: boolean) => void): void {
+	QtIOSAudio.shared.requestNotificationPermission(onGranted)
+}
+export function audioPlay(): void { returnRevision++; bindNative(); QtIOSAudio.shared.play() }
+export function audioPause(): void { returnRevision++; bindNative(); QtIOSAudio.shared.pause() }
+export function audioStop(): void { returnRevision++; bindNative(); QtIOSAudio.shared.stop() }
+export function audioSeek(seconds: number): void { returnRevision++; bindNative(); QtIOSAudio.shared.seek(seconds.toString()) }
+export function audioSetSrc(url: string): void { returnRevision++; QtIOSAudio.shared.setSource(url) }
+export function audioSetTitle(title: string): void { QtIOSAudio.shared.setTitle(title) }
+export function audioSetSinger(singer: string): void { QtIOSAudio.shared.setArtist(singer) }
+export function audioSetAlbum(album: string): void { QtIOSAudio.shared.setAlbum(album) }
+export function audioSetCover(url: string): void { QtIOSAudio.shared.setCover(url) }
+export function audioGetCurrentTime(): number { return parseFloat(QtIOSAudio.shared.currentTime()) }
+export function audioSetCacheLimit(mb: number): void { QtIOSAudio.shared.setCacheLimit(mb.toString()) }
+export function audioSetConcurrentMode(mode: number): void { QtIOSAudio.shared.setConcurrentMode(mode.toString()) }
+export function audioSetSpeed(speed: number): void { QtIOSAudio.shared.setSpeed(speed.toString()) }
+export function audioSetVolume(volume: number): void { QtIOSAudio.shared.setVolume(volume.toString()) }
+export function audioClearCache(): boolean { return QtIOSAudio.shared.clearCache() }
+export function audioCacheSize(): number { return parseFloat(QtIOSAudio.shared.cacheSize()) }
+export function audioSetEqualizerEnabled(on: boolean): void { QtIOSAudio.shared.setEqualizerEnabled(on) }
+export function audioSetEqualizerBands(levelsDb: number[]): void { QtIOSAudio.shared.setEqualizerBands(JSON.stringify(levelsDb)) }
+export function audioPostNotice(title: string, body: string): void { QtIOSAudio.shared.postNotice(title, body) }
+export function audioOnPlay(callback: AudioPlayerVoidCallback | null): void { cbPlay = callback; bindNative() }
+export function audioOnPause(callback: AudioPlayerVoidCallback | null): void { cbPause = callback; bindNative() }
+export function audioOnStop(callback: AudioPlayerVoidCallback | null): void { cbStop = callback; bindNative() }
+export function audioOnEnded(callback: AudioPlayerVoidCallback | null): void { cbEnded = callback; bindNative() }
+export function audioOnCanplay(callback: AudioPlayerVoidCallback | null): void { cbCanplay = callback; bindNative() }
+export function audioOnWaiting(callback: AudioPlayerVoidCallback | null): void { cbWaiting = callback; bindNative() }
+export function audioOnTimeUpdate(callback: AudioPlayerTimeCallback | null): void { cbTime = callback; bindNative() }
+export function audioOnError(callback: AudioPlayerErrorCallback | null): void { cbError = callback; bindNative() }
+export function audioOnPrev(callback: AudioPlayerVoidCallback | null): void { cbPrev = callback; bindNative() }
+export function audioOnNext(callback: AudioPlayerVoidCallback | null): void { cbNext = callback; bindNative() }
+
+// iOS does not expose arbitrary application overlay windows. These controls
+// remain no-ops while capability/permission queries explicitly return false.
+export function audioLyricHasOverlayPermission(): boolean { return false }
+export function audioLyricRequestOverlayPermission(): boolean { return false }
+export function audioLyricShow(): boolean { return false }
+export function audioLyricHide(): void {}
+export function audioLyricUpdate(line: string, translation: string): void {}
+export function audioLyricSetLocked(locked: boolean): void {}
+export function audioLyricSetFontSp(main: number, tr: number): void {}
+export function audioLyricSetTextColor(color: number): void {}
+export function audioLyricSetTypeface(index: number): void {}
+export function audioLyricSetWidth(pct: number): void {}
+export function audioLyricSetStroke(enabled: boolean, width: number): void {}
+export function audioLyricSetShadow(enabled: boolean): void {}
+export function audioLyricSetAlign(align: string): void {}
+export function audioLyricSetBackground(mode: string, colorArgb: number, opacity: number): void {}
+export function audioSetPlaylist(items: AudioPlaylistItem[], startIndex: number, autoPlay: boolean, startPositionSec: number): void {
+	returnRevision++
+	bindNative()
+	lastItems = items.slice()
+	lastIndex = items.length > 0 ? Math.max(0, Math.min(items.length - 1, startIndex)) : -1
+	if (audioDlnaActive()) QtIOSDLNA.shared.setPlaylist(JSON.stringify(items), startIndex.toString(), autoPlay, startPositionSec.toString())
+	else QtIOSAudio.shared.setPlaylist(JSON.stringify(items), startIndex.toString(), autoPlay, startPositionSec.toString())
+}
+export function audioPlayTimelineIndex(index: number): void {
+	returnRevision++
+	bindNative()
+	if (index < 0 || index >= lastItems.length) return
+	lastIndex = index
+	if (audioDlnaActive()) QtIOSDLNA.shared.playTimelineIndex(index.toString())
+	else QtIOSAudio.shared.playTimelineIndex(index.toString())
+}
+export function audioSetRepeatMode(mode: number): void {
+	lastRepeat = mode
+	QtIOSAudio.shared.setRepeatMode(mode.toString())
+	QtIOSDLNA.shared.setRepeatMode(mode.toString())
+}
+export function audioCurrentMediaId(): string { return QtIOSAudio.shared.currentMediaID() }
+export function audioTimelineSize(): number {
+	if (audioDlnaActive()) return parseFloat(QtIOSDLNA.shared.timelineSize())
+	return parseFloat(QtIOSAudio.shared.timelineSize())
+}
+export function audioSyncTimeline(items: AudioPlaylistItem[], expectedCurrentMid: string): void {
+	if (audioCurrentMediaId() != expectedCurrentMid || expectedCurrentMid.length == 0) return
+	const previous = matchingTimelineIndex(expectedCurrentMid, currentTimelineIndex())
+	const selected = preserveTimelineOccurrence(lastItems, previous, items, expectedCurrentMid)
+	if (selected < 0) return
+	lastItems = items.slice()
+	lastIndex = selected
+	if (audioDlnaActive()) QtIOSDLNA.shared.syncTimeline(JSON.stringify(items), expectedCurrentMid)
+	else QtIOSAudio.shared.syncTimeline(JSON.stringify(items), expectedCurrentMid)
+}
+export function audioEvictSongCache(mediaId: string): boolean { return QtIOSAudio.shared.evictSongCache(mediaId) }
+export function audioOnResolveRequest(callback: AudioResolveRequestCallback | null): void { cbResolve = callback; bindNative() }
+export function audioResolveDone(mediaId: string, url: string): void { QtIOSAudio.shared.resolveDone(mediaId, url) }
+export function audioResolveFail(mediaId: string): void { QtIOSAudio.shared.resolveFailed(mediaId) }
+export function audioOnTrackChanged(callback: AudioTrackChangedCallback | null): void { cbTrack = callback; bindNative() }
+export function audioResume(): void { audioPlay() }
+export function audioIsIntendingToPlay(): boolean {
+	if (audioDlnaActive()) return QtIOSDLNA.shared.isIntendingToPlay()
+	return QtIOSAudio.shared.isIntendingToPlay()
+}
+export function audioOnLyricWindowChanged(callback: AudioPlayerStateCallback | null): void {}
+export function audioLyricIsShowing(): boolean { return false }
+export function audioLyricSetLrc(lrc: string): void {}
+export function audioOnSetRating(callback: AudioRatingRequestCallback | null): void { cbRating = callback; bindNative() }
+export function audioSetLiked(mediaId: string, liked: boolean): void { QtIOSAudio.shared.setLiked(mediaId, liked) }
+export function audioMonotonicTime(): number { return parseFloat(QtIOSAudio.shared.monotonicTime()) }
+export function audioSetCarLyric(text: string): void {}
+export function audioSetFloatOutput(on: boolean): void {}
+export function audioSetPreferSoftwareDecoder(on: boolean): void {}
+export function audioSetEnhanceEnabled(on: boolean): void { QtIOSAudio.shared.setEnhanceEnabled(on) }
+export function audioSetEnhanceGain(gainMb: number): void { QtIOSAudio.shared.setEnhanceGain(gainMb.toString()) }
+export function audioSetCarLyricMode(mode: number): void {}
+export function audioCarLyricToken(): number { return 0 }
+export function audioSetCarLyricFor(mediaId: string, token: number, text: string, offsetMs: number): void {}
+export function audioSetCarLyricOffset(mediaId: string, token: number, offsetMs: number): void {}
+export function audioSetTrackCover(mediaId: string, cover: string): void { QtIOSAudio.shared.setTrackCover(mediaId, cover) }
+export function audioPreloadTrack(uri: string): void { bindNative(); QtIOSAudio.shared.preloadTrack(uri) }
+export function audioSetWidgetTheme(dark: boolean, accent: string): void {}
+
+export function audioDlnaSupported(): boolean { return true }
+export function audioDlnaActive(): boolean { return QtIOSDLNA.shared.isActive() }
+export function audioDlnaState(): AudioDlnaState { return parseDlnaState(QtIOSDLNA.shared.state()) }
+export function audioDlnaDiscover(callback: AudioDlnaDiscoverCallback): void {
+	bindNative()
+	bindDlna()
+	QtIOSDLNA.shared.discover((json: string, error: string): void => {
+		const raw = JSON.parse(json) as UTSJSONObject[]
+		const devices: AudioDlnaDevice[] = []
+		raw.forEach((item: UTSJSONObject): void => {
+			devices.push({
+				id: item['id'] as string, name: item['name'] as string,
+				canSeek: item['canSeek'] as boolean, canSetVolume: item['canSetVolume'] as boolean,
+			})
+		})
+		callback(devices, error)
+	})
+}
+export function audioDlnaOnState(callback: AudioDlnaStateCallback | null): void { cbDlnaState = callback; bindDlna() }
+export function audioDlnaOnResolveRequest(callback: AudioDlnaResolveCallback | null): void { cbDlnaResolve = callback; bindDlna() }
+export function audioDlnaResolveDone(mediaId: string, uri: string, referer: string, generation: number): void {
+	QtIOSDLNA.shared.resolveDone(mediaId, uri, referer, generation.toString())
+}
+export function audioDlnaResolveFail(mediaId: string, generation: number): void {
+	QtIOSDLNA.shared.resolveFailed(mediaId, generation.toString())
+}
+export function audioDlnaConnect(id: string): boolean {
+	returnRevision++
+	bindNative()
+	bindDlna()
+	const position = audioGetCurrentTime()
+	const mediaId = audioCurrentMediaId()
+	const autoPlay = audioIsIntendingToPlay()
+	const selected = matchingTimelineIndex(mediaId, currentTimelineIndex())
+	if (!QtIOSDLNA.shared.connect(id)) return false
+	if (lastItems.length > 0) {
+		const index = selected >= 0 ? selected : Math.max(0, lastIndex)
+		lastIndex = index
+		QtIOSDLNA.shared.setPlaylist(JSON.stringify(lastItems), index.toString(), autoPlay, position.toString())
+		QtIOSDLNA.shared.setRepeatMode(lastRepeat.toString())
+	}
+	return true
+}
+export function audioDlnaDisconnect(returnToLocal: boolean): void {
+	const state = audioDlnaState()
+	const autoPlay = audioIsIntendingToPlay()
+	const previous = matchingTimelineIndex(state.mediaId, parseFloat(QtIOSDLNA.shared.currentTimelineIndex()))
+	const previousItems = lastItems.slice()
+	const revision = ++returnRevision
+	QtIOSDLNA.shared.disconnect((stopped: boolean): void => {
+		if (!returnToLocal || !stopped || revision != returnRevision || audioDlnaActive()) return
+		const selected = preserveTimelineOccurrence(previousItems, previous, lastItems, state.mediaId)
+		if (selected < 0) return
+		audioSetPlaylist(lastItems, selected, autoPlay, state.positionMs / 1000)
+		audioSetRepeatMode(lastRepeat)
+	})
+}
+// iOS-only capability: actual PCM processing, false during DLNA/failed tap.
+export function audioEffectsSupported(): boolean { return QtIOSAudio.shared.effectsSupported() }
+// Called before local resolveDone by the iOS service branch.
+export function audioSetResolveReferer(mediaId: string, referer: string): void {
+	QtIOSAudio.shared.setResolveReferer(mediaId, referer)
+}
+// Source preferences invalidate unresolved addresses/prefetches, while the
+// existing playback intent and a confirmed return-to-local receipt stay valid.
+export function audioInvalidateSourcePolicy(): void {
+	QtIOSAudio.shared.invalidateSourcePolicy()
+	QtIOSDLNA.shared.invalidateSourcePolicy()
+}

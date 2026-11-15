@@ -40,6 +40,11 @@ import { http } from '@kit.NetworkKit'
 import { fileIo } from '@kit.CoreFileKit'
 import { notificationManager } from '@kit.NotificationKit'
 import { BusinessError } from '@kit.BasicServicesKit'
+import {
+	dlnaActive, dlnaState, dlnaIntendingToPlay, dlnaDiscover, dlnaConnect, dlnaDisconnect,
+	dlnaOnState, dlnaOnResolve, dlnaOnNativeState, dlnaOnEnded, dlnaLoad,
+	dlnaResolveDone, dlnaResolveFailed, dlnaPlay, dlnaPause, dlnaStop, dlnaSeek, dlnaSetVolume,
+} from './dlna.uts'
 
 import type {
 	AudioPlayerVoidCallback,
@@ -51,6 +56,10 @@ import type {
 	AudioResolveRequestCallback,
 	AudioTrackChangedCallback,
 	AudioRatingRequestCallback,
+	AudioDlnaState,
+	AudioDlnaDiscoverCallback,
+	AudioDlnaStateCallback,
+	AudioDlnaResolveCallback,
 } from '../interface.uts'
 
 // ==================== 常量 ====================
@@ -159,6 +168,12 @@ function buildMetadata(assetId: string, title: string, artist: string, album: st
 // ==================== 模块级状态 ====================
 
 let gPlayer: media.AVPlayer | null = null
+/** 在异步 createAVPlayer 完成前切换到 DLNA/停止时，旧创建回执必须释放自己。 */
+let gPlayerEpoch = 0
+/** 新播放操作撤销断开投屏后尚在等待远端 Stop 的本地恢复请求。 */
+let gDlnaReturnRevision = 0
+/** 断开但未立即恢复时，下次播放沿用投屏曲目/队列/位置。 */
+let gDlnaDetached = false
 /** 播放器创建中的 in-flight 标志。createAVPlayer 是异步的，没有这个标志时
  *  audioSetPlaylist 的 ensurePlayer 与紧随其后的 loadIndex→startLoad→ensurePlayer
  *  会在同一次 JS 调用里并发建出两个播放器：后者覆盖 gPlayer，前者从此无人引用，
@@ -339,6 +354,11 @@ function fireError(message: string): void {
 function fireTimeUpdate(): void {
 	const cb = cbTime
 	if (cb == null) return
+	if (dlnaActive()) {
+		const state = dlnaState()
+		if (state.mediaId.length > 0) cb(state.positionMs / 1000.0, state.durationMs / 1000.0)
+		return
+	}
 	const p = gPlayer
 	if (p == null) return
 	let position = 0.0
@@ -557,6 +577,11 @@ function bindSessionListeners(session: avSession.AVSession): void {
 		session.on('skipToQueueItem', (itemId: number) => {
 			const idx = Math.round(itemId)
 			if (idx < 0 || idx >= gItems.length) return
+			if (dlnaActive()) {
+				if (idx == gIndex) dlnaSeek(0)
+				else loadIndex(idx, 0.0, true, false)
+				return
+			}
 			if (idx == gIndex) {
 				// 点的是当前这首 = 从头重播（与 media3 seekToDefaultPosition 一致）。
 				// completed 状态走 playInternal：audioSeek 的状态闸门会拦掉 completed
@@ -595,6 +620,7 @@ function bindSessionListeners(session: avSession.AVSession): void {
 }
 
 function currentSeconds(): number {
+	if (dlnaActive()) return dlnaState().positionMs / 1000.0
 	const p = gPlayer
 	if (p == null) return 0.0
 	try {
@@ -883,7 +909,13 @@ function applySessionPlaybackState(): void {
 	if (session == null) return
 	const p = gPlayer
 	let state = avSession.PlaybackState.PLAYBACK_STATE_STOP
-	if (p != null) {
+	if (dlnaActive()) {
+		const cast = dlnaState()
+		if (cast.phase == 'playing') state = avSession.PlaybackState.PLAYBACK_STATE_PLAY
+		else if (cast.phase == 'loading' || cast.phase == 'buffering') state = avSession.PlaybackState.PLAYBACK_STATE_PREPARE
+		else if (cast.phase == 'paused' || cast.phase == 'connected') state = avSession.PlaybackState.PLAYBACK_STATE_PAUSE
+		else if (cast.phase == 'error') state = avSession.PlaybackState.PLAYBACK_STATE_ERROR
+	} else if (p != null) {
 		const raw = p.state
 		if (raw == 'playing') {
 			state = avSession.PlaybackState.PLAYBACK_STATE_PLAY
@@ -905,7 +937,7 @@ function applySessionPlaybackState(): void {
 				elapsedTime: currentSeconds() * 1000.0,
 				updateTime: new Date().getTime(),
 			},
-			speed: gPlaybackSpeed,
+			speed: dlnaActive() ? (dlnaState().phase == 'playing' ? 1 : 0) : gPlaybackSpeed,
 			duration: gDurationMs,
 			loopMode: sessionLoopMode(),
 			// 系统据此高亮「当前在播的是队列里哪一条」。这里必须用**绝对下标**，
@@ -1160,10 +1192,17 @@ function publishNotice(id: number, title: string, body: string): void {
  *  （与 ensureSession 的 gSessionCreating 同一套做法；ArkTS 的 GC 与 V8 不同，这类
  *   脱管原生对象比在浏览器里危险得多。） */
 function ensurePlayer(): void {
-	if (gPlayer != null || gPlayerCreating) return
+	if (dlnaActive() || gPlayer != null || gPlayerCreating) return
 	gPlayerCreating = true
+	const epoch = gPlayerEpoch
 	try {
 		media.createAVPlayer((err: BusinessError, player: media.AVPlayer) => {
+			if (epoch != gPlayerEpoch || dlnaActive()) {
+				if (player != null) {
+					try { player.release() } catch (e) { /* 静默：过期创建的播放器只负责释放自己。 */ }
+				}
+				return
+			}
 			// 无论成败都要先放开闸门，否则一次创建失败会让播放器永久建不出来
 			gPlayerCreating = false
 			if (err != null && err.code != 0) {
@@ -1190,6 +1229,7 @@ function ensurePlayer(): void {
 
 /** 赋 url：AVPlayer 只允许在 idle 状态设置 url，否则必须先 reset（异步回 idle） */
 function setPlayerUrl(player: media.AVPlayer, uri: string): void {
+	if (dlnaActive() || gPlayer != player) return
 	try {
 		if (player.state == 'idle') {
 			player.url = uri
@@ -1205,17 +1245,21 @@ function setPlayerUrl(player: media.AVPlayer, uri: string): void {
 
 function attachPlayerListeners(player: media.AVPlayer): void {
 	player.on('stateChange', (state: media.AVPlayerState, reason: media.StateChangeReason) => {
+		if (dlnaActive() || gPlayer != player) return
 		onStateChange(player, state)
 	})
 	player.on('error', (err: BusinessError) => {
+		if (dlnaActive() || gPlayer != player) return
 		// 鸿蒙错误码分段与安卓不同，这里只保证「有错必报」：JS 侧的错误策略
 		// （重取地址 → 有限次自动切歌 → 超限暂停提示）只依赖「收到错误」这一事实
 		fireError('播放出错: code=' + err.code.toString() + ' msg=' + err.message)
 	})
 	player.on('timeUpdate', (time: number) => {
+		if (dlnaActive() || gPlayer != player) return
 		fireTimeUpdate()
 	})
 	player.on('durationUpdate', (duration: number) => {
+		if (dlnaActive() || gPlayer != player) return
 		gDurationMs = duration
 		applySessionMetadata()
 	})
@@ -1223,6 +1267,7 @@ function attachPlayerListeners(player: media.AVPlayer): void {
 	// 回调为 (infoType: BufferingInfoType, value: number)，共三档 START/END/PERCENT。
 	// PERCENT 只用于展示缓冲进度，本播放器不画进度条，忽略即可（不能落进 else 误发 canplay）。
 	player.on('bufferingUpdate', (infoType: media.BufferingInfoType, value: number) => {
+		if (dlnaActive() || gPlayer != player) return
 		if (infoType == media.BufferingInfoType.BUFFERING_START) {
 			fireWaiting()
 		} else if (infoType == media.BufferingInfoType.BUFFERING_END) {
@@ -1232,12 +1277,15 @@ function attachPlayerListeners(player: media.AVPlayer): void {
 	// 音频焦点：耳机/蓝牙媒体键与「别的应用抢焦点」都由系统在这里回派。
 	// 同时播放模式的三档语义与安卓端一致（0 独占 / 1 让路压低 / 2 永不打断）。
 	player.on('audioInterrupt', (info: audio.InterruptEvent) => {
+		if (dlnaActive() || gPlayer != player) return
 		onAudioInterrupt(info)
 	})
 	player.on('seekDone', (seekDoneTime: number) => {
+		if (dlnaActive() || gPlayer != player) return
 		applySessionPlaybackState()
 	})
 	player.on('speedDone', (speed: number) => {
+		if (dlnaActive() || gPlayer != player) return
 		applySessionPlaybackState()
 	})
 }
@@ -1403,6 +1451,12 @@ function seekTo(player: media.AVPlayer, targetMs: number): void {
 
 /** 播放意图置位并出声（prepared/paused 状态直接 play；completed 走重载） */
 function playInternal(): void {
+	if (dlnaActive()) {
+		gDlnaReturnRevision++
+		gIntendPlay = true
+		dlnaPlay()
+		return
+	}
 	const p = gPlayer
 	if (p == null) {
 		ensurePlayer()
@@ -1545,9 +1599,22 @@ function directUriOf(item: AudioPlaylistItem): string {
  */
 function loadIndex(index: number, positionSec: number, autoPlay: boolean, naturalEnd: boolean): void {
 	if (index < 0 || index >= gItems.length) return
+	gDlnaReturnRevision++
+	gDlnaDetached = false
 	gIndex = index
 	const item = gItems[index]
 	gLoadedMediaId = item.mediaId
+	if (dlnaActive()) {
+		gIntendPlay = autoPlay
+		gDurationMs = Math.max(0, (item.duration ?? 0) * 1000)
+		const revision = gDlnaReturnRevision
+		ensureSession()
+		applySessionMetadata()
+		fireTrackChanged(item.mediaId, naturalEnd)
+		if (revision != gDlnaReturnRevision || !dlnaActive()) return
+		dlnaLoad(item, positionSec * 1000, autoPlay)
+		return
+	}
 	// 元数据先落会话：即使地址还在解析/建连，锁屏与通知栏也已经显示正确曲目
 	applySessionMetadata()
 	fireTrackChanged(item.mediaId, naturalEnd)
@@ -1561,6 +1628,7 @@ function loadIndex(index: number, positionSec: number, autoPlay: boolean, natura
 
 /** 真正把地址交给播放器：补上非队列路径的 gSrc 身份，便于单曲重复播放时走「恢复」分支 */
 function startLoad(uri: string, positionSec: number, autoPlay: boolean): void {
+	if (dlnaActive()) return
 	gPendingPositionSec = positionSec
 	gPendingAutoPlay = autoPlay
 	gAwaitPrepare = true
@@ -1644,6 +1712,12 @@ export function audioSetCover(url: string): void {
  * 队列路径的恢复播放请用 audioResume（与安卓端一致，那是两件事）。
  */
 export function audioPlay(): void {
+	gDlnaReturnRevision++
+	if (dlnaActive() && gIndex >= 0 && gIndex < gItems.length) {
+		gIntendPlay = true
+		dlnaPlay()
+		return
+	}
 	if (gSrc.length == 0) {
 		fireError('音频地址为空')
 		return
@@ -1671,6 +1745,8 @@ export function audioPlay(): void {
 		gAwaitPrepare = false
 		gPendingAutoPlay = false
 		gNextUri = ''
+		gPlayerEpoch++
+		gPlayer = null
 		try {
 			p.stop()
 		} catch (eStop) {
@@ -1704,6 +1780,12 @@ export function audioPlay(): void {
 
 /** 恢复播放（队列路径）：只置播放意图，不重新取址 */
 export function audioResume(): void {
+	gDlnaReturnRevision++
+	if (dlnaActive()) { gIntendPlay = true; dlnaPlay(); return }
+	if (gDlnaDetached && gIndex >= 0 && gIndex < gItems.length) {
+		loadIndex(gIndex, gPendingPositionSec, true, false)
+		return
+	}
 	const p = gPlayer
 	if (p == null) {
 		// 播放器还没建（进程刚起/刚 stop 过）：若旧单曲链路留有地址就按播放处理，
@@ -1729,6 +1811,7 @@ export function audioResume(): void {
 }
 
 export function audioPause(): void {
+	gDlnaReturnRevision++
 	// 用户主动暂停：清掉「焦点丢失自动续播」标记，避免焦点瞬时恢复后自己响起来
 	gPausedByFocusLoss = false
 	gIntendPlay = false
@@ -1737,6 +1820,7 @@ export function audioPause(): void {
 	// 「按了暂停反而开始播」）。这里在拿到播放器之前就清，p == null 的早退路径
 	// 同样要生效（冷启动首次播放时播放器往往还没建好）。
 	gPendingAutoPlay = false
+	if (dlnaActive()) { dlnaPause(); applySessionPlaybackState(); return }
 	const p = gPlayer
 	if (p == null) return
 	try {
@@ -1751,6 +1835,15 @@ export function audioPause(): void {
 
 /** 停止并释放：拆掉长时任务、会话与播放器（下次播放整体重建） */
 export function audioStop(): void {
+	gDlnaReturnRevision++
+	if (dlnaActive()) {
+		gIntendPlay = false; gPendingAutoPlay = false; gPausedByFocusLoss = false
+		dlnaStop(); stopBackgroundRunning(); applySessionPlaybackState(); fireStop()
+		return
+	}
+	gPlayerEpoch++
+	gPlayerCreating = false
+	gDlnaDetached = false
 	// 已经拆干净了（播放器、当前曲目、地址三者皆空）：跳过整套拆卸，但**照旧通知**
 	// JS 一次 stop —— 安卓端 nativeStop 每次都无条件 fireStop()，这里保持同一语义，
 	// 只省掉对已释放对象再调 stop/release、再跑一遍停任务与销毁会话的无谓开销。
@@ -1803,6 +1896,8 @@ export function audioStop(): void {
 }
 
 export function audioSeek(seconds: number): void {
+	gDlnaReturnRevision++
+	if (dlnaActive()) { dlnaSeek(Math.max(0, seconds) * 1000); return }
 	// 初载期间保留 seek 意图，prepared 后统一应用。
 	if (gIndex < 0) return
 	gPendingPositionSec = Math.max(0, seconds)
@@ -1826,6 +1921,7 @@ export function audioSeek(seconds: number): void {
 /** 原生是否「意图播放」：暂停=false；缓冲中同样不是 playing，但意图仍是 true。
  *  store 的状态对账探针靠这个区分「真暂停」和「缓冲中」。 */
 export function audioIsIntendingToPlay(): boolean {
+	if (dlnaActive()) return dlnaIntendingToPlay()
 	return gIntendPlay
 }
 
@@ -1841,7 +1937,10 @@ export function audioGetCurrentTime(): number {
  * autoPlay=true 时定位后立即出声；startPositionSec > 0 时从该位置续播。
  */
 export function audioSetPlaylist(items: AudioPlaylistItem[], startIndex: number, autoPlay: boolean, startPositionSec: number): void {
-	if (items == null || items.length == 0) return
+	if (items == null || items.length == 0) {
+		if (dlnaActive()) { gItems = []; gIndex = -1; gLoadedMediaId = ''; audioStop() }
+		return
+	}
 	// 整条重推 = 新一轮取址：清掉旧条目的解析记忆，refetch 流程才能拿到新地址
 	gResolvedUrls.clear()
 	// 队列签名只由「窗口起点|条数|首尾 mediaId」构成，两条不同队列完全可能同签名
@@ -1880,6 +1979,7 @@ export function audioSetRepeatMode(mode: number): void {
 
 /** 当前条目 mediaId（空串 = 无）：store 对账探针用它核对「底层加载的是不是这首歌」 */
 export function audioCurrentMediaId(): string {
+	if (dlnaActive()) return dlnaState().mediaId
 	return gLoadedMediaId
 }
 
@@ -1930,6 +2030,7 @@ export function audioOnResolveRequest(callback: AudioResolveRequestCallback | nu
 
 /** JS 回填解析结果（成功） */
 export function audioResolveDone(mediaId: string, url: string): void {
+	if (dlnaActive()) return
 	if (gPendingMid.length == 0 || gPendingMid != mediaId) return
 	gPendingMid = ''
 	if (gPendingTimer >= 0) {
@@ -1947,6 +2048,7 @@ export function audioResolveDone(mediaId: string, url: string): void {
 
 /** JS 回填解析结果（失败）：走错误回调，由 store 的既有错误策略处理 */
 export function audioResolveFail(mediaId: string): void {
+	if (dlnaActive()) return
 	if (gPendingMid.length == 0 || gPendingMid != mediaId) return
 	gPendingMid = ''
 	if (gPendingTimer >= 0) {
@@ -1954,6 +2056,11 @@ export function audioResolveFail(mediaId: string): void {
 		gPendingTimer = -1
 	}
 	fireError('解析播放地址失败: ' + mediaId)
+}
+
+/** New online loads must resolve under the current source preferences. */
+export function audioInvalidateSourcePolicy(): void {
+	gResolvedUrls.clear()
 }
 
 /** JS 注册切歌事件：原生自动切歌 / 定位跳转 / 队列重推都会触发 */
@@ -1968,6 +2075,7 @@ export function audioSetVolume(volume: number): void {
 	let v = volume
 	if (!(v >= 0)) v = 1.0
 	if (v > 1) v = 1.0
+	if (dlnaActive()) { dlnaSetVolume(v); return }
 	gUserVolume = v
 	applyVolumeToPlayer()
 }
@@ -1979,6 +2087,7 @@ export function audioSetSpeed(speed: number): void {
 	if (s < SPEED_MIN) s = SPEED_MIN
 	if (s > SPEED_MAX) s = SPEED_MAX
 	gPlaybackSpeed = s
+	if (dlnaActive()) return
 	const p = gPlayer
 	if (p != null && gPrepared) applySpeed(p)
 }
@@ -2261,4 +2370,102 @@ export function audioSetTrackCover(mediaId: string, cover: string): void {
   gCoverUrl = cover
   gCoverLoadingFor = ''
   applySessionMetadata()
+}
+
+// ==================== 普通 DLNA 门面 ====================
+
+function dlnaTimelineIndex(mediaId: string): number {
+	// 相同 mediaId 可以在队列中出现多次；已有下标仍匹配时保留该次出现。
+	if (gIndex >= 0 && gIndex < gItems.length && gItems[gIndex].mediaId == mediaId) return gIndex
+	return gItems.findIndex((item: AudioPlaylistItem): boolean => item.mediaId == mediaId)
+}
+function suspendLocalForDlna(): void {
+	gPlayerEpoch++
+	gPlayerCreating = false
+	gResolveToken++
+	gPendingMid = ''
+	if (gPendingTimer >= 0) clearTimeout(gPendingTimer)
+	gPendingTimer = -1
+	gPendingAutoPlay = false; gNextUri = ''; gPrepared = false; gAwaitPrepare = false
+	gPausedByFocusLoss = false; gDucked = false
+	const player = gPlayer
+	gPlayer = null
+	if (player != null) {
+		try { player.stop() } catch (e) { /* 静默：未 prepare 的播放器由 release 兜底。 */ }
+		try { player.release() } catch (e) { /* 静默：已经释放的本地播放器无需重试。 */ }
+	}
+}
+function onDlnaTrackCompleted(): void {
+	const completed = dlnaState(), currentIndex = gIndex, revision = gDlnaReturnRevision
+	fireEnded()
+	// JS 播完回调可能暂停、切歌、重载同一首或断开；新的操作不再原生推进。
+	const latest = dlnaState()
+	if (revision != gDlnaReturnRevision || !dlnaActive() || latest.sessionId != completed.sessionId || latest.generation != completed.generation) return
+	let next = -1
+	if (gRepeatMode == 1) next = currentIndex
+	else if (currentIndex + 1 < gItems.length) next = currentIndex + 1
+	else if (gRepeatMode == 2 && gItems.length > 0) next = 0
+	if (next >= 0) loadIndex(next, 0.0, true, true)
+	else { gIntendPlay = false; stopBackgroundRunning(); applySessionPlaybackState() }
+}
+function bindDlnaNativeHooks(): void {
+	dlnaOnEnded((): void => { onDlnaTrackCompleted() })
+	dlnaOnNativeState((): void => {
+		if (!dlnaActive()) return
+		const state = dlnaState()
+		gIntendPlay = dlnaIntendingToPlay()
+		if (state.mediaId.length > 0) {
+			gLoadedMediaId = state.mediaId
+			const index = dlnaTimelineIndex(state.mediaId)
+			if (index >= 0) gIndex = index
+			if (gDurationMs != state.durationMs) { gDurationMs = state.durationMs; applySessionMetadata() }
+			fireTimeUpdate()
+		}
+		if (state.phase == 'loading' || state.phase == 'buffering') fireWaiting()
+		else if (state.phase == 'playing' || state.phase == 'paused') fireCanplay()
+		if (gIntendPlay) firePlay()
+		else firePause()
+		if (gIntendPlay) startBackgroundRunning()
+		else stopBackgroundRunning()
+		applySessionPlaybackState()
+	})
+}
+export function audioDlnaSupported(): boolean { return true }
+export function audioDlnaActive(): boolean { return dlnaActive() }
+export function audioDlnaState(): AudioDlnaState { return dlnaState() }
+export function audioDlnaDiscover(callback: AudioDlnaDiscoverCallback): void { dlnaDiscover(callback) }
+export function audioDlnaOnState(callback: AudioDlnaStateCallback | null): void { dlnaOnState(callback) }
+export function audioDlnaOnResolveRequest(callback: AudioDlnaResolveCallback | null): void { dlnaOnResolve(callback) }
+export function audioDlnaResolveDone(mediaId: string, uri: string, referer: string, generation: number): void { dlnaResolveDone(mediaId, uri, referer, generation) }
+export function audioDlnaResolveFail(mediaId: string, generation: number): void { dlnaResolveFailed(mediaId, generation) }
+export function audioDlnaConnect(id: string): boolean {
+	const wasCasting = dlnaActive(), previous = dlnaState()
+	const position = wasCasting ? previous.positionMs : gPlayer != null ? currentSeconds() * 1000 : Math.max(0, gPendingPositionSec * 1000)
+	const autoplay = wasCasting ? dlnaIntendingToPlay() : gIntendPlay || gPendingAutoPlay
+	gDlnaReturnRevision++
+	bindDlnaNativeHooks()
+	if (!dlnaConnect(id)) return false
+	suspendLocalForDlna()
+	gDlnaDetached = false
+	ensureSession()
+	if (gIndex >= 0 && gIndex < gItems.length) loadIndex(gIndex, position / 1000, autoplay, false)
+	else { applySessionMetadata(); applySessionPlaybackState() }
+	return true
+}
+export function audioDlnaDisconnect(returnToLocal: boolean): void {
+	const state = dlnaState()
+	if (!dlnaActive()) return
+	const index = dlnaTimelineIndex(state.mediaId)
+	if (index >= 0) gIndex = index
+	gPendingPositionSec = state.positionMs / 1000
+	gDlnaDetached = true
+	gIntendPlay = false; gPendingAutoPlay = false; gPrepared = false; gAwaitPrepare = false
+	const revision = ++gDlnaReturnRevision
+	dlnaDisconnect((stopped: boolean): void => {
+		if (!returnToLocal || !stopped || revision != gDlnaReturnRevision || dlnaActive()) return
+		const current = dlnaTimelineIndex(state.mediaId)
+		if (current < 0) return
+		audioSetPlaylist(gItems, current, true, state.positionMs / 1000)
+	})
+	firePause(); stopBackgroundRunning(); applySessionPlaybackState()
 }

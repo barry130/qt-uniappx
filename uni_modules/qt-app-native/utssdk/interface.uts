@@ -300,6 +300,12 @@ export type PermissionState = {
  */
 export type QueryPermissionStates = (ids: string[]) => PermissionState[];
 
+/** iOS 通知状态需异步读取，回调返回完整权限清单；其余平台由服务包装同步查询。 */
+export type QueryPermissionStatesAsync = (ids: string[], onResult: (states: PermissionState[]) => void) => void;
+
+/** iOS 系统文件选择与音频导入；只统计已成功复制到 Documents/Imports 的文件。 */
+export type ImportLocalAudio = (onResult: (count: number, message: string) => void) => void;
+
 /**
  * 跳到某条权限对应的系统设置页（能直达就直达，ROM 不认则退回应用详情页）。
  * @returns 已成功发起跳转返回 true；平台不支持或 Activity 不可用返回 false
@@ -337,7 +343,7 @@ export type EmbedTagsOptions = {
  * 实现注意（为什么走 Base64 桥/纯字节层）：标签写入逻辑在 utssdk/embed-bytes.uts，
  * 是与平台无关的纯函数（可进 node 自测）；Android 端经 android.util.Base64 与
  * kotlin ByteArray 互转，避免 UTS 对 ByteArray 元素级写入的兼容风险；鸿蒙端直接
- * fileIo.readSync/writeSync(ArrayBuffer)。
+ * fileIo.readSync/writeSync(ArrayBuffer)，iOS 使用 Foundation 协调读取与流式写出。
  */
 export type EmbedAudioTags = (audioTempPath: string, opts: EmbedTagsOptions) => Promise<string>;
 
@@ -376,7 +382,7 @@ export type EmbeddedReadResult = {
  *
  * 实现注意：标签解析逻辑在 utssdk/read-embed.uts（纯字节层，与 embed-bytes.uts
  * 写出侧 round-trip，可进 node 自测）；Android 端经 Base64 桥读字节，
- * 鸿蒙端 fileIo.readSync。
+ * 鸿蒙端 fileIo.readSync，iOS 使用带目录书签授权的 Foundation 文件读取。
  */
 export type ReadEmbeddedTags = (filePath: string) => EmbeddedReadResult | null;
 
@@ -385,7 +391,7 @@ export type ReadEmbeddedTags = (filePath: string) => EmbeddedReadResult | null;
  *
  * 返回逐 URL 拼好的 "name=value; name2=v2" 串数组（空结果的 URL 被过滤掉）。
  * Android 走主线程 CookieManager.getCookie（可读 httpOnly 登录态 Cookie）；
- * iOS/鸿蒙暂未实现（恒返回空数组），宿主按「本轮未捕获到」处理。
+ * iOS 从登录 WKWebView 共用的 WKHTTPCookieStore 读取；鸿蒙暂返回空数组。
  *
  * 为什么做成 Promise：CookieManager.getInstance() 首次初始化要求线程有
  * Looper，UTS 插件函数跑在 JS 逻辑线程（无 Looper 会抛「Can't create
@@ -442,7 +448,7 @@ export type CloseAuthWebView = () => void;
  *   - 返回值 ≥0：文件在盘且可读，值为字节数（0 = 空文件，也算在盘）；
  *   - 返回 -1：stat 不到（真不在盘 / 无权限 / 路径为空）。Android content:// 会打开只读描述符校验；长度未知返回 0。
  * 调用方约定：它只做 uni stat 失败后的**兜底**，不取代 uni stat——uni 成功的
- * 路径（私有目录、鸿蒙沙盒）维持原行为，iOS 端恒 -1 回落原行为，零回归。
+ * 路径（私有目录、鸿蒙沙盒）维持原行为；iOS 使用 Foundation，恢复所选目录的书签后读取文件属性。
  *
  * @param filePath 下载账本里的绝对路径；鸿蒙自定义目录可能是 file://docs/... URI，
  *                 fileIo.statSync 与 openSync 同款认 URI。

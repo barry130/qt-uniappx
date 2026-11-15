@@ -99,7 +99,8 @@ export function dlnaState(): AudioDlnaState {
 		volume: publicState.volume, canSeek: publicState.canSeek, canSetVolume: publicState.canSetVolume, error: publicState.error }
 }
 export function dlnaPositionMs(): number {
-	const elapsed = publicState.phase == 'playing' ? Math.min(1250, Math.max(0, SystemClock.elapsedRealtime().toDouble() - anchorAt)) : 0
+	// SOAP 每次轮询包含两次网络往返，不能在 1.25s 后冻结进度；可靠回报与时长上限仍负责校准。
+	const elapsed = publicState.phase == 'playing' ? Math.max(0, SystemClock.elapsedRealtime().toDouble() - anchorAt) : 0
 	const value = publicState.positionMs + elapsed
 	return publicState.durationMs > 0 ? Math.min(value, publicState.durationMs) : value
 }
@@ -695,10 +696,10 @@ function schedulePoll(): void {
 					pollFailures = 0
 					const sameUri = trackUri == expected
 					if (trackUri.length > 0 && !sameUri) { fail(session, generation, '电视已切换到其他媒体，轻听投屏已暂停'); return }
-					const ended = dlnaNaturalEnd(previousTransport, transport, Math.max(publicState.positionMs, position),
+					const ended = dlnaNaturalEnd(previousTransport, transport, Math.max(dlnaPositionMs(), position),
 						duration > 0 ? duration : publicState.durationMs, observedPlaying, manualStop, sameUri)
 					if (duration > 0) publicState.durationMs = duration
-					// STOPPED 常把 RelTime 清零；保留最后确认位置，结束判断不依赖客户端外推。
+					// STOPPED 可能把 RelTime 清零；客户端位置供结束判断，展示仍以可靠回报为准。
 					if (transport != 'STOPPED' || position > 0) publicState.positionMs = position
 					if (transport == 'PLAYING') { observedPlaying = true; publicState.phase = 'playing'; acquireLocks(); if (position > requestedStartMs + 2000) refreshUsed = false }
 					else if (transport == 'PAUSED_PLAYBACK') { publicState.phase = 'paused'; releaseLocks() }

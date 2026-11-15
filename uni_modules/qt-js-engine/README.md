@@ -1,19 +1,20 @@
 # qt-js-engine
 
-在**安卓 / 鸿蒙端本地执行音源包脚本**（`source-bundle.js`）的 UTS 插件，让「第三方音源接口失效」
-这类问题不发版就能修复。iOS 侧计划走系统 JavaScriptCore（阶段二）。
+在 **Android / Harmony / iOS 本地执行音源包脚本**的 UTS 插件，让「第三方音源接口失效」
+这类问题通过音源包更新修复。iOS 后端使用系统 WebKit 内的 JavaScriptCore 模块加载器。
 
 > 本仓库**不内置音源包**：脚本由用户在应用内安装（官方清单下发或粘贴直链），
 > 插件只负责「拿一段脚本文本在本地跑起来」，不含任何音源实现。
 
-## 引擎后端：系统 WebView 的 V8（唯一）
+## 引擎后端
 
 | 项 | 值 |
 | --- | --- |
 | 实现文件（安卓） | `utssdk/app-android/webview.uts`（WebView 宿主桥）/ `index.uts`（pump、HTTP、定时器、文件 IO、对外 API） |
 | 实现文件（鸿蒙） | `utssdk/app-harmony/builder.ets`（ArkWeb 宿主桥）/ `index.uts`（同上）/ `prelude.uts`（注入源码） |
-| 内核 | 系统 WebView / ArkWeb 内置的 V8/JIT |
-| 混淆脚本 init | 实测 **200-350ms**（混淆后的音源包脚本 141-242ms）——内嵌解释器上是 6-9s |
+| 实现文件（iOS） | `utssdk/app-ios/index.uts`（串行驱动）/ `QtJsEngineNative.swift`（系统原生桥）/ `bootstrap.uts` / `prelude.uts` |
+| 内核 | Android / Harmony 为 V8；iOS 为 WebKit JavaScriptCore |
+| 混淆脚本 init | Android 实测 **200-350ms**；iOS 性能待原生编译/真机测量 |
 | 失败语义 | 系统 WebView 不可用（de-Googled ROM）或启动失败时 `start()` 直接报错，由服务层决定后续 |
 
 > 2026-09-23 之前这里是「WebView 优先 + 内嵌 QuickJS 兜底」双后端。随 QuickJS 后端一并删除的：
@@ -48,12 +49,18 @@ qt-js-engine/
    │  ├─ prelude.uts           宿主注入的 JS 源码（QT_JS_PRELUDE，hostApiVersion=1 的一部分）
    │  ├─ webview.uts           WebView(V8) 宿主桥（创建 / 求值 / 装载 bundle）
    │  └─ index.uts             对外 API（引擎线程 / pump / HTTP / 定时器 / 文件 IO）
-   └─ app-harmony/
-      ├─ config.json           空（无 ohpm 依赖）
-      ├─ module.json5          har 模块声明（含 ohos.permission.INTERNET）
-      ├─ prelude.uts           宿主注入的 JS 源码（QT_JS_PRELUDE，与安卓同源，平台号 1106）
-      ├─ builder.ets           ArkWeb 宿主桥（1×1 隐藏 Web + onInterceptRequest 内存供源码）
-      └─ index.uts             对外 API（两条串行队列 / pump / HTTP / 定时器 / 文件 IO）
+   ├─ app-harmony/
+   │  ├─ config.json           空（无 ohpm 依赖）
+   │  ├─ module.json5          har 模块声明（含 ohos.permission.INTERNET）
+   │  ├─ prelude.uts           宿主注入的 JS 源码（平台号 1106）
+   │  ├─ builder.ets           ArkWeb 宿主桥
+   │  └─ index.uts             串行队列 / pump / HTTP / 定时器 / 文件 IO
+   └─ app-ios/
+      ├─ config.json           iOS 14.0+；系统 WebKit / Foundation / CryptoKit
+      ├─ QtJsEngineNative.swift 原生 WKWebView / URLSession / 文件 / Ed25519
+      ├─ prelude.uts           同源 H/T/R 泵，平台号 1102
+      ├─ bootstrap.uts         模块加载、独立数据槽/播放槽、网络隔离
+      └─ index.uts             操作/求值队列、超时、取消、代次隔离、对外 API
 ```
 
 > 鸿蒙实现（`app-harmony/`）与安卓**同一套架构的第二份平台实现**，上层与音源包零改动。
@@ -196,6 +203,39 @@ stop((r) => {})                // 正常关停；对已 poison 的引擎放弃�
   （`exists` 的 value 是字符串 `"1"`/`"0"`；`remove` 对不存在的路径算成功；`listDir` 目录不存在返回 `[]`）；
 - 回调一律经 `onMain`（`setTimeout(fn, 0)`）投递一拍，与安卓 `Handler.post` 的时序对齐。
 
+实现约定（`app-ios/`）：
+
+- 使用系统 `WKWebView` 的 JavaScriptCore；官方数据包是 ESM，系统 `JSContext`
+  没有公开的模块加载 API，因此由 `WKURLSchemeHandler` 原样提供本地包源码。每次
+  装载使用新 URL，语法错误在模块顶层执行前拒绝，播放包工厂单独暂存交给数据包。
+- 原生 `URLSession` 提供 HTTP，支持手动重定向、超时、8MB 流式上限、响应头小写、
+  charset、base64 和原始 FLAC 位深嗅探。会话不继承 Safari Cookie/凭据，跨域
+  重定向移除认证和客户端身份头；网页外联由 CSP、内容规则及导航委托阻断。
+- 文件操作在独立原生串行队列执行。私有目录为 `Library/Application Support/QtMusic`，
+  文档目录为 `Documents/QtMusic`，内置资源由 `UTSiOS.getResourcePath()` 解析。
+  文件覆盖使用原子的同分区 `rename`；缺失文件返回稳定的 `ENOENT` 错误前缀。
+  官方包使用独立的原生 `CryptoKit` Ed25519 验签，不执行待验包里的代码。
+- 停止、看门狗隔离、内容进程退出会使旧回执失效；服务层可通过 `isHealthy()` 发现后
+  `stop()` + `start()` 重建。iOS 14.0 是包使用 BigInt/ES2020 的最低运行版本。
+
+iOS 验证脚本：
+
+```sh
+node --experimental-vm-modules --disable-warning=ExperimentalWarning tools/check-ios-source-engine.mjs
+```
+
+脚本执行真实 UTS 驱动、prelude、bootstrap 和真正 ESM，覆盖并发、迟到回执、停止、
+超时恢复、两个包槽、定时器与回调契约，同时验证完整服务的音源包重启恢复、版本覆盖、
+日志追加和 manifest/上报平台号。传入官方 meta/play 文件路径时也验证实际构建产物：
+
+```sh
+node --experimental-vm-modules --disable-warning=ExperimentalWarning tools/check-ios-source-engine.mjs ../qt-sources/dist/meta-bundle.js ../qt-sources/dist/play-bundle.js
+```
+
+原生框架以异步替身运行；通过该脚本及 UTS
+转译不代表已完成 iOS 原生编译。必须在 Mac/HBuilderX iOS 编译环境和真机继续验证
+本地模块加载、ATS 配置、后台连续取链以及不同音源格式。
+
 > 鸿蒙侧编译前需确认：本机当前**没有 DevEco Studio / HarmonyOS SDK**，
 > 但 `index.uts` / `builder.ets` 里的原生签名已用 HBuilderX 自带的鸿蒙 SDK 类型定义
 > （`.../uni-uts-v1/lib/uts/types/uni-x/app-harmony/ohos/`）逐条核对过一轮，
@@ -228,7 +268,7 @@ services/source-update.installFromUrl()/installFromLocalFile()/installFromText()
 pages/settings/index.uvue 「音源包管理」        检查更新 / 从链接·本地文件安装 / 逐包启用·停用·卸载（卸载生效数据包 = 数据面停用）
 ```
 
-包体与状态全部经本插件的文件 API 存放在 `filesDir/source-bundle/`
+包体与状态全部经本插件的文件 API 存放在 `dataDir()/source-bundle/`
 （`state.json` + `install/<packId>/meta-bundle.js|play-bundle.js|chain.json`），
 schema 3 见 `services/source-bundle-fs.uts` 头注释。
 
@@ -239,9 +279,10 @@ schema 3 见 `services/source-bundle-fs.uts` 头注释。
 的装载入口；本地音乐照常），首页引导只指路设置页。
 所有包的身份都是「自述 id + 内容签名」：官方包是保留 id
 （`play-official` / `meta-official`）+ 发布私钥的 ed25519 尾部签名块
-（`__QT_SIGN__`），安装/更新时用 APK 内置 tweetnacl 公钥硬校验
+（`__QT_SIGN__`），安装/更新时用宿主内置公钥与原生密码库校验
 （`services/pack-signature.uts`），验不过直接拒绝；第三方包不签名、
 流程不变。
 
 > 注意：改了 UTS 插件后真机调试要重新编译该插件；`HBuilderX` 会按文件指纹跳过未变化的插件，
-> 必要时加 `--cleanCache true`。本插件已无原生库，不再需要为 `.so` 打自定义基座。
+> 必要时加 `--cleanCache true`。Android/Harmony 不再携带独立 V8 `.so`；iOS 的 Swift 原生文件
+> 和部署配置需通过重新编译自定义基座或应用包生效。

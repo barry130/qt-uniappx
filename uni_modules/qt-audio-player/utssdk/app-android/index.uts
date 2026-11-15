@@ -10,7 +10,7 @@
  */
 
 import type { AudioPlayerVoidCallback, AudioPlayerTimeCallback, AudioPlayerErrorCallback, AudioPlayerStateCallback, EnsureNotificationPermission, AudioPlaylistItem, AudioResolveRequestCallback, AudioTrackChangedCallback, AudioRatingRequestCallback } from '../interface.uts'
-import { parseCarLyric, carLyricAt, carLyricFields } from '../car-lyric.uts'
+import { parseCarLyric, carLyricAt, carLyricFields, nextCarLyricDelay } from '../car-lyric.uts'
 import type { CarLyricLine } from '../car-lyric.uts'
 import type { AudioDlnaDevice, AudioDlnaState, AudioDlnaDiscoverCallback, AudioDlnaStateCallback, AudioDlnaResolveCallback } from '../interface.uts'
 import { dlnaActive, dlnaState, dlnaPositionMs, dlnaDiscover, dlnaConnect, dlnaDisconnect, dlnaOnState, dlnaOnResolve, dlnaOnNativeState, dlnaOnEnded, dlnaResolveDone, dlnaResolveFailed, dlnaPlay, dlnaPause, dlnaStop, dlnaSeek, dlnaSetVolume } from './dlna.uts'
@@ -39,6 +39,9 @@ import {
 import { UTSAndroid } from 'io.dcloud.uts'
 
 import Build from 'android.os.Build'
+import Activity from 'android.app.Activity'
+import PowerManager from 'android.os.PowerManager'
+import Color from 'android.graphics.Color'
 import SystemClock from 'android.os.SystemClock'
 import Context from 'android.content.Context'
 import Intent from 'android.content.Intent'
@@ -83,6 +86,7 @@ import UnsupportedOperationException from 'java.lang.UnsupportedOperationExcepti
 import CountDownLatch from 'java.util.concurrent.CountDownLatch'
 import TimeUnit from 'java.util.concurrent.TimeUnit'
 import ConcurrentHashMap from 'java.util.concurrent.ConcurrentHashMap'
+import AtomicInteger from 'java.util.concurrent.atomic.AtomicInteger'
 import CacheDataSource from 'androidx.media3.datasource.cache.CacheDataSource'
 import LeastRecentlyUsedCacheEvictor from 'androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor'
 import StandaloneDatabaseProvider from 'androidx.media3.database.StandaloneDatabaseProvider'
@@ -179,6 +183,9 @@ const DUCK_VOLUME: number = 0.3
 let gUserVolume: number = 1.0
 // 播放倍速（0.5~3.0）。ExoPlayer 用 PlaybackParameters 做变速不变调，设置后跨曲目保持。
 let gPlaybackSpeed: number = 1.0
+let gPitchSemitones: number = 0
+const MIN_PITCH_SEMITONES: number = -12
+const MAX_PITCH_SEMITONES: number = 12
 const SPEED_MIN: number = 0.5
 const SPEED_MAX: number = 3.0
 // 蓝牙/耳机断开自动暂停：becoming_noisy 广播接收器（与 ExoPlayer 内置处理双保险）
@@ -253,12 +260,13 @@ function nativeSetCacheLimit(mb: number): void {
   }
 }
 
-/** 把当前倍速应用到播放器（变速不变调由 media3 的 SonicAudioProcessor 处理） */
+/** 倍速和音调一起下发：共享 PlaybackParameters，保留 float/AudioTrack 默认路由。 */
 function applySpeed(mp: ExoPlayer): void {
   try {
-    mp.setPlaybackSpeed(gPlaybackSpeed.toFloat())
+    const pitch = Math.pow(2.0, (gPitchSemitones / 12.0).toDouble()).toFloat()
+    mp.setPlaybackParameters(new PlaybackParameters(gPlaybackSpeed.toFloat(), pitch))
   } catch (e) {
-    console.log('[QT Audio] 倍速设置失败: ' + (e != null ? e.toString() : 'unknown'))
+    console.log('[QT Audio] 倍速/音调设置失败: ' + (e != null ? e.toString() : 'unknown'))
   }
 }
 
@@ -754,7 +762,16 @@ const gPendingResolves = new ConcurrentHashMap<string, PendingResolve>()
 // （refetch 流程要拿新地址，靠 setPlaylist 清）。
 // 同样三线程并发（loader get/put、JS 桥 put/remove、主线程 clear），必须
 // ConcurrentHashMap：普通 HashMap 并发扩容会坏表
-const gResolvedUrls = new ConcurrentHashMap<string, string>()
+class ResolvedAudioUrl {
+  url: string
+  generation: Int
+  constructor(url: string, generation: Int) {
+    this.url = url
+    this.generation = generation
+  }
+}
+const gResolvedUrls = new ConcurrentHashMap<string, ResolvedAudioUrl>()
+const gSourcePolicyGeneration = new AtomicInteger(0)
 // mediaId → 该条目的磁盘缓存 key（= qt-resolve 占位地址串，CacheDataSource 用它作 key）。
 // 解析器建连时记录；「提前结束」自愈时据此精准清除单首歌的缓存分片（清整盘要停播放，太重）。
 // 与 gResolvedUrls 同线程组（loader put / 主线程读），沿用 ConcurrentHashMap
@@ -816,6 +833,7 @@ class QtResolveResolver implements ResolvingDataSource.Resolver {
   }
 
   override resolveDataSpec(dataSpec: DataSpec): DataSpec {
+    const policyGeneration = gSourcePolicyGeneration.get()
     const uri = dataSpec.uri
     if (RESOLVE_SCHEME != uri.getScheme()) return dataSpec
     const mediaId = uri.getQueryParameter('mid')
@@ -826,9 +844,9 @@ class QtResolveResolver implements ResolvingDataSource.Resolver {
     gCacheKeyByMid.put(mediaId, dataSpec.uri.toString())
     // seek/断点续传等重开场景：直接复用上次的解析结果，零等待零竞态
     const memo = gResolvedUrls.get(mediaId)
-    if (memo != null && memo.length > 0) {
+    if (memo != null && memo.generation == policyGeneration && memo.url.length > 0) {
       console.log('[QT Audio] resolve 复用记忆: ' + mediaId + ' pos=' + dataSpec.position.toString())
-      return dataSpec.buildUpon().setUri(Uri.parse(memo)).build()
+      return dataSpec.buildUpon().setUri(Uri.parse(memo.url)).build()
     }
     console.log('[QT Audio] resolve 请求: ' + mediaId + ' pos=' + dataSpec.position.toString())
     const req = new PendingResolve()
@@ -856,7 +874,12 @@ class QtResolveResolver implements ResolvingDataSource.Resolver {
       // 抛给 onPlayerError → store 错误策略（重取一次/自动切歌/熔断）
       throw new IOException('解析播放地址失败: ' + mediaId)
     }
-    gResolvedUrls.put(mediaId, req.url)
+    if (policyGeneration != gSourcePolicyGeneration.get()) {
+      throw new IOException('音乐源设置已变化，请重新播放')
+    }
+    // Keep the generation on each entry too: a concurrent clear between the
+    // check above and this put must not revive an address on the next open.
+    gResolvedUrls.put(mediaId, new ResolvedAudioUrl(req.url, policyGeneration))
     // 位置/长度/请求头等参数原样保留，仅替换真实地址
     return dataSpec.buildUpon().setUri(Uri.parse(req.url)).build()
   }
@@ -872,7 +895,6 @@ export function audioResolveDone(mediaId: string, url: string): void {
   const req = gPendingResolves.get(mediaId)
   console.log('[QT Audio] resolveDone: ' + mediaId + ' 命中=' + (req != null ? 'true' : 'false'))
   if (req == null) return
-  gResolvedUrls.put(mediaId, nativeMediaUri(url))
   req.url = nativeMediaUri(url)
   req.ok = true
   req.latch.countDown()
@@ -888,6 +910,12 @@ export function audioResolveFail(mediaId: string): void {
   req.latch.countDown()
 }
 
+/** Invalidate online address memories without stopping the current player or deleting audio files. */
+export function audioInvalidateSourcePolicy(): void {
+  gSourcePolicyGeneration.incrementAndGet()
+  gResolvedUrls.clear()
+}
+
 // ==================== 无缝播放：下一首整首预取 ====================
 // JS 在换歌成功后调 audioPreloadTrack(占位URI)，用与播放完全相同的数据源栈
 // （buildAudioDataSourceFactory）把整首歌读一遍：字节落进 SimpleCache（key=
@@ -901,8 +929,10 @@ let gPreloadRunning = false
 
 class QtPreloadRunnable implements Runnable {
   private uri: string
+  private policyGeneration: Int
   constructor(uri: string) {
     this.uri = uri
+    this.policyGeneration = gSourcePolicyGeneration.get()
   }
   override run(): void {
     try {
@@ -924,11 +954,13 @@ class QtPreloadRunnable implements Runnable {
       const ds = factory.createDataSource()
       let total = 0
       try {
+        if (this.policyGeneration != gSourcePolicyGeneration.get()) return
         ds.open(new DataSpec(Uri.parse(this.uri)))
         // UTS 的 Number 落到 Kotlin 是 Double，ByteArray/read 这类 Int 参数必须显式 toInt()
         const chunk = 65536
         const buf = new ByteArray(chunk.toInt())
         while (true) {
+          if (this.policyGeneration != gSourcePolicyGeneration.get()) break
           const n = ds.read(buf, 0, chunk.toInt())
           if (n == -1) break
           total += n
@@ -1091,6 +1123,7 @@ export function audioSetPlaylist(items: AudioPlaylistItem[], startIndex: number,
     const posSec = startPositionSec > 0 ? startPositionSec : 0
     const posMs: Long = (posSec * 1000).toLong()
     mp.setMediaItems(list, start, posMs)
+    applySpeed(mp)
     gAwaitPrepare = true
     mp.prepare()
     if (autoPlay) {
@@ -1272,6 +1305,7 @@ class QtPlayerListener extends Player.Listener {
       gCarOffsetMs = 0
     }
     scheduleCarLyricTick()
+    scheduleWidgetLyric()
     // naturalEnd = 播到头自然引发的切换（AUTO=衔接下一首 / REPEAT=循环重启本条目）。
     // JS 靠它识别「内容提前结束」：截断流/坏缓存时 media3 视为正常播完，无错误事件
     const naturalEnd = reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO
@@ -1348,8 +1382,8 @@ class QtPlayerListener extends Player.Listener {
   override onPlayerErrorChanged(error: PlaybackException | null): void {}
   @Suppress("OVERRIDE_DEPRECATION")
   override onPositionDiscontinuity(reason: Int): void {}
-  override onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int): void {}
-  override onPlaybackParametersChanged(playbackParameters: PlaybackParameters): void {}
+  override onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int): void { scheduleWidgetLyric() }
+  override onPlaybackParametersChanged(playbackParameters: PlaybackParameters): void { scheduleWidgetLyric() }
   override onSeekBackIncrementChanged(seekBackIncrementMs: Long): void {}
   override onSeekForwardIncrementChanged(seekForwardIncrementMs: Long): void {}
   override onMaxSeekToPreviousPositionChanged(maxSeekToPreviousPositionMs: Long): void {}
@@ -2255,6 +2289,7 @@ function nativeStop(): void {
   if (dlnaActive()) { dlnaStop(); return }
   stopProgressPolling()
   getHandler().removeCallbacks(carLyricTicker)
+    stopWidgetLyric()
   // Remove compatibility text before releasing the media session.
   publishCarLyricFields('', false)
   gCarTrackEpoch++
@@ -2305,13 +2340,8 @@ function nativeStop(): void {
   gSinger = ''
   gAlbum = ''
   // 小部件回到空态：否则停止播放后仍显示上一首歌与最后的播放图标
-  // （updateWidgetFromPlayer 对 mp==null 早退，这里直接刷新视图）
-  gWidgetTitle = '轻听音乐'
-  gWidgetArtist = '轻听音乐，想听就听'
-  gWidgetPlaying = false
-  gWidgetCoverUrl = ''
-  gWidgetBitmap = null
-  refreshWidgetViews()
+  // （updateWidgetFromPlayer 对 mp==null 早退，resetWidgetToIdle 直接刷新视图）
+  resetWidgetToIdle()
   // 停止时还原让路音量并释放音频焦点
   restoreVolume()
   abandonAudioFocus()
@@ -2335,7 +2365,9 @@ function nativeSeek(seconds: number): void {
   try {
     let target: Long = Math.round((seconds * 1000).toDouble())
     mp.seekTo(target)
+    applySpeed(mp)
     scheduleCarLyricTick()
+    scheduleWidgetLyric()
   } catch (e) {
     fireError('跳转失败: ' + (e != null ? e.toString() : 'unknown'))
   }
@@ -2605,6 +2637,10 @@ class QtAudioService extends MediaSessionService {
     if (dlnaActive()) dlnaDisconnect()
     gDlnaSessionPlayer = null
     getHandler().removeCallbacks(carLyricTicker)
+    stopWidgetLyric()
+    // R13：服务被系统杀/划任务销毁时不会走用户主动停止的复位路径（nativeStop）；
+    // 此刻进程还活着，把小部件复位成未播放空态再退出，避免桌面键冻结在播放态
+    resetWidgetToIdle()
     gCarTrackEpoch++
     gCarTrackMid = ''
     gCarLyricText = null
@@ -2851,6 +2887,75 @@ const WIDGET_ACTION_TOGGLE = 'qt.widget.TOGGLE'
 const WIDGET_ACTION_NEXT = 'qt.widget.NEXT'
 const WIDGET_ACTION_PREV = 'qt.widget.PREV'
 
+let gWidgetLyric = ''
+let gWidgetScreenReceiver: BroadcastReceiver | null = null
+const widgetProviders: string[] = ['uts.sdk.modules.qtAudioPlayer.QtWidgetProvider', 'uts.sdk.modules.qtAudioPlayer.QtWidgetLargeProvider', 'uts.sdk.modules.qtAudioPlayer.QtWidgetToggleProvider']
+function hasLyricWidget(context: Context): boolean {
+  const manager = AppWidgetManager.getInstance(context)
+  return manager.getAppWidgetIds(new ComponentName(context, widgetProviders[1])).size > 0
+}
+class WidgetScreenReceiver extends BroadcastReceiver {
+  constructor() { super() }
+  override onReceive(context: Context, intent: Intent): void { scheduleWidgetLyric() }
+}
+class WidgetLyricTick implements Runnable { override run(): void { scheduleWidgetLyric() } }
+const widgetLyricTick = new WidgetLyricTick()
+function stopWidgetLyric(): void {
+  getHandler().removeCallbacks(widgetLyricTick)
+  const context = UTSAndroid.getAppContext()
+  if (context != null && gWidgetScreenReceiver != null) {
+    try { context.unregisterReceiver(gWidgetScreenReceiver!!) } catch (e) { console.log('[QT Widget] Screen receiver already removed') }
+  }
+  gWidgetScreenReceiver = null
+}
+function scheduleWidgetLyric(): void {
+  getHandler().removeCallbacks(widgetLyricTick)
+  const context = UTSAndroid.getAppContext()
+  if (context == null) return
+  if (!hasLyricWidget(context) || gMediaPlayer == null || dlnaActive()) {
+    stopWidgetLyric()
+    if (gWidgetLyric.length > 0) { gWidgetLyric = ''; refreshWidgetViews() }
+    return
+  }
+  if (gWidgetScreenReceiver == null) {
+    const filter = new IntentFilter(Intent.ACTION_SCREEN_ON); filter.addAction(Intent.ACTION_SCREEN_OFF)
+    const receiver = new WidgetScreenReceiver()
+    if (Build.VERSION.SDK_INT >= 33) context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+    else context.registerReceiver(receiver, filter)
+    gWidgetScreenReceiver = receiver
+  }
+  const power = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+  if (!power.isInteractive()) return
+  const mp = gMediaPlayer
+  if (mp == null || dlnaActive()) {
+    if (gWidgetLyric.length > 0) { gWidgetLyric = ''; refreshWidgetViews() }
+    return
+  }
+  if (!gCarLinesReady) { gCarLines = parseCarLyric(gCarLyricText ?? ''); gCarLinesReady = true }
+  const position = mp.getCurrentPosition().toDouble()
+  const line = carLyricAt(gCarLines, position, gCarOffsetMs)
+  if (line != gWidgetLyric) { gWidgetLyric = line; refreshWidgetViews() }
+  if (!mp.isPlaying()) return
+  const delay = nextCarLyricDelay(gCarLines, position, gCarOffsetMs, mp.getPlaybackParameters().speed.toDouble())
+  if (delay >= 0) getHandler().postDelayed(widgetLyricTick, delay.toLong())
+}
+
+// A direct Activity PendingIntent supports modern Android widget launch rules.
+class QtWidgetLaunchActivity extends Activity {
+  constructor() { super() }
+  override onCreate(saved: Bundle | null): void {
+    super.onCreate(saved)
+    getSharedPreferences('qt-widget', Context.MODE_PRIVATE).edit().putString('route', 'collection').putLong('routeAt', java.lang.System.currentTimeMillis()).apply()
+    const launch = getPackageManager().getLaunchIntentForPackage(getPackageName())
+    if (launch != null) { launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP); startActivity(launch) }
+    finish()
+  }
+}
+const _forceWidgetLaunchActivity = new QtWidgetLaunchActivity()
+function widgetLibraryIntent(context: Context): PendingIntent {
+  const intent = new Intent(); intent.setClassName(context, 'uts.sdk.modules.qtAudioPlayer.QtWidgetLaunchActivity')
+  return PendingIntent.getActivity(context, 11, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE)
+}
 let gWidgetTitle = '轻听音乐'
 let gWidgetArtist = '轻听音乐，想听就听'
 let gWidgetPlaying = false
@@ -2864,38 +2969,47 @@ class WidgetCoverRunnable implements Runnable {
   }
   override run(): void {
     try {
-      const connection = new URL(this.url).openConnection() as HttpURLConnection
-      // R12-A：小部件封面是应用里唯一没走 DefaultHttpDataSource 的网络加载点——
-      // 裸 HttpURLConnection 不带 UA/Referer、不跟随跨协议重定向，图床挑 UA 或
-      // 302 到 http 时就拉不到图（通知栏同图能显示、小部件却一直是占位）。
-      // 这里对齐通知侧 coverHttpFactory 的口径：同一套 UA/Referer + 15s。
-      connection.setRequestProperty('User-Agent', UA_HEADER)
-      connection.setRequestProperty('Referer', REFERER)
-      connection.setConnectTimeout(15000)
-      connection.setReadTimeout(15000)
-      connection.setDoInput(true)
-      connection.setInstanceFollowRedirects(true)
-      connection.connect()
-      const inputStream = connection.getInputStream()
-      try {
-        const decoded = BitmapFactory.decodeStream(inputStream)
-        if (decoded == null) return
-        let bmp = decoded
-        // 小部件封面只展示 42dp，超大图先缩，控制 RemoteViews 的 IPC 传输体积
-        if (bmp.getWidth() > 220 || bmp.getHeight() > 220) {
-          const h = Math.round((220.0 * bmp.getHeight()) / bmp.getWidth()).toInt()
-          const scaled = Bitmap.createScaledBitmap(bmp, 220, h, true)
-          if (scaled != null) bmp = scaled
+      let bmp: Bitmap | null = null
+      if (this.url.startsWith('file:')) {
+        // R13：本地封面（unifile/file 路径）HttpURLConnection 打不开，直接按路径磁盘解码
+        const path = Uri.parse(this.url).getPath()
+        if (path != null) bmp = BitmapFactory.decodeFile(path)
+      } else {
+        const connection = new URL(this.url).openConnection() as HttpURLConnection
+        // R12-A：小部件封面是应用里唯一没走 DefaultHttpDataSource 的网络加载点——
+        // 裸 HttpURLConnection 不带 UA/Referer、不跟随跨协议重定向，图床挑 UA 或
+        // 302 到 http 时就拉不到图（通知栏同图能显示、小部件却一直是占位）。
+        // 这里对齐通知侧 coverHttpFactory 的口径：同一套 UA/Referer + 15s。
+        connection.setRequestProperty('User-Agent', UA_HEADER)
+        connection.setRequestProperty('Referer', REFERER)
+        connection.setConnectTimeout(15000)
+        connection.setReadTimeout(15000)
+        connection.setDoInput(true)
+        connection.setInstanceFollowRedirects(true)
+        connection.connect()
+        const inputStream = connection.getInputStream()
+        try {
+          const decoded = BitmapFactory.decodeStream(inputStream)
+          if (decoded != null) bmp = decoded
+        } finally {
+          // R12-A：decodeStream 抛异常（非图/截断）时流和连接悬着直到 GC——
+          // 循环下载封面时 fd 会攒
+          inputStream.close()
+          connection.disconnect()
         }
-        getHandler().post(new WidgetApplyCoverRunnable(this.url, bmp))
-      } finally {
-        // R12-A：decodeStream 抛异常（非图/截断）时旧代码直接跳出 try，
-        // 流和连接都悬着直到 GC——循环下载封面时 fd 会攒
-        inputStream.close()
-        connection.disconnect()
       }
+      if (bmp == null) return
+      // 小部件封面只展示 42dp，超大图先缩，控制 RemoteViews 的 IPC 传输体积
+      let fit: Bitmap = bmp!!
+      if (fit.getWidth() > 220 || fit.getHeight() > 220) {
+        const h = Math.round((220.0 * fit.getHeight()) / fit.getWidth()).toInt()
+        const scaled = Bitmap.createScaledBitmap(fit, 220, h, true)
+        if (scaled != null) fit = scaled
+      }
+      getHandler().post(new WidgetApplyCoverRunnable(this.url, fit))
     } catch (e) {
-      // 静默：下载/解码失败保持当前封面
+      // R13：不再静默——真机排查封面空白需要知道失败原因与地址
+      console.log('[QT Widget] 封面加载失败: ' + (e != null ? e.toString() : 'unknown') + ' url=' + this.url)
     }
   }
 }
@@ -2929,6 +3043,18 @@ function widgetLayoutNameOf(componentClass: string): string {
   return 'qt_widget'
 }
 
+/** 小部件回到空态（默认文案 + 播放键图标 + 清空封面）：用户主动停止、服务销毁、
+ * 进程被杀后的按钮点击三条路径共用。RemoteViews 是最后一帧快照，凡是进程还活着的
+ * 退出/销毁时机都要显式提交一次空态，否则小部件会冻结在旧的播放态上。 */
+function resetWidgetToIdle(): void {
+  gWidgetTitle = '轻听音乐'
+  gWidgetArtist = '轻听音乐，想听就听'
+  gWidgetPlaying = false
+  gWidgetCoverUrl = ''
+  gWidgetBitmap = null
+  refreshWidgetViews()
+}
+
 /** 按当前 gWidget* 状态构建并提交全部规格的 RemoteViews（布局资源缺失的规格跳过） */
 function refreshWidgetViews(): void {
   const context = UTSAndroid.getAppContext()
@@ -2941,6 +3067,11 @@ function refreshWidgetViews(): void {
   ]
   try {
     const playId = appResId('qt_play', 'id')
+    const preferences = context.getSharedPreferences('qt-widget', Context.MODE_PRIVATE)
+    const dark = preferences.getBoolean('dark', true)
+    const foreground = Color.parseColor(dark ? '#FFFFFFFF' : '#FF201F24')
+    const muted = Color.parseColor(dark ? '#FFBDBBC4' : '#FF5F5C68')
+    const accent = Color.parseColor(preferences.getString('accent', '#e5484d') ?? '#e5484d')
     for (let i = 0; i < components.length; i++) {
       const name = components[i]
       const layoutName = widgetLayoutNameOf(name)
@@ -2949,7 +3080,11 @@ function refreshWidgetViews(): void {
         console.log('[QT Widget] 布局资源缺失，跳过: ' + layoutName)
         continue
       }
+      if (manager.getAppWidgetIds(new ComponentName(context, name)).size == 0) continue
       const views = new RemoteViews(context.getPackageName(), layoutId)
+      const rootName = layoutName == 'qt_widget_large' ? 'qt_widget_large_root' : layoutName == 'qt_widget_toggle' ? 'qt_widget_toggle_root' : 'qt_widget_root'
+      views.setInt(appResId(rootName, 'id'), 'setBackgroundResource', appDrawableResId(dark ? 'qt_widget_bg' : 'qt_widget_bg_light'))
+      views.setInt(playId, 'setColorFilter', accent)
       if (layoutName == 'qt_widget_toggle') {
         // 1x1 只有播放键：RemoteViews 的 action 指到布局里不存在的 id 会在
         // 宿主渲染时抛 ActionException，必须按布局实际控件下发
@@ -2960,6 +3095,18 @@ function refreshWidgetViews(): void {
       } else {
         views.setTextViewText(appResId('qt_title', 'id'), gWidgetTitle)
         views.setTextViewText(appResId('qt_artist', 'id'), gWidgetArtist)
+        views.setTextColor(appResId('qt_title', 'id'), foreground)
+        views.setTextColor(appResId('qt_artist', 'id'), muted)
+        views.setInt(appResId('qt_prev', 'id'), 'setColorFilter', foreground)
+        views.setInt(appResId('qt_next', 'id'), 'setColorFilter', foreground)
+        views.setOnClickPendingIntent(appResId('qt_cover', 'id'), widgetLibraryIntent(context))
+        views.setOnClickPendingIntent(appResId('qt_title', 'id'), widgetLibraryIntent(context))
+        if (layoutName == 'qt_widget_large') {
+          views.setTextViewText(appResId('qt_lyric', 'id'), gWidgetLyric)
+          views.setTextColor(appResId('qt_lyric', 'id'), foreground)
+          views.setTextColor(appResId('qt_library', 'id'), accent)
+          views.setOnClickPendingIntent(appResId('qt_library', 'id'), widgetLibraryIntent(context))
+        }
         views.setImageViewResource(playId, gWidgetPlaying ? appDrawableResId('ic_qt_notif_pause') : appDrawableResId('ic_qt_notif_play'))
         if (gWidgetBitmap != null) {
           views.setImageViewBitmap(appResId('qt_cover', 'id'), gWidgetBitmap!!)
@@ -2991,7 +3138,8 @@ function widgetCoverUrlOf(mp: ExoPlayer): string {
 /** 播放态/条目变化时从 media3 元数据刷新小部件（播放器未建时跳过，保持空态布局） */
 function updateWidgetFromPlayer(): void {
   const mp = gMediaPlayer
-  if (mp == null) return
+  if (mp == null) { refreshWidgetViews(); return }
+  scheduleWidgetLyric()
   try {
     gWidgetPlaying = mp.getPlayWhenReady()
     const item = mp.getCurrentMediaItem()
@@ -3006,7 +3154,10 @@ function updateWidgetFromPlayer(): void {
       gWidgetTitle = '轻听音乐'
       gWidgetArtist = '轻听音乐，想听就听'
     }
-    const cover = widgetCoverUrlOf(mp)
+    // R13：本地映射歌的 playlist coverUrl 被 store 置空、本地路径变 file:// URI，
+    // HttpURLConnection 都拉不到图；回退到通知栏同源的 audioSetCover 地址（原始 picUrl）。
+    let cover = widgetCoverUrlOf(mp)
+    if (cover.length == 0 || cover.startsWith('file:')) cover = gCoverUrl
     if (cover != gWidgetCoverUrl) {
       gWidgetCoverUrl = cover
       gWidgetBitmap = null
@@ -3025,7 +3176,8 @@ function updateWidgetFromPlayer(): void {
 function widgetTogglePlay(): void {
   if (dlnaActive()) { if (dlnaPlayerIntendingToPlay()) dlnaPause(); else dlnaPlay(); return }
   const mp = gMediaPlayer
-  if (mp == null) return
+  // 进程被杀后点按钮：receiver 拉活进程但播放器已没建，把冻结的播放态先复位
+  if (mp == null) { resetWidgetToIdle(); return }
   try {
     if (mp.getPlayWhenReady()) {
       nativePause()
@@ -3043,7 +3195,8 @@ function widgetTogglePlay(): void {
 function widgetStep(delta: Int): void {
   if (dlnaActive()) { if (delta > 0) fireNext(); else firePrev(); return }
   const mp = gMediaPlayer
-  if (mp == null) return
+  // 进程被杀后点按钮：receiver 拉活进程但播放器已没建，把冻结的播放态先复位
+  if (mp == null) { resetWidgetToIdle(); return }
   try {
     const target = mp.getCurrentMediaItemIndex() + delta
     if (target < 0 || target >= mp.getMediaItemCount()) return
@@ -3101,6 +3254,11 @@ class QtWidgetLargeProvider extends AppWidgetProvider {
   override onReceive(context: Context, intent: Intent): void {
     super.onReceive(context, intent)
     widgetHandleAction(intent.getAction())
+  }
+  override onDisabled(context: Context): void {
+    super.onDisabled(context)
+    stopWidgetLyric()
+    gWidgetLyric = ''
   }
 }
 
@@ -3373,6 +3531,7 @@ function applyCarLyric(text: string): void {
     gCarLinesReady = false
     gCarLines = []
     scheduleCarLyricTick()
+    scheduleWidgetLyric()
   } catch (e) {
     // 静默：车机歌词是增强项，失败不影响播放与其他元数据通道
     console.log('[QT Audio] 车机歌词下发失败: ' + (e != null ? e.toString() : 'unknown'))
@@ -3401,9 +3560,7 @@ export function audioSetCarLyric(text: string): void {
     return
   }
   applyCarLyric(text)
-}
-
-// ==================== 音频输出 / 解码方式 / 音量增强 ====================
+}// ==================== 音频输出 / 解码方式 / 音量增强 ====================
 // 必须追加在文件**最末尾**：UTS 插件的导出 methodId 按声明顺序生成，插在中间会让
 // 其后所有导出整体错位，与旧基座（已安装的 APK）方法表对不上（同 audioSetVolume /
 // audioSetCarLyric 处的注释）。因此这几个导出只能排在 audioSetCarLyric 之后。
@@ -3470,8 +3627,11 @@ export function audioSetEnhanceGain(gainMb: number): void {
 }
 
 // ==================== 可选蓝牙歌词兼容模式（新增导出只追加） ====================
-// 500ms 原生时钟在 JS 挂起/锁屏时仍跟随；相同行不重发，歌词变化限最多 1 次/秒。
-// 关闭模式不保留轮询。保持会话的 URI、评分、封面及所有其他 extras 不变。
+// 播放中把下一拍定在行边界上（≥40ms 粒度），换行后 ~40ms 内发布；非播放、无后续
+// 边界或蓝牙断连回退 500ms 轮询（重连/seek/暂停恢复都在这一拍内被发现），JS 挂起/
+// 锁屏时原生时钟仍跟随。相同行不重发；非空行发布间隔 ≥500ms，被合并挡下的那拍
+// 在窗口打开时立即重试，不会整行丢失。关闭模式不保留轮询。保持会话的 URI、评分、
+// 封面及所有其他 extras 不变。
 function carBluetoothConnected(): boolean {
   const context = getContext()
   if (context == null || Build.VERSION.SDK_INT < 23) return false
@@ -3523,35 +3683,46 @@ function publishCarLyricFields(line: string, bluetooth: boolean): void {
   }
 }
 
-function tickCarLyric(): void {
+function tickCarLyric(): number {
   const mp = gMediaPlayer
-  if (mp == null) return
+  if (mp == null) return 500
   if (gCarLyricMode == 0 || !carBluetoothConnected()) {
     publishCarLyricFields('', false)
-    return
+    return 500
   }
   const item = mp.getCurrentMediaItem()
-  if (item == null) return
+  if (item == null) return 500
   if (item.mediaId != gCarTrackMid || gCarLyricText == null) {
     publishCarLyricFields('', false)
-    return
+    return 500
   }
   if (!gCarLinesReady) {
     gCarLines = parseCarLyric(gCarLyricText ?? '')
     gCarLinesReady = true
   }
-  const line = carLyricAt(gCarLines, mp.getCurrentPosition().toDouble(), gCarOffsetMs)
+  const position = mp.getCurrentPosition().toDouble()
+  const line = carLyricAt(gCarLines, position, gCarOffsetMs)
   // Empty lines, disconnects and disabled mode restore immediately; dense lyrics coalesce.
-  if (line.length > 0 && SystemClock.elapsedRealtime().toDouble() - gCarLastPublishAt < 1000) return
+  if (line.length > 0) {
+    const sincePublish = SystemClock.elapsedRealtime().toDouble() - gCarLastPublishAt
+    // 挡在合并窗内：窗口一开就重试，而不是等下一个行边界（否则这一行会整行丢掉）。
+    if (sincePublish < 500) return Math.max(40.0, (500.0 - sincePublish).toDouble())
+  }
   publishCarLyricFields(line, true)
+  // 播放中把下一拍定在行边界上；暂停或无后续边界回退 500ms 轮询。
+  if (!mp.isPlaying()) return 500
+  const speed = mp.getPlaybackParameters().speed.toDouble()
+  const boundary = nextCarLyricDelay(gCarLines, position, gCarOffsetMs, speed)
+  return boundary < 0 ? 500 : Math.min(boundary.toDouble(), 500.0)
 }
 
 class QtCarLyricTicker implements Runnable {
   override run(): void {
-    try { tickCarLyric() } catch (e) {
+    let delay: number = 500
+    try { delay = tickCarLyric() } catch (e) {
       // 静默：播放器刚释放或路由查询暂时失败，下轮重新检查。
     }
-    if (gCarLyricMode != 0 && gMediaPlayer != null) getHandler().postDelayed(this, 500)
+    if (gCarLyricMode != 0 && gMediaPlayer != null) getHandler().postDelayed(this, delay.toLong())
   }
 }
 const carLyricTicker = new QtCarLyricTicker()
@@ -3581,6 +3752,7 @@ class QtCarLyricCommand implements Runnable {
       gCarLastPublishAt = 0
       if (gCarLyricMode == 0) publishCarLyricFields('', false)
       scheduleCarLyricTick()
+    scheduleWidgetLyric()
       return
     }
     const mp = gMediaPlayer
@@ -3593,6 +3765,7 @@ class QtCarLyricCommand implements Runnable {
     }
     gCarLastPublishAt = 0
     scheduleCarLyricTick()
+    scheduleWidgetLyric()
   }
 }
 function dispatchCarCommand(command: QtCarLyricCommand): void {
@@ -3658,7 +3831,7 @@ dlnaOnNativeState(() => {
   // 只刷新元数据，不读取已停止的本地 ExoPlayer 位置。
   const current = gLastTimelineItems.find((item: AudioPlaylistItem): boolean => item.mediaId == state.mediaId)
   if (current != null) { gWidgetTitle = current.title; gWidgetArtist = current.artist; gWidgetCoverUrl = current.coverUrl }
-  gWidgetPlaying = state.phase == 'playing'; refreshWidgetViews()
+  gWidgetPlaying = state.phase == 'playing'; scheduleWidgetLyric(); refreshWidgetViews()
 })
 }
 export function audioDlnaSupported(): boolean { return true }
@@ -3710,4 +3883,28 @@ export function audioDlnaDisconnect(returnToLocal: boolean): void {
   const mp = gMediaPlayer
   if (mp != null) { gMediaSession3?.setPlayer(mp); mp.pause(); mp.stop(); mp.clearMediaItems() }
   firePause()
+}
+
+// Append-only bridge export: existing custom-base method IDs remain stable.
+class QtWidgetThemePush implements Runnable {
+  override run(): void { refreshWidgetViews() }
+}
+export function audioSetWidgetTheme(dark: boolean, accent: string): void {
+  const context = UTSAndroid.getAppContext()
+  if (context == null) return
+  try {
+    Color.parseColor(accent)
+    context.getSharedPreferences('qt-widget', Context.MODE_PRIVATE).edit().putBoolean('dark', dark).putString('accent', accent).apply()
+    getHandler().post(new QtWidgetThemePush())
+  } catch (e) { console.log('[QT Widget] Theme update failed', e) }
+}
+
+// Append-only bridge export: pitches are local to ExoPlayer, never DLNA commands.
+export function audioSetPitch(semitones: number): void {
+  let value: number = Math.round(semitones.toDouble())
+  if (value < MIN_PITCH_SEMITONES) value = MIN_PITCH_SEMITONES
+  if (value > MAX_PITCH_SEMITONES) value = MAX_PITCH_SEMITONES
+  gPitchSemitones = value
+  const mp = gMediaPlayer
+  if (mp != null && !dlnaActive()) applySpeed(mp)
 }

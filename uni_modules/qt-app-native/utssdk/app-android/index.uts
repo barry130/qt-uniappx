@@ -7,6 +7,19 @@
 
 import { UTSAndroid } from "io.dcloud.uts";
 import Intent from "android.content.Intent";
+import Activity from "android.app.Activity";
+import ActivityManager from "android.app.ActivityManager";
+import Application from "android.app.Application";
+import Bundle from "android.os.Bundle";
+import BroadcastReceiver from "android.content.BroadcastReceiver";
+import IntentFilter from "android.content.IntentFilter";
+import ContentObserver from "android.database.ContentObserver";
+import WindowInfoTracker from "androidx.window.layout.WindowInfoTracker";
+import WindowInfoTrackerCallbackAdapter from "androidx.window.java.layout.WindowInfoTrackerCallbackAdapter";
+import WindowLayoutInfo from "androidx.window.layout.WindowLayoutInfo";
+import FoldingFeature from "androidx.window.layout.FoldingFeature";
+import Consumer from "androidx.core.util.Consumer";
+import ContextCompat from "androidx.core.content.ContextCompat";
 import Uri from "android.net.Uri";
 import File from "java.io.File";
 import FileProvider from "androidx.core.content.FileProvider";
@@ -40,6 +53,7 @@ import Handler from "android.os.Handler";
 import Looper from "android.os.Looper";
 import Runnable from "java.lang.Runnable";
 import CookieManager from "android.webkit.CookieManager";
+import ValueCallback from "android.webkit.ValueCallback";
 import Dialog from "android.app.Dialog";
 import DialogInterface from "android.content.DialogInterface";
 import WebView from "android.webkit.WebView";
@@ -2147,6 +2161,14 @@ function webCookieHandler(): Handler {
 	return created;
 }
 
+/**
+ * 清库进行中标记：为 true 时 getWebCookies 一律返回空。
+ * removeAllCookies 是异步删除，若在删除完成前读库会读回「待删除的旧登录 Cookie」，
+ * 宿主第一拍轮询就会把上次登录态当成新登录而秒过（2026-11-13 实测）。此标记让清库
+ * 完成前的读一律为空，从根上避免读到旧 Cookie。
+ */
+let gAuthClearPending: boolean = false;
+
 /** 把「逐 URL 读 Cookie 后回值」做成 Runnable（qt-js-engine webview.uts 的 V8MainTask 同款） */
 class WebCookieTask implements Runnable {
 	private urls: string[];
@@ -2158,6 +2180,11 @@ class WebCookieTask implements Runnable {
 	}
 
 	override run(): void {
+		if (gAuthClearPending) {
+			// 清库未完成：这拍不读，避免读到待删除的旧登录 Cookie
+			this.resolve([]);
+			return;
+		}
 		const out: string[] = [];
 		try {
 			const cm = CookieManager.getInstance();
@@ -2549,6 +2576,57 @@ function qtAuthOpenOnMain(url: string, onClose: (message: string) => void, ua: s
 	}
 }
 
+/** 清库安全兜底延迟：回调没来也要在此时解除读阻塞 */
+const QT_AUTH_CLEAR_SAFETY_MS = 1500;
+
+/** CookieManager.removeAllCookies 的完成回调（清库完成后解除读阻塞） */
+class QtAuthCookieClearCallback implements ValueCallback<boolean> {
+	constructor() {
+		super();
+	}
+	override onReceiveValue(value: boolean | null): void {
+		gAuthClearPending = false;
+	}
+}
+
+/** 安全兜底：回调万一不来，解除读阻塞，避免 getWebCookies 永远返回空导致登录卡死 */
+class QtAuthClearDoneTask implements Runnable {
+	constructor() {
+		super();
+	}
+	override run(): void {
+		gAuthClearPending = false;
+	}
+}
+
+/**
+ * 主线程任务：清空 WebView 共享 Cookie 库。
+ *
+ * 每个平台网页登录都要「重新登录」，不能继承上一次的登录态：CookieManager 是进程级
+ * 持久 cookie 库，WebView 重建也不会丢，导致二次点「网页登录」时站点直接判定已登录、
+ * 秒回 Cookie 而不出二维码（2026-11-13 实测）。App 已捕获的凭据存在应用自己的存储里，
+ * 清 WebView 的库不影响已登录源本身，只是让原生登录页每次从零开始。
+ */
+class QtAuthClearCookiesTask implements Runnable {
+	constructor() {
+		super();
+	}
+	override run(): void {
+		try {
+			// 先置位：删除完成前 getWebCookies 一律回空，避免读到待删除的旧登录 Cookie
+			gAuthClearPending = true;
+			const cm = CookieManager.getInstance();
+			cm.removeAllCookies(new QtAuthCookieClearCallback());
+			cm.flush();
+			console.log("[AppNative] openAuthWebView: 已清理上次登录 Cookie");
+			webCookieHandler().postDelayed(new QtAuthClearDoneTask(), QT_AUTH_CLEAR_SAFETY_MS.toLong());
+		} catch (e) {
+			gAuthClearPending = false;
+			console.log("[AppNative] 清理登录 Cookie 失败: " + (e != null ? e.toString() : "unknown"));
+		}
+	}
+}
+
 /** 主线程任务：打开登录 WebView（UTS 插件函数跑在 JS 线程，无 Looper，必须 post） */
 class QtAuthOpenTask implements Runnable {
 	private url: string;
@@ -2580,9 +2658,59 @@ class QtAuthCloseTask implements Runnable {
 
 /**
  * 用「可控 WebView」打开官方登录页（契约见 interface.uts 的 OpenAuthWebView）。
+ *
+ * 首次进入网页登录时从 onLoad 触发，此时页面切换动画尚未结束、Activity 窗口可能还不可用：
+ * activity==null 或 Dialog.show() 抛 BadTokenException 都会被吞掉——宿主以为「已打开」，
+ * 用户却停在等待页，只能手点「重新打开官方登录页」（2026-11-13 实测）。
+ * 打开后延迟复核：Dialog 没真正挂上就在短时间内自动重试，把首开失败兜住。
  */
+const QT_AUTH_OPEN_MAX_ATTEMPTS = 20;
+const QT_AUTH_OPEN_RETRY_DELAY_MS = 250;
+/** 首次进入时先让页面切换这一帧走完，Activity 窗口 token 就绪后再 show()，避开 BadToken */
+const QT_AUTH_OPEN_INITIAL_DELAY_MS = 300;
+
+/** 打开后复核 Dialog 是否真的挂上；未挂上则自动重试（不改动既有 onClose 语义） */
+class QtAuthVerifyTask implements Runnable {
+  private url: string;
+  private onClose: (message: string) => void;
+  private ua: string;
+  private attempt: number;
+
+  constructor(url: string, onClose: (message: string) => void, ua: string, attempt: number) {
+    super();
+    this.url = url;
+    this.onClose = onClose;
+    this.ua = ua;
+    this.attempt = attempt;
+  }
+
+  override run(): void {
+    if (gAuthDialog != null && gAuthWebView != null) return;
+    if (this.attempt >= QT_AUTH_OPEN_MAX_ATTEMPTS) {
+      console.log("[AppNative] openAuthWebView 多次重试仍未能打开");
+      // 兜底：不能在宿主侧无声地停在等待页。回调非空原因，宿主会切到“已关闭，可重新打开”的可见态。
+      this.onClose("无法自动打开官方登录页，请点「重新打开官方登录页」");
+      return;
+    }
+    // 非 HTTPS 地址在 qtAuthOpenOnMain 内已通过 onClose 回调，避免重复重试
+    if (!this.url.startsWith("https://")) return;
+    console.log("[AppNative] openAuthWebView 未生效，自动重试 " + (this.attempt + 1));
+    qtAuthOpenWithRetry(this.url, this.onClose, this.ua, this.attempt + 1);
+  }
+}
+
+function qtAuthOpenWithRetry(url: string, onClose: (message: string) => void, ua: string, attempt: number): void {
+  webCookieHandler().post(new QtAuthOpenTask(url, onClose, ua));
+  webCookieHandler().postDelayed(new QtAuthVerifyTask(url, onClose, ua, attempt), QT_AUTH_OPEN_RETRY_DELAY_MS.toLong());
+}
+
 export const openAuthWebView: OpenAuthWebView = function (url: string, onClose: (message: string) => void, ua: string): void {
-	webCookieHandler().post(new QtAuthOpenTask(url, onClose, ua));
+	// 每次打开前先清空 WebView 的 Cookie 库，确保不继承上一次登录态（同一 Handler FIFO：先清后开）。
+	webCookieHandler().post(new QtAuthClearCookiesTask());
+	// 首开不立即 show()：等页面切换这一帧结束（Activity 窗口 token 就绪）再挂 Dialog，
+	// 随后按 QT_AUTH_OPEN_RETRY_DELAY_MS 复核是否真挂上，未挂上自动重试。
+	webCookieHandler().postDelayed(new QtAuthOpenTask(url, onClose, ua), QT_AUTH_OPEN_INITIAL_DELAY_MS.toLong());
+	webCookieHandler().postDelayed(new QtAuthVerifyTask(url, onClose, ua, 0), (QT_AUTH_OPEN_INITIAL_DELAY_MS + QT_AUTH_OPEN_RETRY_DELAY_MS).toLong());
 };
 
 /** 关闭 openAuthWebView 打开的登录 WebView（未打开时无副作用，不触发 onClose） */
@@ -2600,4 +2728,138 @@ export async function moveAppToBackgroundNative(): Promise<boolean> {
     console.log("[AppNative] moveTaskToBack error", e);
   }
   return false;
+}
+
+// Device presentation bridge (append-only method order).
+let presentationAdapter: WindowInfoTrackerCallbackAdapter | null = null;
+let presentationConsumer: Consumer<WindowLayoutInfo> | null = null;
+let presentationActivity: Activity | null = null;
+let presentationApplication: Application | null = null;
+let presentationCallback: ((left: number, top: number, right: number, bottom: number, separating: boolean, tabletop: boolean) => void) | null = null;
+let performanceCallback: ((lowMemory: boolean, powerSave: boolean, animationsDisabled: boolean) => void) | null = null;
+let performanceRegistered = false;
+class QtPresentationLifecycle implements Application.ActivityLifecycleCallbacks {
+  override onActivityCreated(activity: Activity, saved: Bundle | null): void {}
+  override onActivityStarted(activity: Activity): void {}
+  override onActivityResumed(activity: Activity): void {
+    if (presentationCallback != null) bindPresentationActivity(activity, presentationCallback!!);
+    publishPerformance();
+  }
+  override onActivityPaused(activity: Activity): void {}
+  override onActivityStopped(activity: Activity): void {}
+  override onActivitySaveInstanceState(activity: Activity, saved: Bundle): void {}
+  override onActivityDestroyed(activity: Activity): void {
+    if (presentationActivity == activity) detachPresentationActivity();
+  }
+}
+class QtPerformanceReceiver extends BroadcastReceiver {
+  constructor() { super(); }
+  override onReceive(context: Context, intent: Intent): void { publishPerformance(); }
+}
+class QtAnimationObserver extends ContentObserver {
+  constructor() { super(new Handler(Looper.getMainLooper())); }
+  override onChange(selfChange: boolean): void { publishPerformance(); }
+}
+const presentationLifecycle = new QtPresentationLifecycle();
+const performanceReceiver = new QtPerformanceReceiver();
+const animationObserver = new QtAnimationObserver();
+class QtFoldConsumer implements Consumer<WindowLayoutInfo> {
+  private callback: (left: number, top: number, right: number, bottom: number, separating: boolean, tabletop: boolean) => void;
+  private activity: Activity;
+  constructor(activity: Activity, callback: (left: number, top: number, right: number, bottom: number, separating: boolean, tabletop: boolean) => void) {
+    this.activity = activity; this.callback = callback;
+  }
+  override accept(info: WindowLayoutInfo): void {
+    if (presentationActivity != this.activity) return;
+    const density = this.activity.getResources().getDisplayMetrics().density.toDouble();
+    const content = this.activity.findViewById<View>(android.R.id.content);
+    const xy = new IntArray(2);
+    if (content != null) content.getLocationInWindow(xy);
+    const features = info.displayFeatures;
+    for (let i = 0; i < features.size; i++) {
+      const feature = features.get(i.toInt());
+      if (feature instanceof FoldingFeature) {
+        const fold = feature as FoldingFeature;
+        if (!fold.isSeparating && fold.occlusionType != FoldingFeature.OcclusionType.FULL) continue;
+        const bounds = fold.bounds;
+        this.callback((bounds.left - xy[0]).toDouble() / density, (bounds.top - xy[1]).toDouble() / density,
+          (bounds.right - xy[0]).toDouble() / density, (bounds.bottom - xy[1]).toDouble() / density, true,
+          fold.orientation == FoldingFeature.Orientation.HORIZONTAL && fold.state == FoldingFeature.State.HALF_OPENED);
+        return;
+      }
+    }
+    this.callback(0, 0, 0, 0, false, false);
+  }
+}
+function detachPresentationActivity(): void {
+  if (presentationAdapter != null && presentationConsumer != null) presentationAdapter!!.removeWindowLayoutInfoListener(presentationConsumer!!);
+  presentationActivity = null; presentationConsumer = null; presentationAdapter = null;
+}
+export function stopDevicePresentation(): void {
+  detachPresentationActivity();
+  presentationCallback = null; performanceCallback = null;
+  const app = presentationApplication;
+  if (app != null) {
+    app.unregisterActivityLifecycleCallbacks(presentationLifecycle);
+    if (performanceRegistered) {
+      app.unregisterReceiver(performanceReceiver);
+      app.getContentResolver().unregisterContentObserver(animationObserver);
+    }
+  }
+  performanceRegistered = false; presentationApplication = null;
+}
+export function startDevicePresentation(callback: (left: number, top: number, right: number, bottom: number, separating: boolean, tabletop: boolean) => void): void {
+  stopDevicePresentation();
+  const activity = UTSAndroid.getUniActivity();
+  if (activity == null) return;
+  presentationCallback = callback;
+  const app = activity.getApplication();
+  presentationApplication = app;
+  app.registerActivityLifecycleCallbacks(presentationLifecycle);
+  bindPresentationActivity(activity, callback);
+}
+function bindPresentationActivity(activity: Activity, callback: (left: number, top: number, right: number, bottom: number, separating: boolean, tabletop: boolean) => void): void {
+  if (presentationActivity == activity) return;
+  detachPresentationActivity();
+  try {
+    presentationActivity = activity;
+    const adapter = new WindowInfoTrackerCallbackAdapter(WindowInfoTracker.getOrCreate(activity));
+    const consumer = new QtFoldConsumer(activity, callback);
+    presentationAdapter = adapter; presentationConsumer = consumer;
+    adapter.addWindowLayoutInfoListener(activity, ContextCompat.getMainExecutor(activity), consumer);
+  } catch (e) {
+    detachPresentationActivity(); callback(0, 0, 0, 0, false, false);
+    console.log("[AppNative] Fold observation unavailable", e);
+  }
+}
+export function readDevicePerformance(callback: (lowMemory: boolean, powerSave: boolean, animationsDisabled: boolean) => void): void {
+  performanceCallback = callback;
+  const app = presentationApplication;
+  if (app != null && !performanceRegistered) {
+    const filter = new IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED);
+    if (Build.VERSION.SDK_INT >= 33) app.registerReceiver(performanceReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+    else app.registerReceiver(performanceReceiver, filter);
+    performanceRegistered = true;
+    app.getContentResolver().registerContentObserver(Settings.Global.getUriFor(Settings.Global.ANIMATOR_DURATION_SCALE), false, animationObserver);
+  }
+  publishPerformance();
+}
+function publishPerformance(): void {
+  const context = UTSAndroid.getAppContext();
+  if (context == null) return;
+  try {
+    const memory = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager;
+    const power = context.getSystemService(Context.POWER_SERVICE) as PowerManager;
+    const scale = Settings.Global.getFloat(context.getContentResolver(), Settings.Global.ANIMATOR_DURATION_SCALE, 1.0.toFloat());
+    if (performanceCallback != null) performanceCallback!!(memory.isLowRamDevice(), power.isPowerSaveMode(), scale == 0.0.toFloat());
+  } catch (e) { console.log("[AppNative] Performance signals unavailable", e); }
+}
+export function takeWidgetRoute(): string {
+  const context = UTSAndroid.getAppContext();
+  if (context == null) return "";
+  const preferences = context.getSharedPreferences("qt-widget", Context.MODE_PRIVATE);
+  const route = preferences.getString("route", "") ?? "";
+  const at = preferences.getLong("routeAt", 0);
+  preferences.edit().remove("route").remove("routeAt").apply();
+  return java.lang.System.currentTimeMillis() - at < 30000 ? route : "";
 }
