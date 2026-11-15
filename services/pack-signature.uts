@@ -62,9 +62,26 @@ export async function verifyOfficialSignature(text: string): Promise<PackSignChe
   const parts = splitSignatureBlock(text);
   if (parts.sig.length == 0) return { ok: false, message: "文件缺少有效的官方签名" };
   return await new Promise<PackSignCheck>((resolve) => {
-    verifyPackSignature(parts.content, parts.sig, OFFICIAL_SIGN_PUBKEY_HEX, (result) => {
-      if (!result.ok) { resolve({ ok: false, message: "验签环境不可用：" + result.error }); return; }
-      resolve(result.value == "ok" ? { ok: true, message: "" } : { ok: false, message: "签名不匹配，文件已改动或并非官方原版" });
-    });
+    // 原生验签是异步回调；任何一端挂死都会让调用方的 loading 永远收不掉。
+    // 这里与原生侧的超时兜底互为双保险：先到者收口，后到者被 settled 拦下。
+    let settled = false;
+    const done = (r: PackSignCheck): void => {
+      if (settled) return;
+      settled = true;
+      resolve(r);
+    };
+    const guard = setTimeout(() => {
+      done({ ok: false, message: "验签超时，请重试" });
+    }, 10000);
+    try {
+      verifyPackSignature(parts.content, parts.sig, OFFICIAL_SIGN_PUBKEY_HEX, (result) => {
+        clearTimeout(guard);
+        if (!result.ok) { done({ ok: false, message: "验签环境不可用：" + result.error }); return; }
+        done(result.value == "ok" ? { ok: true, message: "" } : { ok: false, message: "签名不匹配，文件已改动或并非官方原版" });
+      });
+    } catch (e) {
+      clearTimeout(guard);
+      done({ ok: false, message: "验签调用异常：" + e });
+    }
   });
 }

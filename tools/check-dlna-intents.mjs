@@ -10,7 +10,7 @@ import vm from "node:vm";
 const native = readFileSync(new URL("../uni_modules/qt-audio-player/utssdk/app-android/dlna.uts", import.meta.url), "utf8");
 const protocol = readFileSync(new URL("../uni_modules/qt-audio-player/utssdk/dlna-protocol.uts", import.meta.url), "utf8");
 const compile = source => stripTypeScriptTypes(source.replace(/^export /gm, "").replace(/(\w+)!!/g, "$1!"), { mode: "strip" });
-const footer = native.slice(native.indexOf("function clearResolveTimeout"));
+const footer = native.slice(native.indexOf("function clearEndEvidence"));
 
 function setup() {
   const jobs = [], posts = [], effects = [], requests = [];
@@ -42,6 +42,8 @@ function setup() {
     currentItem: null, currentResourceUri: "", requestedStartMs: 0,
     resolveTimeout: null, refreshUsed: false, playIntent: new AtomicBoolean(false), manualStop: false,
     observedPlaying: false, previousTransport: "", pollFailures: 0, pollRunning: false,
+    playingPositionMs: 0, playingAt: 0, playingUri: '', playingSession: -1, playingGeneration: -1,
+    playingPlayRevision: 0, playingSeekRevision: 0,
     publicState: { target: "dlna", sessionId: 1, generation: 1, phase: "connected", mediaId: "", positionMs: 0, durationMs: 60000, volume: 0.5, canSeek: true, canSetVolume: true, error: "" },
     INSTANCE: "<InstanceID>0</InstanceID>",
     resources: { clear() {}, put() {}, containsKey: () => true },

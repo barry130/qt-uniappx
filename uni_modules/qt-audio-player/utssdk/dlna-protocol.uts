@@ -39,11 +39,18 @@ export function dlnaByteRange(header: string, size: number): DlnaByteRange | nul
 	return { start, end: Math.min(end, size - 1), partial: true }
 }
 
-/** 接收端必须给出可靠时长/近尾进度，并且此前确实播放过当前地址。 */
-export function dlnaNaturalEnd(previous: string, current: string, positionMs: number, durationMs: number,
-	wasPlaying: boolean, manualStop: boolean, sameUri: boolean): boolean {
-	return wasPlaying && !manualStop && sameUri && previous == 'PLAYING' && current == 'STOPPED'
-		&& durationMs > 2000 && positionMs >= durationMs - 1500
+/** 接收端必须给出可靠时长/近尾进度，并且此前确实播放过当前地址。
+ * wasPlaying 由调用方绑定当前会话、曲目、播放/定位版本和非空相同 URI。
+ * 使用最近一次成功 PLAYING 的原始设备位置；UI 外推时钟不参与结束判断。
+ */
+export function dlnaNaturalEnd(previous: string, current: string, previousPositionMs: number, durationMs: number,
+	wasPlaying: boolean, manualStop: boolean, compatibleUri: boolean, elapsedMs: number = 0,
+	positionMs: number = 0, intendPlay: boolean = true): boolean {
+	if (!wasPlaying || manualStop || !intendPlay || !compatibleUri || previous != 'PLAYING' ||
+		(current != 'STOPPED' && current != 'NO_MEDIA_PRESENT') || !(durationMs > 2000) ||
+		!(previousPositionMs > 0) || !(elapsedMs >= 0 && elapsedMs <= 5000)) return false
+	const candidate = Math.min(durationMs, Math.max(previousPositionMs + elapsedMs, positionMs))
+	return durationMs - candidate <= 1800
 }
 
 export function dlnaMimeFromPath(path: string): string {

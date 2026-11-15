@@ -212,7 +212,6 @@
       <QtTabBar current="pages/home/index" :dots="updateDotPaths" />
       <!-- 三个全屏弹窗（公告 / 升级 / 数据包引导）互斥：只渲染 activePopup 选中的那一个 -->
       <qt-notice-splash v-if="activePopup == 'splash'" :notice="noticeStore.splashNotice" @closed="onSplashClosed" />
-      <qt-upgrade-popup v-model:visible="upgradeVisible" :info="upgradeInfo" @closed="onUpgradeClosed" />
       <QtMetaPackGuide :visible="activePopup == 'meta'" @go="goSourcePack" @dismiss="onMetaGuideDismiss" />
       </view>
     </view>
@@ -266,7 +265,6 @@ import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtNoticeBar from "@/uni_modules/qt-ui/components/qt-notice-bar/qt-notice-bar.uvue";
 import QtNoticeSplash from "@/uni_modules/qt-ui/components/qt-notice-splash/qt-notice-splash.uvue";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
-import qtUpgradePopup from "@/uni_modules/qt-ui/components/qt-upgrade-popup/qt-upgrade-popup.uvue";
 import QtMetaPackGuide from "@/uni_modules/qt-ui/components/qt-meta-pack-guide/qt-meta-pack-guide.uvue";
 import QtLocalMixes from "@/uni_modules/qt-ui/components/qt-local-mixes/qt-local-mixes.uvue";
 import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
@@ -282,6 +280,8 @@ import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layou
 import { useNoticeStore } from "@/stores/notice";
 import { isNoticeBarClosedInSession } from "@/services/notice";
 import { consumePendingUpdate, pendingUpdateRef } from "@/services/upgrade";
+import { publishAppUpdate, appUpdateState } from "@/services/app-update";
+const appUpdateVisible = appUpdateState().visible;
 import { markFirstPageReady } from "@/services/boot-guard";
 import type { AppUpdateInfo } from "@/services/upgrade";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
@@ -411,26 +411,47 @@ function onSplashClosed(hideToday: boolean): void {
 }
 
 const upgradeVisible = ref(false);
+// 展示中的版本与待展示版本分开：关闭当前弹窗只消费前者。
+const displayedUpgradeInfo = ref<AppUpdateInfo | null>(null);
 const upgradeInfo = ref<AppUpdateInfo | null>(null);
 const upgradeHold = ref(false);
 const noticeIdle = computed<boolean>(() => noticeStore.loaded && noticeStore.splashNotice == null);
+/** 真正把更新交给框架层宿主弹出（弹窗挂在 qt-page-frame，不再挂本页） */
+function openUpgrade(): void {
+  const pending = upgradeInfo.value;
+  if (pending == null) return;
+  // 其他页面正在展示更新时，保留首页自己的待展示版本，等全局宿主空闲后再发布。
+  if (appUpdateVisible.value) {
+    upgradeHold.value = true;
+    return;
+  }
+  upgradeHold.value = false;
+  // 先登记 ownership 与展示记录，再同步发布；待展示槽只承接后续新版本。
+  displayedUpgradeInfo.value = pending;
+  upgradeInfo.value = null;
+  upgradeVisible.value = true;
+  publishAppUpdate(pending);
+}
 function tryShowUpgrade(): void {
   const pending = consumePendingUpdate();
   if (pending == null) return;
+  const displayed = displayedUpgradeInfo.value;
+  // 展示中的同版本重复通知已经消费；也不覆盖正在排队的下一版本。
+  if (displayed != null && displayed.versionCode == pending.versionCode) return;
   upgradeInfo.value = pending;
   if (!noticeIdle.value) {
     upgradeHold.value = true;
     return;
   }
   upgradeHold.value = false;
-  upgradeVisible.value = true;
+  openUpgrade();
 }
 watch(pendingUpdateRef, () => tryShowUpgrade());
 watch(noticeIdle, () => {
   if (!upgradeHold.value || upgradeVisible.value) return;
   if (upgradeInfo.value != null && noticeIdle.value) {
     upgradeHold.value = false;
-    upgradeVisible.value = true;
+    openUpgrade();
   }
 });
 onMounted(() => {
@@ -440,7 +461,7 @@ onMounted(() => {
   upgradeTimer = setTimeout(() => {
     if (!noticeStore.loaded && upgradeInfo.value != null && !upgradeVisible.value) {
       upgradeHold.value = false;
-      upgradeVisible.value = true;
+      openUpgrade();
     }
   }, 12000) as number;
 });
@@ -456,11 +477,25 @@ onUnmounted(() => {
   // 永远等一个不存在的弹窗
   homePopupStore.busy = false;
 });
-function onUpgradeClosed(): void {
+// 弹窗已移到框架层宿主（qt-app-update-host）。关闭后必须在这里复位本地占用态：
+// activePopup / popupBlocking / homePopupStore.busy 都读 upgradeVisible，
+// 不复位的话 tabbar 会一直被挡住、启动弹窗队列也永远等不到空闲。
+watch(appUpdateVisible, (open: boolean): void => {
+  if (open) {
+    if (upgradeInfo.value != null && !upgradeVisible.value) upgradeHold.value = true;
+    return;
+  }
+  if (!upgradeVisible.value) {
+    // 关闭的是其他页面的更新：保留首页排队版本，公告空闲后补发。
+    if (upgradeInfo.value != null && upgradeHold.value && noticeIdle.value) openUpgrade();
+    return;
+  }
+  // 只消费首页已展示的版本；展示期间收到的新版本继续等待公告门控。
   upgradeVisible.value = false;
-  upgradeInfo.value = null;
-  upgradeHold.value = false;
-}
+  displayedUpgradeInfo.value = null;
+  upgradeHold.value = upgradeInfo.value != null;
+  if (upgradeHold.value && noticeIdle.value) openUpgrade();
+});
 function goNoticeCenter(): void {
   uni.navigateTo({ url: "/pages/notice/list/index" });
 }

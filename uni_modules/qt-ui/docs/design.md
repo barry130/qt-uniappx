@@ -130,7 +130,7 @@ uni_modules/
     ├── docs/
     │   ├── design.md               # 本文档：设计系统
     │   └── ui-review.md            # UI 审查红线 / 整改进度 / 剩余问题（活文档）
-    └── components/                 # 单文件、单目录，共 45 个组件；完整目录见 component-catalog.md
+    └── components/                 # 单文件、单目录；完整目录见 component-catalog.md
         ├── qt-page-frame/          # 页面外壳：rail / chrome / toast / player bar / 设置与我的三栏
         ├── qt-card/  qt-button/  qt-icon/  qt-loading/  qt-checkbox/
         ├── qt-empty/               # 空态 / 列表为空 / 错误占位（见 §11.1）
@@ -139,6 +139,7 @@ uni_modules/
         ├── qt-mini-player/         # 悬浮播放球（几乎全站可见）
         ├── qt-song-row/  qt-song-row-lite/  qt-local-row/
         ├── qt-notice-bar/  qt-notice-splash/  qt-notice-card/  qt-upgrade-popup/
+        ├── qt-app-update-host/      # 应用更新全局宿主：框架层承接页面发布，可见期间不替换版本
         ├── qt-toast-host/          # 轻提示宿主（全站一个实例）
         ├── qt-confirm-host/        # 确认弹窗宿主（全站一个实例，替代 uni.showModal）
         ├── qt-action-sheet-host/   # 底部操作表宿主（全站一个实例，替代 uni.showActionSheet）

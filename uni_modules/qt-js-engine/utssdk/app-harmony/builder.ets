@@ -80,6 +80,8 @@
 // '@ohos.arkui.UIContext' 导入并再导出）。HitTestMode 是 enums.d.ts 里的环境枚举，无需 import。
 import { BuilderNode, ComponentContent, FrameNode, OverlayManager, UIContext } from '@kit.ArkUI';
 import { webview } from '@kit.ArkWeb';
+import { cryptoFramework } from '@kit.CryptoArchitectureKit';
+import { util as verifyUtil } from '@kit.ArkTS';
 // ⚠️ `.ets` 里 `UTSHarmony` **不是全局**（只有 `.uts` 才由编译器注入 import），
 // 必须自己从运行时包导入。本文件只用到 `getWindowStage()`：它的 d.ets 返回
 // `OHWindow.WindowStage`（`import OHWindow from '@ohos.window'`）可以正常解析。
@@ -656,6 +658,49 @@ export class QtJsArkWebHost {
       this.readyCb();
     }
   }
+}
+
+/**
+ * 官方音源包 Ed25519 验签（纯 ArkTS 原生实现）。
+ * 本机 SDK 的 AsyKeyGenerator.convertKey Promise 重载要求 pubKey、priKey 两个参数；
+ * 私钥参数传 null 表示只转换公钥，不是回调式重载。
+ */
+export function verifyPackSignatureNative(
+  content: string,
+  signatureBase64: string,
+  publicKeyHex: string,
+  callback: (ok: string, value: string, error: string) => void
+): void {
+  let settled = false;
+  const reply = (ok: string, value: string, error: string): void => {
+    if (settled) return;
+    settled = true;
+    callback(ok, value, error);
+  };
+  const guard = setTimeout(() => {
+    reply('0', '', '原生 Ed25519 验签超时');
+  }, 8000);
+  const run = async (): Promise<void> => {
+    try {
+      const encoded = '302a300506032b6570032100' + publicKeyHex;
+      const bytes = new Uint8Array(encoded.length / 2);
+      for (let i = 0; i < encoded.length; i += 2) {
+        bytes[i / 2] = parseInt(encoded.substring(i, i + 2), 16);
+      }
+      const key = await cryptoFramework.createAsyKeyGenerator('Ed25519').convertKey({ data: bytes }, null);
+      const verifier = cryptoFramework.createVerify('Ed25519');
+      await verifier.init(key.pubKey);
+      const signature = new verifyUtil.Base64Helper().decodeSync(signatureBase64);
+      const data = new verifyUtil.TextEncoder().encodeInto(content);
+      const valid = await verifier.verify({ data: data }, { data: signature });
+      clearTimeout(guard);
+      reply('1', valid ? 'ok' : 'bad', '');
+    } catch (e) {
+      clearTimeout(guard);
+      reply('0', '', '原生 Ed25519 验签不可用：' + errorText(e));
+    }
+  };
+  run();
 }
 
 /** 取得 UIContext：windowStage 主窗口优先，其次当前窗口 */

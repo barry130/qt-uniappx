@@ -211,6 +211,7 @@ function setup({ size = 800000 } = {}) {
   const context = vm.createContext({
     console, UTSJSONObject, JSON: json, Uint8Array, ArrayBuffer, Map, Set,
     Date: class extends Date { static now() { return now; } },
+    systemDateTime: { TimeType: { STARTUP: 0 }, getUptime: () => now },
     setTimeout: setTimer, clearTimeout: clearTimer,
     xml: { EventType: eventTypes, XmlPullParser },
     util: {
@@ -401,6 +402,64 @@ await check('only a confirmed near-end transition emits natural completion', asy
     assert.equal(ends, nearEnd ? 1 : 0);
   }
 });
+await check('58s of 60s plus 1.5s then STOPPED at zero emits completion once', async () => {
+  const env = setup(); await env.connect(); await env.load(item('test:bounded-end', 60));
+  let ends = 0; env.api.dlnaOnEnded(() => ends++);
+  env.remote.duration = 60000; env.remote.position = 58000;
+  await env.tick(1000); await env.drain();
+  env.remote.transport = 'STOPPED'; env.remote.position = 0;
+  await env.tick(1500); await env.drain();
+  assert.equal(ends, 1);
+  assert.equal(env.api.dlnaState().phase, 'stopped');
+  await env.tick(2000); await env.drain();
+  assert.equal(ends, 1);
+});
+for (const terminal of ['STOPPED', 'NO_MEDIA_PRESENT']) for (const uri of ['same', 'empty']) {
+  await check('near-end ' + terminal + ' with ' + uri + ' URI completes before any missing-media error', async () => {
+    const env = setup(); await env.connect(); await env.load(item('test:terminal', 60));
+    const states = []; let ends = 0;
+    env.api.dlnaOnState(state => states.push(state)); env.api.dlnaOnEnded(() => ends++);
+    env.remote.duration = 60000; env.remote.position = 58000;
+    await env.tick(1000); await env.drain();
+    env.remote.transport = terminal; env.remote.position = 0;
+    if (uri === 'empty') env.remote.uri = '';
+    await env.tick(1500); await env.drain();
+    assert.equal(ends, 1);
+    assert.equal(env.api.dlnaState().phase, 'stopped');
+    assert.ok(!states.some(state => state.phase === 'error'));
+    await env.tick(3000); await env.drain(); assert.equal(ends, 1);
+  });
+}
+await check('a seek near the tail revokes old PLAYING evidence until a new successful poll', async () => {
+  const env = setup(); await env.connect(); await env.load(item('test:seek-end', 60));
+  let ends = 0; env.api.dlnaOnEnded(() => ends++);
+  env.remote.duration = 60000; env.remote.position = 59000;
+  await env.tick(1000); await env.drain();
+  env.api.dlnaSeek(59000); await env.drain();
+  env.remote.transport = 'STOPPED'; env.remote.position = 0;
+  await env.tick(1000); await env.drain();
+  assert.equal(ends, 0);
+});
+await check('one failed poll revokes near-end evidence before a terminal response', async () => {
+  const env = setup(); await env.connect(); await env.load(item('test:offline-end', 60));
+  let ends = 0; env.api.dlnaOnEnded(() => ends++);
+  env.remote.duration = 60000; env.remote.position = 59000;
+  await env.tick(1000); await env.drain();
+  env.failAction = 'GetPositionInfo'; await env.tick(1000); await env.drain();
+  env.failAction = ''; env.remote.transport = 'STOPPED'; env.remote.position = 0;
+  await env.tick(1000); await env.drain(); assert.equal(ends, 0);
+});
+for (const operation of ['play', 'pause', 'stop']) {
+  await check(operation + ' after a successful near-end poll requires new PLAYING evidence', async () => {
+    const env = setup(); await env.connect(); await env.load(item('test:control-end', 60));
+    let ends = 0; env.api.dlnaOnEnded(() => ends++);
+    env.remote.duration = 60000; env.remote.position = 59000;
+    await env.tick(1000); await env.drain();
+    env.api[{ play: 'dlnaPlay', pause: 'dlnaPause', stop: 'dlnaStop' }[operation]](); await env.drain();
+    env.remote.transport = 'STOPPED'; env.remote.position = 0;
+    await env.tick(1000); await env.drain(); assert.equal(ends, 0);
+  });
+}
 await check('relay serves HEAD and exact prefix/suffix bytes; rejects multiple ranges and foreign peers', async () => {
   const env = setup(); await env.connect(); await env.load();
   const path = '/dlna/' + env.api.debug().tokens[0];

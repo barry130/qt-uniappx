@@ -67,11 +67,6 @@
           <text class="footer" :class="layout.isWide ? 'footer-wide' : ''" :style="mutedStyle + qtFontDual(22, 12) + qtTvSongLineStyle(12)">© 2026 轻听音乐</text>
         </view>
       </scroll-view>
-      <qt-upgrade-popup
-        v-model:visible="popupVisible"
-        :info="popupInfo"
-        @closed="onPopupClosed"
-      />
     </view>
   </qt-page-frame>
 </template>
@@ -82,10 +77,9 @@ import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-fr
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtContentWidth, qtSplitByHeight, QT_GUTTER_PX } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { computed, ref, onMounted } from "vue";
+import { computed, ref, onMounted, watch } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
-import qtUpgradePopup from "@/uni_modules/qt-ui/components/qt-upgrade-popup/qt-upgrade-popup.uvue";
-import type { AppUpdateInfo } from "@/services/upgrade";
+import { appUpdateState, publishAppUpdate } from "@/services/app-update";
 import {
   checkAppUpdate,
   consumePendingUpdate,
@@ -115,8 +109,11 @@ const version = getVersionText();
 // 构建时间标记：联调期区分同版本号下的不同包（见 services/app-version.ts）
 const buildStamp = APP_BUILD_STAMP;
 const updateText = ref("点击检查");
-const popupVisible = ref(false);
-const popupInfo = ref<AppUpdateInfo | null>(null);
+const appUpdateVisible = appUpdateState().visible;
+watch(appUpdateVisible, (open: boolean): void => {
+  // 全局宿主关闭后恢复原入口；后续“已是最新版本”等新结果不被旧关闭事件擦掉。
+  if (!open && updateText.value == "发现新版本") updateText.value = "点击检查";
+});
 
 /**
  * 关于页的两组入口。原本是 42 行手写模板，两组结构完全相同（图标 + 标题 + 可选行尾值 + 箭头），
@@ -171,8 +168,7 @@ onMounted(() => {
   const pending = consumePendingUpdate();
   if (pending != null) {
     updateText.value = "发现新版本";
-    popupInfo.value = pending;
-    popupVisible.value = true;
+    publishAppUpdate(pending);
   }
 });
 
@@ -182,8 +178,7 @@ function checkUpdate(): void {
     .then((info) => {
       if (info != null) {
         updateText.value = "发现新版本";
-        popupInfo.value = info;
-        popupVisible.value = true;
+        publishAppUpdate(info);
       } else {
         updateText.value = "已是最新版本";
         qtShowToast({ title: "已是最新版本", icon: "none" });
@@ -193,11 +188,6 @@ function checkUpdate(): void {
       updateText.value = "点击检查";
       qtShowToast({ title: "检查更新失败", icon: "none" });
     });
-}
-
-function onPopupClosed(): void {
-  popupVisible.value = false;
-  updateText.value = "点击检查";
 }
 
 /** 官网条款页（系统浏览器打开）：用户协议与隐私政策拆成两页，各自一个入口 */

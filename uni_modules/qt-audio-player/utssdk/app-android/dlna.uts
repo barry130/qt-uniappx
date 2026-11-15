@@ -70,6 +70,13 @@ let wifiLock: WifiManager.WifiLock | null = null
 let anchorAt = 0
 let pollRunning = false
 let observedPlaying = false
+let playingPositionMs = 0
+let playingAt = 0
+let playingPlayRevision = 0
+let playingSeekRevision = 0
+let playingSession = -1
+let playingGeneration = -1
+let playingUri = ''
 let previousTransport = ''
 let manualStop = false
 let currentResourceUri = ''
@@ -569,14 +576,14 @@ function releaseLocks(): void {
 function fail(session: number, generation: number, message: string): void {
 	if (!active(session, generation)) return
 	publicState.positionMs = dlnaPositionMs(); publicState.phase = 'error'; publicState.error = message
-	playIntent.set(false); playIntentEpoch.incrementAndGet(); manualStop = true; releaseLocks(); notify()
+	playIntent.set(false); playIntentEpoch.incrementAndGet(); manualStop = true; clearEndEvidence(); releaseLocks(); notify()
 }
 export function dlnaConnect(id: string): boolean {
 	const r = devices.get(id)
 	if (r == null) return false
 	const previous = currentDevice
 	const session = sessionEpoch.incrementAndGet().toDouble(), generation = mediaEpoch.incrementAndGet().toDouble()
-	closeMediaServer(); currentDevice = r; currentItem = null; observedPlaying = false; previousTransport = ''; manualStop = false
+	closeMediaServer(); currentDevice = r; currentItem = null; clearEndEvidence(); manualStop = false
 	publicState = { target: 'dlna', sessionId: session, generation, deviceId: r.id, deviceName: r.name,
 		phase: 'connected', mediaId: '', positionMs: 0, durationMs: 0, volume: 1, canSeek: false, canSetVolume: r.canVolume, error: '' }
 	notify()
@@ -600,6 +607,10 @@ export function dlnaConnect(id: string): boolean {
 	}))
 	return true
 }
+function clearEndEvidence(): void {
+	observedPlaying = false; playingPositionMs = 0; playingAt = 0; playingUri = ''; previousTransport = ''
+	playingPlayRevision = 0; playingSeekRevision = 0; playingSession = -1; playingGeneration = -1
+}
 function clearResolveTimeout(): void { if (resolveTimeout != null) main.removeCallbacks(resolveTimeout!!); resolveTimeout = null }
 export function dlnaLoad(item: AudioPlaylistItem, startMs: number, autoplay: boolean, refresh: boolean = false): void {
 	if (!dlnaActive()) return
@@ -608,7 +619,7 @@ export function dlnaLoad(item: AudioPlaylistItem, startMs: number, autoplay: boo
 	if (currentItem == null || currentItem!!.mediaId != item.mediaId) refreshUsed = false
 	currentItem = item; resources.clear(); currentResourceUri = ''; requestedStartMs = Math.max(0, startMs)
 	playIntent.set(autoplay); playIntentEpoch.incrementAndGet()
-	manualStop = false; observedPlaying = false; previousTransport = ''; pollFailures = 0
+	manualStop = false; clearEndEvidence(); pollFailures = 0
 	publicState.generation = generation; publicState.mediaId = item.mediaId; publicState.positionMs = requestedStartMs
 	publicState.durationMs = Math.max(0, (item.duration ?? 0) * 1000); publicState.phase = 'loading'; publicState.error = ''; publicState.canSeek = false
 	if (autoplay) acquireLocks()
@@ -678,44 +689,65 @@ export function dlnaResolveDone(mediaId: string, uri: string, referer: string, g
 	}))
 }
 function schedulePoll(): void {
-	if (pollRunning || !dlnaActive() || publicState.phase == 'error' || currentResourceUri.length == 0) return
+	if (pollRunning || !dlnaActive() || publicState.phase == 'error' || publicState.phase == 'stopped' || currentResourceUri.length == 0) return
 	pollRunning = true
 	main.postDelayed(new Work(() => {
 		pollRunning = false
 		const session = sessionEpoch.get().toDouble(), generation = mediaEpoch.get().toDouble(), r = currentDevice, expected = currentResourceUri
 		if (r == null || expected.length == 0 || publicState.phase == 'error' || publicState.phase == 'loading') return
+		const playRevision = playIntentEpoch.get().toDouble(), seekRevision = seekEpoch.get().toDouble()
 		network.execute(new Work(() => {
 			try {
+				if (!active(session, generation)) return
 				const transport = soap(r, 'GetTransportInfo', INSTANCE).find('CurrentTransportState')?.text.trim() ?? ''
 				const positions = soap(r, 'GetPositionInfo', INSTANCE)
 				const duration = dlnaTimeMs(positions.find('TrackDuration')?.text ?? '')
 				const position = dlnaTimeMs(positions.find('RelTime')?.text ?? '')
 				const trackUri = positions.find('TrackURI')?.text.trim() ?? ''
+				const sampledAt = SystemClock.elapsedRealtime().toDouble()
 				post(() => {
 					if (!active(session, generation) || currentResourceUri != expected) return
+					if (playIntentEpoch.get().toDouble() != playRevision || seekEpoch.get().toDouble() != seekRevision) { schedulePoll(); return }
 					pollFailures = 0
 					const sameUri = trackUri == expected
 					if (trackUri.length > 0 && !sameUri) { fail(session, generation, '电视已切换到其他媒体，轻听投屏已暂停'); return }
-					const ended = dlnaNaturalEnd(previousTransport, transport, Math.max(dlnaPositionMs(), position),
-						duration > 0 ? duration : publicState.durationMs, observedPlaying, manualStop, sameUri)
+					const ended = dlnaNaturalEnd(previousTransport, transport, playingPositionMs,
+						duration > 0 ? duration : publicState.durationMs,
+						observedPlaying && playingSession == session && playingGeneration == generation && playingUri == expected &&
+						playingPlayRevision == playRevision && playingSeekRevision == seekRevision, manualStop,
+						sameUri || trackUri.length == 0, sampledAt - playingAt, position, playIntent.get())
+					const hadPlaying = observedPlaying
+					clearEndEvidence()
+					if (transport == 'PLAYING' && sameUri && position > 0 && playIntent.get() && !manualStop) {
+						observedPlaying = true; playingPositionMs = position; playingAt = sampledAt; playingUri = expected
+						playingSession = session; playingGeneration = generation; playingPlayRevision = playRevision; playingSeekRevision = seekRevision
+					}
 					if (duration > 0) publicState.durationMs = duration
-					// STOPPED 可能把 RelTime 清零；客户端位置供结束判断，展示仍以可靠回报为准。
-					if (transport != 'STOPPED' || position > 0) publicState.positionMs = position
-					if (transport == 'PLAYING') { observedPlaying = true; publicState.phase = 'playing'; acquireLocks(); if (position > requestedStartMs + 2000) refreshUsed = false }
+					if (ended) {
+						manualStop = true; previousTransport = transport; publicState.phase = 'stopped'
+						publicState.positionMs = publicState.durationMs; publicState.error = ''; releaseLocks(); notify()
+						if (active(session, generation) && playIntentEpoch.get().toDouble() == playRevision && seekEpoch.get().toDouble() == seekRevision) endListener?.invoke()
+						return
+					}
+					// A terminal zero may preserve the display, but never supplies PLAYING evidence.
+					if ((transport != 'STOPPED' && transport != 'NO_MEDIA_PRESENT') || position > 0) publicState.positionMs = position
+					if (transport == 'PLAYING') { publicState.phase = 'playing'; acquireLocks(); if (position > requestedStartMs + 2000) refreshUsed = false }
 					else if (transport == 'PAUSED_PLAYBACK') { publicState.phase = 'paused'; releaseLocks() }
 					else if (transport == 'TRANSITIONING') publicState.phase = 'buffering'
-					else if (transport == 'STOPPED') publicState.phase = 'stopped'
+					else if (transport == 'STOPPED') { publicState.phase = 'stopped'; releaseLocks() }
 					else if (transport == 'NO_MEDIA_PRESENT') { fail(session, generation, '电视没有正在播放的媒体'); return }
+					else publicState.phase = 'buffering'
 					previousTransport = transport; notify()
-					if (ended) { manualStop = true; endListener?.invoke() }
-					else if (transport == 'STOPPED' && !manualStop && observedPlaying) {
-						publicState.error = '设备停止播放；未确认自然结束，已停止自动切歌'; notify()
+					if (transport == 'STOPPED' && !manualStop && hadPlaying) {
+						publicState.error = '设备停止播放；未确认自然结束，已停止自动切歌'; notify(false)
 					}
-					if (dlnaActive() && publicState.generation == generation && publicState.phase != 'stopped') schedulePoll()
+					if (active(session, generation)) schedulePoll()
 				})
 			} catch (e) {
 				post(() => {
 					if (!active(session, generation)) return
+					if (currentResourceUri != expected || playIntentEpoch.get().toDouble() != playRevision || seekEpoch.get().toDouble() != seekRevision) { schedulePoll(); return }
+					clearEndEvidence()
 					pollFailures++
 					if (pollFailures >= 3) fail(session, generation, '投屏设备失去连接，请检查电视和局域网')
 					else schedulePoll()
@@ -767,7 +799,7 @@ function requestRefresh(session: number, generation: number): void {
 }
 export function dlnaPlay(): void {
 	if (!dlnaActive()) return
-	playIntent.set(true); playIntentEpoch.incrementAndGet(); manualStop = false
+	playIntent.set(true); playIntentEpoch.incrementAndGet(); manualStop = false; clearEndEvidence()
 	if (currentItem != null && (currentResourceUri.length == 0 || publicState.phase == 'error' || publicState.phase == 'stopped')) {
 		const refresh = publicState.phase == 'error'
 		if (refresh) refreshUsed = false
@@ -778,7 +810,7 @@ export function dlnaPlay(): void {
 export function dlnaPause(): void {
 	if (!dlnaActive()) return
 	publicState.positionMs = dlnaPositionMs()
-	playIntent.set(false); playIntentEpoch.incrementAndGet()
+	playIntent.set(false); playIntentEpoch.incrementAndGet(); clearEndEvidence()
 	publicState.phase = 'paused'; releaseLocks(); notify()
 	if (currentResourceUri.length > 0) control('Pause', '')
 }
@@ -787,13 +819,13 @@ export function dlnaStop(): void {
 	publicState.positionMs = dlnaPositionMs()
 	playIntent.set(false); playIntentEpoch.incrementAndGet(); manualStop = true
 	publicState.generation = mediaEpoch.incrementAndGet().toDouble()
-	clearResolveTimeout(); resources.clear(); currentResourceUri = ''; observedPlaying = false
+	clearResolveTimeout(); resources.clear(); currentResourceUri = ''; clearEndEvidence()
 	publicState.phase = 'stopped'; releaseLocks(); notify()
 	control('Stop', '')
 }
 export function dlnaSeek(positionMs: number): void {
 	if (!publicState.canSeek) return
-	seekEpoch.incrementAndGet()
+	seekEpoch.incrementAndGet(); clearEndEvidence()
 	const position = Math.max(0, Math.min(publicState.durationMs > 0 ? publicState.durationMs : positionMs, positionMs))
 	control('Seek', '<Unit>REL_TIME</Unit><Target>' + dlnaTimeText(position) + '</Target>')
 }
@@ -806,7 +838,7 @@ export function dlnaSetVolume(volume: number): void {
 }
 export function dlnaDisconnect(onStopped: ((success: boolean) => void) | null = null): void {
 	const r = currentDevice
-	sessionEpoch.incrementAndGet(); mediaEpoch.incrementAndGet(); clearResolveTimeout(); manualStop = true
+	sessionEpoch.incrementAndGet(); mediaEpoch.incrementAndGet(); clearResolveTimeout(); manualStop = true; clearEndEvidence()
 	const retiredSession = sessionEpoch.get().toDouble(), retiredGeneration = mediaEpoch.get().toDouble()
 	closeMediaServer(); releaseLocks(); currentDevice = null; currentItem = null; currentResourceUri = ''; playIntent.set(false); playIntentEpoch.incrementAndGet()
 	publicState.target = 'local'; publicState.phase = 'disconnected'; publicState.deviceId = ''; publicState.deviceName = ''

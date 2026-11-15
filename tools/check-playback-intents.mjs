@@ -148,6 +148,7 @@ await check('official verification uses host crypto and rejects a forged signatu
       const key = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from(hex, 'hex')]);
       callback({ ok: true, value: verify(null, Buffer.from(content, 'utf8'), { key, format: 'der', type: 'spki' }, Buffer.from(sig, 'base64')) ? 'ok' : 'bad', error: '' });
     },
+    setTimeout, clearTimeout,
   });
   const signature = Buffer.alloc(64).toString('base64');
   assert.equal((await verifyOfficialSignature('tampered/*__QT_SIGN__' + JSON.stringify({ alg: 'ed25519', sig: signature }) + '*/')).ok, false);
@@ -155,6 +156,51 @@ await check('official verification uses host crypto and rejects a forged signatu
   assert.equal((await verifyOfficialSignature('tampered/*__QT_SIGN__' + JSON.stringify({ alg: 'ed25519', sig: 'invalid' }) + '*/')).ok, false);
   assert.equal(calls, 1, 'invalid signature encoding never enters the bridge');
   assert.ok(!src.includes('evalOnEngine('));
+  const harmonyBridge = read('uni_modules/qt-js-engine/utssdk/app-harmony/index.uts');
+  const harmonyNative = read('uni_modules/qt-js-engine/utssdk/app-harmony/builder.ets');
+  assert.ok(harmonyBridge.includes('verifyPackSignatureNative(content, signatureBase64, publicKeyHex'), 'Harmony UTS delegates to the ArkTS native implementation');
+  assert.ok(!harmonyBridge.includes("createAsyKeyGenerator('Ed25519')"), 'crypto calls stay out of the UTS lowering path');
+  assert.ok(harmonyNative.includes("createVerify('Ed25519')"));
+  assert.ok(harmonyNative.includes('convertKey({ data: bytes }, null)'), 'installed SDK requires separate public/private key arguments');
+});
+if (process.env.QT_HARMONY_DIST) await check('generated Harmony artifact contains the real native verifier', () => {
+  const root = process.env.QT_HARMONY_DIST.replace(/[\\/]+$/, '') + '/uni_modules/qt-js-engine/utssdk/app-harmony/';
+  const bridge = readFileSync(root + 'index.ets', 'utf8');
+  const native = readFileSync(root + 'builder.ets', 'utf8');
+  assert.ok(!/function verifyPackSignature\([^)]*\): void \{\}/.test(bridge), 'UTS lowering must not emit an empty exported verifier');
+  assert.ok(!/verifyPackSignature[^=]*=\([^)]*\): void\s*=>\s*\{\s*\}/.test(bridge), 'typed verifier export must retain its body');
+  assert.ok(bridge.includes('verifyPackSignatureNative(content, signatureBase64, publicKeyHex'), 'generated bridge calls native ArkTS');
+  assert.ok(native.includes("createAsyKeyGenerator('Ed25519')"));
+  assert.ok(native.includes('convertKey({ data: bytes }, null)'));
+  assert.ok(native.includes("createVerify('Ed25519')"));
+});
+await check('verification settles even when the native bridge never calls back', async () => {
+  // 模拟原生桥未执行或未回调导致 Promise 悬挂，调用方 await 与 loading 一直等待。
+  // 这里验证服务侧超时收口；具体桥接故障原因由生成产物检查另行核对。
+  const src = read('services/pack-signature.uts');
+  const { verifyOfficialSignature } = load(src, ['verifyOfficialSignature'], {
+    parseJsonToUtso: text => ({ get: k => JSON.parse(text)[k] }),
+    verifyPackSignature: () => { /* 刻意永不回调 */ },
+    setTimeout, clearTimeout,
+  });
+  const signature = Buffer.alloc(64).toString('base64');
+  const pack = 'x/*__QT_SIGN__' + JSON.stringify({ alg: 'ed25519', sig: signature }) + '*/';
+  const raced = await Promise.race([
+    verifyOfficialSignature(pack),
+    new Promise(resolve => setTimeout(() => resolve('still-pending'), 12000)),
+  ]);
+  assert.notEqual(raced, 'still-pending', 'bridge silence must not hang the caller forever');
+  assert.equal(raced.ok, false);
+  assert.ok(String(raced.message).length > 0, 'timeout path still carries a user-facing reason');
+  // 同步抛错的桥也必须收口，而不是把异常冒到页面
+  const { verifyOfficialSignature: throwing } = load(src, ['verifyOfficialSignature'], {
+    parseJsonToUtso: text => ({ get: k => JSON.parse(text)[k] }),
+    verifyPackSignature: () => { throw new Error('bridge exploded'); },
+    setTimeout, clearTimeout,
+  });
+  const thrown = await throwing(pack);
+  assert.equal(thrown.ok, false);
+  assert.ok(String(thrown.message).includes('bridge exploded'));
 });
 await check('fallback timeline starts local audio and resolves remote audio', () => {
   const src = read('services/audio-player.uts');

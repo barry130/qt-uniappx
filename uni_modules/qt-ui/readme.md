@@ -37,6 +37,8 @@ TV 复用同一套页面与 QtUI。通过 [use-qt-tv](<composables/use-qt-tv.ts>
 
 升级弹窗 `qt-upgrade-popup` 保留强制更新的专用居中外壳，复用 `qt-rich-text` 与 `qt-button`。标题、版本、渠道与包大小合并为紧凑标题区；面板按可用窗口高度展开，正文独立滚动、操作区固定，避免长公告挤在 260rpx / 180px 小区域内。手机左右各留 24rpx，宽屏沿用 modal 宽度；顶部状态栏、底部导航区与矮横窗均参与高度预算。手机双下载入口并排，“以后再说”移至次行；宽屏操作保持一行，矮横窗再压缩标题和页脚留白。所有底色与文字跟随主题，强制更新、下载中关闭锁及失败退出路径不变。
 
+页面不再直接挂载升级弹窗：`qt-app-update-host` 位于 `qt-page-frame` 框架层，读取 `services/app-update.ts` 并复用 `qt-upgrade-popup`，避免页面层叠上下文让播放条或 tab bar 压住遮罩。全局弹窗可见期间不替换版本；首页只清理自己发布的弹窗，其他页面关闭后保留并重试首页排队更新；关于页关闭后恢复“点击检查”。行为门禁为 `node tools/check-app-update.mjs`。
+
 收藏重复版本由 `qt-collect-choice-host` 承接：它是挂在页面 frame 的业务适配器，
 复用 `qt-sheet`、`qt-option`、`qt-checkbox` 和 `qt-button`，不增加基础选择组件族。
 面板展示歌名、歌手、音源、专辑、时长和已有/待收藏状态，默认保留已有版本，可多选。

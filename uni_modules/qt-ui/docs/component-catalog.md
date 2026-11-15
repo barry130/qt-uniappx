@@ -65,6 +65,7 @@ TV 继续复用下方全部组件族。共享布局 `isTv` 控制字体/尺寸�
 | [qt-checkbox](<../components/qt-checkbox/qt-checkbox.uvue>) | 默认红环点，indicator="check" 显示红底白勾；保持 change 与点击隔离 |
 | [qt-action-sheet](<../components/qt-action-sheet/qt-action-sheet.uvue>) | Sheet + Option + Reveal 的兼容适配器；SheetAction.description 副信息、完整多行标签及实测内容高度 |
 | [qt-action-sheet-host](<../components/qt-action-sheet-host/qt-action-sheet-host.uvue>) | 全局服务渲染出口 |
+| [qt-app-update-host](<../components/qt-app-update-host/qt-app-update-host.uvue>) | 应用更新弹窗的框架层宿主；读 services/app-update.ts 状态渲染 qt-upgrade-popup，与播放条 / tab-bar 同层；可见期间不替换版本，关闭统一清全局状态 |
 | [qt-segmented](<../components/qt-segmented/qt-segmented.uvue>) | 均分 / 横滚标签，真实几何揭示 |
 | [qt-source-switcher](<../components/qt-source-switcher/qt-source-switcher.uvue>) | 音源业务入口，使用全局 host |
 | [qt-recommendation-source-control](<../components/qt-recommendation-source-control/qt-recommendation-source-control.uvue>) | 日推 / FM 的独立业务来源入口；kind=daily/fm，复用 Option / 全局 action-sheet，严格包能力、账号提示和失效快照取消；change(kind) |

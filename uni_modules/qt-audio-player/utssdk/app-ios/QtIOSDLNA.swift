@@ -21,6 +21,17 @@ public final class QtIOSDLNA: NSObject {
         let completion: (Bool, QtIOSXMLNode?, String) -> Void
     }
 
+    private struct PlayingEvidence {
+        let session: UInt64
+        let generation: UInt64
+        let playback: UInt64
+        let seek: UInt64
+        let control: UInt64
+        let uri: String
+        let position: Double
+        let monotonic: Double
+    }
+
     private let network = URLSession(configuration: .default)
     private var devices: [String: QtIOSDLNADevice] = [:]
     private var discoveryEpoch: UInt64 = 0
@@ -31,6 +42,8 @@ public final class QtIOSDLNA: NSObject {
     private var playbackRevision: UInt64 = 0
     private var seekRevision: UInt64 = 0
     private var volumeRevision: UInt64 = 0
+    private var controlRevision: UInt64 = 0
+    private var pollSequence: UInt64 = 0
     private var queue: [Track] = []
     private var index = -1
     private var repeatMode = 0
@@ -46,8 +59,10 @@ public final class QtIOSDLNA: NSObject {
     private var deferredSeek: Double?
     private var transportStarted = false
     private var transportBusy = false
-    private var sawPlaying = false
-    private var lastMovingPosition = 0.0
+    private var lastConfirmedPlaying: PlayingEvidence?
+    private var lastDevicePosition = 0.0
+    private var manuallyStopped = false
+    private var endConsumed = false
     private var foreignMediaCount = 0
     private var pollFailures = 0
     private var pollBusy = false
@@ -90,6 +105,28 @@ public final class QtIOSDLNA: NSObject {
         return n
     }
     private func matches(_ s: UInt64, _ g: UInt64) -> Bool { active && session == s && generation == g }
+    private func revokePlayingEvidence() { lastConfirmedPlaying = nil }
+    private func matchesPoll(_ s: UInt64, _ g: UInt64, _ playback: UInt64, _ seek: UInt64, _ control: UInt64, _ poll: UInt64) -> Bool {
+        matches(s, g) && playbackRevision == playback && seekRevision == seek &&
+            controlRevision == control && pollSequence == poll && pollBusy
+    }
+    private func finishPoll(_ s: UInt64, _ g: UInt64, _ poll: UInt64) {
+        // An obsolete callback must not release a newer generation's poll.
+        if matches(s, g) && pollSequence == poll { pollBusy = false }
+    }
+    private func uriMatchesMedia(_ uri: String) -> Bool {
+        guard !uri.isEmpty, !mediaURI.isEmpty, let expected = URL(string: mediaURI),
+              let observed = URL(string: uri) else { return false }
+        return observed.absoluteString == expected.absoluteString
+    }
+    private func deviceSeconds(_ text: String) -> Double? {
+        let parts = text.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3, let hours = Double(parts[0]), let minutes = Double(parts[1]),
+              let seconds = Double(parts[2]), hours.isFinite, minutes.isFinite, seconds.isFinite,
+              hours >= 0, minutes >= 0, minutes < 60, seconds >= 0, seconds < 60 else { return nil }
+        let value = hours * 3600 + minutes * 60 + seconds
+        return value.isFinite ? value : nil
+    }
 
     public func setListeners(_ state: @escaping (String) -> Void,
                              _ resolve: @escaping (String, String, Bool) -> Void,
@@ -123,6 +160,8 @@ public final class QtIOSDLNA: NSObject {
     }
 
     private func fail(_ message: String) {
+        controlRevision &+= 1
+        revokePlayingEvidence()
         error = message
         phase = "error"
         publish()
@@ -272,6 +311,8 @@ public final class QtIOSDLNA: NSObject {
         generation &+= 1
         playbackRevision &+= 1
         seekRevision &+= 1
+        controlRevision &+= 1
+        revokePlayingEvidence()
         resolveTimer?.cancel()
         resolveTimer = nil
         sourceTask?.cancel()
@@ -283,8 +324,8 @@ public final class QtIOSDLNA: NSObject {
         transportStarted = false
         prepared = false
         deferredSeek = nil
-        sawPlaying = false
-        lastMovingPosition = 0
+        lastDevicePosition = 0
+        endConsumed = false
         foreignMediaCount = 0
         pollFailures = 0
         mediaID = ""
@@ -298,6 +339,7 @@ public final class QtIOSDLNA: NSObject {
     private func load(_ selected: Int, _ start: Double, _ autoPlay: Bool, _ natural: Bool) {
         guard active, selected >= 0, selected < queue.count else { return }
         retireMedia()
+        manuallyStopped = false
         index = selected
         mediaID = queue[selected].mediaId
         position = start
@@ -464,13 +506,25 @@ public final class QtIOSDLNA: NSObject {
 
     private func seekAfterPrepare(_ s: UInt64, _ g: UInt64) {
         guard let device = device else { return }
+        // This also covers a deferred restore seek issued after the first Play.
+        controlRevision &+= 1
+        revokePlayingEvidence()
         let revision = seekRevision
+        let playback = playbackRevision
+        let control = controlRevision
         let target = position
         enqueue(device.transport, "Seek",
                 [("InstanceID", "0"), ("Unit", "REL_TIME"), ("Target", QtIOSDLNAProtocol.time(target))],
-                valid: { self.matches(s, g) && self.seekRevision == revision }) { success, _, detail in
-            guard self.matches(s, g) else { return }
-            if !success && self.seekRevision == revision {
+                valid: { self.matches(s, g) && self.seekRevision == revision &&
+                    self.playbackRevision == playback && self.controlRevision == control }) { success, _, detail in
+            guard self.matches(s, g), self.seekRevision == revision,
+                  self.playbackRevision == playback, self.controlRevision == control else {
+                if self.matches(s, g) { self.driveTransport(); self.startPolling() }
+                return
+            }
+            if !success {
+                self.controlRevision &+= 1
+                self.revokePlayingEvidence()
                 self.error = "设备暂不接受跳转：\(detail)"
                 if detail.contains("401") || detail.localizedCaseInsensitiveContains("invalid action") {
                     self.device?.actions.remove("Seek")
@@ -482,7 +536,7 @@ public final class QtIOSDLNA: NSObject {
                     self.deferredSeek = target
                 } else {
                     self.deferredSeek = nil
-                    self.position = self.lastMovingPosition
+                    self.position = self.lastDevicePosition
                 }
             } else if success && self.seekRevision == revision {
                 self.deferredSeek = nil
@@ -497,16 +551,21 @@ public final class QtIOSDLNA: NSObject {
         mainValue {
             guard active else { return }
             playbackRevision &+= 1
+            controlRevision &+= 1
+            revokePlayingEvidence()
+            manuallyStopped = false
             intent = true
-            if mediaID.isEmpty && !queue.isEmpty { load(max(0, index), position, true, false) }
+            if endConsumed && !queue.isEmpty { load(max(0, index), 0, true, false) }
+            else if mediaID.isEmpty && !queue.isEmpty { load(max(0, index), position, true, false) }
             else { driveTransport() }
         }
     }
-    public func pause() { mainValue { playbackRevision &+= 1; intent = false; driveTransport(); publish() } }
+    public func pause() { mainValue { playbackRevision &+= 1; controlRevision &+= 1; revokePlayingEvidence(); intent = false; driveTransport(); publish() } }
     public func stop() {
         mainValue {
             guard active, let device = device else { return }
             retireMedia()
+            manuallyStopped = true
             intent = false
             phase = "stopped"
             publish()
@@ -517,6 +576,8 @@ public final class QtIOSDLNA: NSObject {
         mainValue {
             guard active, device?.canSeek == true else { return }
             seekRevision &+= 1
+            controlRevision &+= 1
+            revokePlayingEvidence()
             position = max(0, number(seconds))
             if duration > 0 { position = min(position, duration) }
             if prepared { seekAfterPrepare(session, generation) }
@@ -589,53 +650,106 @@ public final class QtIOSDLNA: NSObject {
     private func poll() {
         guard active, prepared, !pollBusy, let device = device else { return }
         pollBusy = true
-        let s = session, g = generation, seek = seekRevision
+        pollSequence &+= 1
+        let pollID = pollSequence
+        let s = session, g = generation, playback = playbackRevision, seek = seekRevision, control = controlRevision
         enqueue(device.transport, "GetPositionInfo", [("InstanceID", "0")],
-                valid: { self.matches(s, g) }) { success, root, _ in
-            guard self.matches(s, g) else { return }
-            if !success {
-                self.pollBusy = false
+                valid: { self.matchesPoll(s, g, playback, seek, control, pollID) }) { success, root, _ in
+            guard self.matchesPoll(s, g, playback, seek, control, pollID) else {
+                self.finishPoll(s, g, pollID)
+                return
+            }
+            guard success else {
+                self.revokePlayingEvidence()
+                self.finishPoll(s, g, pollID)
                 self.pollFailures += 1
                 if self.pollFailures == 3 { self.fail("无法读取播放设备状态，请检查局域网连接") }
                 return
             }
-            self.pollFailures = 0
+            let sampledAt = ProcessInfo.processInfo.systemUptime
             let uri = root?.descendants("TrackURI").first?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let ours = uri.isEmpty || URL(string: uri)?.absoluteString == URL(string: self.mediaURI)?.absoluteString
-            if !ours {
+            if !uri.isEmpty && !self.uriMatchesMedia(uri) {
+                self.revokePlayingEvidence()
                 self.foreignMediaCount += 1
-                self.pollBusy = false
+                self.finishPoll(s, g, pollID)
                 if self.foreignMediaCount >= 2 { self.fail("播放设备已切换到其他媒体，请重新连接") }
                 return
             }
-            self.foreignMediaCount = 0
-            if self.seekRevision == seek {
-                let newPosition = QtIOSDLNAProtocol.seconds(root?.descendants("RelTime").first?.text ?? "")
-                let newDuration = QtIOSDLNAProtocol.seconds(root?.descendants("TrackDuration").first?.text ?? "")
-                if newDuration > 0 { self.duration = newDuration }
-                if self.deferredSeek == nil { self.position = newPosition }
-                if newPosition > self.lastMovingPosition + 0.1 { self.lastMovingPosition = newPosition }
-            }
+            let rawPosition = self.deviceSeconds(root?.descendants("RelTime").first?.text ?? "")
+            let rawDuration = self.deviceSeconds(root?.descendants("TrackDuration").first?.text ?? "")
             self.enqueue(device.transport, "GetTransportInfo", [("InstanceID", "0")],
-                         valid: { self.matches(s, g) }) { success, info, _ in
-                guard self.matches(s, g) else { return }
-                self.pollBusy = false
-                guard success else { return }
-                let state = info?.descendants("CurrentTransportState").first?.text.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ?? ""
-                if state == "PLAYING" { self.sawPlaying = true; self.phase = "playing" }
-                else if state == "PAUSED_PLAYBACK" { self.phase = "paused" }
-                else if state == "TRANSITIONING" { self.phase = "buffering" }
-                else if state == "STOPPED", self.intent, self.sawPlaying,
-                        self.duration > 0, self.lastMovingPosition >= max(1, self.duration - 2) {
-                    self.advanceNatural()
+                         valid: { self.matchesPoll(s, g, playback, seek, control, pollID) }) { success, info, _ in
+                guard self.matchesPoll(s, g, playback, seek, control, pollID) else {
+                    self.finishPoll(s, g, pollID)
                     return
                 }
+                guard success else {
+                    self.revokePlayingEvidence()
+                    self.finishPoll(s, g, pollID)
+                    self.pollFailures += 1
+                    if self.pollFailures == 3 { self.fail("无法读取播放设备状态，请检查局域网连接") }
+                    return
+                }
+                // Commit position and phase together only after both SOAP replies
+                // still belong to this session and its current controls.
+                self.pollFailures = 0
+                self.foreignMediaCount = 0
+                if let rawDuration = rawDuration, rawDuration > 0 { self.duration = rawDuration }
+                if let rawPosition = rawPosition {
+                    self.lastDevicePosition = rawPosition
+                    if self.deferredSeek == nil { self.position = rawPosition }
+                }
+                let currentPosition = rawPosition ?? 0
+                let state = info?.descendants("CurrentTransportState").first?.text.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ?? ""
+                if state == "PLAYING" {
+                    self.phase = "playing"
+                    if !uri.isEmpty, let rawPosition = rawPosition, rawPosition > 0,
+                       self.intent, !self.manuallyStopped, self.deferredSeek == nil {
+                        self.lastConfirmedPlaying = PlayingEvidence(session: s, generation: g, playback: playback,
+                            seek: seek, control: control, uri: uri, position: rawPosition, monotonic: sampledAt)
+                    } else {
+                        self.revokePlayingEvidence()
+                    }
+                } else if state == "PAUSED_PLAYBACK" {
+                    self.revokePlayingEvidence()
+                    self.phase = "paused"
+                } else if state == "TRANSITIONING" {
+                    self.revokePlayingEvidence()
+                    self.phase = "buffering"
+                } else if state == "STOPPED" || state == "NO_MEDIA_PRESENT" {
+                    let evidence = self.lastConfirmedPlaying
+                    self.revokePlayingEvidence()
+                    if self.intent, !self.manuallyStopped, self.duration > 2,
+                       let evidence = evidence,
+                       evidence.session == s, evidence.generation == g, evidence.playback == playback,
+                       evidence.seek == seek, evidence.control == control,
+                       self.uriMatchesMedia(evidence.uri),
+                       (uri.isEmpty || self.uriMatchesMedia(uri)) {
+                        let elapsed = ProcessInfo.processInfo.systemUptime - evidence.monotonic
+                        if elapsed >= 0, elapsed <= 5 {
+                            let candidate = min(self.duration, max(evidence.position + elapsed, currentPosition))
+                            if self.duration - candidate <= 1.8 {
+                                self.finishPoll(s, g, pollID)
+                                self.advanceNatural()
+                                return
+                            }
+                        }
+                    }
+                    self.phase = "stopped"
+                } else {
+                    self.revokePlayingEvidence()
+                    self.phase = "connected"
+                }
+                self.finishPoll(s, g, pollID)
                 self.publish()
             }
         }
     }
 
     private func advanceNatural() {
+        guard !endConsumed else { return }
+        endConsumed = true
+        revokePlayingEvidence()
         if repeatMode == 1 { load(index, 0, true, true); return }
         if index + 1 < queue.count { load(index + 1, 0, true, true); return }
         if repeatMode == 2 && !queue.isEmpty { load(0, 0, true, true); return }

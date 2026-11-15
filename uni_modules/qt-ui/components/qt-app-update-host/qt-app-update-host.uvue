@@ -1,0 +1,35 @@
+<template>
+  <!--
+    应用更新弹窗宿主（全站一个实例，挂在 qt-page-frame 框架层）。
+
+    存在的理由：升级弹窗原先挂在页面模板里，而页面模板整体位于
+    `.qt-page-frame-shell`（z-index:2）这个**层叠上下文**内。遮罩在里面写
+    z-index:999 也出不去，播放条(940)/mini-player(998)/tab-bar(900) 又是 shell
+    的兄弟节点，必然压住遮罩——遮罩底部「直接下载」被播放条抢走点击（跳播放页），
+    「我的」tab 在强制更新时仍可点。挂到框架层与底部栏同层，遮罩才真正盖住它们。
+
+    配方同 qt-confirm-host / qt-pack-install-sheet：服务持状态，宿主读状态渲染。
+  -->
+  <QtUpgradePopup
+    :visible="st.visible.value"
+    :info="st.info.value"
+    @update:visible="onVisibleChange"
+    @closed="onClosed"
+  />
+</template>
+
+<script setup lang="ts">
+import QtUpgradePopup from "@/uni_modules/qt-ui/components/qt-upgrade-popup/qt-upgrade-popup.uvue";
+import { appUpdateState, dismissAppUpdate } from "@/services/app-update";
+
+const st = appUpdateState();
+
+/** 弹窗自行收起（非强制更新的「以后再说」、下载完成后的延迟关闭） */
+function onVisibleChange(value: boolean): void {
+  if (!value) dismissAppUpdate();
+}
+
+function onClosed(): void {
+  dismissAppUpdate();
+}
+</script>
