@@ -15,6 +15,9 @@ import { moveAppToBackgroundNative } from "@/uni_modules/qt-app-native";
 import { logErrV, logWarn } from "@/services/logger";
 import { ensureNotificationPermission as ensureNotificationPermissionNative } from "@/uni_modules/qt-audio-player";
 import { qtShowToast } from "@/services/toast";
+// #ifdef APP-IOS
+import { queryPermissionStatesAsync as queryPermissionStatesAsyncNative, importLocalAudio as importLocalAudioNative } from "@/uni_modules/qt-app-native";
+// #endif
 
 export type DownloadProgress = (received: number, total: number, percent: number) => void;
 
@@ -39,12 +42,10 @@ export function isHarmonyOs(): boolean {
 }
 
 /**
- * 本机是否为安卓端（原生登录 WebView 只有安卓实现，iOS 必须继续用内置 web-view）。
+ * 本机是否为安卓端。
  *
- * 为什么不写 `!isHarmonyOs()`：iOS / H5 也满足「非鸿蒙」，但原生登录 WebView 在
- * 这两个平台上是空实现 —— 2026-11-02 审阅实测：iOS 上页面判定「已用系统 WebView
- * 打开」，可实际什么都没弹，用户只能干等到 180s 超时（旧版 iOS 靠内置 web-view
- * 是能登录的，属平台级回退）。平台能力要显式判定，别靠排除法。
+ * 原生能力必须按平台显式判定，不能把「非鸿蒙」都视为安卓。
+ * 登录入口单独使用 supportsNativeAuthWebView() 判定。
  */
 export function isAndroidOs(): boolean {
   // #ifdef APP-ANDROID
@@ -55,7 +56,7 @@ export function isAndroidOs(): boolean {
   // #endif
 }
 
-/** 本机是否为 iOS 端（同上：显式判定，供页面选内置 web-view 或原生 WebView） */
+/** 本机是否为 iOS 端。 */
 export function isIosOs(): boolean {
   // #ifdef APP-IOS
   return true;
@@ -63,6 +64,45 @@ export function isIosOs(): boolean {
   // #ifndef APP-IOS
   return false;
   // #endif
+}
+
+/** 原生登录页与 Cookie 捕获必须同时实现，页面与账号入口共用此能力判定。 */
+export function supportsNativeAuthWebView(): boolean {
+  return isAndroidOs() || isIosOs();
+}
+
+export function supportsLocalAudioImport(): boolean {
+  return isIosOs();
+}
+
+/** iOS 从系统「文件」选择音频并复制到应用内；选择取消返回 0。 */
+export function importLocalAudio(): Promise<{ count: number; message: string }> {
+  // #ifdef APP-IOS
+  return new Promise((resolve) => {
+    try {
+      importLocalAudioNative((count: number, message: string): void => { resolve({ count, message }); });
+    } catch (e) {
+      logErrV("AppNative", "导入本地音频", e);
+      resolve({ count: 0, message: "无法打开文件选择器" });
+    }
+  });
+  // #endif
+  // #ifndef APP-IOS
+  return Promise.resolve({ count: 0, message: "当前平台不需要导入音频" });
+  // #endif
+}
+
+/** 用户能在系统「文件」中找到的下载位置；授权 URL 本身仍交给原生层。 */
+export function downloadDirectoryHint(customDir: string, fallback: string): string {
+  if (!isIosOs()) return customDir.length > 0 ? customDir : fallback;
+  if (customDir.length == 0) return "文件 / 轻听 / Downloads / QtDownload / Music";
+  try {
+    const path = decodeURIComponent(customDir).replace(/\/+$/, "");
+    return "所选目录：" + path.substring(path.lastIndexOf("/") + 1);
+  } catch (e) {
+    logErrV("AppNative", "目录显示名", e);
+    return "所选目录";
+  }
 }
 
 /** 系统返回键设置只在具备后台/退出能力的平台展示。 */
@@ -113,7 +153,7 @@ export function openInBrowser(url: string): void {
     qtShowToast({ title: "下载地址为空", icon: "none" });
     return;
   }
-  // #ifdef APP-ANDROID || APP-HARMONY
+  // #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
   if (openExternalUrl(url)) return;
   // #endif
   // #ifdef H5
@@ -181,14 +221,13 @@ export function installApk(filePath: string): boolean {
 }
 
 /**
- * 检查/请求「通知栏」运行时权限（Android 13+ 的 POST_NOTIFICATIONS）。
- * @returns 是否已授权：
- *  - Android 13+ 未授权时自动弹出系统授权框，await 其结果；
- *  - Android 12-（通知权限默认可使用）与 H5 视为已授权。
+ * 检查/请求原生通知权限：Android 13+ POST_NOTIFICATIONS、
+ * 鸿蒙通知授权、iOS UNUserNotificationCenter。
+ * Android 12 及以下与不支持原生通知的平台视为已授权。
  * 经 uni_modules 原生插件实现，此处只做 Promise 包装与平台降级。
  */
 export function ensureNotificationPermission(): Promise<boolean> {
-  // #ifdef APP-ANDROID || APP-HARMONY
+  // #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
   return new Promise((resolve) => {
     try {
       ensureNotificationPermissionNative((granted: boolean) => {
@@ -200,8 +239,12 @@ export function ensureNotificationPermission(): Promise<boolean> {
     }
   });
   // #endif
-  // #ifndef APP-ANDROID || APP-HARMONY
+  // #ifndef APP-ANDROID
+  // #ifndef APP-HARMONY
+  // #ifndef APP-IOS
   return Promise.resolve(true);
+  // #endif
+  // #endif
   // #endif
 }
 
@@ -210,11 +253,11 @@ export function ensureNotificationPermission(): Promise<boolean> {
  * Android：API 26+ 直达通知页，否则降级到应用详情页。
  * 鸿蒙：直接弹系统「是否允许通知」授权框（notificationManager.requestEnableNotification），
  *   已授权时静默成功；用户已选「不再询问」时原生侧自动降级到应用详情页。
- * iOS / H5：不支持，返回 false，由调用方降级为提示。
+ * iOS：进入本应用设置页；H5 不支持。
  * @returns 是否成功拉起设置页
  */
 export function openNotificationSettings(): boolean {
-  // #ifdef APP-ANDROID || APP-HARMONY
+  // #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
   try {
     return openNotificationSettingsNative();
   } catch (e) {
@@ -222,8 +265,12 @@ export function openNotificationSettings(): boolean {
     return false;
   }
   // #endif
-  // #ifndef APP-ANDROID || APP-HARMONY
+  // #ifndef APP-ANDROID
+  // #ifndef APP-HARMONY
+  // #ifndef APP-IOS
   return false;
+  // #endif
+  // #endif
   // #endif
 }
 
@@ -283,8 +330,10 @@ export function openAutoStartSettings(): boolean {
     return false;
   }
   // #endif
-  // #ifndef APP-ANDROID || APP-HARMONY
+  // #ifndef APP-ANDROID
+  // #ifndef APP-HARMONY
   return false;
+  // #endif
   // #endif
 }
 
@@ -294,7 +343,7 @@ export function openAutoStartSettings(): boolean {
  * @returns 是否成功拉起设置页
  */
 export function openAppDetailsSettings(): boolean {
-  // #ifdef APP-ANDROID || APP-HARMONY
+  // #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
   try {
     return openAppDetailsSettingsNative();
   } catch (e) {
@@ -302,8 +351,12 @@ export function openAppDetailsSettings(): boolean {
     return false;
   }
   // #endif
-  // #ifndef APP-ANDROID || APP-HARMONY
+  // #ifndef APP-ANDROID
+  // #ifndef APP-HARMONY
+  // #ifndef APP-IOS
   return false;
+  // #endif
+  // #endif
   // #endif
 }
 
@@ -397,10 +450,10 @@ export function readBottomNavInset(onResult: (px: number, navigationKeys: number
  * Android 走 ACTION_OPEN_DOCUMENT + contentResolver（content URI 只有一次读
  * 权限，所以原生侧直接把内容读出来回传）；鸿蒙走 DocumentViewPicker 选文件 +
  * 临时 URI 读全文（2026-10-25 补齐，此前恒「不支持」导致鸿蒙装不了本地音源包）；
- * 其余平台恒回调不支持。
+ * iOS 使用 UIDocumentPicker，读取用户选择的 UTF-8 .js 文件。
  */
 export function pickJsFile(): Promise<PickFileResult> {
-  // #ifdef APP-ANDROID || APP-HARMONY
+  // #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
   return new Promise((resolve) => {
     try {
       pickJsFileNative((result) => {
@@ -412,8 +465,12 @@ export function pickJsFile(): Promise<PickFileResult> {
     }
   });
   // #endif
-  // #ifndef APP-ANDROID || APP-HARMONY
+  // #ifndef APP-ANDROID
+  // #ifndef APP-HARMONY
+  // #ifndef APP-IOS
   return Promise.resolve({ ok: false, name: "", content: "", message: "当前平台不支持本地文件安装" } as PickFileResult);
+  // #endif
+  // #endif
   // #endif
 }
 
@@ -425,7 +482,7 @@ export function pickJsFile(): Promise<PickFileResult> {
  * 鸿蒙走 DocumentViewPicker（selectMode=FOLDER）+ fileShare.persistPermission 持久化
  * 目录授权，回传的是**目录 URI**（不是普通路径）——这是 phone 上唯一能写到公共目录的
  * 路线（READ_WRITE_DOWNLOAD_DIRECTORY 在 phone 上是 INVALID，见原生侧注释）。
- * iOS 无公共目录落盘路径，原生恒回调失败，由调用方保持固定目录并给出说明。
+ * iOS 使用 UIDocumentPicker，保存 security-scoped bookmark 后返回目录 URL。
  */
 export function pickDirectory(): Promise<PickDirectoryResult> {
   return new Promise((resolve) => {
@@ -441,7 +498,7 @@ export function pickDirectory(): Promise<PickDirectoryResult> {
 }
 
 /**
- * 把已保存的自定义目录喂回原生层（鸿蒙专用，其余平台空实现）。
+ * 把已保存的目录喂回原生层：鸿蒙恢复 URI 授权，iOS 恢复 bookmark 对应的目录。
  *
  * 为什么需要：鸿蒙的原生变量不跨进程，`persistPermission` 授予的 URI 授权虽然持久，
  * 但每次启动都要 `activatePermission` 激活一次。JS 侧把 URI 存在 uni storage
@@ -449,7 +506,7 @@ export function pickDirectory(): Promise<PickDirectoryResult> {
  * @param uri 目录 URI；空串表示恢复默认目录
  */
 export function restoreCustomDir(uri: string): void {
-  // #ifdef APP-HARMONY
+  // #ifdef APP-HARMONY || APP-IOS
   try {
     setCustomDirUriNative(uri);
   } catch (e) {
@@ -471,10 +528,10 @@ export function restoreCustomDir(uri: string): void {
  * 原生侧走 AtManager.getSelfPermissionStatus（五态），能真正区分
  * 已授权 / 未授权 / 系统版本不适用 / 受设备策略限制，能力比安卓端更强。
  *
- * 其余平台没有与这两套权限一一对应的授权模型，一律返回 unknown。
+ * iOS 使用 ios.* 能力 ID；局域网开关没有公开查询 API，保留 unknown 状态。
  */
 export function queryPermissionStates(ids: string[]): PermissionState[] {
-  // #ifdef APP-ANDROID || APP-HARMONY
+  // #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
   try {
     return queryPermissionStatesNative(ids);
   } catch (e) {
@@ -482,8 +539,28 @@ export function queryPermissionStates(ids: string[]): PermissionState[] {
     return unknownPermissionStates(ids);
   }
   // #endif
-  // #ifndef APP-ANDROID || APP-HARMONY
+  // #ifndef APP-ANDROID
+  // #ifndef APP-HARMONY
+  // #ifndef APP-IOS
   return unknownPermissionStates(ids);
+  // #endif
+  // #endif
+  // #endif
+}
+
+/** iOS 通知状态通过系统异步 API 刷新，其余平台复用现有同步查询。 */
+export function queryPermissionStatesAsync(ids: string[]): Promise<PermissionState[]> {
+  // #ifdef APP-IOS
+  return new Promise((resolve) => {
+    try { queryPermissionStatesAsyncNative(ids, (states: PermissionState[]): void => { resolve(states); }); }
+    catch (e) {
+      logErrV("AppNative", "queryPermissionStatesAsync", e);
+      resolve(unknownPermissionStates(ids));
+    }
+  });
+  // #endif
+  // #ifndef APP-IOS
+  return Promise.resolve(queryPermissionStates(ids));
   // #endif
 }
 
@@ -505,7 +582,7 @@ function unknownPermissionStates(ids: string[]): PermissionState[] {
  * @returns 已成功发起跳转返回 true；平台不支持返回 false（调用方提示手动前往）
  */
 export function openPermissionSettings(id: string): boolean {
-  // #ifdef APP-ANDROID || APP-HARMONY
+  // #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
   try {
     return openPermissionSettingsNative(id);
   } catch (e) {
@@ -513,8 +590,12 @@ export function openPermissionSettings(id: string): boolean {
     return false;
   }
   // #endif
-  // #ifndef APP-ANDROID || APP-HARMONY
+  // #ifndef APP-ANDROID
+  // #ifndef APP-HARMONY
+  // #ifndef APP-IOS
   return false;
+  // #endif
+  // #endif
   // #endif
 }
 
@@ -523,22 +604,25 @@ export function openPermissionSettings(id: string): boolean {
  * 契约细节见 qt-app-native 的 interface.uts）：返回逐 URL 拼好的
  * "name=value; name2=v2" 串数组，读不到的 URL 不出现在结果里。
  *
- * Android 主线程 CookieManager（可读 httpOnly）；鸿蒙/iOS 原生侧暂未实现
- * （恒空数组），宿主按「本轮未捕获到」处理。失败绝不抛异常——轮询调用方
- * 只需要「这轮拿到了什么」，异常一律归为空结果。
+ * Android 使用 CookieManager，iOS 使用登录 WKWebView 同一数据仓的 WKHTTPCookieStore，
+ * 均包含 HttpOnly 登录态；鸿蒙暂不提供原生登录通道。
  */
 export function getWebCookies(urls: string[]): Promise<string[]> {
-  // #ifdef APP-ANDROID || APP-HARMONY
+  // #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
   // 原生侧已保证「异常也 resolve 空数组」（Runnable 内部 try/catch），这里不再包一层
   return getWebCookiesNative(urls);
   // #endif
-  // #ifndef APP-ANDROID || APP-HARMONY
+  // #ifndef APP-ANDROID
+  // #ifndef APP-HARMONY
+  // #ifndef APP-IOS
   return Promise.resolve([] as string[]);
+  // #endif
+  // #endif
   // #endif
 }
 
 /**
- * 用「可控登录 WebView」打开官方网页登录页（网页登录 v17，Android）。
+ * 用可控原生 WebView 打开官方网页登录页（Android / iOS）。
  *
  * 为什么不用内置 <web-view>：QQ 登录页在手机 UA 下把「QQ登录」做成应用跳转
  * （mqqapi:// / intent:// 等自定义 scheme），内置组件既没有 shouldOverrideUrlLoading
@@ -555,19 +639,20 @@ export function getWebCookies(urls: string[]): Promise<string[]> {
  *                m.kuwo.cn 的无登录位首页），这类源由调用方传桌面 UA。
  */
 export function openAuthWebView(url: string, onClose: (message: string) => void, ua: string): void {
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-IOS
   openAuthWebViewNative(url, onClose, ua);
   // #endif
   // #ifndef APP-ANDROID
-  // iOS / H5 没有原生登录 WebView：调用方（pages/web-login）必须按 isAndroidOs()
-  // 选内置 web-view，走到这里是调用方判错了平台，留一行 warn 方便定位
-  logWarn("app-native", "openAuthWebView 当前平台无原生实现（iOS/H5 请用内置 web-view）: " + url);
+  // #ifndef APP-IOS
+  logWarn("app-native", "当前平台无法打开原生登录页");
+  onClose("当前平台无法打开原生登录页");
+  // #endif
   // #endif
 }
 
 /** 关闭 openAuthWebView 打开的登录 WebView（未打开时无副作用，不触发 onClose） */
 export function closeAuthWebView(): void {
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-IOS
   closeAuthWebViewNative();
   // #endif
 }
@@ -586,10 +671,11 @@ export function closeAuthWebView(): void {
  * @returns 落盘后的绝对路径；失败返回空串
  */
 export function saveImageToGallery(tempPath: string, fileName: string): Promise<string> {
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-IOS
   return saveToPublicMediaNative(tempPath, "picture", fileName, "qtMusic");
   // #endif
   // #ifndef APP-ANDROID
+  // #ifndef APP-IOS
   return new Promise<string>((resolve: (value: string) => void, _reject: (err: any) => void) => {
     uni.saveImageToPhotosAlbum({
       filePath: tempPath,
@@ -597,5 +683,6 @@ export function saveImageToGallery(tempPath: string, fileName: string): Promise<
       fail: () => resolve(""),
     });
   });
+  // #endif
   // #endif
 }

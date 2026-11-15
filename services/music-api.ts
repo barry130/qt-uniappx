@@ -20,12 +20,15 @@ import { qtDiag } from "./diag";
 import { logErrV, logWarn } from "./logger";
 import type { Playlist, Song, Artist, Album } from "@/types/music";
 import { mergeAggregateSongs } from "./aggregate-merge";
+import { readAggregateSources } from "./aggregate-sources";
 import type { AggregateSongBatch } from "./aggregate-merge";
 import { sourcePlayLoginActive, sourceVipTierOf } from "./source-auth";
 import { cachedQualityProfileOf, PROFILE_MODE_OFFICIAL, sourcePlayQualityOf } from "./source-quality";
 import { readSongEmbedded } from "./local-media";
 import { preferredSource } from "./preferred-source";
 import { readLyricDisk, writeLyricDisk, removeLyricDisk, clearLyricDisk } from "./lyric-disk-cache";
+import { sourceEnabled, assertSourceEnabled, orderedSourceIds, sourcePolicyConfigured, sourcePolicyFingerprint,
+  sourcePolicyRevision, assertSourcePolicyCurrent, SOURCE_POLICY_CHANGED_EVENT } from "./source-policy";
 
 
 /**
@@ -133,6 +136,8 @@ export function isPlayUrlStale(song: Song): boolean {
   const url = song.url;
   if (url == null || url.length == 0) return true;
   if (!isRemotePlayUrl(url)) return false;
+  if (song.platform != "podcast" && (song.urlSourcePolicy != null || sourcePolicyConfigured()) &&
+    song.urlSourcePolicy != sourcePolicyFingerprint()) return true;
   const at = song.urlFetchedAt;
   if (at == null || at <= 0) return true;
   return Date.now() - at > PLAY_URL_TTL;
@@ -186,6 +191,8 @@ export type RegistrySource = {
   qualities?: string[];
   /** 歌单广场排序选项（v5 起下发；未声明 = 不支持排序） */
   playlistSorts?: RegistrySort[];
+  /** Account supply is opt-in: absent or non-boolean declarations never grant support. */
+  accountRecommendations?: { daily?: boolean; fm?: boolean };
   /** 账号登录能力（v9 起下发；未声明 = 该源不支持账号登录，不显示登录入口） */
   auth?: RegistryAuthCaps;
 };
@@ -206,7 +213,12 @@ export type RegistryAuthCaps = { methods: string[]; domains: string[]; officialQ
 /** 数据包注册表里的一个音质档位 */
 export type RegistryQuality = { id: string; name: string };
 /** 数据包注册表（音源清单 + 音质档位；宿主 UI 选项的唯一来源） */
-export type SourceRegistry = { sources: RegistrySource[]; qualities: RegistryQuality[] };
+export type SourceRegistry = { sources: RegistrySource[]; qualities: RegistryQuality[]; sourcePolicyVersion?: number };
+
+function enabledPreferredSource(song: Song): Song | null {
+  const preferred = preferredSource(song);
+  return preferred != null && sourceEnabled(preferred.platform) ? preferred : null;
+}
 /**
  * 搜索/歌手/专辑类接口的每页条数兜底上限。
  *
@@ -290,6 +302,9 @@ export class MusicApi {
   private urlCache = new UTSJSONObject();
   /** 播放地址的取址时间（毫秒），配合 PLAY_URL_TTL 判断缓存是否过期 */
   private urlCacheAt = new Map<string, number>();
+  private urlEpoch = 0;
+  private urlVersions = new Map<string, number>();
+  private urlTasks = new Map<string, Promise<{ url: string; crossTarget: Song | null }>>();
   /**
    * 每条播放地址是音源包里**哪条源**取到的（cacheKey 同 urlCache）。
    *
@@ -301,6 +316,8 @@ export class MusicApi {
   /** 同一原歌/音质的缓存属于哪个手选音源；选择改变时不能复用旧地址。 */
   private urlSelection = new Map<string, string>();
   private urlCrossTarget = new Map<string, Song>();
+  /** Snapshot the resolved source and quality; later preferences cannot relabel the old audio. */
+  private urlPlaybackInfo = new Map<string, { source: Song; quality: string }>();
   /**
    * 每条播放地址的**实测档位**（cacheKey 同 urlCache；空串 = 未测出/老包）。
    *
@@ -328,6 +345,8 @@ export class MusicApi {
   private urlSizeProbed = new Set<string>();
   /** 宿主探测到字节数后广播（无 payload，播放页听到就重算当前歌的 kbps） */
   static readonly URL_SIZE_EVENT = "qt-url-size";
+  /** Audio source/quality can arrive without a size report from an older package. */
+  static readonly PLAY_SOURCE_EVENT = "qt-play-source";
   private lyricCache = new UTSJSONObject();
   /** 播放地址缓存的存活键 FIFO（容量上限见 URL_CACHE_CAP，写入序淘汰最旧） */
   private urlCacheKeys: string[] = [];
@@ -439,7 +458,7 @@ export class MusicApi {
       const p = list[i] as SourcePackMeta;
       parts.push(p.id + "@" + p.versionCode.toString());
     }
-    return parts.join(",");
+    return parts.join(",") + "|policy:" + sourcePolicyFingerprint();
   }
 
   /** 换包/清缓存的进程纪元，不进入跨启动的持久键。 */
@@ -454,7 +473,7 @@ export class MusicApi {
       parts.push(JSON.stringify([p.id, p.versionCode.toString()]));
     }
     parts.sort();
-    return JSON.stringify({ activeMetaId: state.activeMetaId, activeId: state.activeId, packs: parts });
+    return JSON.stringify({ activeMetaId: state.activeMetaId, activeId: state.activeId, packs: parts, policy: sourcePolicyFingerprint() });
   }
 
   /** 页面/loader 与 API 共用的 opaque 身份；调用方先等待本地状态恢复。 */
@@ -543,6 +562,7 @@ export class MusicApi {
     this.urlSize.delete(key);
     this.urlSelection.delete(key);
     this.urlCrossTarget.delete(key);
+    this.urlPlaybackInfo.delete(key);
     const at = this.urlCacheKeys.indexOf(key);
     if (at >= 0) this.urlCacheKeys.splice(at, 1);
   }
@@ -554,15 +574,22 @@ export class MusicApi {
    * 同时把注册表清单标记为过期：换包后新包声明的 searchPageMax / referer /
    * latestUsesOffset 可能与旧包不同，必须重取才生效（旧值先留着兜底，见 registryStale）。
    */
+  playConfigEpoch(): number { return this.urlEpoch; }
+
   clearPlayUrlCache(): void {
+    this.urlEpoch++;
+    this.urlVersions.clear();
+    this.urlTasks.clear();
     this.chartCacheEpoch += 1;
     this.urlCache = new UTSJSONObject();
     this.urlCacheAt = new Map<string, number>();
     this.urlLine = new Map<string, string>();
     this.urlSelection.clear();
     this.urlCrossTarget.clear();
+    this.urlPlaybackInfo.clear();
     this.urlActualQuality = new Map<string, string>();
     this.urlSize = new Map<string, number>();
+    this.urlSizeProbed.clear();
     this.urlCacheKeys = [];
     // 列表短缓存一并清掉：未装数据包期间 engineInvoke 会给空应答，而 latest/
     // recommendations 等会把这份空列表 dataSet 进 60s 短缓存；不清的话用户装完包
@@ -577,9 +604,15 @@ export class MusicApi {
    * 使下一次 playUrl 重新向平台解析新链接，而不是复用坏 URL。
    */
   invalidatePlayUrl(song: Song, quality: string = "320"): void {
+    if (this.urlVersions.size >= 512) this.clearPlayUrlCache();
     const base = song.platform + ":" + song.id;
-    this.urlCacheRemove(base + ":" + quality);
-    this.urlCacheRemove(base + ":native:" + quality);
+    const qualities = [quality, this.normalizeOfficialQuality(song.platform, quality)];
+    for (let i = 0; i < qualities.length; i++) {
+      const key = base + ":" + qualities[i];
+      this.urlVersions.set(key, (this.urlVersions.get(key) ?? 0) + 1);
+      this.urlCacheRemove(key);
+      this.urlCacheRemove(base + ":native:" + qualities[i]);
+    }
   }
 
   /**
@@ -601,7 +634,7 @@ export class MusicApi {
   private lyricKeyOf(song: Song): string {
     const key = song.platform + ":" + song.id;
     if (this.pickedLyricOf(song) != null) return key;
-    const preferred = preferredSource(song);
+    const preferred = enabledPreferredSource(song);
     return preferred != null ? key + ":source:" + preferred.platform + ":" + preferred.id : key;
   }
 
@@ -614,6 +647,13 @@ export class MusicApi {
    * 把应答树重建为 UTSJSONObject；.uts 文件里的 JSON.parse 才会被编译成 UTS.JSON.parse。
    */
   private async engineInvoke(name: string, args: UTSJSONObject): Promise<UTSJSONObject> {
+    const local = ["sourceRegistry", "bundleInfo", "setAuth", "clearAuth", "getSourceQualities", "parseSheet"].indexOf(name) >= 0;
+    const policyToken = sourcePolicyRevision();
+    const source = args.getString("source");
+    if (!local && source != null) {
+      if (source == "local") return new UTSJSONObject();
+      assertSourceEnabled(source);
+    }
     // 未安装数据包时**根本不发请求**，直接给空应答。
     //
     // 为什么必须在这里挡：本方法是全部数据入口（搜索/歌单/榜单/歌手/歌词/封面）
@@ -635,6 +675,7 @@ export class MusicApi {
       return new UTSJSONObject();
     }
     const raw = await invokeSource(name, JSON.stringify([args]));
+    if (!local) assertSourcePolicyCurrent(policyToken);
     return parseJsonToUtso(raw);
   }
 
@@ -704,6 +745,14 @@ export class MusicApi {
           }
           if (sorts.length > 0) src.playlistSorts = sorts;
         }
+        // Account recommendations require exact boolean true, never truthy strings or auth presence.
+        const rawAccountRecommendations = item.get("accountRecommendations") as UTSJSONObject | null;
+        if (rawAccountRecommendations != null && !Array.isArray(rawAccountRecommendations) && typeof rawAccountRecommendations == "object") {
+          src.accountRecommendations = {
+            daily: rawAccountRecommendations.get("daily") === true,
+            fm: rawAccountRecommendations.get("fm") === true,
+          };
+        }
         // 账号登录能力（v9 契约，{methods,domains}）：旧包没有时保持
         // undefined（= 不支持登录，账号页不显示该源的登录入口）。
         const rawAuth = item.get("auth") as UTSJSONObject | null;
@@ -765,7 +814,7 @@ export class MusicApi {
       this.registryQualities = qualities;
       // 重取成功才清脏位；失败（返回 null）保留脏位，下次 ensureRegistry 再试
       this.registryStale = false;
-      return { sources, qualities };
+      return { sources, qualities, sourcePolicyVersion: response.getNumber("sourcePolicyVersion") ?? 0 };
     } catch (_) {
       return null;
     }
@@ -956,7 +1005,8 @@ export class MusicApi {
    *
    * 不能拿数组末位当最高：包侧 qualities 数组低→高、高→低两种顺序都存在
    * （契约只约束「这些档位可用」，不约束顺序），末位在高→低排序的包里
-   * 恰好是最低档。按全局档位基准序取排名最大的；官方 level id 不在全局
+   * 恰好是最低档。按全局档位基准序取最靠前的（ranks 反转后 indexOf 越小
+   * = 档位越高，取最小者）；官方 level id 不在全局
    * 档位表里时，仿 clampQualityFor 的口径把清单反转后插到高位，保证
    * 官方档之间也有正确的高低关系。档位表还没装好（ranks 空）＝对高低
    * 一无所知，退回末位（维持旧行为，调用方清单非空已由条件保证）。
@@ -973,11 +1023,18 @@ export class MusicApi {
       }
     }
     if (hasUnknown) ranksAll = ids.slice().reverse().concat(ranks);
+    // ranks 由全局清单（低→高）反转而来：indexOf 越小 = 档位越高（对齐
+    // clampQualityFor 里「反转后插到高位」的同一口径）。取排名最靠前的最高档；
+    // 2026-11-14 修正方向：此前误取 indexOf 最大（=清单最低档），与下面
+    // 空表兜底「末位当最高」的方向相反，过期档位迁移会把用户改到最低档
+    // （网络面别拆分回归首次覆盖此路径时暴露）。ids 全部未知（indexOf<0）
+    // 时维持 best 初值 = 末位，与旧行为一致。
     let best = ids[ids.length - 1];
     let bestRank = -1;
     for (let i = 0; i < ids.length; i++) {
       const rank = ranksAll.indexOf(ids[i]);
-      if (rank > bestRank) {
+      if (rank < 0) continue;
+      if (bestRank < 0 || rank < bestRank) {
         bestRank = rank;
         best = ids[i];
       }
@@ -1008,6 +1065,12 @@ export class MusicApi {
     };
     const musicId = item.get("musicId");
     if (musicId != null && (musicId as string).length > 0) song.musicId = musicId as string;
+    const version = item.get("version") as string | null;
+    const isrc = item.get("isrc") as string | null;
+    const reliable = item.get("durationReliable") as boolean | null;
+    if (version != null) song.version = version;
+    if (isrc != null) song.isrc = isrc;
+    if (reliable != null) song.durationReliable = reliable;
     return song;
   }
 
@@ -1046,6 +1109,7 @@ export class MusicApi {
       }
     }
     playlist.tracks = tracks;
+    playlist.complete = detail.getBoolean("complete") == true;
     return playlist;
   }
 
@@ -1094,10 +1158,23 @@ export class MusicApi {
 
   // ==================== 歌单广场 ====================
 
+  async sourceAvailability(song: Song, quality: string, check: boolean = false): Promise<UTSJSONObject> {
+    const args = this.songArgsOf(song);
+    args.set("platform", song.platform);
+    args.set("duration", song.duration != null ? song.duration : 0);
+    if (song.version != null) args.set("version", song.version);
+    if (song.isrc != null) args.set("isrc", song.isrc);
+    if (song.durationReliable != null) args.set("durationReliable", song.durationReliable);
+    args.set("quality", quality);
+    args.set("check", check);
+    return await this.engineInvoke("sourceAvailability", args);
+  }
+
   /**
    * 各平台自身的歌单分类。返回 { id, name, group } 列表，id 为该平台筛选歌单时使用的取值。
    */
   async playlistCategories(source: Source): Promise<UTSJSONObject[]> {
+    if (source == "local" || !sourceEnabled(source)) return [];
     // 歌单分类：本地持久缓存 7 天（分类集合基本不变，是最稳定的一份数据）。
     // 读必须走 ttlReadUtso：调用方拿 UTSJSONObject 用 .get 取字段，而普通
     // JSON.parse 读出的是无 .get 的纯对象（真机已踩：item.get is not a function）。
@@ -1126,6 +1203,7 @@ export class MusicApi {
   /** 推荐歌单（category 为空时 bundle 取各平台默认分类；sort 为歌单广场排序——
    *  包侧 playlistSorts 声明的 id 原样透传，空串 = 各平台默认，v5 契约） */
   async recommendations(source: Source, category?: string, page?: number, sort?: string): Promise<Playlist[]> {
+    if (source == "local" || !sourceEnabled(source)) return [];
     const sortId = sort != null ? sort : "";
     const cacheKey = "rec:" + source + ":" + (category != null ? category : "") + ":" + (page != null ? page : 1) + ":" + sortId;
     const hit = this.dataGet(cacheKey);
@@ -1157,6 +1235,7 @@ export class MusicApi {
   // ==================== 歌曲/榜单/热词 ====================
 
   async latest(source: Source, limit: number, offset: number): Promise<Song[]> {
+    if (source == "local" || !sourceEnabled(source)) return [];
     const cacheKey = "latest:" + source + ":" + limit + ":" + offset;
     const hit = this.dataGet(cacheKey);
     if (hit != null) return hit as Song[];
@@ -1179,13 +1258,18 @@ export class MusicApi {
     });
   }
 
-  banners(): Promise<Banner[]> {
-    return gateway("wyy/banner") as Promise<Banner[]>;
+  async banners(): Promise<Banner[]> {
+    if (!sourceEnabled("wyy")) return [];
+    const token = sourcePolicyRevision();
+    const list = await gateway("wyy/banner") as Banner[];
+    assertSourcePolicyCurrent(token);
+    return list;
   }
 
   async charts(source?: Source, force: boolean = false): Promise<Chart[]> {
     await ensureLocalStateRestored();
     const currentSource = sourceName(source);
+    if (currentSource == "local" || !sourceEnabled(currentSource)) return [];
     const identity = this.chartCacheIdentity();
     const ttlKey = "charts:" + this.chartPackIdentity() + ":" + currentSource;
     const cacheKey = "charts:" + identity + ":" + currentSource;
@@ -1264,11 +1348,13 @@ export class MusicApi {
    * 都来自数据包注册表（不再写死四源），顺序即注册表顺序，也是交错节奏。
    */
   async allLatest(limit: number, offset: number): Promise<Song[]> {
+    const policyToken = sourcePolicyRevision();
     const sources = await this.onlineRegistrySources();
     if (sources.length == 0) return [];
     const perSource = Math.ceil(limit / sources.length) + 1;
     const batches: Song[][] = [];
     for (let i = 0; i < sources.length; i++) {
+      assertSourcePolicyCurrent(policyToken);
       const source = sources[i] as RegistrySource;
       // offset 是否透传由包自述（未声明 = 不支持翻页，恒取首页）
       const pageOffset = source.latestUsesOffset == true ? offset : 0;
@@ -1281,6 +1367,7 @@ export class MusicApi {
       }
     }
     const all: Song[] = [];
+    assertSourcePolicyCurrent(policyToken);
     for (let index = 0; index < perSource && all.length < limit; index++) {
       for (let s = 0; s < batches.length; s++) {
         const batch = batches[s] as Song[];
@@ -1297,7 +1384,8 @@ export class MusicApi {
    */
   private async onlineRegistrySources(): Promise<RegistrySource[]> {
     await this.ensureRegistry();
-    return this.registrySources.filter((s) => s.id != "local");
+    const ids = orderedSourceIds(this.registrySources.filter((s) => s.id != "local").map((s) => s.id));
+    return ids.map((id) => this.registrySources.find((s) => s.id == id)!);
   }
 
   /**
@@ -1331,9 +1419,10 @@ export class MusicApi {
    * 热门搜索（跨源聚合）：bundle 内多源并发合并、去重、按源顺序封顶 30 条。
    * 取代按源的热词——搜索页的「热门搜索」不再跟随当前音源，切源不重拉。
    */
-  /** 跨源热词合并（封顶 30 条）。sources=null 不限；传聚合白名单时包内只并勾选的源
-   *  （数据包 v7+ 支持 sources 入参，旧包忽略该参数——退化为全源，可接受） */
+  /** 跨源热词合并（封顶 30 条）。null 不限，[] 明确全关，在调用包之前返回空列表
+   *  （非空白名单由 v7+ 包处理；旧包忽略白名单，保留原兼容路径） */
   async allHotWords(sources: string[] | null): Promise<string[]> {
+    if (sources != null && sources.length == 0) return [];
     const args = new UTSJSONObject();
     if (sources != null) args["sources"] = sources;
     const response = await this.engineInvoke("allHotWords", args);
@@ -1375,9 +1464,11 @@ export class MusicApi {
   async allSearch(
     keyword: string,
     page: number,
-    size: number
+    size: number,
+    sources: string[] | null = readAggregateSources()
   ): Promise<Song[]> {
-    const batches = await this.allSearchBatches(keyword, page, size);
+    if (sources != null && sources.length == 0) return [];
+    const batches = await this.allSearchBatches(keyword, page, size, sources);
     const all: Song[] = [];
     for (let i = 0; i < batches.length; i++) {
       const batch = batches[i];
@@ -1396,12 +1487,15 @@ export class MusicApi {
   async allSearchBatches(
     keyword: string,
     page: number,
-    size: number
+    size: number,
+    sources: string[] | null = readAggregateSources()
   ): Promise<AggregateSongBatch[]> {
+    if (sources != null && sources.length == 0) return [];
     const args = new UTSJSONObject();
     args.set("keyword", keyword);
     args.set("page", page);
     args.set("size", size);
+    if (sources != null) args.set("sources", sources);
     const response = await this.engineInvoke("searchAll", args);
     const rawBatches = response.get("batches") as UTSJSONObject[] | null;
     const batches: AggregateSongBatch[] = [];
@@ -1410,6 +1504,7 @@ export class MusicApi {
       const batch = rawBatches[i] as UTSJSONObject;
       const platform = this.strOf(batch.get("source"));
       if (platform.length == 0) continue;
+      if (!sourceEnabled(platform)) continue;
       const raw = batch.get("list") as UTSJSONObject[] | null;
       const songs: Song[] = [];
       if (raw != null) {
@@ -1430,7 +1525,7 @@ export class MusicApi {
    * `full` 表示各源原始页是否有取满 size 的（= 大概率还有下一页），
    * 调用方据此决定是否继续翻页（避免上游不认 page 参数时空转）。
    *
-   * @param sources 聚合白名单（null = 全部音源，见 services/aggregate-sources.ts）
+   * @param sources 聚合白名单（null = 全部音源，[] = 明确全关）
    * @param preferSource 当前音源 id：完全同分时优先保留它（播放更顺）
    */
   async searchMerged(
@@ -1440,13 +1535,14 @@ export class MusicApi {
     sources: string[] | null,
     preferSource: string
   ): Promise<{ songs: Song[]; full: boolean }> {
+    if (sources != null && sources.length == 0) return { songs: [], full: false };
     if (activeMetaPack() != null) {
       try {
         const args = new UTSJSONObject();
         args.set("keyword", keyword);
         args.set("page", page);
         args.set("size", size);
-        if (sources != null && sources.length > 0) args.set("sources", sources);
+        if (sources != null) args.set("sources", sources);
         if (preferSource.length > 0) args.set("preferSource", preferSource);
         const response = await this.engineInvoke("searchMerged", args);
         const raw = response.get("list") as UTSJSONObject[] | null;
@@ -1470,7 +1566,7 @@ export class MusicApi {
       }
     }
     // 降级路径：searchAll 拿批次（单源失败跳过），app 侧自己合
-    const batches = await this.allSearchBatches(keyword, page, size);
+    const batches = await this.allSearchBatches(keyword, page, size, sources);
     let full = false;
     for (let i = 0; i < batches.length; i++) {
       if (batches[i].songs.length >= size) full = true;
@@ -1837,7 +1933,7 @@ export class MusicApi {
    * 并把「该地址真正的取址时间」写回歌曲对象，供播放器判断 song.url 是否已过期。
    * 注意用缓存条目自身的时间戳而非当前时间，否则反复命中缓存会把有效期无限延长。
    */
-  async playUrl(song: Song, quality: string = "320"): Promise<string> {
+  async playUrl(song: Song, quality: string = "320", preferenceRetries: number = 2): Promise<string> {
     // 播客 / 有声书单集：song.id 就是 RSS 里的 enclosure 直链，不经过音源引擎。
     // 这类曲目没有对应的音源包（也不该有），走下面那条链路只会报「没有可用的
     // 音源」；同时跳过歌词预取——播客没有版权歌词，去问引擎是白跑一趟。
@@ -1846,20 +1942,24 @@ export class MusicApi {
       song.urlFetchedAt = Date.now();
       return song.id;
     }
-    const requestedSource = preferredSource(song) ?? song;
+    const requestedSource = enabledPreferredSource(song) ?? song;
     const sourceKey = requestedSource.platform + ":" + requestedSource.id;
     // v11：官方清单生效时旧档名归一到官方 level（存量 player.quality 可能还是
     // flac/flac24bit），否则请求档不在官方清单里、按最高档起试
     const effQuality = this.normalizeOfficialQuality(song.platform, quality);
     const cacheKey = song.platform + ":" + song.id + ":" + effQuality;
     const resolved = await this.resolvePlayUrl(song, effQuality, cacheKey);
-    const latestSource = preferredSource(song) ?? song;
-    if (latestSource.platform + ":" + latestSource.id != sourceKey) return this.playUrl(song, quality);
+    const latestSource = enabledPreferredSource(song) ?? song;
+    if (latestSource.platform + ":" + latestSource.id != sourceKey) {
+      if (preferenceRetries <= 0) throw new Error("音源选择已变化，请重新播放");
+      return this.playUrl(song, quality, preferenceRetries - 1);
+    }
     const url = resolved.url;
     if (url.length > 0) {
       const at = this.urlCacheAt.get(cacheKey);
       const ts = at != null ? at : 0;
       song.urlFetchedAt = ts > 0 ? ts : Date.now();
+      song.urlSourcePolicy = sourcePolicyFingerprint();
       // 取到地址就把这首歌的歌词一起取好。默认「URL 哪个源就用哪个源的歌词」
       // （地址按 song.platform 取）；但跨源兜底命中时 URL 来自目标源（如 kw 救回
       // wyy 的歌），歌词必须跟随目标源重取，否则配的是原平台的词，很可能对不上。
@@ -1879,12 +1979,27 @@ export class MusicApi {
     return url;
   }
 
-  private async resolvePlayUrl(
+  private resolvePlayUrl(song: Song, quality: string, cacheKey: string): Promise<{ url: string; crossTarget: Song | null }> {
+    const epoch = this.urlEpoch;
+    const version = this.urlVersions.get(cacheKey) ?? 0;
+    const target = enabledPreferredSource(song) ?? song;
+    const key = JSON.stringify([epoch, version, cacheKey, target.platform, target.id, target.name, target.singer, target.version, target.isrc, target.durationReliable, sourcePlayQualityOf(target.platform, quality)]);
+    const running = this.urlTasks.get(key);
+    if (running != null) return running;
+    const task = this.fetchPlayUrl(song, quality, cacheKey, epoch, version);
+    this.urlTasks.set(key, task);
+    task.then(() => { if (this.urlTasks.get(key) == task) this.urlTasks.delete(key); }, () => { if (this.urlTasks.get(key) == task) this.urlTasks.delete(key); });
+    return task;
+  }
+
+  private async fetchPlayUrl(
     song: Song,
     quality: string,
-    cacheKey: string
+    cacheKey: string,
+    epoch: number,
+    version: number
   ): Promise<{ url: string; crossTarget: Song | null }> {
-    const preferred = preferredSource(song);
+    const preferred = enabledPreferredSource(song);
     const target = preferred != null ? preferred : song;
     const selectedQuality = preferred != null ? sourcePlayQualityOf(target.platform, quality) : quality;
     const selection = preferred != null ? preferred.platform + ":" + preferred.id + ":" + selectedQuality : "";
@@ -1906,6 +2021,9 @@ export class MusicApi {
     // 失败性质、命中线路与跨源目标歌都随这次调用的返回值带回，不经全局标记：
     // 取链是并发的，全局标记会被别的调用串味（见 isContentFailError 的说明）。
     const result = await getPlayUrlByEngineResult(target, selectedQuality);
+    if (epoch != this.urlEpoch || version != (this.urlVersions.get(cacheKey) ?? 0)) throw new Error("播放配置已变化，请重试");
+    const currentTarget = enabledPreferredSource(song) ?? song;
+    if (currentTarget.platform != target.platform || currentTarget.id != target.id) return this.resolvePlayUrl(song, quality, cacheKey);
     // 加密档兜底：老音源包会直接给出 mflac/mgg/qmc 加密地址（新包已在 play-guard
     // 拦截），宿主无解密契约——不缓存、按内容失败处理（store 换下一首）。
     if (isEncryptedMediaUrl(result.url)) {
@@ -1936,6 +2054,12 @@ export class MusicApi {
       const crossTarget = this.rememberUrlLine(cacheKey, result.line);
       const lyricTarget = crossTarget != null ? crossTarget : preferred;
       if (lyricTarget != null) this.urlCrossTarget.set(cacheKey, lyricTarget);
+      const audioSource = crossTarget ?? target;
+      this.urlPlaybackInfo.set(cacheKey, {
+        source: audioSource,
+        quality: result.actualQuality.length > 0 ? result.actualQuality : this.clampQualityFor(audioSource.platform, selectedQuality),
+      });
+      uni.$emit(MusicApi.PLAY_SOURCE_EVENT, cacheKey);
       return { url: result.url, crossTarget: lyricTarget };
     }
     // 弱网（整链无响应）与「音源没这首」在此分流（2026-10-03 弱网修复）：
@@ -1976,10 +2100,53 @@ export class MusicApi {
 
   /** 当前地址实际命中源的 Referer；投屏代理与取链使用同一份注册表声明。 */
   playRefererOf(song: Song, quality: string = "320"): string {
+    return this.refererOf(this.playSourceOf(song, quality).platform as Source);
+  }
+
+  /** Playback metadata follows the resolved audio, including saved and cross-source matches. */
+  playSourceOf(song: Song, quality: string = "320"): Song {
     const normalized = this.normalizeOfficialQuality(song.platform, quality);
     const key = song.platform + ":" + song.id + ":" + normalized;
-    const target = this.urlCrossTarget.get(key) ?? preferredSource(song) ?? song;
-    return this.refererOf(target.platform as Source);
+    return this.urlPlaybackInfo.get(key)?.source ?? this.urlCrossTarget.get(key) ?? enabledPreferredSource(song) ?? song;
+  }
+
+  /** Display fallback for older packages without actualQuality, using the same package quality rules. */
+  playQualityOf(song: Song, quality: string = "320"): string {
+    const target = this.playSourceOf(song, quality);
+    const wanted = target.platform != song.platform || target.id != song.id
+      ? sourcePlayQualityOf(target.platform, quality) : quality;
+    return this.clampQualityFor(target.platform, wanted);
+  }
+
+  /** A quality preflight must not relabel audio that is still using a different URL. */
+  playbackInfoOf(song: Song, quality: string = "320", url: string = ""): { source: Song; quality: string; size: number } {
+    const normalized = this.normalizeOfficialQuality(song.platform, quality);
+    let key = song.platform + ":" + song.id + ":" + normalized;
+    const preferred = enabledPreferredSource(song);
+    const originalPrefix = song.platform + ":" + song.id + ":";
+    const preferredPrefix = preferred != null ? preferred.platform + ":" + preferred.id + ":" : originalPrefix;
+    let resolved = url.length == 0 || this.urlCache.get(key) == url;
+    if (!resolved) {
+      // UTSJSONObject is not iterable. Scan only the bounded live-key list, not its tombstones.
+      // This runs on metadata events, never on the progress clock.
+      for (let i = this.urlCacheKeys.length - 1; i >= 0; i--) {
+        const candidate = this.urlCacheKeys[i];
+        if (candidate != null && this.urlCache.get(candidate) == url
+          && (candidate.startsWith(originalPrefix) || candidate.startsWith(preferredPrefix))) {
+          key = candidate;
+          resolved = true;
+          break;
+        }
+      }
+    }
+    const info = resolved ? this.urlPlaybackInfo.get(key) : null;
+    const source = info?.source ?? (resolved ? this.urlCrossTarget.get(key) ?? preferred ?? song : preferred ?? song);
+    const requested = resolved ? key.substring(key.lastIndexOf(":") + 1) : quality;
+    const actual = resolved ? this.urlActualQuality.get(key) ?? "" : "";
+    const fallback = source.platform != song.platform || source.id != song.id
+      ? sourcePlayQualityOf(source.platform, requested) : requested;
+    return { source, quality: info?.quality ?? (actual.length > 0 ? actual : this.clampQualityFor(source.platform, fallback)),
+      size: resolved ? this.urlSize.get(key) ?? 0 : 0 };
   }
 
   /**
@@ -1988,7 +2155,8 @@ export class MusicApi {
    * 而不是把一个 mp3 存成 .flac（与地址同缓存同生命周期，见 urlActualQuality）。
    */
   actualQualityOf(song: Song, quality: string = "320"): string {
-    const v = this.urlActualQuality.get(song.platform + ":" + song.id + ":" + quality);
+    const normalized = this.normalizeOfficialQuality(song.platform, quality);
+    const v = this.urlActualQuality.get(song.platform + ":" + song.id + ":" + normalized);
     return v != null ? v : "";
   }
 
@@ -1997,7 +2165,8 @@ export class MusicApi {
    * 与地址同缓存同生命周期（见 urlSize）。
    */
   actualSizeOf(song: Song, quality: string = "320"): number {
-    const v = this.urlSize.get(song.platform + ":" + song.id + ":" + quality);
+    const normalized = this.normalizeOfficialQuality(song.platform, quality);
+    const v = this.urlSize.get(song.platform + ":" + song.id + ":" + normalized);
     return v != null ? v : 0;
   }
 
@@ -2035,11 +2204,14 @@ export class MusicApi {
   private probeUrlSize(cacheKey: string, url: string): void {
     if (this.urlSizeProbed.has(cacheKey)) return;
     this.urlSizeProbed.add(cacheKey);
+    const epoch = this.urlEpoch;
+    const version = this.urlVersions.get(cacheKey) ?? 0;
     uni.request({
       url: url,
       method: "HEAD",
       timeout: 8000,
       success: (res) => {
+        if (epoch != this.urlEpoch || version != (this.urlVersions.get(cacheKey) ?? 0) || this.urlCacheGet(cacheKey) != url) return;
         if (res.statusCode < 200 || res.statusCode >= 300) return;
         const header = res.header as UTSJSONObject | null;
         if (header == null) return;
@@ -2206,7 +2378,7 @@ export class MusicApi {
     // 缓存键仍是原歌（播放页/桌面歌词都按原歌键读），所以消费方无需知道有手选这回事。
     // 没有手选时 picked == null，行为与改动前逐字一致。
     const picked = this.pickedLyricOf(song);
-    const task = this.fetchLyricFor(picked != null ? picked : preferredSource(song) ?? song, key, trKey);
+    const task = this.fetchLyricFor(picked != null ? picked : enabledPreferredSource(song) ?? song, key, trKey);
     this.lyricInflight.set(key, task);
     try {
       await task;
@@ -2217,6 +2389,7 @@ export class MusicApi {
 
   /** ensureLyric 的实际取词步骤（已被并发去重包住，同一时刻同一 key 只会有一份在跑） */
   private async fetchLyricFor(song: Song, key: string, trKey: string): Promise<void> {
+    const policyToken = sourcePolicyRevision();
     if (song.platform == "local") {
       // 本地歌曲没有平台 id：按旧实现顺序先酷我后网易云，关键词搜索命中后取歌词
       let text = await this.lyricByKeyword(song, "kw");
@@ -2227,7 +2400,9 @@ export class MusicApi {
       try {
         const keyword =
           song.singer.length > 0 ? song.singer + " " + song.name : song.name;
+        assertSourcePolicyCurrent(policyToken);
         const hits = await this.search(keyword, "wyy", "song", 1, 1);
+        assertSourcePolicyCurrent(policyToken);
         if (hits.length > 0) {
           const hit = hits[0] as Song;
           const response = await this.engineInvoke("lyric", this.lyricArgs(hit));
@@ -2236,6 +2411,7 @@ export class MusicApi {
       } catch (_) {
         // 静默：翻译歌词拿不到按无翻译缓存，已标记 asked 不再重试
       }
+      assertSourcePolicyCurrent(policyToken);
       if (tr.length > 0) this.cacheSet(this.lyricCache, trKey, tr);
       this.lyricAsked.set(key, Date.now());
       return;
@@ -2262,6 +2438,7 @@ export class MusicApi {
     qtDiag("[QT Lyric] 取词 " + key + " 歌词 " + lyric.length + " 字符 / 翻译 "
       + translation.length + " 字符 / 逐字 " + wordByWord.length + " 字符 / 罗马音 "
       + romanization.length + " 字符" + (failed ? " 异常：" + errText : ""));
+    assertSourcePolicyCurrent(policyToken);
     if (lyric.length > 0) this.cacheSet(this.lyricCache, key, lyric);
     if (translation.length > 0) this.cacheSet(this.lyricCache, trKey, translation);
     // 与歌词/翻译同口径：只在非空时写入（cacheSet 内部已判空），空串不占位
@@ -2471,7 +2648,7 @@ export class MusicApi {
     if (song == null) return null;
     const key = song.platform + ":" + song.id;
     const pick = this.lyricPicks()[key];
-    return pick != null ? pick : null;
+    return pick != null && sourceEnabled(pick.platform) ? pick : null;
   }
 
   private rememberLyricPick(original: Song, picked: Song): void {
@@ -2505,6 +2682,7 @@ export class MusicApi {
    * 返回 "" 表示未取到（不抛错，与旧实现一致）。
    */
   async songCover(song: Song, refresh: boolean = false): Promise<string> {
+    const policyToken = sourcePolicyRevision();
     if (!refresh && song.picUrl != null && song.picUrl.length > 0) return song.picUrl;
     // 本地歌曲没有源站主键（id 是本地路径派生出来的），cover 入口拿它去问必空手：
     // 与取词同一口径 —— 按「歌手 歌名」搜索命中，再用命中项取封面
@@ -2521,6 +2699,7 @@ export class MusicApi {
     } catch (_) {
       // 静默：单源 cover 失败继续走关键词兜底
     }
+    assertSourcePolicyCurrent(policyToken);
     // 单源取不到（源站没这张图 / 该源不支持 cover）：退到关键词搜索找同名曲的封面
     return this.coverByKeyword(song);
   }
@@ -2532,14 +2711,16 @@ export class MusicApi {
    * 避免直接拿首条搜索结果的翻唱/演唱会封面。保留 Live 等实际版本信息。
    */
   private async coverByKeyword(song: Song): Promise<string> {
+    const policyToken = sourcePolicyRevision();
     const title = song.platform == "local" ? song.name.replace(/\s+[（(]\d+[）)]$/, "").trim() : song.name.trim();
     const normalize = (value: string): string => value.toLowerCase().replace(/[\s.·,，、/&＆_\-()（）《》]/g, "");
     const wantTitle = normalize(title);
     const wantSinger = normalize(song.singer);
     const keyword = song.singer.length > 0 ? song.singer + " " + title : title;
     if (keyword.trim().length == 0) return "";
-    const sources: Source[] = ["kw", "wyy"];
+    const sources: Source[] = orderedSourceIds(["kw", "wyy"]);
     for (let i = 0; i < sources.length; i++) {
+      assertSourcePolicyCurrent(policyToken);
       try {
         const hits = await this.search(keyword, sources[i], "song", 1, 5);
         for (let j = 0; j < hits.length; j++) {
@@ -2609,6 +2790,7 @@ export class MusicApi {
 }
 
 export const musicApi = new MusicApi();
+uni.$on(SOURCE_POLICY_CHANGED_EVENT, () => { musicApi.clearPlayUrlCache(); });
 
 export class AccountApi {
   login(username: string, password: string): Promise<UTSJSONObject> {

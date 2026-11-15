@@ -1,7 +1,8 @@
 /**
  * 本地日志（发行版可查现场）
  *
- * 为什么需要这个文件：**发行包没有控制台**。Android 的 logcat / 鸿蒙的 hilog 只在
+ * 为什么需要这个文件：**发行包没有控制台**。Android 的 logcat / iOS 的 Xcode 控制台 /
+ * 鸿蒙的 hilog 只在
  * 连着电脑调试时能看，用户装的是正式包，出问题时既没有 devtools 也没有日志工具，
  * 报障时只剩一句「播放不了」。所以要把关键链路落到应用私有目录的文件里，
  * 让用户能在设置页看到路径、复制出来发给我们。
@@ -28,10 +29,11 @@
  * 丢日志的竞态，所以必须排队。
  *
  * 为什么不用 uni.getFileSystemManager()：跨端可用性不确定（现有代码也刻意回避它），
- * 统一走 qt-js-engine 插件（Android java.io / 鸿蒙 CoreFileKit），与音源包存储同一条路。
+ * 统一走 qt-js-engine 插件（Android java.io / iOS Foundation / 鸿蒙 CoreFileKit），
+ * 与音源包存储同一条路。
  */
 
-// #ifdef APP-ANDROID || APP-HARMONY
+// #ifdef APP-ANDROID || APP-IOS || APP-HARMONY
 import {
   dataDir as nativeDataDir,
   appendTextFile as nativeAppendTextFile,
@@ -88,7 +90,7 @@ type LogDirEntry = {
   size: number;
 };
 
-// #ifdef APP-ANDROID || APP-HARMONY
+// #ifdef APP-ANDROID || APP-IOS || APP-HARMONY
 function fsDataDir(): string {
   return nativeDataDir();
 }
@@ -168,7 +170,9 @@ function fsReadText(path: string): Promise<string> {
 }
 // #endif
 
-// #ifndef APP-ANDROID || APP-HARMONY
+// #ifndef APP-ANDROID
+// #ifndef APP-IOS
+// #ifndef APP-HARMONY
 function fsDataDir(): string {
   return "";
 }
@@ -192,6 +196,8 @@ function fsList(dir: string): Promise<LogDirEntry[]> {
 function fsReadText(path: string): Promise<string> {
   return Promise.resolve("");
 }
+// #endif
+// #endif
 // #endif
 
 // ==================== 路径 ====================

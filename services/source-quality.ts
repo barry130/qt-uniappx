@@ -1,6 +1,6 @@
 /**
  * 各平台独立的音质选择（2026-10-28 与 qt-pc 对齐：音质从「播放/下载设置」的
- * 全局单值改为按平台管理，入口在音源账号页每个平台卡片 + 播放页音质菜单）+
+ * 全局单值改为按平台管理，入口在音源平台管理页每个平台账号卡片 + 播放页音质菜单）+
  * v12 生效档位清单的引擎门面与宿主缓存。
  *
  * ── 与 qt-pc/src/lib/source-quality.ts 的异同 ──
@@ -11,6 +11,9 @@
  *  - 变更事件：SOURCE_QUALITIES_CHANGED_EVENT（菜单高亮/账号页下拉订阅刷新）；
  *  - v12：fetchSourceQualityProfile——生效档位清单由数据包判定（它持有播放面
  *    凭据与 officialQualities 自述），宿主只把会员档作为数据传入并缓存展示。
+ *  - 2026-11-14 网络面别拆分：播放/下载表各拆成 WIFI 与移动网络两张
+ *    （用户需求「分别独立管理」），读写都按当前网络面别（./network-kind）
+ *    选表；旧「不分网络」表一次性平移进两张网络表后删除。
  * 不同（平台架构差异，非语义差异）：
  *  - PC 把全量表推给 Rust 引擎（engine.rs effective_quality_for 自己取值）；
  *    uniappx 取链是**参数式**的（playUrl(song, quality)），引擎不需要持有表：
@@ -29,6 +32,12 @@
 import { parseJsonToUtso } from "./http";
 import { invokeSource } from "./source-engine";
 import { sourceVipTierOf } from "./source-auth";
+import {
+  currentNetworkKind,
+  NETWORK_KIND_CHANGED_EVENT,
+  NETWORK_KIND_WIFI,
+  NETWORK_KIND_CELLULAR,
+} from "./network-kind";
 
 // ---------- 键与事件 ----------
 
@@ -40,11 +49,26 @@ const PLAY_QUALITIES_KEY = "qt-source-play-qualities-v3";
 /** 平台独立下载音质表（JSON：{源id: 档位id}） */
 const DOWNLOAD_QUALITIES_KEY = "qt-source-download-qualities";
 
+/**
+ * 2026-11-14 网络面别拆分：上面两个旧键是「不分网络」时代的表，只在一次性
+ * 迁移（ensureNetworkSchema）里读入、复制到下面的网络表后删除；新读写一律
+ * 走四个网络键，WIFI 与移动网络互不覆盖。
+ */
+const PLAY_WIFI_KEY = "qt-source-play-qualities-wifi";
+const PLAY_CELLULAR_KEY = "qt-source-play-qualities-cellular";
+const DOWNLOAD_WIFI_KEY = "qt-source-download-qualities-wifi";
+const DOWNLOAD_CELLULAR_KEY = "qt-source-download-qualities-cellular";
+
 /** 播放档位口径版本：v2 起「播放音质」缺省跟随该源下载音质，旧手选值一次性作废；
  *  v3 再清一次（用户设备可能已跑过 v2，老安装里手选的高档位仍会盖住缺省，
  *  2026-10-31 用户复述「播放音质默认 320K」时发现 QQ 仍显示母带） */
 const PLAY_SCHEMA_KEY = "qt-source-play-quality-schema";
 const PLAY_SCHEMA_VERSION = "3";
+
+/** 网络面别拆分的迁移标记：没见过就把旧表复制进四个网络键（两个网络先各拿
+ *  一份与拆分前一致的值，用户之后再独立改），并删旧键防双写口径漂移 */
+const NETWORK_SCHEMA_KEY = "qt-source-quality-network-schema";
+const NETWORK_SCHEMA_VERSION = "1";
 
 /** 平台音质表变化后广播；播放页音质标注/账号页下拉等 UI 监听刷新 */
 export const SOURCE_QUALITIES_CHANGED_EVENT = "qt-source-qualities-changed";
@@ -83,9 +107,12 @@ export const PROFILE_MODE_PLATFORM = "platform";
 
 // ---------- 平台独立音质表（存储 + 进程内缓存） ----------
 
-/** {源id: 档位id} 的内存副本（首次读后缓存，写入同步更新；UTSJSONObject 便于 get/keys） */
-let cachedPlay: UTSJSONObject | null = null;
-let cachedDownload: UTSJSONObject | null = null;
+/** {源id: 档位id} 的内存副本（首次读后缓存，写入同步更新；UTSJSONObject 便于 get/keys）
+ *  2026-11-14 起按网络面别分表：WIFI 与移动网络各一张，互不覆盖 */
+let cachedPlayWifi: UTSJSONObject | null = null;
+let cachedPlayCellular: UTSJSONObject | null = null;
+let cachedDownloadWifi: UTSJSONObject | null = null;
+let cachedDownloadCellular: UTSJSONObject | null = null;
 
 function readQualityTable(key: string): UTSJSONObject {
   try {
@@ -110,23 +137,45 @@ function readQualityTable(key: string): UTSJSONObject {
   }
 }
 
-function playTable(): UTSJSONObject {
-  if (cachedPlay == null) cachedPlay = readQualityTable(PLAY_QUALITIES_KEY);
-  return cachedPlay as UTSJSONObject;
+function playKeyOf(network: string): string {
+  return network == NETWORK_KIND_WIFI ? PLAY_WIFI_KEY : PLAY_CELLULAR_KEY;
 }
 
-function downloadTable(): UTSJSONObject {
-  if (cachedDownload == null) cachedDownload = readQualityTable(DOWNLOAD_QUALITIES_KEY);
-  return cachedDownload as UTSJSONObject;
+function downloadKeyOf(network: string): string {
+  return network == NETWORK_KIND_WIFI ? DOWNLOAD_WIFI_KEY : DOWNLOAD_CELLULAR_KEY;
+}
+
+function playTable(network: string): UTSJSONObject {
+  if (network == NETWORK_KIND_WIFI) {
+    if (cachedPlayWifi == null) cachedPlayWifi = readQualityTable(PLAY_WIFI_KEY);
+    return cachedPlayWifi as UTSJSONObject;
+  }
+  if (cachedPlayCellular == null) cachedPlayCellular = readQualityTable(PLAY_CELLULAR_KEY);
+  return cachedPlayCellular as UTSJSONObject;
+}
+
+function downloadTable(network: string): UTSJSONObject {
+  if (network == NETWORK_KIND_WIFI) {
+    if (cachedDownloadWifi == null) cachedDownloadWifi = readQualityTable(DOWNLOAD_WIFI_KEY);
+    return cachedDownloadWifi as UTSJSONObject;
+  }
+  if (cachedDownloadCellular == null) cachedDownloadCellular = readQualityTable(DOWNLOAD_CELLULAR_KEY);
+  return cachedDownloadCellular as UTSJSONObject;
 }
 
 /**
- * 平台的播放音质（同步读）。回落链：平台表 → 调用方传入的全局默认。
- * uniappx 的全局默认常驻在 player.quality（PC 是旧全局键迁移，这里不需要：
- * 持有方直接传入，避免本模块反向 import stores/player 成环）。
+ * 平台的播放音质（同步读，按**当前网络面别**选表）。回落链：该网络播放表 →
+ * 调用方传入的全局默认。uniappx 的全局默认常驻在 player.quality（PC 是旧
+ * 全局键迁移，这里不需要：持有方直接传入，避免本模块反向 import
+ * stores/player 成环）。
  */
 export function sourcePlayQualityOf(source: string, fallback: string): string {
-  const table = playTable();
+  return sourcePlayQualityForNetwork(source, fallback, currentNetworkKind());
+}
+
+/** 指定网络面别（wifi/cellular）的播放音质：账号页 WIFI/移动网络两行独立展示用 */
+export function sourcePlayQualityForNetwork(source: string, fallback: string, network: string): string {
+  const table = playTable(network);
   const v = table.get(source);
   if (v != null) {
     const q = v.toString();
@@ -135,9 +184,14 @@ export function sourcePlayQualityOf(source: string, fallback: string): string {
   return fallback.length > 0 ? fallback : "320";
 }
 
-/** 平台的下载音质（同步读）。回落链同 sourcePlayQualityOf。 */
+/** 平台的下载音质（同步读，当前网络面别）。回落链同 sourcePlayQualityOf。 */
 export function sourceDownloadQualityOf(source: string, fallback: string): string {
-  const table = downloadTable();
+  return sourceDownloadQualityForNetwork(source, fallback, currentNetworkKind());
+}
+
+/** 指定网络面别的下载音质：账号页 WIFI/移动网络两行独立展示用 */
+export function sourceDownloadQualityForNetwork(source: string, fallback: string, network: string): string {
+  const table = downloadTable(network);
   const v = table.get(source);
   if (v != null) {
     const q = v.toString();
@@ -147,21 +201,26 @@ export function sourceDownloadQualityOf(source: string, fallback: string): strin
 }
 
 /**
- * 写入公共路径：校验 → 更新内存表 → 落库 → 广播。返回 false = 形状非法
- * （调用方提示「非法的音质设置」）。**同值短路**：不落库不广播——清单翻面
- * 迁移（source-registry 的 migrateStaleQualities）会对大量平台重写档位，
- * 值没变时短路避免事件风暴与无谓写盘。
+ * 写入公共路径：校验 → 更新对应网络面别的内存表 → 落库 → 广播。返回 false =
+ * 形状非法（调用方提示「非法的音质设置」）。**同值短路**：不落库不广播——
+ * 清单翻面迁移（source-registry 的 migrateStaleQualities）会对大量平台×两个
+ * 网络重写档位，值没变时短路避免事件风暴与无谓写盘。
  */
-function setSourceQualityImpl(isPlay: boolean, source: string, quality: string): boolean {
+function setSourceQualityImpl(isPlay: boolean, source: string, quality: string, network: string): boolean {
   if (!SOURCE_RE.test(source) || !QUALITY_RE.test(quality)) return false;
-  const table = isPlay ? playTable() : downloadTable();
+  const table = isPlay ? playTable(network) : downloadTable(network);
   const existing = table.get(source);
   if (existing != null && existing.toString() == quality) return true;
   table.set(source, quality);
-  if (isPlay) cachedPlay = table;
-  else cachedDownload = table;
+  if (isPlay) {
+    if (network == NETWORK_KIND_WIFI) cachedPlayWifi = table;
+    else cachedPlayCellular = table;
+  } else {
+    if (network == NETWORK_KIND_WIFI) cachedDownloadWifi = table;
+    else cachedDownloadCellular = table;
+  }
   try {
-    uni.setStorageSync(isPlay ? PLAY_QUALITIES_KEY : DOWNLOAD_QUALITIES_KEY, JSON.stringify(table));
+    uni.setStorageSync(isPlay ? playKeyOf(network) : downloadKeyOf(network), JSON.stringify(table));
   } catch (_) {
     // 静默：内存表已更新（本次会话生效），重启后回到旧值
   }
@@ -169,29 +228,52 @@ function setSourceQualityImpl(isPlay: boolean, source: string, quality: string):
   return true;
 }
 
-/** 写平台的播放音质（落库 + 广播；形状非法返回 false 由调用方提示） */
+/**
+ * 写平台的播放音质（落库 + 广播；形状非法返回 false 由调用方提示）。
+ * 落到**当前网络**的面别表：播放页音质菜单只改用户此刻所连网络的那一行，
+ * 另一个网络的档位不受影响。
+ */
 export function setSourcePlayQuality(source: string, quality: string): boolean {
-  return setSourceQualityImpl(true, source, quality);
+  return setSourceQualityImpl(true, source, quality, currentNetworkKind());
 }
 
-/** 写平台的下载音质（落库 + 广播；下载不走引擎无需推送，PC 同款） */
-export function setSourceDownloadQuality(source: string, quality: string): boolean {
-  return setSourceQualityImpl(false, source, quality);
+/** 写平台指定网络面别的播放音质：账号页 WIFI/移动网络两行独立设置用 */
+export function setSourcePlayQualityForNetwork(source: string, quality: string, network: string): boolean {
+  return setSourceQualityImpl(true, source, quality, network);
 }
 
 /**
- * 恢复默认（设置→存储清理「恢复默认设置」用）：删两表 + 清缓存 + 广播。
+ * 写平台的下载音质（落库 + 广播；下载不走引擎无需推送，PC 同款）。
+ * 落到当前网络的面别表，口径与播放侧一致。
+ */
+export function setSourceDownloadQuality(source: string, quality: string): boolean {
+  return setSourceQualityImpl(false, source, quality, currentNetworkKind());
+}
+
+/** 写平台指定网络面别的下载音质：账号页 WIFI/移动网络两行独立设置用 */
+export function setSourceDownloadQualityForNetwork(source: string, quality: string, network: string): boolean {
+  return setSourceQualityImpl(false, source, quality, network);
+}
+
+/**
+ * 恢复默认（设置→存储清理「恢复默认设置」用）：删全部新旧表 + 清缓存 + 广播。
  * 广播让打开中的菜单/下拉立刻回到全局默认档位。
  */
 export function resetSourceQualities(): void {
   try {
     uni.removeStorageSync(PLAY_QUALITIES_KEY);
     uni.removeStorageSync(DOWNLOAD_QUALITIES_KEY);
+    uni.removeStorageSync(PLAY_WIFI_KEY);
+    uni.removeStorageSync(PLAY_CELLULAR_KEY);
+    uni.removeStorageSync(DOWNLOAD_WIFI_KEY);
+    uni.removeStorageSync(DOWNLOAD_CELLULAR_KEY);
   } catch (_) {
     // 静默：remove 失败时缓存已清，本次会话内读到的已是默认值
   }
-  cachedPlay = null;
-  cachedDownload = null;
+  cachedPlayWifi = null;
+  cachedPlayCellular = null;
+  cachedDownloadWifi = null;
+  cachedDownloadCellular = null;
   uni.$emit(SOURCE_QUALITIES_CHANGED_EVENT);
 }
 
@@ -213,13 +295,71 @@ function ensurePlaySchema(): void {
   } catch (_) {
     // 静默：删不掉也只是本次会话仍读到旧值，下次启动重试
   }
-  cachedPlay = null;
+  cachedPlayWifi = null;
+  cachedPlayCellular = null;
   try {
     uni.setStorageSync(PLAY_SCHEMA_KEY, PLAY_SCHEMA_VERSION);
   } catch (_) {
     // 静默：标记写不进时下次启动会再清一次，幂等
   }
   uni.$emit(SOURCE_QUALITIES_CHANGED_EVENT);
+}
+
+/**
+ * 网络面别拆分迁移（进程内一次）：把旧「不分网络」表复制到 WIFI 与移动网络
+ * 两张表——拆分前选的档位两个网络先各拿一份，用户之后在账号页/播放页再独立
+ * 改——然后删旧键，防止旧代码路径或残留数据造成第二套口径。播放旧表先经
+ * ensurePlaySchema（v3）处理，这里只搬「当前仍生效」的值；下载表原样平移。
+ */
+function ensureNetworkSchema(): void {
+  let seen = "";
+  try {
+    seen = uni.getStorageSync(NETWORK_SCHEMA_KEY).toString();
+  } catch (_) {
+    seen = "";
+  }
+  if (seen == NETWORK_SCHEMA_VERSION) return;
+  copyLegacyTable(PLAY_QUALITIES_KEY, PLAY_WIFI_KEY, PLAY_CELLULAR_KEY);
+  copyLegacyTable(DOWNLOAD_QUALITIES_KEY, DOWNLOAD_WIFI_KEY, DOWNLOAD_CELLULAR_KEY);
+  try {
+    uni.removeStorageSync(PLAY_QUALITIES_KEY);
+    uni.removeStorageSync(DOWNLOAD_QUALITIES_KEY);
+  } catch (_) {
+    // 静默：删不掉也只是残留（旧键不再被读写），下次启动重试
+  }
+  cachedPlayWifi = null;
+  cachedPlayCellular = null;
+  cachedDownloadWifi = null;
+  cachedDownloadCellular = null;
+  try {
+    uni.setStorageSync(NETWORK_SCHEMA_KEY, NETWORK_SCHEMA_VERSION);
+  } catch (_) {
+    // 静默：标记写不进时下次启动会再搬一次，幂等
+  }
+  uni.$emit(SOURCE_QUALITIES_CHANGED_EVENT);
+}
+
+/** 旧表 → 两张网络表：每条只在该网络表缺位时写入（重跑幂等，且不覆盖已独立改过的值） */
+function copyLegacyTable(fromKey: string, wifiKey: string, cellularKey: string): void {
+  const legacy = readQualityTable(fromKey);
+  const keys = UTSJSONObject.keys(legacy);
+  if (keys.length == 0) return;
+  const wifi = readQualityTable(wifiKey);
+  const cellular = readQualityTable(cellularKey);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const v = legacy.get(k);
+    if (v == null) continue;
+    const q = v.toString();
+    if (wifi.get(k) == null) wifi.set(k, q);
+    if (cellular.get(k) == null) cellular.set(k, q);
+  }
+  try {
+    uni.setStorageSync(wifiKey, JSON.stringify(wifi));
+    uni.setStorageSync(cellularKey, JSON.stringify(cellular));
+  } catch (_) {
+    // 静默：搬不动时下次启动重试（标记未写会重跑）
+  }
 }
 
 // ---------- v12 生效档位清单（包侧判定 + 宿主缓存） ----------
@@ -339,5 +479,11 @@ export async function fetchSourceQualityProfile(
   return { mode: mode, qualities: qualities, aliases: aliases };
 }
 
-// 模块初始化即做口径迁移（先于任何读取）
+// 模块初始化即做口径迁移（先于任何读取）：v3 播放口径 → 网络面别拆分
 ensurePlaySchema();
+ensureNetworkSchema();
+// WIFI/移动网络切换 = 各取档点的生效音质整体变化，转译成音质表变化事件，
+// 打开中的播放页音质菜单/账号页卡片立即跟随（同一事件名，订阅方零改动）
+uni.$on(NETWORK_KIND_CHANGED_EVENT, () => {
+  uni.$emit(SOURCE_QUALITIES_CHANGED_EVENT);
+});

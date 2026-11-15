@@ -30,6 +30,7 @@ import { mergeClientHeaders } from "@/services/client-info";
 import { getAccessToken } from "@/services/auth";
 import { getCurrentVersionCode, getCurrentVersionName } from "@/services/app-version";
 import { musicApi } from "@/services/music-api";
+import { sourceEnabled, sourcePolicyRevision, orderedSourceIds, isSourcePolicyError } from "@/services/source-policy";
 import type { SourcePackMeta } from "@/services/source-bundle-fs";
 import type { PackHeaderInfo } from "@/services/source-pack-header";
 import { parsePackHeader, UNSUPPORTED_PACK_MESSAGE, isJsPackFileName } from "@/services/source-pack-header";
@@ -91,6 +92,8 @@ import {
   loadedMetaCode,
   engineUsable,
   invalidatePlayPackCache,
+  applyEngineSourcePolicy,
+  sourcePolicyStatus,
 } from "@/services/source-engine";
 
 /**
@@ -99,19 +102,27 @@ import {
  * 鸿蒙只能取 1106 —— 1104 早在 V20261008001__platform_linux_macos.sql 里给了 Linux。
  */
 export const PLATFORM_ANDROID = 1101;
+export const PLATFORM_IOS = 1102;
 export const PLATFORM_HARMONY = 1106;
 
 /**
  * 本机平台号。manifest 准入过滤（platforms 白名单）与更新结果上报都用它。
- * 鸿蒙必须显式分支：否则会被当成 Android（1101）去要包、去上报，
- * 后端按 1106 发布的鸿蒙产物永远下发不到，上报数据也会污染安卓统计。
+ * iOS / 鸿蒙必须显式分支：否则会被当成 Android（1101）去要包、去上报，
+ * 后端按 1102 / 1106 发布的产物永远下发不到，上报数据也会污染安卓统计。
  * 其余平台保持原有取值不变（历史上这里一律发 1101）。
  */
 export function currentPlatform(): number {
+  // #ifdef APP-IOS
+  return PLATFORM_IOS;
+  // #endif
   // #ifdef APP-HARMONY
   return PLATFORM_HARMONY;
   // #endif
+  // #ifndef APP-IOS
+  // #ifndef APP-HARMONY
   return PLATFORM_ANDROID;
+  // #endif
+  // #endif
 }
 /** 本机支持的宿主契约版本（与 source-engine 里的一致） */
 const HOST_API_VERSION = 1;
@@ -945,6 +956,13 @@ export type SourceSmokeResult = { ok: boolean; message: string };
  * 每首最多试 2 次（网络抖动不该判死一个好包）。
  */
 export async function smokeTest(songs: Song[]): Promise<SourceSmokeResult> {
+  await applyEngineSourcePolicy();
+  const policyStatus = sourcePolicyStatus();
+  if (policyStatus.configured && (!policyStatus.metaSupported || policyStatus.playSupported == false)) {
+    return { ok: true, message: "音乐源设置已保存，请更新音源包后进行在线自检" };
+  }
+  const policyToken = sourcePolicyRevision();
+  songs = songs.filter((song: Song): boolean => sourceEnabled(song.platform));
   if (songs.length == 0) {
     // 没有候选曲目就跳过自检（宁可不检，也不能凭空判失败）
     return { ok: true, message: "无候选曲目，跳过冒烟" } as SourceSmokeResult;
@@ -953,12 +971,20 @@ export async function smokeTest(songs: Song[]): Promise<SourceSmokeResult> {
   for (let i = 0; i < songs.length; i++) {
     const song = songs[i];
     for (let attempt = 0; attempt < 2; attempt++) {
-      const url = await getPlayUrlByEngine(song, "128");
+      if (policyToken != sourcePolicyRevision()) return { ok: true, message: "音乐源设置已变化，跳过本次在线自检" };
+      let url = "";
+      try { url = await getPlayUrlByEngine(song, "128"); }
+      catch (e) {
+        if (isSourcePolicyError(e)) return { ok: true, message: "音乐源设置限制本次在线自检" };
+        throw e;
+      }
+      if (policyToken != sourcePolicyRevision()) return { ok: true, message: "音乐源设置已变化，跳过本次在线自检" };
       if (url.length == 0) {
         lastMessage = `${song.name} 取链为空`;
         continue;
       }
       const playable = await verifyPlayableByEngine(url);
+      if (policyToken != sourcePolicyRevision()) return { ok: true, message: "音乐源设置已变化，跳过本次在线自检" };
       if (playable) {
         return { ok: true, message: `${song.name} 取链+预检通过` } as SourceSmokeResult;
       }
@@ -975,7 +1001,13 @@ export async function smokeTest(songs: Song[]): Promise<SourceSmokeResult> {
  */
 export async function pickSmokeSongs(): Promise<Song[]> {
   try {
-    const results = await musicApi.search(SMOKE_KEYWORD, "kw", "song", 1, 5);
+    const policyToken = sourcePolicyRevision();
+    const registry = await musicApi.sourceRegistry();
+    if (registry == null) return [];
+    const ids = orderedSourceIds(registry.sources.map((source): string => source.id));
+    if (ids.length == 0 || policyToken != sourcePolicyRevision()) return [];
+    const results = await musicApi.search(SMOKE_KEYWORD, ids[0], "song", 1, 5);
+    if (policyToken != sourcePolicyRevision()) return [];
     return results;
   } catch (e) {
     return [] as Song[];
@@ -1404,7 +1436,7 @@ export function offersFromJson(payload: string): PackUpdateOffer[] {
 export function offerLabel(o: PackUpdateOffer): string {
   const kindLabel = o.kind == PACK_KIND_META ? "数据包" : "播放包";
   const from = o.currentCode > 0 ? `v${o.currentCode}` : "未安装";
-  return `${kindLabel}有新版本：v${from} → v${o.newCode}（${o.newName}）`;
+  return `${kindLabel}有新版本：${from} → v${o.newCode}（${o.newName}）`;
 }
 
 /** 应用成功（或拉黑）后从内存清单里去掉对应 offer */

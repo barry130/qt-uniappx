@@ -25,6 +25,46 @@ import {
   shouldRefill,
 } from "@/services/radio-queue";
 import { logMsg, logMsgWarn } from "@/services/logger";
+import {
+  readRecommendationChoice,
+  recommendationChoiceCurrent,
+  recommendationChoiceRevision,
+  RECOMMENDATION_SOURCE_CHANGED_EVENT,
+} from "@/stores/recommendation-source";
+import type { RecommendationChoice } from "@/stores/recommendation-source";
+import {
+  prepareAccountRecommendationContext,
+  accountRecommendationContextCurrent,
+  fetchAccountFmNext,
+  accountRecommendationErrorMessage,
+} from "@/services/account-recommendation";
+import type { AccountRecommendationContext } from "@/services/account-recommendation";
+import { SOURCE_AUTH_CHANGED_EVENT } from "@/services/source-auth";
+import { SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
+import { SOURCE_POLICY_CHANGED_EVENT } from "@/services/source-policy";
+
+/** Official supply probes are bounded, including empty/duplicate-only batches. */
+const ACCOUNT_FM_MAX_PROBES = 3;
+
+type AccountRadioSupply = { songs: Song[]; cursor: string | null; exhausted: boolean };
+
+/** A copied queue signature detects user removals/reordering, not only foreign song IDs. */
+function radioQueueKeys(queue: Song[]): string[] {
+  return queue.map((song: Song): string => radioTrackKey(song));
+}
+function radioQueueMatches(queue: Song[], expected: string[]): boolean {
+  if (queue.length == 0 || queue.length != expected.length) return false;
+  for (let i = 0; i < queue.length; i++) {
+    if (radioTrackKey(queue[i]) != expected[i]) return false;
+  }
+  return true;
+}
+function retryableAccountRadioError(err: any): boolean {
+  const message = errMsg(err);
+  return message.indexOf("ACCOUNT_RECOMMENDATIONS_NETWORK") >= 0 ||
+    message.indexOf("ACCOUNT_RECOMMENDATIONS_RATE_LIMIT") >= 0 ||
+    message.indexOf("ACCOUNT_RECOMMENDATIONS_UPSTREAM") >= 0;
+}
 
 /** 上一轮 FM 会话排过的键：只用来让下一轮避开它们（见文件头） */
 const LAST_SESSION_KEY = "qt-radio-last-session";
@@ -92,6 +132,39 @@ function writeLastSessionKeys(keys: string[]): void {
 
 class RadioStore {
   private generation = 0;
+  private sessionChoice: RecommendationChoice | null = null;
+  private sessionChoiceRevision = 0;
+  private accountContext: AccountRecommendationContext | null = null;
+  private accountQueueKeys: string[] = [];
+  private accountFailures = 0;
+  private startPlaybackRevision = 0;
+  private nextSupplyRetryAt = 0;
+  /** Only a cursor from a batch actually accepted by the player is committed. */
+  accountCursor: string | null = null;
+  origin: "app" | "account" = "app";
+  get accountMode(): boolean { return readRecommendationChoice("fm").origin == "account"; }
+
+  private sessionCurrent(generation: number): boolean {
+    if (generation != this.generation || this.sessionChoice == null) return false;
+    if (!recommendationChoiceCurrent("fm", this.sessionChoice, this.sessionChoiceRevision)) return false;
+    return this.origin != "account" || this.accountContext == null || accountRecommendationContextCurrent(this.accountContext);
+  }
+
+  private ownsQueue(): boolean {
+    const player = usePlayerStore();
+    if (!player.radioActive) return false;
+    return this.origin == "account"
+      ? radioQueueMatches(player.queue, this.accountQueueKeys)
+      : queueBelongsToRadio(player.queue, this.usedKeys);
+  }
+
+  /** Account/source revocation clears old supply immediately, without overriding a user's new queue. */
+  onRecommendationEnvironmentChanged(): void {
+    if (this.sessionChoice == null || this.sessionCurrent(this.generation)) return;
+    const restore = this.ownsQueue();
+    this.stop(restore);
+    this.error = "推荐来源或账号授权已变化，请重新开始收听";
+  }
   /** 是否正在 FM 模式（用户停止、或队列被换走让位后变 false） */
   get active(): boolean { return usePlayerStore().radioActive; }
   /** 整队替换落地后才 true：FM 持有当前播放器队列的凭证 */
@@ -121,13 +194,25 @@ class RadioStore {
     const generation = ++this.generation;
     const player = usePlayerStore();
     const revision = player.playbackRevision();
+    this.startPlaybackRevision = revision;
     this.loading = true;
     this.error = "";
     this.exhausted = false;
     this.seed = seed;
+    this.sessionChoice = readRecommendationChoice("fm");
+    this.sessionChoiceRevision = recommendationChoiceRevision("fm");
+    this.origin = this.sessionChoice.origin;
+    this.accountContext = null;
+    this.accountCursor = null;
+    this.accountFailures = 0;
+    this.nextSupplyRetryAt = 0;
     try {
+      if (this.origin == "account") {
+        await this.startAccount(this.sessionChoice.sourceId, generation, revision);
+        return;
+      }
       const pref = await loadPreference();
-      if (generation != this.generation) return;
+      if (!this.sessionCurrent(generation)) return;
       if (player.playbackRevision() != revision) { this.loading = false; return; }
       // 池子 = 收藏 + 歌单 + 最近播放 + 已下载；收藏/歌单/最近可能不在本地库里
       // （云端卡片、已删文件），但只要有可播的 id 就能进队列，所以一并并进去重。
@@ -182,9 +267,11 @@ class RadioStore {
       // 退出（停止 FM）时要原样还回去。已经在 FM 里（queueClaimed）时不再抄一次。
       // FM 期间强制顺序播放：随机/单曲循环下「下一首」会跳到队列任意一首，
       // 页面上的「接下来」当场换成另一批。原模式记下来，停止/让位时还回去。
+      this.usedKeys = usedKeys;
       player.beginRadio();
       await player.play(batch[0], batch, false, false, true);
       if (generation != this.generation) return;
+      if (!this.sessionCurrent(generation)) { this.onRecommendationEnvironmentChanged(); return; }
       if (!player.radioActive) { this.loading = false; this.queueClaimed = false; return; }
       this.usedKeys = usedKeys;
       this.pool = pool;
@@ -198,11 +285,173 @@ class RadioStore {
     } catch (err) {
       if (generation != this.generation) return;
       this.loading = false;
-      player.endRadio(true);
+      // A failed account start must not restore a snapshot over a later user choice.
+      player.endRadio(this.origin == "account" ? this.ownsQueue() : true);
       this.queueClaimed = false;
-      this.error = errMsg(err);
-      logMsgWarn("[radio] FM 开始失败：" + errMsg(err));
+      this.error = this.origin == "account" ? accountRecommendationErrorMessage(err) : errMsg(err);
+      this.accountContext = null;
+      this.sessionChoice = null;
+      logMsgWarn("[radio] FM 开始失败：" + this.error);
+    } finally {
+      if (generation == this.generation) this.loading = false;
     }
+  }
+
+  /** Only the source package supplies account FM songs; no local ranking or account feedback. */
+  private async startAccount(sourceId: string, generation: number, playbackRevision: number): Promise<void> {
+    const player = usePlayerStore();
+    const context = await prepareAccountRecommendationContext(sourceId, "fm");
+    if (!this.sessionCurrent(generation)) return;
+    if (player.playbackRevision() != playbackRevision) { this.loading = false; return; }
+    this.accountContext = context;
+    this.usedKeys = new Set<string>();
+    this.seed = null;
+    const supply = await this.fetchAccountSupply(context, generation);
+    if (generation != this.generation) return;
+    if (!this.sessionCurrent(generation)) { this.onRecommendationEnvironmentChanged(); return; }
+    if (supply == null) {
+      this.stop(this.ownsQueue());
+      this.error = "账号推荐请求已失效，请重新开始收听";
+      return;
+    }
+    if (player.playbackRevision() != playbackRevision) { this.loading = false; return; }
+    if (supply.songs.length == 0) {
+      this.loading = false;
+      this.exhausted = true;
+      this.error = "官方私人 FM 暂时没有新的歌曲，可稍后重新开始";
+      return;
+    }
+    this.pool = [];
+    this.disliked = [];
+    this.pref = null;
+    const usedKeys = new Set<string>();
+    for (let i = 0; i < supply.songs.length; i++) usedKeys.add(radioTrackKey(supply.songs[i]));
+    this.usedKeys = usedKeys;
+    this.accountQueueKeys = radioQueueKeys(supply.songs);
+    player.beginRadio();
+    const playing = player.play(supply.songs[0], supply.songs, false, false, true);
+    // play commits the JavaScript queue synchronously, then awaits playback resources.
+    if (player.radioActive && queueBelongsToRadio(player.queue, usedKeys)) this.accountQueueKeys = radioQueueKeys(player.queue);
+    await playing;
+    if (generation != this.generation) return;
+    if (!this.sessionCurrent(generation)) { this.onRecommendationEnvironmentChanged(); return; }
+    if (!this.ownsQueue()) { this.stop(false); return; }
+    // The player accepted this queue. Only now publish cursor/ownership/supply state.
+    this.accountCursor = supply.cursor;
+    this.queueClaimed = true;
+    this.exhausted = supply.exhausted;
+    this.loading = false;
+    startHeartbeat(this);
+    logMsg("[radio] 账号 FM 开始，本批 " + supply.songs.length + " 首");
+  }
+
+  private async fetchAccountSupply(context: AccountRecommendationContext, generation: number): Promise<AccountRadioSupply | null> {
+    let cursor = this.accountCursor;
+    for (let probe = 0; probe < ACCOUNT_FM_MAX_PROBES; probe++) {
+      if (!this.sessionCurrent(generation)) return null;
+      const current = (): boolean => this.sessionCurrent(generation) && (this.queueClaimed ? this.ownsQueue() : usePlayerStore().playbackRevision() == this.startPlaybackRevision);
+      const batch = await fetchAccountFmNext(context, cursor == null ? undefined : cursor, current);
+      if (!this.sessionCurrent(generation)) return null;
+      // An expired official batch cannot claim or append to the player, nor commit a cursor.
+      if (batch.expiresAt != null && batch.expiresAt <= Date.now()) throw new Error("ACCOUNT_RECOMMENDATIONS_UPSTREAM");
+      if (batch.cursor != null) cursor = batch.cursor;
+      const songs: Song[] = [];
+      const seen = new Set<string>();
+      const dislikes = useDislikesStore();
+      for (let i = 0; i < batch.items.length; i++) {
+        const song = batch.items[i];
+        const key = radioTrackKey(song);
+        if (this.usedKeys.has(key) || seen.has(key) || dislikes.isDisliked(song)) continue;
+        seen.add(key);
+        songs.push(song);
+      }
+      if (songs.length > 0) return { songs, cursor, exhausted: batch.exhausted == true };
+      if (batch.exhausted == true) break;
+    }
+    // A probe that admitted nothing must not advance the committed cursor.
+    return { songs: [], cursor: this.accountCursor, exhausted: true };
+  }
+
+  private async refillAccount(): Promise<void> {
+    const context = this.accountContext;
+    if (context == null || !this.sessionCurrent(this.generation)) { this.onRecommendationEnvironmentChanged(); return; }
+    if (Date.now() < this.nextSupplyRetryAt) return;
+    const generation = this.generation;
+    const player = usePlayerStore();
+    const expectedQueue = this.accountQueueKeys.slice();
+    this.loading = true;
+    let appendAttempted = false;
+    try {
+      const supply = await this.fetchAccountSupply(context, generation);
+      if (generation != this.generation) return;
+      if (!this.sessionCurrent(generation)) { this.onRecommendationEnvironmentChanged(); return; }
+      if (!player.radioActive || !radioQueueMatches(player.queue, expectedQueue)) { this.stop(false); return; }
+      if (supply == null) return;
+      if (supply.songs.length == 0) { this.exhausted = true; return; }
+      appendAttempted = true;
+      // No await between the ownership check and synchronous enqueue; external queues win.
+      const added = player.enqueueMany(supply.songs, true, true);
+      this.accountQueueKeys = radioQueueKeys(player.queue);
+      if (added > 0) {
+        const usedKeys = new Set<string>();
+        for (let i = 0; i < this.accountQueueKeys.length; i++) usedKeys.add(this.accountQueueKeys[i]);
+        this.usedKeys = usedKeys;
+        this.accountCursor = supply.cursor;
+        this.accountFailures = 0;
+        this.nextSupplyRetryAt = 0;
+        this.error = "";
+      }
+      this.exhausted = supply.exhausted || added == 0;
+    } catch (err) {
+      if (generation != this.generation) return;
+      if (!this.sessionCurrent(generation)) { this.onRecommendationEnvironmentChanged(); return; }
+      const message = accountRecommendationErrorMessage(err);
+      if (appendAttempted) {
+        // Transport outcome after queue mutation is uncertain: no retry or snapshot rollback.
+        this.stop(false);
+        this.error = "私人 FM 补歌未能确认，已停止供给；可重新开始";
+      } else if (retryableAccountRadioError(err) && this.accountFailures < 2) {
+        this.accountFailures++;
+        this.nextSupplyRetryAt = Date.now() + this.accountFailures * 5000;
+        this.error = message;
+      } else {
+        const restore = this.ownsQueue();
+        this.stop(restore);
+        this.error = message;
+      }
+      logMsgWarn("[radio] 账号 FM 补歌失败：" + this.error);
+    } finally {
+      if (generation == this.generation) this.loading = false;
+    }
+  }
+
+  /** Check actual queue ownership before a delayed page-row click can dispatch playback. */
+  playQueued(song: Song): void {
+    if (!this.sessionCurrent(this.generation)) { this.onRecommendationEnvironmentChanged(); return; }
+    if (!this.active || !this.queueClaimed) return;
+    if (!this.ownsQueue()) { this.stop(false); return; }
+    const key = radioTrackKey(song);
+    if (!this.usedKeys.has(key)) return;
+    const player = usePlayerStore();
+    for (let i = 0; i < player.queue.length; i++) {
+      const queued = player.queue[i];
+      if (queued != null && radioTrackKey(queued) == key) {
+        void player.play(queued, [], false, false, true);
+        return;
+      }
+    }
+  }
+
+  /** Next is local playback only. At the tail, wait for one bounded supply before advancing. */
+  async next(): Promise<void> {
+    const player = usePlayerStore();
+    const generation = this.generation;
+    const revision = player.playbackRevision();
+    if (!this.sessionCurrent(generation)) { this.onRecommendationEnvironmentChanged(); return; }
+    if (!this.active || !this.queueClaimed || !this.ownsQueue()) return;
+    if (player.currentIndex() >= player.queue.length - 1 && !this.exhausted) await this.refill();
+    if (generation != this.generation || player.playbackRevision() != revision || !this.active || !this.ownsQueue()) return;
+    player.next();
   }
 
   /**
@@ -210,6 +459,8 @@ class RadioStore {
    * 播放列表放回去；让位退出（队列被用户换走）时传 false，只清状态不动播放器。
    */
   stop(restoreOriginal = true): void {
+    // Account FM may restore only the queue it still owns, including during initial play.
+    const restore = restoreOriginal && (this.origin != "account" || this.ownsQueue());
     this.generation++;
     stopHeartbeat();
     this.queueClaimed = false;
@@ -217,11 +468,16 @@ class RadioStore {
     this.error = "";
     this.exhausted = false;
     this.seed = null;
-    // 把 FM 期间借走的播放模式还给用户：停 FM 只停「继续推歌」，
-    // 不该顺手把「随机播放」这种个人设置也一起改掉
-    usePlayerStore().endRadio(restoreOriginal);
-    // 用户点「停止 FM」= 退出 FM：把进入前那份播放列表原样放回去
+    this.sessionChoice = null;
+    this.accountContext = null;
+    this.accountCursor = null;
+    this.accountQueueKeys = [];
+    this.accountFailures = 0;
+    this.nextSupplyRetryAt = 0;
+    // 归还原模式；让位退出不拿旧快照覆盖用户另选的播放列表。
+    usePlayerStore().endRadio(restore);
     this.pool = [];
+    this.disliked = [];
     this.usedKeys = new Set<string>();
     this.pref = null;
   }
@@ -235,14 +491,13 @@ class RadioStore {
 
   /** 立刻补一批（「换一批」按钮） */
   async refill(count = RADIO_BATCH): Promise<void> {
-    if (!this.active || !this.queueClaimed || this.loading || this.pref == null || this.exhausted) return;
+    if (!this.active || !this.queueClaimed || this.loading || this.exhausted) return;
+    if (!this.sessionCurrent(this.generation)) { this.onRecommendationEnvironmentChanged(); return; }
     const player = usePlayerStore();
-    // 队列被换走（双击别的歌单/清空队列）：FM 让位，绝不往别人的队列里追加。
-    // 传 false：这是用户自己的选择，不要把我们抄下来的旧列表抢回去。
-    if (!queueBelongsToRadio(player.queue, this.usedKeys)) {
-      this.stop(false);
-      return;
-    }
+    // 用户换队列、删除或改序后让位，不向新队列追加，也不恢复覆盖它。
+    if (!this.ownsQueue()) { this.stop(false); return; }
+    if (this.origin == "account") { await this.refillAccount(); return; }
+    if (this.pref == null) return;
     this.loading = true;
     try {
       const pref = this.pref as DailyPreference;
@@ -279,6 +534,10 @@ class RadioStore {
 
   /** 不喜欢当前这首：落屏蔽规则 + 立刻换一首顶上 */
   async dislike(song: Song): Promise<void> {
+    // Official FM has no independently authorised feedback action; even hidden UI cannot invoke it.
+    if (this.origin == "account" || this.accountMode) return;
+    const generation = this.generation;
+    const revision = usePlayerStore().playbackRevision();
     try {
       useDislikesStore().banSong(song);
     } catch (err) {
@@ -298,30 +557,31 @@ class RadioStore {
     }
     this.disliked = nextFlags;
     if (this.active && !this.exhausted) await this.refill(1);
+    if (generation != this.generation || usePlayerStore().playbackRevision() != revision) return;
     usePlayerStore().next();
   }
 
   /** 播放器队列余量不足时补一批；先核对 FM 是否仍持有队列（tick 的实际执行者） */
   async ensure(remaining: number): Promise<void> {
     if (!this.active || !this.queueClaimed) return;
-    // 归属核对必须排在补歌阈值之前：队列被换走时哪怕余量还很多（用户双击了
-    // 自己的长歌单），FM 也要立刻让位 —— 否则 queueClaimed 一直挂着，
-    // 之后退出 FM 会把原列表盖到用户自己的队列上。
-    const player = usePlayerStore();
-    if (!queueBelongsToRadio(player.queue, this.usedKeys)) {
-      this.stop(false);
-      return;
-    }
+    if (!this.sessionCurrent(this.generation)) { this.onRecommendationEnvironmentChanged(); return; }
+    // 归属核对在阈值之前；账号供给也拒绝用户删除/改序后的旧快照。
+    if (!this.ownsQueue()) { this.stop(false); return; }
     if (!shouldRefill(remaining)) return;
     await this.refill();
   }
 
-  /** 全局心跳（每秒一次）：读播放器余量并按需补歌 */
+  /** 全局心跳：暂停时仍检查授权和归属，只有播放中才自动拉取下一批。 */
   async tick(): Promise<void> {
+    if (this.sessionChoice != null && !this.sessionCurrent(this.generation)) {
+      this.onRecommendationEnvironmentChanged();
+      return;
+    }
     if (!this.active) { this.stop(false); return; }
     if (!this.queueClaimed) return;
-    if (!usePlayerStore().playing) return;
+    if (!this.ownsQueue()) { this.stop(false); return; }
     const player = usePlayerStore();
+    if (!player.playing) return;
     const index = player.currentIndex();
     const remaining = player.queue.length - (index < 0 ? 0 : index) - 1;
     await this.ensure(remaining);
@@ -346,6 +606,13 @@ function stopHeartbeat(): void {
 }
 
 const radio = reactive(new RadioStore()) as RadioStore;
+
+// Singleton lifecycle checks are independent of the FM page (including background/paused FM).
+function onRecommendationEnvironmentChanged(): void { radio.onRecommendationEnvironmentChanged(); }
+uni.$on(RECOMMENDATION_SOURCE_CHANGED_EVENT, onRecommendationEnvironmentChanged);
+uni.$on(SOURCE_AUTH_CHANGED_EVENT, onRecommendationEnvironmentChanged);
+uni.$on(SOURCE_PACKS_CHANGED_EVENT, onRecommendationEnvironmentChanged);
+uni.$on(SOURCE_POLICY_CHANGED_EVENT, onRecommendationEnvironmentChanged);
 
 export function useRadioStore(): RadioStore {
   return radio;

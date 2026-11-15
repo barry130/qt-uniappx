@@ -82,8 +82,8 @@ export function saveUserId(uid: string): void {
   try {
     uni.setStorageSync(USER_ID_KEY, uid);
   } catch (_) {
-    // 登录路径：写不进会让换号检测失灵（收藏缓存可能串号），记日志排查
     logWarn("Auth", "saveUserId 写入失败（uid=" + uid + "）");
+    throw new Error("无法保存账号标识，请检查存储空间后重试");
   }
 }
 

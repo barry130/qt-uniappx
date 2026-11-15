@@ -18,7 +18,7 @@ import { getAccessToken, getSessionEpoch, sessionIsCurrent } from "./auth";
 import { cacheUserAvatar, getCachedAvatarUrl } from "./avatar-cache";
 import { updateCachedMeAvatar } from "./user-cache";
 import { mergeClientHeaders } from "./client-info";
-import { logErrV } from "./logger";
+import { logErrV, logInfo, logWarn } from "./logger";
 
 /** 直传凭证（后端 QtUploadTicketVo） */
 type UploadTicket = {
@@ -226,10 +226,6 @@ function proxyPutOnce(contentPath: string, bytes: ArrayBuffer, mime: string): Pr
       // （真机实测普通对象上 JSON.parse/as UTSJSONObject 双双抛错 → 误报「格式异常」）。
       dataType: "text",
       success: (res) => {
-        if (res.statusCode < 200 || res.statusCode >= 300) {
-          reject(new Error("代传失败（HTTP " + res.statusCode + "）"));
-          return;
-        }
         try {
           // 形态无关归一化（asUtso）：res.data 可能是原始文本，也可能是运行时
           // 已预解析的普通对象/UTSJSONObject（dataType 在部分平台对 PUT 不生效）。
@@ -237,8 +233,16 @@ function proxyPutOnce(contentPath: string, bytes: ArrayBuffer, mime: string): Pr
           const body = asUtso(res.data);
           const code = body.get("code");
           if (code != null && (code as number) !== 200) {
+            // 业务拒绝（403/429 等）也必须把服务端文案抛给用户：
+            // 早先按 statusCode 先拦，会把「目录授权/并发已满/超限」全部盖成
+            // 「代传失败（HTTP 403）」，页面上看不到真实原因
             const msg = body.get("msg") as string | null;
-            reject(new Error(msg != null && msg.length > 0 ? msg : "代传失败"));
+            logWarn("QT Music", "代传被拒 HTTP " + res.statusCode + " " + (msg != null ? msg : ""));
+            reject(new Error(msg != null && msg.length > 0 ? msg : "代传失败（HTTP " + res.statusCode + "）"));
+            return;
+          }
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new Error("代传失败（HTTP " + res.statusCode + "）"));
             return;
           }
           const data = body.get("data");
@@ -255,6 +259,19 @@ function proxyPutOnce(contentPath: string, bytes: ArrayBuffer, mime: string): Pr
         } catch (e) {
           // 真机定位用：原始回执形态（string/对象）与实际异常都落盘，诊断页可见
           logErrV("QT Music", "代传回执解析失败 " + contentPath + " data=" + typeof res.data, e);
+          // 网关/WAF 拦截时正文是纯文本（实测「非法请求」且 HTTP 仍是 200），
+          // 解析必然失败：把原始文本片段带进错误里，页面上能直接看出是被网关拦了，
+          // 而不是客户端解析出了毛病
+          if (typeof res.data == "string") {
+            const raw = (res.data as string).trim();
+            const preview = raw.length > 40 ? raw.substring(0, 40) : raw;
+            reject(new Error("代传失败（HTTP " + res.statusCode + "）" + (preview.length > 0 ? "：" + preview : "")));
+            return;
+          }
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new Error("代传失败（HTTP " + res.statusCode + "）"));
+            return;
+          }
           reject(new Error("代传回执格式异常"));
         }
       },
@@ -265,13 +282,14 @@ function proxyPutOnce(contentPath: string, bytes: ArrayBuffer, mime: string): Pr
   });
 }
 
-/** 代传正文：PUT + 渠道切换重试（state=CREATED 表示已切到备用渠道，重发同一正文） */
+/** 代传正文：POST + 渠道切换重试（state=CREATED 表示已切到备用渠道，重发同一正文） */
 async function proxyUpload(contentPath: string, filePath: string, mime: string): Promise<void> {
   const bytes = await readFileBytes(filePath);
   // 上限 3 次与服务端两段式 MAX_ATTEMPTS 对齐：首次 + 最多 2 次渠道切换
   for (let attempt = 0; attempt < 3; attempt++) {
     const state = await proxyPutOnce(contentPath, bytes, mime);
     if (state === "COMMITTED") return;
+    logWarn("QT Music", "代传渠道切换 attempt=" + attempt + " state=" + state);
     if (state !== "CREATED") {
       throw new Error("文件发送失败（" + state + "）");
     }
@@ -294,6 +312,9 @@ async function uploadFlow(
     throw new Error("获取上传计划失败");
   }
   if (plan.mode === "PROXY") {
+    // 代传正文走裸 uni.request（不经 apiRequest），默认不会进 quietmusic.log；
+    // 这里补一条落盘记录，失败时能直接看到端点与渠道状态，不用再靠猜
+    logInfo("QT Music", "代传开始 " + planPath + " uploadId=" + plan.proxyUploadId);
     await proxyUpload(plan.proxyContentPath, filePath, mime);
     const done = await apiRequest(
       applyPath,
@@ -346,23 +367,23 @@ export async function uploadAvatar(filePath: string): Promise<string> {
 }
 
 /**
- * 歌单封面上传（/like/playlist/{pid}/cover/** 直传链路，UPDATE_DESIGN.md §5.3）。
+ * 本地歌单封面上传：与头像共用 uploadFlow，按计划选择 DIRECT 或 PROXY 两阶段代传。
+ * 入口仅在收藏歌单外层列表的本地歌单长按菜单；在线歌单及详情页没有换封面入口。
  *
- * 与头像那条链路不同的地方：complete 阶段服务端直接改数据库
- * （`qt_like_playlist.pic_url`）并推进该用户的同步 seq，所以封面是「真的写库」，
- * 其他设备下次增量拉取就能看到新封面，客户端不需要再补推 playlist/add。
+ * DIRECT 的 complete 或 PROXY 的 apply 由服务端直接更新
+ * `qt_like_playlist.pic_url` 并推进同步 seq；客户端只同步封面缓存，不补推 playlist/add。
  *
- * 前置条件：这个歌单在服务器上必须已有收藏行 —— 同步过的自建歌单，或任何已收藏的
- * 在线歌单。还没同步过的自建歌单服务端会说「歌单不存在」，文案原样抛给调用方。
+ * 前置条件：自建歌单已同步到服务器。尚未同步时，服务端的「歌单不存在」原样展示。
  */
 export async function uploadPlaylistCover(pid: string, platform: string, filePath: string): Promise<string> {
+  const epoch = getSessionEpoch();
   const mime = guessImageMime(filePath);
   if (mime.length === 0) {
     throw new Error("仅支持 png / jpg / webp 图片");
   }
   const size = await fileSize(filePath);
   const fileName = "cover." + imageExt(filePath);
-  return await uploadFlow(
+  const url = await uploadFlow(
     "app/user/like/playlist/" + pid + "/cover/upload-plan",
     {
       platform,
@@ -376,6 +397,8 @@ export async function uploadPlaylistCover(pid: string, platform: string, filePat
     filePath,
     mime
   );
+  if (!sessionIsCurrent(epoch)) throw new Error("登录状态已变化，请重新操作");
+  return url;
 }
 
 /** 取消自定义封面（恢复默认展示）：服务端把 pic_url 置空并推进 seq，不占每日上传次数。 */

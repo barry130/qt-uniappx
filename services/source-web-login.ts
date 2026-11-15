@@ -76,3 +76,54 @@ export function captureUrlsOf(webLogin: RegistryWebLogin, domains: string[]): st
   }
   return urls;
 }
+
+/** 读取一条 Cookie 头里的指定 name（"" = 不存在或值为空）。 */
+export function cookieValueOf(cookie: string, name: string): string {
+  const parts = cookie.split(";");
+  for (let i = 0; i < parts.length; i++) {
+    const text = parts[i].trim();
+    const eq = text.indexOf("=");
+    if (eq <= 0) continue;
+    if (text.substring(0, eq).trim() == name) return text.substring(eq + 1).trim();
+  }
+  return "";
+}
+
+/**
+ * QQ 网页登录允许「QQ登录 / 微信登录」两条路：微信扫码成功后站点把账号 id
+ * 放在 wxuin（网页端 getUin 同口径），musickey 放在 qqmusic_key，可能没有
+ * 传统 uin / qm_keyst。数据包离线校验与官方取链都只认 uin + qm_keyst，
+ * 这里补成两者兼容的形状（不改原值，只补缺项）。
+ */
+export function normalizeQqWebLoginCookie(cookie: string): string {
+  if (cookie.length == 0) return cookie;
+  const keyst = cookieValueOf(cookie, "qm_keyst").length > 0
+    ? cookieValueOf(cookie, "qm_keyst")
+    : cookieValueOf(cookie, "qqmusic_key");
+  let text = cookie;
+  if (cookieValueOf(text, "qm_keyst").length == 0 && keyst.length > 0) {
+    text = text + "; qm_keyst=" + keyst;
+  }
+  if (cookieValueOf(text, "uin").length == 0) {
+    const id = qqWebLoginAccountId(text);
+    if (id.length > 0) text = text + "; uin=" + id;
+  }
+  return text;
+}
+
+/** 微信扫码登录（wxopenid 是网页端自己的 isWeChat 判据）。 */
+export function qqWebLoginIsWeChatCookie(cookie: string): boolean {
+  return cookieValueOf(cookie, "wxopenid").length > 0;
+}
+
+/** 微信登录的账号 id：wxuin 优先（网页端同口径），其次 qqmusic_uin / p_uin。 */
+export function qqWebLoginAccountId(cookie: string): string {
+  const names = ["wxuin", "qqmusic_uin", "p_uin", "uin"];
+  for (let i = 0; i < names.length; i++) {
+    const raw = cookieValueOf(cookie, names[i]);
+    if (raw.length == 0) continue;
+    const id = raw.replace(/^o0?/i, "").replace(/^0+(?=\d)/, "");
+    if (/^\d{5,}$/.test(id)) return id;
+  }
+  return "";
+}

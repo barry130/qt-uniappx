@@ -30,6 +30,7 @@
  */
 import { parseJsonToUtso } from "./http";
 import { invokeSource, setMetaAuthHook } from "./source-engine";
+import { sourceEnabled, sourcePolicyRevision } from "./source-policy";
 
 // ---------- 键与事件 ----------
 
@@ -143,11 +144,31 @@ const ID_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 const MAX_ACCOUNTS = 16;
 
 const accountRevisions = new Map<string, number>();
+const metaAuthRevisions = new Map<string, number>();
+const AUTH_PROCESS_EPOCH = Date.now().toString() + "-" + Math.random().toString().slice(2);
+let accountSessionSequence = 0;
+let metaInstanceRevision = 0;
+/** Only non-secret lifecycle identity crosses into recommendation consumers. */
+export type SourceMetaAuthIdentity = {
+  sourceId: string; accountId: string; nickname: string; accountSession: string;
+  authRevision: number; metaAuthRevision: number;
+};
+type MetaAccountSnapshot = { account: SourceAuthAccount; revision: number; session: string };
+type MetaAppliedAuth = { session: string; authorization: number; instance: number; acknowledged: boolean };
+const metaAccountSnapshots = new Map<string, MetaAccountSnapshot>();
+const metaAppliedAuth = new Map<string, MetaAppliedAuth>();
+export function sourceMetaAuthRevision(source: string): number { return metaAuthRevisions.get(source) ?? 0; }
+function invalidateMetaAuthorization(source: string): void {
+  metaAuthRevisions.set(source, sourceMetaAuthRevision(source) + 1);
+  metaAppliedAuth.delete(source);
+}
 export function sourceAuthRevision(source: string): number {
   return accountRevisions.get(source) ?? 0;
 }
 function invalidateSourceAuth(source: string): void {
   accountRevisions.set(source, sourceAuthRevision(source) + 1);
+  metaAccountSnapshots.delete(source);
+  metaAppliedAuth.delete(source);
 }
 
 /** Compare both lifetime and stored identity, including delete→relogin with the same cookie. */
@@ -159,6 +180,39 @@ export function sourceAuthAccountMatches(source: string, expected: SourceAuthAcc
     if (e.source == source) return e.account.cookie == expected.cookie && e.account.savedAt == expected.savedAt && e.account.extrasJson == expected.extrasJson && e.account.user.id == expected.user.id;
   }
   return false;
+}
+
+/** Opaque session tokens are generated independently of credential values, never hashes of them. */
+export function readSourceMetaAuthIdentity(source: string): SourceMetaAuthIdentity | null {
+  const entries = readSourceAuthEntries();
+  let account: SourceAuthAccount | null = null;
+  for (let i = 0; i < entries.length; i++) {
+    if (entries[i].source == source) { account = entries[i].account; break; }
+  }
+  if (account == null) return null;
+  let snapshot = metaAccountSnapshots.get(source);
+  if (snapshot == null || !sourceAuthAccountMatches(source, snapshot.account, snapshot.revision)) {
+    accountSessionSequence++;
+    snapshot = { account, revision: sourceAuthRevision(source), session: AUTH_PROCESS_EPOCH + ":" + accountSessionSequence };
+    metaAccountSnapshots.set(source, snapshot);
+    metaAppliedAuth.delete(source);
+  }
+  return { sourceId: source, accountId: account.user.id, nickname: account.user.nickname,
+    accountSession: snapshot.session, authRevision: snapshot.revision, metaAuthRevision: sourceMetaAuthRevision(source) };
+}
+export function sourceMetaAuthCurrent(identity: SourceMetaAuthIdentity): boolean {
+  const snapshot = metaAccountSnapshots.get(identity.sourceId);
+  return snapshot != null && identity.accountSession == snapshot.session
+    && identity.accountId == snapshot.account.user.id && identity.authRevision == snapshot.revision
+    && identity.metaAuthRevision == sourceMetaAuthRevision(identity.sourceId)
+    && readSourceAuthTogglesFor(identity.sourceId).useMeta
+    && sourceAuthAccountMatches(identity.sourceId, snapshot.account, identity.authRevision);
+}
+export function sourceMetaAuthAcknowledged(identity: SourceMetaAuthIdentity): boolean {
+  const applied = metaAppliedAuth.get(identity.sourceId);
+  return sourceMetaAuthCurrent(identity) && applied != null && applied.acknowledged
+    && applied.session == identity.accountSession && applied.authorization == identity.metaAuthRevision
+    && applied.instance == metaInstanceRevision;
 }
 
 /** Refresh is a compare-and-set, never an upsert of a deleted account. */
@@ -434,6 +488,7 @@ export async function setSourceAuthToggle(
   const next: SourceAuthToggles =
     scope == "meta" ? { useMeta: on, usePlay: current.usePlay } : { useMeta: current.useMeta, usePlay: on };
   if (next.useMeta == current.useMeta && next.usePlay == current.usePlay) return;
+  if (scope == "meta") invalidateMetaAuthorization(source);
   writeTogglesEntry(source, next);
   uni.$emit(SOURCE_AUTH_CHANGED_EVENT);
   await applySourceAuthForSource(source);
@@ -453,6 +508,7 @@ export async function setSourceAuthToggleAll(scope: SourceAuthScope, on: boolean
       scope == "meta"
         ? { useMeta: on, usePlay: current.usePlay }
         : { useMeta: current.useMeta, usePlay: on };
+    if (scope == "meta" && next.useMeta != current.useMeta) invalidateMetaAuthorization(source);
     writeTogglesEntry(source, next);
   }
   uni.$emit(SOURCE_AUTH_CHANGED_EVENT);
@@ -513,9 +569,9 @@ function packOutdatedV9(entry: string): Error {
 }
 
 /** 包装 v9 入口调用：缺入口（旧包）换成「该更新包了」，其余错误原样抛 */
-async function authInvoke(name: string, args: UTSJSONObject): Promise<UTSJSONObject> {
+async function authInvoke(name: string, args: UTSJSONObject, current: (() => boolean) | null = null): Promise<UTSJSONObject> {
   try {
-    const raw = await invokeSource(name, JSON.stringify([args]));
+    const raw = await invokeSource(name, JSON.stringify([args]), 30000, current);
     return parseJsonToUtso(raw);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -718,11 +774,78 @@ let authApplyTail: Promise<void> = Promise.resolve();
 function applySourceAuthForSource(source: string): Promise<void> {
   // Serial reconciliation prevents a late setAuth from racing a newer clearAuth.
   // Read the current account when the queued task runs, not when it is requested.
-  const task = authApplyTail.then(() => applyLatestSourceAuth(source));
+  const task = authApplyTail.then(async () => {
+    try { await applyLatestSourceAuth(source); }
+    finally { uni.$emit(SOURCE_AUTH_CHANGED_EVENT); }
+  });
   authApplyTail = task.catch((_) => {
     // Keep the queue usable; the caller still receives task's rejection.
   });
   return task;
+}
+
+async function applyMetaAccountAuth(identity: SourceMetaAuthIdentity, strict: boolean, extraCurrent: (() => boolean) | null): Promise<void> {
+  const instance = metaInstanceRevision;
+  const current = (): boolean => instance == metaInstanceRevision && sourceMetaAuthCurrent(identity)
+    && (extraCurrent == null || extraCurrent());
+  if (!current()) throw new Error("ACCOUNT_RECOMMENDATIONS_AUTH_CHANGED");
+  const applied = metaAppliedAuth.get(identity.sourceId);
+  // In particular, changing usePlay must not replace the package's meta credential object.
+  if (applied != null && applied.session == identity.accountSession
+    && applied.authorization == identity.metaAuthRevision && applied.instance == instance
+    && (!strict || applied.acknowledged)) return;
+  const snapshot = metaAccountSnapshots.get(identity.sourceId);
+  if (snapshot == null) throw new Error("ACCOUNT_RECOMMENDATIONS_AUTH_REQUIRED");
+  const args = new UTSJSONObject();
+  args.set("scope", "meta");
+  args.set("source", identity.sourceId);
+  args.set("cookie", snapshot.account.cookie);
+  const response = await authInvoke("setAuth", args, current);
+  if (!current()) throw new Error("ACCOUNT_RECOMMENDATIONS_AUTH_CHANGED");
+  const acknowledged = response.get("ok") === true;
+  if (strict && !acknowledged) throw new Error("ACCOUNT_RECOMMENDATIONS_AUTH_REQUIRED");
+  metaAppliedAuth.set(identity.sourceId, { session: identity.accountSession,
+    authorization: identity.metaAuthRevision, instance, acknowledged });
+}
+
+/** Strictly await the successful meta ACK, including time spent behind earlier reconciliation. */
+export function ensureSourceMetaAuthInjected(identity: SourceMetaAuthIdentity, extraCurrent: () => boolean): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const deadline = Date.now() + 30000;
+    let active = true;
+    const timer = setTimeout(() => {
+      if (!active) return;
+      active = false;
+      reject(new Error("ACCOUNT_RECOMMENDATIONS_TIMEOUT"));
+    }, 30000);
+    const current = (): boolean => {
+      try { return active && Date.now() < deadline && extraCurrent() && sourceMetaAuthCurrent(identity); }
+      catch (_) { return false; }
+    };
+    const expiredOrStale = (): Error => new Error(Date.now() >= deadline
+      ? "ACCOUNT_RECOMMENDATIONS_TIMEOUT" : "ACCOUNT_RECOMMENDATIONS_AUTH_CHANGED");
+    const task = authApplyTail.then(async (): Promise<void> => {
+      if (!current()) throw expiredOrStale();
+      await applyMetaAccountAuth(identity, true, current);
+      if (!current() || !sourceMetaAuthAcknowledged(identity)) throw expiredOrStale();
+    });
+    authApplyTail = task.catch((_) => {
+      // Preserve the queue while the strict caller still receives this rejection.
+    });
+    void task.then(() => {
+      if (!active) return;
+      const valid = current();
+      active = false;
+      clearTimeout(timer);
+      if (!valid) reject(expiredOrStale());
+      else resolve();
+    }, (error: any) => {
+      if (!active) return;
+      active = false;
+      clearTimeout(timer);
+      reject(Date.now() >= deadline ? expiredOrStale() : error);
+    });
+  });
 }
 
 async function applyLatestSourceAuth(source: string): Promise<void> {
@@ -730,22 +853,23 @@ async function applyLatestSourceAuth(source: string): Promise<void> {
   const entries = readSourceAuthEntries();
   let account: SourceAuthAccount | null = null;
   for (let i = 0; i < entries.length; i++) {
-    if (entries[i].source == source) {
-      account = entries[i].account;
-      break;
-    }
+    if (entries[i].source == source) { account = entries[i].account; break; }
   }
   if (account == null) {
+    metaAppliedAuth.delete(source);
     await authClearCredential("meta", source);
     if (sourceAuthRevision(source) != revision) return;
     await authClearCredential("play", source);
     return;
   }
-  const toggles = readSourceAuthTogglesFor(source);
-  if (toggles.useMeta) await authSetCredential("meta", source, account.cookie);
-  else await authClearCredential("meta", source);
+  const identity = readSourceMetaAuthIdentity(source);
+  if (readSourceAuthTogglesFor(source).useMeta && identity != null) await applyMetaAccountAuth(identity, false, null);
+  else {
+    metaAppliedAuth.delete(source);
+    await authClearCredential("meta", source);
+  }
   if (sourceAuthRevision(source) != revision) return;
-  if (toggles.usePlay) await authSetCredential("play", source, account.cookie);
+  if (readSourceAuthTogglesFor(source).usePlay) await authSetCredential("play", source, account.cookie);
   else await authClearCredential("play", source);
 }
 
@@ -800,12 +924,17 @@ async function doRefreshAllSourceAccounts(reason: string): Promise<KeepaliveStat
   const entries = readSourceAuthEntries();
   const revisions = entries.map((entry) => sourceAuthRevision(entry.source));
   let rotated = 0;
+  let checked = 0;
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
+    if (!sourceEnabled(entry.source)) continue;
+    const policyToken = sourcePolicyRevision();
     const revision = revisions[i];
     if (!sourceAuthAccountMatches(entry.source, entry.account, revision)) continue;
     try {
+      checked++;
       const r = await authCheckUser(entry.source, entry.account.cookie, entry.account.extrasJson);
+      if (policyToken != sourcePolicyRevision() || !sourceEnabled(entry.source)) continue;
       // 失效跳过不删 / 未轮换跳过不写
       if (!r.ok || r.credential.length == 0) continue;
       const user = r.user != null ? r.user : entry.account.user;
@@ -815,7 +944,7 @@ async function doRefreshAllSourceAccounts(reason: string): Promise<KeepaliveStat
       // 静默：单源失败（网络/旧包缺入口）跳过不打扰用户，不影响其余源
     }
   }
-  return { checked: entries.length, rotated: rotated };
+  return { checked, rotated };
 }
 
 /**
@@ -915,6 +1044,8 @@ export async function accountPlaylists(source: string): Promise<SourceAccountPla
 // 注册（与 stores/source-registry.ts 的模块级监听同一套路）：只要本文件被
 // import（App.uvue 启动即引用），钩子先于任何装载就位。
 setMetaAuthHook((): void => {
+  metaInstanceRevision++;
+  metaAppliedAuth.clear();
   void ensureSourceAuthInjected();
 });
 

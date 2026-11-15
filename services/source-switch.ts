@@ -2,14 +2,16 @@
  * 换源（qt-uniappx 端）：当前源不支持该歌曲时，搜索其他源里同一首歌并展示。
  *
  * 与 qt-pc 的 src/lib/source-switch.ts 同口径（人工保持同步）：
- * - 聚合搜索（musicApi.allSearch，batch 自带 source、单源失败跳过），
- *   不动 qt-sources 数据包、不重建 pack —— 只消费包注册表已有的源；
+ * - 默认聚合搜索（musicApi.allSearch，单源失败跳过）；指定平台时只搜索该平台，
+ *   分开缓存，避免聚合前 20 条遮住已选择的来源；只消费包注册表已有的源；
  * - 评分取自 store/player.ts 的 pickBestMatch：歌名相同 +10 / 包含 +5，
  *   歌手相同 +6 / 包含 +3，≤0 视为不是同一首歌直接丢弃；
- * - 排除当前平台；按 platform:id 去重；分数降序；最多留 20 条。
+ * - 聚合模式排除当前平台；指定平台排除当前曲目；按 platform:id 去重，
+ *   分数降序；最多留 20 条。
  */
 import type { Song } from "@/types/music";
 import { musicApi } from "@/services/music-api";
+import { assertSourceEnabled, SOURCE_POLICY_CHANGED_EVENT } from "@/services/source-policy";
 
 /** 候选上限：够滑又不至于一次渲染太多行 */
 export const MAX_CANDIDATES = 20;
@@ -33,6 +35,8 @@ export function scoreCandidate(candidate: Song, want: { title: string; singer: s
   const candSinger = normalizeMatchText(candidate.singer);
   if (wantTitle.length > 0 && wantTitle == candTitle) score += 10;
   else if (wantTitle.length > 0 && candTitle.indexOf(wantTitle) >= 0) score += 5;
+  else if (candTitle.length > 0 && wantTitle.indexOf(candTitle) >= 0) score += 5;
+  if (score == 0) return 0;
   if (wantSinger.length > 0 && wantSinger == candSinger) score += 6;
   else if (wantSinger.length > 0 && candSinger.indexOf(wantSinger) >= 0) score += 3;
   return score;
@@ -54,9 +58,12 @@ const CACHE_TTL_MS = 10 * 60 * 1000;
 const cacheKeys: string[] = [];
 const cacheAt: number[] = [];
 const cacheItems: Song[][] = [];
+let cacheGeneration = 0;
+let nextRequest = 0;
+const requests = new Map<string, number>();
 
-function cacheKeyOf(song: Song, page: number, size: number): string {
-  return song.platform + ":" + song.id + ":" + page + ":" + size;
+function cacheKeyOf(song: Song, page: number, size: number, targetSource: string = ""): string {
+  return song.platform + ":" + song.id + ":" + page + ":" + size + (targetSource.length > 0 ? ":" + targetSource : "");
 }
 
 /** 取缓存（过期/缺失返回 null）；命中就把该条挪到队尾，维持 FIFO */
@@ -122,57 +129,78 @@ export function sourceSwitchCacheStat(): SourceSwitchCacheStat {
 
 /** 清空换源缓存（换包/手动刷新时用） */
 export function clearSourceSwitchCache(): void {
+  cacheGeneration += 1;
+  requests.clear();
   cacheKeys.splice(0, cacheKeys.length);
   cacheAt.splice(0, cacheAt.length);
   cacheItems.splice(0, cacheItems.length);
 }
+uni.$on(SOURCE_POLICY_CHANGED_EVENT, clearSourceSwitchCache);
 
 /** 同步窥一眼首页缓存（未命中返回 null）：面板用它决定要不要先显示 loading */
-export function peekSourceCandidates(song: Song): Song[] | null {
+export function peekSourceCandidates(song: Song, targetSource: string = ""): Song[] | null {
   if (song == null) return null;
-  return cacheGet(cacheKeyOf(song, 1, 5));
+  return cacheGet(cacheKeyOf(song, 1, 5, targetSource));
 }
 
 /**
- * 聚合搜索其他源里同一首歌：keyword = 「歌名 歌手」，排除当前平台，
- * 按 platform:id 去重，丢掉 ≤0 分，分数降序，最多 MAX_CANDIDATES 条。
+ * 搜索同一首歌：keyword = 「歌名 歌手」，默认聚合排除当前平台；
+ * targetSource 非空时只搜索指定平台。按 platform:id 去重，丢掉 ≤0 分，
+ * 分数降序，最多 MAX_CANDIDATES 条。
  * 歌名歌手都为空（脏数据）→ 不打搜索直接返回空。
  *
- * 结果按「歌曲 + 页码」缓存；force = 忽略并覆盖缓存（手动「重新搜索」）。
+ * 结果按「歌曲 + 页码 + 指定平台」缓存；force = 忽略并覆盖缓存。
  */
 export async function findSourceCandidates(
   song: Song,
   page = 1,
   size = 5,
   force: boolean = false,
+  targetSource: string = "",
 ): Promise<Song[]> {
   if (song == null) return [];
   const keyword = [song.name, song.singer].filter((part) => part != null && part.length > 0).join(" ").trim();
   if (keyword.length == 0) return [];
-  const key = cacheKeyOf(song, page, size);
+  if (targetSource.length > 0) assertSourceEnabled(targetSource);
+  const key = cacheKeyOf(song, page, size, targetSource);
   if (!force) {
     const cached = cacheGet(key);
     if (cached != null) return cached;
   }
-  const all = await musicApi.allSearch(keyword, page, size);
-  const seen: string[] = [];
-  const picked: { song: Song; score: number }[] = [];
-  for (let i = 0; i < all.length; i++) {
-    const candidate = all[i];
-    if (candidate == null) continue;
-    if (candidate.platform == song.platform) continue;
-    const dedupKey = candidate.platform + ":" + candidate.id;
-    if (seen.indexOf(dedupKey) >= 0) continue;
-    seen.push(dedupKey);
-    const score = scoreCandidate(candidate, { title: song.name, singer: song.singer });
-    if (score <= 0) continue;
-    picked.push({ song: candidate, score });
+  const generation = cacheGeneration;
+  const configEpoch = musicApi.playConfigEpoch();
+  const request = ++nextRequest;
+  requests.set(key, request);
+  try {
+    // A selected platform gets its own request/cache; an aggregate top-20 cannot hide it.
+    const all = targetSource.length > 0
+      ? await musicApi.search(keyword, targetSource, "song", page, size) as Song[]
+      : await musicApi.allSearch(keyword, page, size);
+    const seen: string[] = [];
+    const picked: { song: Song; score: number }[] = [];
+    for (let i = 0; i < all.length; i++) {
+      const candidate = all[i];
+      if (candidate == null) continue;
+      if (targetSource.length > 0) {
+        if (candidate.platform != targetSource || candidate.id == song.id && candidate.platform == song.platform) continue;
+      } else if (candidate.platform == song.platform) continue;
+      const dedupKey = candidate.platform + ":" + candidate.id;
+      if (seen.indexOf(dedupKey) >= 0) continue;
+      seen.push(dedupKey);
+      const score = scoreCandidate(candidate, { title: song.name, singer: song.singer });
+      if (score <= 0) continue;
+      picked.push({ song: candidate, score });
+    }
+    picked.sort((a, b) => b.score - a.score);
+    const out: Song[] = [];
+    for (let i = 0; i < picked.length && out.length < MAX_CANDIDATES; i++) {
+      out.push(picked[i].song);
+    }
+    if (generation != cacheGeneration || configEpoch != musicApi.playConfigEpoch()) throw new Error("音乐源设置或换源候选已变化，请重试");
+    if (requests.get(key) == request) cacheSet(key, out);
+    return out;
+  } finally {
+    // Retain only in-flight guards; long sessions must not accumulate a key per song.
+    if (requests.get(key) == request) requests.delete(key);
   }
-  picked.sort((a, b) => b.score - a.score);
-  const out: Song[] = [];
-  for (let i = 0; i < picked.length && out.length < MAX_CANDIDATES; i++) {
-    out.push(picked[i].song);
-  }
-  cacheSet(key, out);
-  return out;
 }

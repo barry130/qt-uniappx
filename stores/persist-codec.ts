@@ -20,6 +20,9 @@ export function songToJson(song: Song): string {
   obj.set("album", song.album);
   obj.set("picUrl", song.picUrl);
   obj.set("platform", song.platform);
+  if (song.version != null) obj.set("version", song.version);
+  if (song.isrc != null) obj.set("isrc", song.isrc);
+  if (song.durationReliable != null) obj.set("durationReliable", song.durationReliable);
   if (song.url != null && song.url.length > 0) obj.set("url", song.url);
   if (song.duration != null && song.duration > 0)
     obj.set("duration", song.duration);
@@ -69,6 +72,9 @@ export function songFromJson(text: string): Song | null {
       url: url != null ? url : "",
       duration: duration != null ? duration : 0,
       musicId: musicId != null && musicId.length > 0 ? musicId : undefined,
+      version: (obj.get("version") as string | null) ?? undefined,
+      isrc: (obj.get("isrc") as string | null) ?? undefined,
+      durationReliable: (obj.get("durationReliable") as boolean | null) ?? undefined,
       likeSeq: likeSeq != null && likeSeq > 0 ? likeSeq : undefined,
       pids,
     };

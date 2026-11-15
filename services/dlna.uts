@@ -1,9 +1,9 @@
 import { ref } from "vue";
-import { audioPlayer, PLAYER_VOLUME_CHANGED_EVENT } from "@/services/audio-player";
+import { audioPlayer, PLAYER_VOLUME_CHANGED_EVENT, PLAYER_CAPABILITIES_CHANGED_EVENT } from "@/services/audio-player";
 import { usePlayerStore } from "@/stores/player";
 import type { AudioDlnaDevice, AudioDlnaState } from "@/uni_modules/qt-audio-player";
 import { qtShowToast } from "@/services/toast";
-// #ifdef APP-ANDROID
+// #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
 import { audioDlnaDiscover, audioDlnaConnect, audioDlnaDisconnect, audioDlnaOnState } from "@/uni_modules/qt-audio-player";
 // #endif
 
@@ -12,19 +12,24 @@ const devices = ref<AudioDlnaDevice[]>([]);
 const error = ref(""), state = ref<AudioDlnaState | null>(null);
 let searchGeneration = 0, lastError = "";
 export function dlnaSupported(): boolean {
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
   return true;
   // #endif
   // #ifndef APP-ANDROID
+  // #ifndef APP-HARMONY
+  // #ifndef APP-IOS
   return false;
+  // #endif
+  // #endif
   // #endif
 }
 export function dlnaUiState() { return { visible, searching, devices, error, state }; }
 export function initDlna(): void {
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
   audioDlnaOnState((snapshot: AudioDlnaState): void => {
     state.value = snapshot;
     uni.$emit(PLAYER_VOLUME_CHANGED_EVENT);
+    uni.$emit(PLAYER_CAPABILITIES_CHANGED_EVENT);
     if (snapshot.error.length > 0 && snapshot.error != lastError) {
       lastError = snapshot.error;
       qtShowToast({ title: snapshot.error, icon: "none" });
@@ -41,7 +46,7 @@ export function discoverDlna(): void {
   if (!dlnaSupported()) return;
   const generation = ++searchGeneration;
   searching.value = true; error.value = "";
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
   audioDlnaDiscover((found: AudioDlnaDevice[], failure: string): void => {
     if (generation != searchGeneration) return;
     devices.value = found; error.value = failure; searching.value = false;
@@ -49,7 +54,7 @@ export function discoverDlna(): void {
   // #endif
 }
 export function connectDlna(device: AudioDlnaDevice): void {
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
   const player = usePlayerStore(), current = player.current;
   const expectedId = current == null ? "" : current.platform + ":" + current.id;
   const position = player.progress, autoPlay = player.playing;
@@ -63,7 +68,7 @@ export function connectDlna(device: AudioDlnaDevice): void {
   // #endif
 }
 export function disconnectDlna(returnToLocal: boolean): void {
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
   audioDlnaDisconnect(returnToLocal);
   // #endif
   closeDlna();

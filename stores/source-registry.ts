@@ -8,15 +8,19 @@ import {
   clearQualityProfiles,
   fetchSourceQualityProfile,
   PROFILE_MODE_OFFICIAL,
-  setSourceDownloadQuality,
-  setSourcePlayQuality,
-  sourceDownloadQualityOf,
-  sourcePlayQualityOf,
+  setSourceDownloadQualityForNetwork,
+  setSourcePlayQualityForNetwork,
+  sourceDownloadQualityForNetwork,
+  sourcePlayQualityForNetwork,
   storeQualityProfile,
 } from "@/services/source-quality";
+import { NETWORK_KIND_WIFI, NETWORK_KIND_CELLULAR } from "@/services/network-kind";
 import type { QualityProfile } from "@/services/source-quality";
 import { usePlayerStore } from "@/stores/player";
 import { useDownloadsStore } from "@/stores/downloads";
+import { orderedSourceIds, sourceEnabled, SOURCE_POLICY_CHANGED_EVENT } from "@/services/source-policy";
+import { ensureDataEngine, sourceMetaRevision, sourceMetaCurrent } from "@/services/source-engine";
+import type { RecommendationKind } from "@/stores/recommendation-source";
 
 /**
  * 会员档高低序（v11 官方档位过滤用）：none < vip < svip。
@@ -50,6 +54,12 @@ export type SourceFeature = "charts" | "playlists" | "artist" | "album" | "lates
  *   （事件在引擎重载完成、播放地址缓存清空之后广播，见 source-update.uts）。
  */
 class SourceRegistryStore {
+  /** Full package catalog, also used for disabled-platform labels and account management. */
+  catalog: RegistrySource[] = [];
+  generation = 0;
+  /** Profile maps are not reactive; UI observes this after an asynchronous refresh. */
+  qualityGeneration = 0;
+  policySupported = false;
   /** 数据包声明的音源清单（顺序即切换器/榜单/设置页的展示顺序） */
   sources: RegistrySource[] = [];
   /** 数据包声明的音质档位（播放器/设置页/下载的选项来源） */
@@ -58,10 +68,11 @@ class SourceRegistryStore {
   ready = false;
   /** 进行中的加载（并发 ensure 共享同一次请求） */
   private loading: Promise<void> | null = null;
+  private accountMetaRevision = "";
 
   /** 幂等拉取：成功过就直接返回，未成功则发起/搭车同一次加载 */
   ensure(): Promise<void> {
-    if (this.ready) return Promise.resolve();
+    if (this.ready && sourceMetaCurrent(this.accountMetaRevision)) return Promise.resolve();
     if (this.loading != null) return this.loading;
     this.loading = this.load();
     return this.loading;
@@ -74,7 +85,10 @@ class SourceRegistryStore {
 
   private async load(): Promise<void> {
     try {
+      if (!(await ensureDataEngine())) { this.ready = false; this.accountMetaRevision = ""; return; }
+      const metaRevision = sourceMetaRevision();
       const registry = await musicApi.sourceRegistry();
+      if (!sourceMetaCurrent(metaRevision)) { this.ready = false; this.accountMetaRevision = ""; return; }
       if (registry == null) {
         // 未装数据包 / 旧版包无注册表入口 / 引擎未就绪（换包重载的空窗也走这里）：
         // 只置未就绪等下次 ensure 重试，不清空已取到的清单——瞬时空响应把
@@ -82,7 +96,10 @@ class SourceRegistryStore {
         this.ready = false;
         return;
       }
-      this.sources = registry.sources;
+      this.catalog = registry.sources;
+      this.accountMetaRevision = metaRevision;
+      this.policySupported = registry.sourcePolicyVersion == 1;
+      this.applyPolicy();
       this.qualities = registry.qualities;
       this.ready = true;
       this.validateCurrentSource();
@@ -92,6 +109,18 @@ class SourceRegistryStore {
     } finally {
       this.loading = null;
     }
+  }
+
+  applyPolicy(): void {
+    const ids = orderedSourceIds(this.catalog.map((s: RegistrySource): string => s.id));
+    const sources: RegistrySource[] = [];
+    for (let i = 0; i < ids.length; i++) {
+      const source = this.catalog.find((s: RegistrySource): boolean => s.id == ids[i]);
+      if (source != null) sources.push(source);
+    }
+    this.sources = sources;
+    this.generation++;
+    if (this.ready) this.validateCurrentSource();
   }
 
   /** UI 直接遍历用的源 id 列表（顺序 = 数据包声明顺序） */
@@ -122,6 +151,7 @@ class SourceRegistryStore {
    * - 声明为 false → false（页面据此不显示该源的这个功能入口/标签）。
    */
   supports(id: string, feature: SourceFeature): boolean {
+    if (!sourceEnabled(id)) return false;
     for (let i = 0; i < this.sources.length; i++) {
       const s = this.sources[i];
       if (s.id != id) continue;
@@ -135,6 +165,20 @@ class SourceRegistryStore {
     return true;
   }
 
+  /** Account capabilities are fail-closed and belong to the current meta engine, not retained labels.
+   * 2026-11-14 用户裁定对齐桌面四源口径：不再单独禁用 KG FM，能力仍只认注册表显式声明。 */
+  supportsAccountRecommendation(id: string, kind: RecommendationKind): boolean {
+    if ((kind != "daily" && kind != "fm") || !sourceEnabled(id)) return false;
+    if (!this.ready || !sourceMetaCurrent(this.accountMetaRevision)) return false;
+    for (let i = 0; i < this.catalog.length; i++) {
+      const source = this.catalog[i];
+      if (source.id != id) continue;
+      const caps = source.accountRecommendations;
+      return caps != null && (kind == "daily" ? caps.daily === true : caps.fm === true);
+    }
+    return false;
+  }
+
   /**
    * 是否**存在**支持某项功能的源（聚合级门控）。
    *
@@ -146,7 +190,7 @@ class SourceRegistryStore {
     for (let i = 0; i < this.sources.length; i++) {
       if (this.supports(this.sources[i].id, feature)) return true;
     }
-    return this.sources.length == 0;
+    return this.sources.length == 0 && !this.ready;
   }
 
   has(id: string): boolean {
@@ -159,8 +203,8 @@ class SourceRegistryStore {
   /** 音源展示名（本地音乐固定「本地」；未知 id 兜底「未知」) */
   label(id: string): string {
     if (id == "local") return "本地";
-    for (let i = 0; i < this.sources.length; i++) {
-      const source = this.sources[i];
+    for (let i = 0; i < this.catalog.length; i++) {
+      const source = this.catalog[i];
       if (source != null && source.id == id) return source.name;
     }
     return "未知";
@@ -169,8 +213,8 @@ class SourceRegistryStore {
   /** 紧凑徽标文案（歌曲行/歌单卡角标） */
   short(id: string): string {
     if (id == "local") return "本地";
-    for (let i = 0; i < this.sources.length; i++) {
-      const source = this.sources[i];
+    for (let i = 0; i < this.catalog.length; i++) {
+      const source = this.catalog[i];
       if (source != null && source.id == id) return source.short;
     }
     return "未知";
@@ -179,8 +223,8 @@ class SourceRegistryStore {
   /** 平台徽标底色（#rrggbb；本地与未知源用中性灰） */
   color(id: string): string {
     if (id == "local") return "#8b93a7";
-    for (let i = 0; i < this.sources.length; i++) {
-      const source = this.sources[i];
+    for (let i = 0; i < this.catalog.length; i++) {
+      const source = this.catalog[i];
       if (source != null && source.id == id) return source.color;
     }
     return "#8b92a1";
@@ -243,8 +287,8 @@ class SourceRegistryStore {
       }
     }
     let declared: string[] | null = null;
-    for (let i = 0; i < this.sources.length; i++) {
-      const s = this.sources[i];
+    for (let i = 0; i < this.catalog.length; i++) {
+      const s = this.catalog[i];
       if (s.id == id) {
         declared = s.qualities != null ? s.qualities : null;
         break;
@@ -263,8 +307,8 @@ class SourceRegistryStore {
    * 页面据此不渲染排序选择器；有多个选项时展示（wyy 最热/最新、kg 最热/最新/推荐）。
    */
   playlistSorts(id: string): RegistrySort[] {
-    for (let i = 0; i < this.sources.length; i++) {
-      const s = this.sources[i];
+    for (let i = 0; i < this.catalog.length; i++) {
+      const s = this.catalog[i];
       if (s.id == id) return s.playlistSorts != null ? s.playlistSorts : [];
     }
     return [];
@@ -276,8 +320,8 @@ class SourceRegistryStore {
    * 选项/降档阶梯的切换口径都从它派生）。
    */
   officialQualities(id: string): RegistryOfficialQuality[] {
-    for (let i = 0; i < this.sources.length; i++) {
-      const s = this.sources[i];
+    for (let i = 0; i < this.catalog.length; i++) {
+      const s = this.catalog[i];
       if (s.id == id) {
         const auth = s.auth;
         if (auth == null) return [];
@@ -293,13 +337,17 @@ class SourceRegistryStore {
    * 可能存着脏值），回退到数据包声明的第一个音源，避免页面拿死 id 请求。
    */
   private validateCurrentSource(): void {
-    if (this.sources.length == 0) return;
     const store = useSourceStore();
-    if (!this.has(store.current)) store.setSource(this.sources[0].id);
+    if (store.current == "local") return;
+    if (!this.has(store.current)) store.setSource(this.sources.length > 0 ? this.sources[0].id : "local");
   }
 }
 
 const sourceRegistryStore = reactive(new SourceRegistryStore()) as SourceRegistryStore;
+uni.$on(SOURCE_POLICY_CHANGED_EVENT, () => {
+  sourceRegistryStore.applyPolicy();
+  void refreshQualityProfiles();
+});
 
 // 音源包安装/更新/卸载后重取注册表 + 清 v12 生效清单缓存（bumpPacksChanged
 // 在引擎重载后才广播，这里拿到的一定是新版包的清单；重取失败维持原清单，下次
@@ -307,7 +355,9 @@ const sourceRegistryStore = reactive(new SourceRegistryStore()) as SourceRegistr
 // 重取完成后由 load() 里的 refreshQualityProfiles 首拉重建）
 uni.$on(SOURCE_PACKS_CHANGED_EVENT, () => {
   sourceRegistryStore.ready = false;
+  profileRefreshGeneration++;
   clearQualityProfiles();
+  sourceRegistryStore.qualityGeneration++;
   sourceRegistryStore.ensure();
 });
 
@@ -320,7 +370,13 @@ uni.$on(SOURCE_PACKS_CHANGED_EVENT, () => {
  * 拖垮其它源：storeQualityProfile(id, null) 记「试过但没拉到」，消费方回落
  * 宿主 v10/v11 判定，不弹提示（旧包缺入口是合法状态，等用户更新包）。
  */
+let profileRefreshGeneration = 0;
 async function refreshQualityProfiles(): Promise<void> {
+  const refresh = ++profileRefreshGeneration;
+  const registryGeneration = sourceRegistryStore.generation;
+  const configEpoch = musicApi.playConfigEpoch();
+  const current = (): boolean => refresh == profileRefreshGeneration
+    && registryGeneration == sourceRegistryStore.generation && configEpoch == musicApi.playConfigEpoch();
   if (sourceRegistryStore.sources.length == 0) return;
   const tasks: Promise<void>[] = [];
   for (let i = 0; i < sourceRegistryStore.sources.length; i++) {
@@ -330,15 +386,17 @@ async function refreshQualityProfiles(): Promise<void> {
     tasks.push(
       fetchSourceQualityProfile(id, sourceVipTierOf(id))
         .then((profile: QualityProfile) => {
-          storeQualityProfile(id, profile);
+          if (current()) storeQualityProfile(id, profile);
         })
         .catch((_e) => {
           // 旧包缺入口 / 引擎空窗：记失败回落宿主判定，不打扰用户
-          storeQualityProfile(id, null);
+          if (current()) storeQualityProfile(id, null);
         }),
     );
   }
   await Promise.all(tasks);
+  if (!current()) return;
+  sourceRegistryStore.qualityGeneration++;
   migrateStaleQualities();
 }
 
@@ -354,6 +412,9 @@ function migrateStaleQualities(): void {
   // 一定已初始化：refreshQualityProfiles 只会在注册表加载/事件回调里跑）
   const player = usePlayerStore();
   const downloads = useDownloadsStore();
+  // 2026-11-14 网络面别拆分后两个网络各有一张表：WIFI 与移动网络的存量档位
+  // 都不能落在清单外，迁移对两个面别对称执行
+  const networks: string[] = [NETWORK_KIND_WIFI, NETWORK_KIND_CELLULAR];
   for (let i = 0; i < sourceRegistryStore.sources.length; i++) {
     const src = sourceRegistryStore.sources[i];
     if (src == null) continue;
@@ -368,11 +429,14 @@ function migrateStaleQualities(): void {
     // 最高档不能拿数组末位当：包侧 qualities 顺序高→低、低→高都存在，
     // 按 musicApi 的全局档位基准序取排名最大的（2026-11-03 审阅 R2）。
     const highest = musicApi.highestQualityOf(ids);
-    const dlEff = sourceDownloadQualityOf(src.id, downloads.downloadQuality);
-    // 播放缺省跟随下载音质（两处口径必须一致，否则校验会把播放档位误改成最高档）
-    const playEff = sourcePlayQualityOf(src.id, dlEff);
-    if (ids.indexOf(playEff) < 0) setSourcePlayQuality(src.id, highest);
-    if (ids.indexOf(dlEff) < 0) setSourceDownloadQuality(src.id, highest);
+    for (let n = 0; n < networks.length; n++) {
+      const network = networks[n];
+      const dlEff = sourceDownloadQualityForNetwork(src.id, downloads.downloadQuality, network);
+      // 播放缺省跟随下载音质（两处口径必须一致，否则校验会把播放档位误改成最高档）
+      const playEff = sourcePlayQualityForNetwork(src.id, dlEff, network);
+      if (ids.indexOf(playEff) < 0) setSourcePlayQualityForNetwork(src.id, highest, network);
+      if (ids.indexOf(dlEff) < 0) setSourceDownloadQualityForNetwork(src.id, highest, network);
+    }
   }
 }
 
@@ -380,6 +444,8 @@ function migrateStaleQualities(): void {
 // 对数据包的凭据注入落地后再重查，避免包侧读到旧登录态；连发事件只重拉一次。
 let profileRefreshTimer: number | null = null;
 uni.$on(SOURCE_AUTH_CHANGED_EVENT, () => {
+  // Invalidate old replies immediately, including the debounce window.
+  profileRefreshGeneration++;
   if (profileRefreshTimer != null) clearTimeout(profileRefreshTimer);
   profileRefreshTimer = setTimeout(() => {
     profileRefreshTimer = null;

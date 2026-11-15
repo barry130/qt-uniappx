@@ -51,6 +51,7 @@ export const PLAYER_BAR_TOOLS: PlayerBarToolMeta[] = [
   { id: "quality", label: "音质", hint: "切换当前歌曲音质", icon: "music", adminOnly: false },
   { id: "dislike", label: "屏蔽", hint: "屏蔽当前歌曲 / 歌手", icon: "ban", adminOnly: false },
   { id: "speed", label: "倍速", hint: "循环切换播放倍速", icon: "gauge", adminOnly: false },
+  { id: "pitch", label: "升降调", hint: "调整当前歌曲音调（-12~+12 半音，不变速）", icon: "tone", adminOnly: false },
   { id: "sleep", label: "定时关闭", hint: "定时停止播放（开启时按钮显示剩余时间）", icon: "clock", adminOnly: false },
   { id: "share", label: "分享", hint: "生成当前歌曲的分享卡片", icon: "share", adminOnly: false },
   { id: "equalizer", label: "均衡器", hint: "打开均衡器页面", icon: "sliders", adminOnly: false },

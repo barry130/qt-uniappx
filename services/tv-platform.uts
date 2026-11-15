@@ -1,0 +1,23 @@
+/** Vapor services are JS. All Android APIs remain inside the independent UTS plugin. */
+import { readTvDevice, startTvRemote, setTvRemoteState, stopTvRemote, collectTvCandidates, highlightTvElement, activateTvElement, scrollTvAncestor, setTvPresentation, performTvBack } from "@/uni_modules/qt-tv-native";
+import { logWarn } from "@/services/logger";
+import type { QtTvCandidate } from "@/uni_modules/qt-ui/composables/qt-tv-navigation";
+export type QtTvRemoteEvent = { key: string; code: number; action: string; repeat: number };
+export type QtTvRemoteState = { enabled: boolean; captureBack: boolean; captureMenu: boolean; editing: boolean };
+export type QtTvDevice = { television: boolean; leanback: boolean; uiModeType: number; nativeAvailable: boolean };
+let warned = false;
+function report(): void { if (!warned) { warned = true; logWarn("TV", "电视原生桥尚未加载，当前仅应用层展示；匹配基座后启用遥控导航"); } }
+export function tvReadDevice(): QtTvDevice {
+  try { return readTvDevice() as QtTvDevice; } catch (_) { report(); return { television: false, leanback: false, uiModeType: 0, nativeAvailable: false }; }
+}
+export function tvStartRemote(handler: (event: QtTvRemoteEvent) => void): void { try { startTvRemote(handler); } catch (_) { report(); } }
+export function tvSetRemoteState(state: QtTvRemoteState): void { try { setTvRemoteState(state); } catch (_) { report(); } }
+export function tvStopRemote(): void { try { stopTvRemote(); } catch (_) { report(); } }
+export function tvCollect(root: UniElement | null): QtTvCandidate[] {
+  try { return collectTvCandidates(root) as QtTvCandidate[]; } catch (_) { report(); return []; }
+}
+export function tvHighlight(id: string, color: string): void { try { highlightTvElement(id, color); } catch (_) { report(); } }
+export function tvActivate(id: string, longPress: boolean): void { try { activateTvElement(id, longPress); } catch (_) { report(); } }
+export function tvScroll(id: string, direction: string): boolean { try { return scrollTvAncestor(id, direction); } catch (_) { return false; } }
+export function tvPresent(enabled: boolean): void { try { setTvPresentation(enabled); } catch (_) { report(); } }
+export function tvBack(): void { try { performTvBack(); } catch (_) { uni.navigateBack({ delta: 1 }); } }

@@ -4,9 +4,10 @@ import { usePlayerStore } from '@/stores/player'
 import { useDownloadsStore } from '@/stores/downloads'
 import { useDislikesStore } from '@/stores/dislikes'
 import { useLyricOffsetStore } from '@/stores/lyric-offset'
+import { useLyricSizeStore } from '@/stores/lyric-size'
 import { useSourceStore } from '@/stores/source'
 import { playerBarCounted, usePlayerBarStore } from '@/stores/player-bar'
-import { isQtAdmin } from '@/services/music-api'
+import { musicApi, isQtAdmin } from '@/services/music-api'
 import { useThemeStore } from '@/uni_modules/qt-ui/stores/theme'
 import { useFontScaleStore } from '@/uni_modules/qt-ui/stores/font-scale'
 import { useNoticeStore } from '@/stores/notice'
@@ -40,7 +41,17 @@ import { enqueueBootModal, BOOT_MODAL_PRIORITY_PLAY_PACK, BOOT_MODAL_PRIORITY_BA
 import { openPackInstallSheet, PACK_SHEET_UNAVAILABLE } from '@/services/pack-install-sheet'
 // 音源账号登录态注入：import 即注册「meta 装载成功」钩子（服务模块级副作用）
 // + 凭据轮换/后台保活（启动 20s 首检 + 每次回前台 24h 节流，见 services/source-auth.ts）
-import { ensureSourceAuthInjected, keepaliveSourceAccounts } from '@/services/source-auth'
+import { SOURCE_AUTH_CHANGED_EVENT, ensureSourceAuthInjected, keepaliveSourceAccounts } from '@/services/source-auth'
+import { recoverPlaylistFollow, refreshDuePlaylistFollows, playlistFollowForeground } from '@/services/playlist-follow'
+
+import { SOURCE_QUALITIES_CHANGED_EVENT } from '@/services/source-quality'
+import { clearSourceSwitchCache } from '@/services/source-switch'
+import { startPresentation, stopPresentation } from '@/services/device-presentation'
+import { qtInitTv, qtSetTvForeground } from '@/uni_modules/qt-ui/composables/use-qt-tv'
+uni.$on(SOURCE_AUTH_CHANGED_EVENT, () => { musicApi.clearPlayUrlCache(); clearSourceSwitchCache() })
+uni.$on(SOURCE_QUALITIES_CHANGED_EVENT, () => { musicApi.clearPlayUrlCache(); clearSourceSwitchCache() })
+uni.$on('qt-source-packs-changed', () => { clearSourceSwitchCache() })
+uni.$on('qt-aggregate-sources-changed', () => { clearSourceSwitchCache() })
 
 // 最近一次已写入日志的诊断串（''=还没记过）：只记录变化，避免每次回前台刷屏；
 // 同时给真机排查留现场 —— 布局仍不对时，日志页（pages/logs）能直接看到原生读到
@@ -142,6 +153,7 @@ onLaunch(() => {
   // 桌面歌词开关为运行期状态（不持久化），启动后默认关闭，无需恢复
   desktopLyric.restore()
   usePlayerStore().restore()
+  try { recoverPlaylistFollow() } catch (e) { logMsgErr('歌单跟随恢复', e) }
   useDownloadsStore().restore()
   // 不喜欢列表：放在 player 之后（player restore 只加载数据不推时间线），
   // 但必须在用户任何播放动作之前就绪——启动后首次 play/pushTimeline 就要按它过滤
@@ -149,6 +161,9 @@ onLaunch(() => {
   // 歌词偏移（全局默认 + 按曲目覆盖）：纯本地偏好，播放页取当前行时按它换算，
   // 所以必须在首次渲染歌词之前就绪
   useLyricOffsetStore().restore()
+  // 歌词字号倍率：与偏移同理，纯本地偏好。必须在首帧歌词之前就绪，
+  // 否则先在默认 100% 画一屏再跳到用户档位（内联 :style 依赖 store 已恢复）
+  useLyricSizeStore().restore()
   useSourceStore().restore()
   // 播放页工具按钮开关（设置 → 播放页按钮）：纯本地展示偏好。
   // 必须带名额口径：非管理员的「播放链接」不渲染、不占名额，否则恢复时会把
@@ -295,6 +310,13 @@ async function runPlayPackGuide(): Promise<void> {
 
 // 进入前台时发送 show 事件（统计回前台）；已登录时增量拉取收藏变更（多端同步，LIKE_SYNC_DESIGN.md）
 onShow(() => {
+  qtInitTv()
+  qtSetTvForeground(true)
+  startPresentation()
+  playlistFollowForeground(true)
+  setTimeout(() => {
+    if (useDisclaimerStore().pending == false) refreshDuePlaylistFollows().catch(() => {})
+  }, 30000)
   // 首屏守卫回前台：后台期间系统会冻结 JS 定时器，冻到很晚才触发的「未挂载」判定
   // 毫无意义（实测有间隔 19 分钟的用例），所以回前台重新计时并重新给一次机会
   notifyAppForeground()
@@ -319,6 +341,9 @@ onShow(() => {
 
 // 进入后台时保存播放状态（当前歌曲/进度），供下次重启后恢复；并追加统计 flush
 onHide(() => {
+  qtSetTvForeground(false)
+  stopPresentation()
+  playlistFollowForeground(false)
   // 进后台立刻停掉首屏守卫的判定：后台白屏不该被当成启动失败
   notifyAppBackground()
   // 注意：**后台继续下载**，这里不暂停。只有「退出/被杀后重新启动」才是暂停态，

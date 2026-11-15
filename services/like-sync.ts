@@ -9,10 +9,12 @@
  * 本文件只 import player.ts 的类型（import type），运行期无循环依赖。
  */
 import { likeBatch, fetchChanges, fetchAllLikes } from "@/services/like";
+import { prepareCollectionWrite } from "@/services/collection-transaction";
 import { parseJsonToUtso } from "@/services/http";
 import { getAccessToken, getSessionEpoch, getUserId, sessionIsCurrent } from "@/services/auth";
 import { logMsg } from "@/services/logger";
 import { generateGlobalPid } from "@/services/global-pid";
+import { beginLoading, finishLoading } from "@/services/ui-loading";
 import type { LikeChange, PendingLikeOp, Playlist, Song } from "@/types/music";
 import type { PlayerStore } from "@/stores/player";
 
@@ -78,6 +80,7 @@ export class LikeSyncEngine {
   }
 
   private beginSync(): number | null {
+    prepareCollectionWrite();
     const epoch = getSessionEpoch();
     if (this.likeSyncBusy && this.likeSyncEpoch == epoch) return null;
     // 旧会话仍可能在 await；新会话立即获得独立锁，旧 finally 不得释放它。
@@ -272,6 +275,32 @@ export class LikeSyncEngine {
     this.flushPendingOps().catch(() => {});
   }
 
+  /** Follow journal recovery needs a durable outbox before advancing its checkpoint. */
+  enqueueLikeOpsDurably(ops: PendingLikeOp[]): void {
+    const next = this.pendingOps.slice();
+    for (let i = 0; i < ops.length; i++) {
+      const op = ops[i];
+      // Recovery may replay after the outbox write succeeded but checkpoint failed.
+      let previous: PendingLikeOp | null = null;
+      const data = parseJsonToUtso(op.dataJson);
+      for (let j = next.length - 1; j >= 0; j--) {
+        const old = next[j];
+        const oldData = parseJsonToUtso(old.dataJson);
+        if (old.type == op.type && oldData.getString("sid") == data.getString("sid") && oldData.getString("platform") == data.getString("platform") && oldData.getString("pid") == data.getString("pid")) { previous = old; break; }
+      }
+      if (previous == null || previous.action != op.action || previous.dataJson != op.dataJson) next.push(op);
+    }
+    const rows: string[] = [];
+    for (let i = 0; i < next.length; i++) {
+      const op = next[i];
+      const row = new UTSJSONObject();
+      row.set("type", op.type); row.set("action", op.action); row.set("dataJson", op.dataJson);
+      rows.push(JSON.stringify(row));
+    }
+    uni.setStorageSync(this.accountKey(LIKE_OPS_KEY), JSON.stringify(rows));
+    this.pendingOps = next;
+  }
+
   /** 推送积压的收藏操作（对外入口，防止与增量拉取并发交错） */
   async flushPendingOps(): Promise<void> {
     const token = getAccessToken();
@@ -325,6 +354,7 @@ export class LikeSyncEngine {
    */
   private async doFlushPendingOps(epoch: number, revision: number): Promise<void> {
     while (this.pendingOps.length > 0 && this.syncIsCurrent(epoch, revision)) {
+      prepareCollectionWrite();
       // 预扫队首组装一批：无效 op 记下标（成功失败都要剔除），有效 op 进批。
       // 组批过程中不改动队列，失败时整批原样保留
       const batch: PendingLikeOp[] = [];
@@ -623,6 +653,7 @@ export class LikeSyncEngine {
         const res = await fetchChanges(this.likeCursor);
         if (!this.syncIsCurrent(epoch, revision)) return;
         if (res == null) break;
+        prepareCollectionWrite();
         // 服务器 maxSeq 比本地游标还小说明数据库被重建过（seq 重新从 1 计）：
         // 旧游标已失效，对齐到新库，否则后续增量拉取会永远落在新库 maxSeq 之后
         if (res.maxSeq < this.likeCursor) {
@@ -671,6 +702,9 @@ export class LikeSyncEngine {
    * 看到的还是旧名旧封面（2026-11-02 审阅）。返回 true 时调用方必须停在它之前。
    */
   private isDeferredLikeChange(change: LikeChange): boolean {
+    // A local membership edit may arrive while fetchChanges is awaiting the
+    // network. Keep the cursor before that change until the outbox is flushed.
+    if (change.type == "song") return this.hasPendingLikeOp("song", change.id, change.platform);
     if (change.type != "playlist") return false;
     if (change.platform != "local") return false;
     const pid = change.pid != null && change.pid.length > 0 ? change.pid! : change.id;
@@ -857,6 +891,7 @@ export class LikeSyncEngine {
       page++;
     }
     if (!completed || !this.syncIsCurrent(epoch, revision)) return;
+    prepareCollectionWrite();
     // 一首歌属于多个歌单时，服务器会返回多条（同 sid、不同 pid），
     // 先按 id + platform 合并成一条，把各个 pid 收进 pids 数组
     const collapsedSongs: Song[] = [];
@@ -881,7 +916,12 @@ export class LikeSyncEngine {
     }
     // 以服务器为准重建；本地「有待推送操作」或「seq 更新」的条目保留（LWW）
     const mergedSongs: Song[] = [];
-    for (let i = 0; i < collapsedSongs.length; i++) mergedSongs.push(collapsedSongs[i]);
+    for (let i = 0; i < collapsedSongs.length; i++) {
+      const song = collapsedSongs[i];
+      // A pending removal can leave no local row at all. Do not resurrect it
+      // from a server snapshot obtained before that removal was acknowledged.
+      if (!this.hasPendingLikeOp("song", song.id, song.platform)) mergedSongs.push(song);
+    }
     for (let i = 0; i < this.host.likedSongs.length; i++) {
       const local = this.host.likedSongs[i];
       let serverSeq = 0;
@@ -949,6 +989,7 @@ export class LikeSyncEngine {
   async syncLikedFromServer(): Promise<void> {
     const token = getAccessToken();
     if (!token) return;
+    prepareCollectionWrite();
     // 先把数据库里缺失的本地歌单元数据补上（历史版本新建歌单不上送，
     // 这里按 likeSeq 判断补推一次；服务器按 pid upsert 幂等）
     this.backfillLocalPlaylistsSync();
@@ -1050,6 +1091,7 @@ export class LikeSyncEngine {
       page++;
     }
     if (!completed || !sessionIsCurrent(epoch) || revision != this.likeSyncRevision) return 0;
+    prepareCollectionWrite();
     let count = 0;
     let removedCount = 0;
     // 歌单按「云端确认点」（likeSeq，推送成功时由服务器分配回写）三分
@@ -1152,24 +1194,16 @@ export class LikeSyncEngine {
   }
 
   /**
-   * 切换账号时清空本地收藏缓存（账号归属标记检测到换号时调用）。
-   * 服务器是数据源，A 的数据留在 A 的服务器账号里；新账号登录后
-   * syncLikedFromServer 游标为 0 会自动全量拉取本账号数据恢复本地。
+   * 切换账号时恢复目标账号的本地收藏、同步游标和离线待提交操作。
    * 不动播放历史、下载等设备级数据。
    */
   clearLocalLikeData(): void {
     this.likeSyncRevision++;
     this.likeSyncBusy = false;
     this.likeSyncEpoch = -1;
-    this.host.likedSongs = [];
-    this.host.savedPlaylists = [];
-    this.host.localPlaylists = [];
-    this.host.likedDirty = true;
-    this.host.playlistsDirty = true;
-    this.host.localPlaylistsDirty = true;
-    this.host.persistNow();
+    this.host.restoreAccountCollections();
     // 不清目标 UID 的游标/outbox：退出后同账号重登必须继续补推断网操作。
     this.load();
-    logMsg("[Player] 检测到切换账号，已清空本地收藏缓存");
+    logMsg("[Player] 已恢复当前账号的本地收藏缓存");
   }
 }

@@ -8,10 +8,15 @@ export type Song = {
   url?: string;
   /** 播放地址获取时间戳（毫秒），用于判断 url 是否过期（不持久化，重启后视为过期重新获取） */
   urlFetchedAt?: number;
+  /** In-memory policy fingerprint; saved remote URLs must be resolved again after platform settings change. */
+  urlSourcePolicy?: string;
   /** 喜欢列表变更序号（服务器 updated_seq），用于多端同步冲突比较（last-write-wins） */
   likeSeq?: number;
   duration?: number;
-  musicId?: string;
+  musicId?: string | null;
+  version?: string;
+  isrc?: string;
+  durationReliable?: boolean;
   /**
    * 这首歌被收藏进了哪些歌单（存那些歌单的 pid）。
    *
@@ -32,6 +37,7 @@ export type Playlist = {
   platform: string;
   description: string | null;
   tracks?: Song[];
+  complete?: boolean;
   /** 喜欢歌单变更序号（服务器 updated_seq），用于多端同步冲突比较（last-write-wins） */
   likeSeq?: number;
   /**

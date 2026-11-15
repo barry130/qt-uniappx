@@ -1,0 +1,52 @@
+import { startDevicePresentation, stopDevicePresentation, readDevicePerformance, takeWidgetRoute } from '@/uni_modules/qt-app-native';
+// #ifdef APP-ANDROID
+import { audioSetWidgetTheme } from '@/uni_modules/qt-audio-player';
+// #endif
+import { applyQtFoldGeometry } from '@/uni_modules/qt-ui/composables/use-qt-layout';
+import { applyQtPerformance } from '@/uni_modules/qt-ui/composables/use-qt-performance';
+import { useThemeStore } from '@/uni_modules/qt-ui/stores/theme';
+import { useDisclaimerStore } from '@/stores/disclaimer';
+import { watch } from 'vue';
+
+let presentationGeneration = 0;
+let presentationTimer: number = 0;
+let presentationActive = false;
+function consumeWidgetRoute(): void {
+  if (!presentationActive || useDisclaimerStore().pending) return;
+  const route = takeWidgetRoute();
+  if (route == 'collection') uni.navigateTo({ url: '/pages/collection/index' });
+}
+function syncWidgetTheme(): void {
+  // #ifdef APP-ANDROID
+  const theme = useThemeStore();
+  audioSetWidgetTheme(theme.dark, theme.skin.accent);
+  // #endif
+}
+watch(() => useThemeStore().dark + ':' + useThemeStore().skin.accent, () => { syncWidgetTheme(); });
+watch(() => useDisclaimerStore().pending, (pending: boolean): void => {
+  if (!pending && presentationTimer == 0) consumeWidgetRoute();
+});
+export function startPresentation(): void {
+  presentationActive = true;
+  const generation = ++presentationGeneration;
+  startDevicePresentation((left: number, top: number, right: number, bottom: number, separating: boolean, tabletop: boolean): void => {
+    if (generation == presentationGeneration) applyQtFoldGeometry(separating ? { left, top, right, bottom, separating, tabletop } : null);
+  });
+  readDevicePerformance((lowMemory: boolean, powerSave: boolean, animationsDisabled: boolean): void => {
+    if (generation == presentationGeneration) applyQtPerformance(lowMemory, powerSave, animationsDisabled);
+  });
+  syncWidgetTheme();
+  if (presentationTimer != 0) clearTimeout(presentationTimer);
+  presentationTimer = setTimeout(() => {
+    presentationTimer = 0;
+    if (generation != presentationGeneration) return;
+    consumeWidgetRoute();
+  }, 500) as number;
+}
+export function stopPresentation(): void {
+  presentationActive = false;
+  presentationGeneration++;
+  if (presentationTimer != 0) clearTimeout(presentationTimer);
+  presentationTimer = 0;
+  stopDevicePresentation();
+}

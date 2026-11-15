@@ -1,14 +1,16 @@
-/** 听歌报告公共存档。Android 直读写需要「所有文件访问」；其它端明确降级。 */
+/** 听歌报告存档。Android 公共目录需要存储授权；iOS 使用「文件」可见的沙盒 Documents。 */
 import { readTextFile, writeTextFile, renamePath, remove } from "@/uni_modules/qt-js-engine";
-import { queryPermissionStates } from "@/uni_modules/qt-app-native";
 // #ifdef APP-ANDROID
+import { queryPermissionStates } from "@/uni_modules/qt-app-native";
+// #endif
+// #ifdef APP-ANDROID || APP-IOS
 import * as QtJsEngine from "@/uni_modules/qt-js-engine";
 // 旧自定义基座的代理可能没有新增接口。先复制导出，避免打包器静态解析缺失的命名导出。
 const optionalEngine = Object.assign({}, QtJsEngine) as { publicDataDir?: () => string };
 // #endif
 
 export function listenStatsPath(): string {
-  // #ifdef APP-ANDROID
+  // #ifdef APP-ANDROID || APP-IOS
   const getDirectory = optionalEngine.publicDataDir;
   if (typeof getDirectory != "function") return "";
   try {
@@ -19,7 +21,9 @@ export function listenStatsPath(): string {
   }
   // #endif
   // #ifndef APP-ANDROID
+  // #ifndef APP-IOS
   return "";
+  // #endif
   // #endif
 }
 
@@ -33,7 +37,12 @@ export function canWriteListenStats(): boolean {
     if (states[i].applicable && !states[i].unknown && states[i].granted) return true;
   }
   // #endif
+  // #ifdef APP-IOS
+  return listenStatsPath().length > 0;
+  // #endif
+  // #ifndef APP-IOS
   return false;
+  // #endif
 }
 
 export type ListenStatsRead = { ok: boolean; text: string; missing: boolean };

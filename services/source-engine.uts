@@ -50,6 +50,7 @@ import {
   invoke,
   isRunning,
   isHealthy,
+  evaluate,
 } from "@/uni_modules/qt-js-engine";
 import {
   activePack,
@@ -62,6 +63,8 @@ import {
   PACK_KIND_META,
 } from "@/services/source-bundle-fs";
 import { logErr, logErrV, logInfo, logWarn, logWarnV } from "@/services/logger";
+import { sourcePolicySnapshot, sourcePolicyRevision, sourcePolicyConfigured, sourcePolicyError, assertSourceEnabled,
+  setSourcePolicyCapability, assertSourcePolicyCurrent, isSourcePolicyError, SOURCE_POLICY_CHANGED_EVENT, SOURCE_POLICY_UPGRADE_MESSAGE } from "@/services/source-policy";
 
 /** 与插件 interface.uts 对应的结构类型（服务层不引插件类型，避免跨模块类型耦合） */
 type EngineInfo = { engine: string; version: string; hostApiVersion: number; probe: string };
@@ -154,6 +157,116 @@ let gLastError = "";
 let gLoadFailure: SourceLoadFailure = "";
 /** 内置 meta 是否已装进引擎（引擎重建/隔离后归零；未装数据包时恒为 false） */
 let gMetaReady = false;
+let gMetaPolicySupported = false;
+let gPlayPolicySupported: boolean | null = null;
+let gAppliedPolicy = -1;
+let gPolicyError = "";
+let gPolicyTask: Promise<void> | null = null;
+let gEngineGeneration = 0;
+/** Non-secret process identity: persisted account caches must miss after an app restart. */
+const ENGINE_PROCESS_EPOCH = Date.now().toString() + "-" + Math.random().toString().slice(2);
+let gMetaLoadedUpdatedAt = 0;
+export function sourceEngineEpoch(): string { return ENGINE_PROCESS_EPOCH + ":" + gEngineGeneration; }
+/** Bind both the active package and the package actually installed in this engine. */
+export function sourceMetaRevision(): string {
+  const pack = activeMetaPack();
+  return JSON.stringify([sourceEngineEpoch(), pack == null ? "" : pack.id,
+    pack == null ? 0 : pack.versionCode, pack == null ? 0 : pack.updatedAt,
+    gMetaLoadedId, gMetaLoadedCode, gMetaLoadedUpdatedAt]);
+}
+export function sourceMetaCurrent(revision: string): boolean {
+  const pack = activeMetaPack();
+  return pack != null && engineUsable() && pack.id == gMetaLoadedId
+    && pack.versionCode == gMetaLoadedCode && pack.updatedAt == gMetaLoadedUpdatedAt
+    && revision == sourceMetaRevision();
+}
+const POLICY_LOCAL_ENTRIES = ["sourceRegistry", "bundleInfo", "setAuth", "clearAuth", "getSourceQualities", "parseSheet"];
+// Installed before importing any package. 旧包不支持平台总开关时默认全部平台开启，仅在策略落地期间短暂挂起请求。
+const POLICY_HOST_GUARD = `(function () {
+  if (globalThis.__qtSourcePolicyHostReady) return;
+  var request = globalThis.__qtHost.request;
+  globalThis.__qtHost.request = function (url, options) {
+    if (globalThis.__qtSourcePolicySuspended) {
+      return Promise.reject(new Error("音乐源设置正在应用或音源包需要更新"));
+    }
+    return request(url, options);
+  };
+  globalThis.__qtSourcePolicyHostReady = true;
+})();`;
+function policyEvaluate(code: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    evaluate(code, (result: EvalResult) => {
+      if (result.ok) resolve(); else reject(new Error(result.error));
+    });
+  });
+}
+async function setPolicyHostGuard(suspended: boolean): Promise<void> {
+  await policyEvaluate(POLICY_HOST_GUARD +
+    "\nglobalThis.__qtSourcePolicyConfigured = " + (sourcePolicyConfigured() ? "true" : "false") +
+    ";globalThis.__qtSourcePolicySuspended = " + (suspended ? "true" : "false") + ";");
+}
+export async function applyEngineSourcePolicy(): Promise<void> {
+  const engineToken = gEngineGeneration;
+  if (gPolicyTask != null) { await gPolicyTask; }
+  if (engineToken != gEngineGeneration) return;
+  if (!gMetaReady || gAppliedPolicy == sourcePolicyRevision()) return;
+  const task = (async (): Promise<void> => {
+    do {
+      const token = sourcePolicyRevision();
+      const metaId = gMetaLoadedId;
+      const metaCode = gMetaLoadedCode;
+      gPolicyError = sourcePolicyError();
+      try {
+        await setPolicyHostGuard(true);
+        if (engineToken != gEngineGeneration) return;
+        if (gMetaPolicySupported) {
+          const raw = await callInvoke("setSourcePolicy", JSON.stringify([sourcePolicySnapshot()]), 4000);
+          if (engineToken != gEngineGeneration) return;
+          const result = JSON.parse(raw) as UTSJSONObject;
+          if (result.get("ok") != true) throw new Error("音源包未接受音乐源设置");
+          gPlayPolicySupported = result.get("playSupported") as boolean | null;
+        }
+        if (engineToken != gEngineGeneration || metaId != gMetaLoadedId || metaCode != gMetaLoadedCode) return;
+        if (gPolicyError.length == 0) await setPolicyHostGuard(false);
+        if (engineToken != gEngineGeneration) return;
+        gAppliedPolicy = token;
+      } catch (e) {
+        if (engineToken != gEngineGeneration) return;
+        gPolicyError = "音乐源设置未能应用：" + msgOf(e);
+        return;
+      }
+    } while (gAppliedPolicy != sourcePolicyRevision());
+  })();
+  gPolicyTask = task;
+  try { await task; } finally { if (gPolicyTask == task) gPolicyTask = null; }
+}
+export type SourcePolicyStatus = { metaSupported: boolean; playSupported: boolean | null; configured: boolean; message: string };
+export function sourcePolicyStatus(): SourcePolicyStatus {
+  const message = gPolicyError.length > 0 ? gPolicyError : !gMetaReady ? "安装数据包后可管理音乐源" :
+    !gMetaPolicySupported ? "当前音源包不支持平台总开关，已默认全部平台开启；安装新版音源包后可自定义" :
+    gPlayPolicySupported == false ? SOURCE_POLICY_UPGRADE_MESSAGE + "播放包；自定义设置期间暂停在线取链" : "";
+  return { metaSupported: gMetaPolicySupported, playSupported: gPlayPolicySupported, configured: sourcePolicyConfigured(), message };
+}
+async function guardSourcePolicy(name: string, argsJson: string): Promise<number> {
+  await applyEngineSourcePolicy();
+  if (POLICY_LOCAL_ENTRIES.indexOf(name) < 0) {
+    if (gPolicyError.length > 0) throw new Error(gPolicyError);
+    // 音源包不支持平台总开关时不做策略拦截：按「默认全部开启」放行。
+    if (gMetaPolicySupported) {
+      if (sourcePolicyConfigured() &&
+        ((name == "getPlayUrl" || name == "sourceAvailability") && gPlayPolicySupported != true)) {
+        throw new Error(SOURCE_POLICY_UPGRADE_MESSAGE);
+      }
+      const args = JSON.parse(argsJson) as UTSJSONObject[] | null;
+      if (args != null && args.length > 0) {
+        const source = args[0].getString("source");
+        if (source != null) assertSourceEnabled(source);
+      }
+    }
+  }
+  return sourcePolicyRevision();
+}
+uni.$on(SOURCE_POLICY_CHANGED_EVENT, () => { void applyEngineSourcePolicy(); });
 /** 引擎里实际装载的 meta 来源：包 id（如 meta-official）；数据包不内置，未装时为 "" */
 let gMetaLoadedId = "";
 /** 引擎里实际装载的 meta 版本号（未装时为 0） */
@@ -358,9 +471,17 @@ export function ensureEngine(): Promise<boolean> {
 
 /** 引擎重建后归零 meta 与播放包的装载标记。 */
 function resetLoadedState(): void {
+  gEngineGeneration++;
+  gPolicyTask = null;
   gMetaReady = false;
+  gMetaPolicySupported = false;
+  setSourcePolicyCapability(null);
+  gPlayPolicySupported = null;
+  gAppliedPolicy = -1;
+  gPolicyError = "";
   gMetaLoadedId = "";
   gMetaLoadedCode = 0;
+  gMetaLoadedUpdatedAt = 0;
   gPlayPackLoadedId = "";
   gPlayPackLoadedCode = 0;
   gPlayPackLoadedKey = "";
@@ -399,10 +520,10 @@ async function bootEngine(): Promise<boolean> {
 
 /** 停止引擎（换包/排查时用；平时不需要停） */
 export async function shutdownEngine(): Promise<void> {
+  resetLoadedState();
   await callStop();
   gStatus = "idle";
   gEngineVersion = "";
-  resetLoadedState();
   gLoadFailure = "";
   // 手动重启 = 用户已介入，清掉自动重建的限流窗口，让它重新可用
   gReviveWindowStart = 0;
@@ -471,6 +592,7 @@ async function loadMetaIntoEngine(): Promise<boolean> {
     gStatus = "loading";
     // 插件内部会先 compile 做语法校验（不执行），再经动态 import 装载 ESM；
     // meta 顶层检测到 globalThis.__qtHost（prelude 已注入）时自注册 __qtEntries
+    await setPolicyHostGuard(true);
     await callLoadBundle(meta.text);
     // 契约自检：bundleInfo 必须自述是 meta-bundle 且 hostApiVersion 一致
     // （旧「单体 ESM 官方包」自述 name=source-bundle，会在这里被拒——
@@ -487,6 +609,12 @@ async function loadMetaIntoEngine(): Promise<boolean> {
     gMetaReady = true;
     gMetaLoadedId = meta.id;
     gMetaLoadedCode = meta.code;
+    gMetaLoadedUpdatedAt = pack == null ? 0 : pack.updatedAt;
+    gMetaPolicySupported = info.get("sourcePolicyVersion") == 1;
+    setSourcePolicyCapability(gMetaPolicySupported);
+    gPlayPolicySupported = null;
+    gAppliedPolicy = -1;
+    await applyEngineSourcePolicy();
     gStatus = "ready";
     gLastError = "";
     const revision = info.get("metaRevision");
@@ -611,6 +739,8 @@ async function applyPlayPackInEngine(pack: SourcePackMeta): Promise<boolean> {
     gPlayPackLoadedId = pack.id;
     gPlayPackLoadedCode = pack.versionCode;
     gPlayPackLoadedKey = playPackRevision(pack);
+    gAppliedPolicy = -1;
+    await applyEngineSourcePolicy();
     gPlayPackFailedKey = "";
     gStatus = "ready";
     gLastError = "";
@@ -652,6 +782,7 @@ export async function unloadPlayPack(): Promise<boolean> {
     gPlayPackLoadedId = "";
     gPlayPackLoadedCode = 0;
     gPlayPackLoadedKey = "";
+    gPlayPolicySupported = null;
   } catch (e) {
     logWarnV("SourceEngine", "uninstallPlayPack 失败，将在下次注入时覆盖", msgOf(e));
     return false;
@@ -831,11 +962,18 @@ export async function getPlayUrlByEngineResult(
   args.set("album", song.album);
   args.set("quality", quality);
   args.set("duration", song.duration != null ? song.duration : 0);
+  if (song.musicId != null) args.set("musicId", song.musicId);
+  if (song.version != null) args.set("version", song.version);
+  if (song.isrc != null) args.set("isrc", song.isrc);
+  if (song.durationReliable != null) args.set("durationReliable", song.durationReliable);
   let value = "";
   try {
+    const policyToken = await guardSourcePolicy("getPlayUrl", JSON.stringify([args]));
     value = await callInvoke("getPlayUrl", JSON.stringify([args]), PLAY_TIMEOUT_MS);
+    assertSourcePolicyCurrent(policyToken);
   } catch (e) {
     // 未装播放包（meta 转发层抛 PLAY_PACK_MISSING_MESSAGE）→ 引导安装
+    if (isSourcePolicyError(e)) throw e;
     const message = msgOf(e);
     if (message.indexOf(PLAY_PACK_MISSING_MESSAGE_PART) >= 0) {
       emitPlayPackMissing();
@@ -897,11 +1035,70 @@ const DATA_TIMEOUT_MS = 30000;
  * 失败抛错（调用方按原语义 catch/提示），因为数据接口取不到就是页面加载失败，
  * 需要让用户看到。
  */
-export async function invokeSource(name: string, argsJson: string, timeoutMs: number = DATA_TIMEOUT_MS): Promise<string> {
+/** Account-only callers pass a current guard; ordinary data requests keep their existing contract. */
+function invokeSourceGuarded(name: string, argsJson: string, timeoutMs: number, current: () => boolean): Promise<string> {
+  const generation = gEngineGeneration;
+  const deadline = Date.now() + timeoutMs;
+  return new Promise<string>((resolve, reject) => {
+    let active = true;
+    const timer = setTimeout(() => {
+      if (!active) return;
+      active = false;
+      reject(new Error("ACCOUNT_RECOMMENDATIONS_TIMEOUT"));
+    }, timeoutMs);
+    const check = (): void => {
+      if (Date.now() >= deadline) throw new Error("ACCOUNT_RECOMMENDATIONS_TIMEOUT");
+      if (!active || generation != gEngineGeneration || !current()) {
+        throw new Error("ACCOUNT_RECOMMENDATIONS_AUTH_CHANGED");
+      }
+    };
+    const work = async (): Promise<string> => {
+      check();
+      if (!(await ensureDataEngine())) throw new Error("ACCOUNT_RECOMMENDATIONS_UNSUPPORTED");
+      check();
+      const metaRevision = sourceMetaRevision();
+      const policyToken = await guardSourcePolicy(name, argsJson);
+      check();
+      if (!sourceMetaCurrent(metaRevision)) throw new Error("ACCOUNT_RECOMMENDATIONS_AUTH_CHANGED");
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error("ACCOUNT_RECOMMENDATIONS_TIMEOUT");
+      // No await may occur between this final ownership check and native dispatch.
+      check();
+      const value = await callInvoke(name, argsJson, remaining);
+      check();
+      if (!sourceMetaCurrent(metaRevision)) throw new Error("ACCOUNT_RECOMMENDATIONS_AUTH_CHANGED");
+      if (POLICY_LOCAL_ENTRIES.indexOf(name) < 0) assertSourcePolicyCurrent(policyToken);
+      return value;
+    };
+    void work().then((value: string) => {
+      if (!active) return;
+      try { check(); }
+      catch (error) { active = false; clearTimeout(timer); reject(error); return; }
+      active = false;
+      clearTimeout(timer);
+      resolve(value);
+    }, (error: any) => {
+      if (!active) return;
+      let stale = generation != gEngineGeneration;
+      try { if (!current()) stale = true; }
+      catch (_) { stale = true; }
+      active = false;
+      clearTimeout(timer);
+      if (Date.now() >= deadline) reject(new Error("ACCOUNT_RECOMMENDATIONS_TIMEOUT"));
+      else reject(stale ? new Error("ACCOUNT_RECOMMENDATIONS_AUTH_CHANGED") : error);
+    });
+  });
+}
+export async function invokeSource(name: string, argsJson: string, timeoutMs: number = DATA_TIMEOUT_MS, current: (() => boolean) | null = null): Promise<string> {
+  if (current != null) return await invokeSourceGuarded(name, argsJson, timeoutMs, current);
   if (!(await ensureDataEngine())) {
     throw new Error("音源引擎未就绪：" + (gLastError.length > 0 ? gLastError : "尚未装载"));
   }
-  return await callInvoke(name, argsJson, timeoutMs);
+  if (name == "sourceAvailability" && !(await ensurePlayPackLoaded())) throw new Error("请安装并启用播放音源包");
+  const policyToken = await guardSourcePolicy(name, argsJson);
+  const value = await callInvoke(name, argsJson, timeoutMs);
+  if (POLICY_LOCAL_ENTRIES.indexOf(name) < 0) assertSourcePolicyCurrent(policyToken);
+  return value;
 }
 
 /** 试听校验：让 meta 发一次 Range 请求确认地址真的可播（冒烟自检的第 ③ 道闸门；
@@ -911,7 +1108,9 @@ export async function verifyPlayableByEngine(url: string): Promise<boolean> {
   const args = new UTSJSONObject();
   args.set("url", url);
   try {
+    const policyToken = await guardSourcePolicy("verifyPlayable", JSON.stringify([args]));
     const value = await callInvoke("verifyPlayable", JSON.stringify([args]), VERIFY_TIMEOUT_MS);
+    assertSourcePolicyCurrent(policyToken);
     const o = JSON.parse(value) as UTSJSONObject;
     const okFlag = o.get("ok") as boolean | null;
     return okFlag == true;

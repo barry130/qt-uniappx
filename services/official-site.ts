@@ -13,6 +13,17 @@ export const OFFICIAL_SITE_URL = "https://quietmusic.canace.cn";
 /** 意见反馈：GitHub / CNB 双渠道的 Issue 与 PR 入口 */
 export const OFFICIAL_FEEDBACK_URL = OFFICIAL_SITE_URL + "/feedback";
 
+/**
+ * 直接提交 Issue 的两个仓库入口（2026-11-14 起反馈页的两个按钮指向这里）。
+ *
+ * 为什么不再跳官网 /feedback：官网那一层还要再点一次跳转，多一跳就多一次流失；
+ * 两个仓库与官网首页列的完全相同，仓库地址也必须与 git remote 完全一致
+ * （GitHub 为 git@github.com:barry130/qt-uniappx.git，CNB 为 canace/qt-uniappx），
+ * 否则用户会落到 404 或别人的同名仓库上。
+ */
+export const OFFICIAL_ISSUE_CNB_URL = "https://cnb.cool/canace/qt-uniappx/-/issues/new";
+export const OFFICIAL_ISSUE_GITHUB_URL = "https://github.com/barry130/qt-uniappx/issues/new";
+
 /** 用户协议 */
 export const OFFICIAL_AGREEMENT_URL = OFFICIAL_SITE_URL + "/agreement";
 

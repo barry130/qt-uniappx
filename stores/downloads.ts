@@ -183,7 +183,7 @@ function headerValue(headers: any, name: string): string {
 }
 
 function parseContentRange(value: string): QtContentRange | null {
-  const match = /^bytes\s+(\d+)-(\d+)\/(\d+)$/i.exec(value);
+  const match = /^bytes\s+(\d+)-(\d+)\/(\d+)$/i.exec(value.trim());
   if (match == null) return null;
   let start = parseInt(match[1]);
   let end = parseInt(match[2]);
@@ -319,16 +319,11 @@ function isRangeNotSatisfiable(e: any): boolean {
 }
 /** 下载文件名格式（uni 存储键）：artist=歌手-歌名（默认），song=歌名-歌手 */
 const DOWNLOAD_NAME_FORMAT_KEY = "qt-download-name-format";
-/** 同时下载数（uni 存储键）：默认 3，范围 1~6 */
+/** 同时下载数（uni 存储键）：默认 1，只有 1/2 两档（2026-11-13 用户口径） */
 const DOWNLOAD_CONCURRENCY_KEY = "qt-download-concurrency";
 export const DOWNLOAD_CONCURRENCY_MIN = 1;
-export const DOWNLOAD_CONCURRENCY_MAX = 6;
-export const DOWNLOAD_CONCURRENCY_DEFAULT = 3;
-/**
- * 超过 3 并发就要提醒一次：音源 CDN 普遍按 IP 限流，一次放太多连接容易被判成
- * 爬虫而临时封 IP（LX Music 的默认上限也是 3）。这里只提醒，不禁止。
- */
-export const DOWNLOAD_CONCURRENCY_WARN_ABOVE = 3;
+export const DOWNLOAD_CONCURRENCY_MAX = 2;
+export const DOWNLOAD_CONCURRENCY_DEFAULT = 1;
 
 /**
  * 下载同时保存封面 / 歌词（uni 存储键）。都默认关：额外请求会拖慢整批下载，
@@ -562,6 +557,8 @@ class DownloadsStore {
   private lastTickAt = 0;
   /** 老记录字节数回填是否已跑过（restore 会被反复调，只跑一次） */
   private sizeBackfillDone = false;
+  /** 当前运行时若不提供下载响应头，后续任务直接整下，避免重复探测和无效分块。 */
+  private downloadHeadersUnavailable = false;
 
   restore(): void {
     // 队列恢复只做一次；恢复内部会 pump，等待中的任务自动续传
@@ -1104,10 +1101,11 @@ class DownloadsStore {
       const dir = partDirOf();
       let total = 0;
       const resourceKey = resourceKeyOf(task.song, wanted);
-      const cached = dir != null ? this.readPartTotal(task.song, resourceKey) : 0;
+      const canResume = dir != null && !this.downloadHeadersUnavailable;
+      const cached = canResume ? this.readPartTotal(task.song, resourceKey, url) : 0;
       if (cached > 0) {
         total = cached;
-      } else if (dir != null) {
+      } else if (canResume) {
         total = await this.headTotal(url, task.song.platform);
         if (!this.taskIsCurrent(task, myRun)) return;
       }
@@ -1116,28 +1114,17 @@ class DownloadsStore {
       qtDiagDebug("[Download] 续传探测 " + task.song.platform + ":" + task.song.id +
         " dir=" + (dir == null ? "null" : "ok") + " total=" + total +
         " cached=" + cached);
-      if (total > 0 && dir != null) {
+      if (total > 0 && dir != null && !this.downloadHeadersUnavailable) {
         this.noteBytes(task, cached, total);
         const assembled = await this.fetchResumable(url, task.song, total, resourceKey, dir, task, myRun);
         // 暂停/移除：.part 已保留在私有目录，静默退出（恢复时续传）
         if (assembled == null) return;
         tempPath = assembled;
       } else {
-        task.progress = 0;
-        tempPath = await this.fetchToTemp(url, task.song.platform, task, myRun, (progress: number, done: number, total: number) => {
-          // 旧传输（暂停/移除后）不再刷进度：新传输在跑时它还在回调会打架
-          if (task.cancelled || task.runId != myRun) return;
-          this.noteBytes(task, done, total);
-          this.setProgress(task, progress);
-        });
-        if (!this.taskIsCurrent(task, myRun)) {
-          try {
-            uni.getFileSystemManager().unlinkSync(plainPath(tempPath));
-          } catch (_) {
-            // 静默：取消后临时文件删不掉由平台缓存清理兜底
-          }
-          return;
-        }
+        if (this.downloadHeadersUnavailable) this.clearPart(task.song);
+        const whole = await this.fetchWhole(url, task, myRun);
+        if (whole == null) return;
+        tempPath = whole;
       }
       // 下载期间被用户移除/暂停：直接丢弃，不落盘、不写已下载列表
       if (!this.taskIsCurrent(task, myRun)) return;
@@ -1321,29 +1308,77 @@ class DownloadsStore {
     this.enqueue(song);
   }
 
+  private discardTemp(path: string): void {
+    if (path == null || path.length == 0) return;
+    try {
+      uni.getFileSystemManager().unlinkSync(plainPath(path));
+    } catch (_) {
+      // 静默：下载临时文件删除失败由平台缓存清理兜底
+    }
+  }
+
+  private async fetchWhole(url: string, task: DownloadTask, myRun: number): Promise<string | null> {
+    if (task.cancelled || task.runId != myRun) return null;
+    task.doneBytes = 0;
+    task.totalBytes = 0;
+    this.resetSpeed(task);
+    this.setProgress(task, 0);
+    const path = await this.fetchToTemp(url, task.song.platform, task, myRun, (progress: number, done: number, total: number) => {
+      if (task.cancelled || task.runId != myRun) return;
+      this.noteBytes(task, done, total);
+      this.setProgress(task, progress);
+    });
+    if (task.cancelled || task.runId != myRun) {
+      this.discardTemp(path);
+      return null;
+    }
+    return path;
+  }
+
   private fetchToTemp(url: string, platform: string, task: DownloadTask, myRun: number, onProgress?: (progress: number, done: number, total: number) => void): Promise<string> {
     // 并发消费（pump），单个底层挂起会白占一个名额：
     // 整体包一层限时，超时按失败处理让名额归还（runTaskInner 的 catch 会重试或置 failed）
     return new Promise<string>((outerResolve, outerReject) => {
+      let settled = false;
       const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         outerReject(new Error("网络超时（连接太慢或音源限速）"));
+        if (task.runId == myRun && task.abortHandle != null) {
+          try {
+            task.abortHandle.abort();
+          } catch (_) {
+            // 静默：超时已交付，迟到的下载结果会单独清理
+          }
+        }
       }, DOWNLOAD_TIMEOUT_MS) as number;
-      const settle = (fn: () => void): void => {
-        clearTimeout(timer);
-        fn();
-      };
-      this.fetchToTempOnce(url, platform, task, myRun, onProgress).then(
-        (path) => settle(() => outerResolve(path)),
-        (err) => settle(() => outerReject(err)),
+      this.fetchToTempOnce(url, platform, task, myRun, () => !settled, onProgress).then(
+        (path) => {
+          if (settled) {
+            this.discardTemp(path);
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          outerResolve(path);
+        },
+        (err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          outerReject(err);
+        },
       );
     });
   }
 
-  private async fetchToTempOnce(url: string, platform: string, task: DownloadTask, myRun: number, onProgress?: (progress: number, done: number, total: number) => void): Promise<string> {
+  private async fetchToTempOnce(url: string, platform: string, task: DownloadTask, myRun: number, isActive: () => boolean, onProgress?: (progress: number, done: number, total: number) => void): Promise<string> {
     // 注册表是 Referer 的唯一来源：冷启动直接点下载时可能还没拉过注册表，
     // 先确保就绪再取头，否则会漏发本应带的 Referer（幂等、失败静默）。
     await musicApi.ensureRegistry();
+    if (!isActive() || task.cancelled || task.runId != myRun) throw new Error("下载已取消");
     return new Promise<string>((resolve, reject) => {
+      let completed = false;
       const header = new UTSJSONObject();
       // Referer 由数据包按源声明（music-api 的 refererOf 读注册表能力自述）。
       // 未声明就**不发**该头：老代码在这里给未知源兜底成网易云，等于冒充别的平台，
@@ -1354,21 +1389,32 @@ class DownloadsStore {
         url,
         header,
         success: (res) => {
-          if (res.statusCode >= 200 && res.statusCode < 300) {
+          if (completed || !isActive()) {
+            this.discardTemp(res.tempFilePath);
+            return;
+          }
+          completed = true;
+          if (task.runId == myRun) task.abortHandle = null;
+          if (res.statusCode == 200) {
             resolve(res.tempFilePath);
           } else {
-            reject(new Error(describeHttpStatus(res.statusCode)));
+            this.discardTemp(res.tempFilePath);
+            reject(new Error(res.statusCode == 206 ? "下载响应不完整（音源仍返回了部分文件）" : describeHttpStatus(res.statusCode)));
           }
         },
         fail: (error) => {
-          logErrV("Download", "下载失败", error);
+          if (completed) return;
+          completed = true;
+          if (task.runId == myRun) task.abortHandle = null;
+          if (isActive() && !task.cancelled && task.runId == myRun) logErrV("Download", "下载失败", error);
           reject(new Error(describeNetError(error)));
         },
       });
       // 使用 downloadTask 注册进度回调；句柄挂到任务上，暂停时尽力 abort
-      task.abortHandle = downloadTask;
+      if (!completed && !task.cancelled && task.runId == myRun) task.abortHandle = downloadTask;
       if (downloadTask && downloadTask.onProgressUpdate) {
         downloadTask.onProgressUpdate((progress) => {
+          if (completed || !isActive() || task.cancelled || task.runId != myRun) return;
           if (onProgress) {
             // 整下路径拿得到真实字节数：totalBytesWritten / totalBytesExpectedToWrite。
             // 有的源不给 Content-Length（total 为 0），此时只报已写字节。
@@ -1808,7 +1854,7 @@ class DownloadsStore {
    * 大小超过它（侧车与残留对不上、被别的路径改过），调用方会照 total 发 Range
    * 而被服务器回 416。这里对不上就返回 0，让调用方重新探测。
    */
-  private readPartTotal(song: Song, resourceKey: string): number {
+  private readPartTotal(song: Song, resourceKey: string, url: string): number {
     const dir = partDirOf();
     if (dir == null) return 0;
     const partPath = dir + "/" + partKey(song) + ".part";
@@ -2017,10 +2063,17 @@ class DownloadsStore {
   private probeTotalByDownload(url: string, platform: string): Promise<number> {
     return new Promise<number>((resolve) => {
       let settled = false;
+      let probe: any = null;
       const timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          resolve(0);
+        if (settled) return;
+        settled = true;
+        resolve(0);
+        if (probe != null) {
+          try {
+            probe.abort();
+          } catch (_) {
+            // 静默：探测超时已返回，迟到的临时文件会在 success 中清理
+          }
         }
       }, DOWNLOAD_HEAD_TIMEOUT_MS) as number;
       const done = (n: number): void => {
@@ -2037,16 +2090,20 @@ class DownloadsStore {
           url,
           header,
           success: (res) => {
+            this.discardTemp(res.tempFilePath);
+            if (settled) return;
             // 没经过进度回调就结束了：拿不到长度，按探不到处理
             // （探不到长度是常规降级：退回一次性整下，不算失败，故走 debug 级）
             qtDiagDebug("[Download] 探测(下载) 无进度即结束 status=" + res.statusCode);
             done(0);
           },
           fail: (e) => {
+            if (settled) return;
             qtDiagDebug("[Download] 探测(下载) 失败 " + describeNetError(e));
             done(0);
           },
         });
+        probe = dt;
         if (dt && dt.onProgressUpdate) {
           dt.onProgressUpdate((p) => {
             // 已判定过就必须立刻返回。abort 不是瞬间生效：实测一次探测的进度回调
@@ -2067,6 +2124,7 @@ class DownloadsStore {
           });
         }
       } catch (e) {
+        if (settled) return;
         qtDiagDebug("[Download] 探测(下载) 异常 " + describeNetError(e));
         done(0);
       }
@@ -2076,6 +2134,7 @@ class DownloadsStore {
   /**
    * 下一个分块（Range: bytes=start-end）。返回块临时文件；
    * whole=true 表示服务器无视 Range 直接回了整个文件（此时临时文件就是成品）。
+   * 缺少可校验的 Content-Range 时丢弃该块并返回 null，由调用方改为完整下载。
    * 进度按「已完成字节 + 块内进度」折算成整体百分比。
    */
   private fetchChunk(
@@ -2088,10 +2147,27 @@ class DownloadsStore {
     task: DownloadTask,
     myRun: number,
     ifRange: string,
-  ): Promise<QtChunkResult> {
-    return new Promise<QtChunkResult>((resolve, reject) => {
+  ): Promise<QtChunkResult | null> {
+    return new Promise<QtChunkResult | null>((resolve, reject) => {
+      let settled = false;
+      let downloadTask: any = null;
+      const finish = (): boolean => {
+        if (settled) return false;
+        settled = true;
+        clearTimeout(timer);
+        if (task.runId == myRun && task.abortHandle == downloadTask) task.abortHandle = null;
+        return true;
+      };
       const timer = setTimeout(() => {
+        if (!finish()) return;
         reject(new Error("网络超时（连接太慢或音源限速）"));
+        if (downloadTask != null) {
+          try {
+            downloadTask.abort();
+          } catch (_) {
+            // 静默：分块超时已交付，迟到的结果会丢弃
+          }
+        }
       }, DOWNLOAD_CHUNK_TIMEOUT_MS) as number;
       const header = new UTSJSONObject();
       const referer = musicApi.refererOf(platform as Source);
@@ -2102,11 +2178,18 @@ class DownloadsStore {
         url,
         header,
         success: (res) => {
-          clearTimeout(timer);
-          task.abortHandle = null;
+          if (!finish()) {
+            this.discardTemp(res.tempFilePath);
+            return;
+          }
           if (res.statusCode < 200 || res.statusCode >= 300) {
+            this.discardTemp(res.tempFilePath);
             reject(new Error(describeHttpStatus(res.statusCode)));
             return;
+          }
+          const responseHeaders = (res as any).header;
+          if ((res.statusCode == 200 || res.statusCode == 206) && responseHeaders == null) {
+            this.downloadHeadersUnavailable = true;
           }
           if (res.statusCode == 200) {
             // If-Range 不匹配或服务器不支持 Range：返回的是完整文件，作为成品使用。
@@ -2116,15 +2199,16 @@ class DownloadsStore {
               rangeStart: 0,
               rangeEnd: 0,
               rangeTotal: 0,
-              etag: headerValue(res.header, "ETag"),
-              lastModified: headerValue(res.header, "Last-Modified"),
+              etag: headerValue(responseHeaders, "ETag"),
+              lastModified: headerValue(responseHeaders, "Last-Modified"),
             });
             return;
           }
           if (res.statusCode == 206) {
-            const range = parseContentRange(headerValue(res.header, "Content-Range"));
+            const range = parseContentRange(headerValue(responseHeaders, "Content-Range"));
             if (range == null) {
-              reject(new Error("续传响应缺少有效 Content-Range"));
+              this.discardTemp(res.tempFilePath);
+              resolve(null);
               return;
             }
             resolve({
@@ -2133,17 +2217,17 @@ class DownloadsStore {
               rangeStart: range.start,
               rangeEnd: range.end,
               rangeTotal: range.total,
-              etag: headerValue(res.header, "ETag"),
-              lastModified: headerValue(res.header, "Last-Modified"),
+              etag: headerValue(responseHeaders, "ETag"),
+              lastModified: headerValue(responseHeaders, "Last-Modified"),
             });
             return;
           }
+          this.discardTemp(res.tempFilePath);
           reject(new Error("不支持的分块响应（HTTP " + res.statusCode + "）"));
         },
         fail: (error) => {
-          clearTimeout(timer);
-          task.abortHandle = null;
-          logErrV("Download", "分块下载失败", error);
+          if (!finish()) return;
+          if (!task.cancelled && task.runId == myRun) logErrV("Download", "分块下载失败", error);
           // 416 必须原样带出去：下面 describeNetError 会把它糊成「网络错误」，
           // 上层就认不出「该丢残留重来」和「网络抖动重试」的区别了。
           if (isRangeNotSatisfiable(error)) {
@@ -2153,9 +2237,11 @@ class DownloadsStore {
           reject(new Error(describeNetError(error)));
         },
       });
-      task.abortHandle = dt;
+      downloadTask = dt;
+      if (!settled && !task.cancelled && task.runId == myRun) task.abortHandle = dt;
       if (dt && dt.onProgressUpdate) {
         dt.onProgressUpdate((p) => {
+          if (settled) return;
           // 旧代次（暂停/移除后）：立刻掐断，省流量也不刷进度
           if (task.cancelled || task.runId != myRun) {
             try {
@@ -2276,10 +2362,11 @@ class DownloadsStore {
       if (task.cancelled || task.runId != myRun) return null;
       const start = partSize;
       const end = Math.min(start + DOWNLOAD_CHUNK_BYTES, total) - 1;
-      let chunk: QtChunkResult;
+      let chunk: QtChunkResult | null;
       try {
         chunk = await this.fetchChunk(url, song.platform, start, end, total, partSize, task, myRun, ifRange);
       } catch (e) {
+        if (task.cancelled || task.runId != myRun) return null;
         // 416：侧车记的总长与这次新链接的实际大小对不上，重试同一段永远是 416。
         // 清掉残留后**抛出去**（不能 return null——那是「暂停/已移除」的语义，
         // 会让任务静默消失）：runTaskInner 的 catch 会退避重排一次，重新取址
@@ -2302,12 +2389,13 @@ class DownloadsStore {
         throw e;
       }
       if (task.cancelled || task.runId != myRun) {
-        try {
-          fs.unlinkSync(plainPath(chunk.temp));
-        } catch (_) {
-          // 静默：删不掉仅残留少量缓存，不影响下载结果
-        }
+        if (chunk != null) this.discardTemp(chunk.temp);
         return null;
+      }
+      if (chunk == null) {
+        qtDiagDebug("[Download] 无法校验续传响应，改为完整下载 " + song.platform + ":" + song.id);
+        this.clearPart(song);
+        return await this.fetchWhole(url, task, myRun);
       }
       if (chunk.whole) {
         // 服务器不认 Range：这块临时文件就是完整成品，丢掉 .part 直接用
