@@ -1,28 +1,33 @@
 <template>
-  <QtSheet :visible="visible" :title="title" @close="close">
-    <scroll-view class="as-list" direction="vertical" :show-scrollbar="false" :scroll-into-view="reveal.anchor.value" :style="listStyle">
-      <view v-for="(action, index) in actions" :key="index" :id="reveal.itemId(index)">
-        <QtOption :label="action.name" :selected="index == selectedIdx" :disabled="action.disabled == true" :color="action.color != null ? action.color : ''" :dense="true" @select="pick(index)" />
+  <QtSheet :visible="visible" :title="title" :footer-flush="true" @close="close">
+    <scroll-view class="as-list" :class="layout.isTv ? 'qt-tv-scroll' : ''" data-qt-tv-id="action-sheet-list" direction="vertical" :show-scrollbar="contentHeight > availableHeight" :scroll-into-view="reveal.anchor.value" :style="listStyle">
+      <view :id="contentId" class="as-content">
+        <view v-for="(action, index) in actions" :key="index" :id="reveal.itemId(index)">
+          <QtOption :data-qt-tv-id="'action-sheet-item:' + index" :label="action.name" :description="action.description != null ? action.description : ''" :row-min-height-px="action.description != null ? 44 : 0" :selected="index == selectedIdx" :disabled="action.disabled == true" :color="action.color != null ? action.color : ''" :dense="true" @select="pick(index)" />
+        </view>
       </view>
     </scroll-view>
     <template #footer>
-      <view class="as-cancel" :class="layout.isWide ? 'as-cancel-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'" @click="close">
+      <!-- 用户 2026-11-13：取消键直接贴到弹层底边，安全区由同色垫条补齐，不再在下面留一行空白。 -->
+      <view class="as-cancel" :class="layout.isWide ? 'as-cancel-wide' : ''" data-qt-tv-id="action-sheet-cancel" :style="'background-color:' + theme.skin.surfaceMuted + ';' + (layout.isTv ? 'height:56px;' : '')" @click="close">
         <text class="as-cancel-text" :class="layout.isWide ? 'as-cancel-text-wide' : ''" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(28, 15)">取消</text>
       </view>
+      <view class="as-cancel-inset" :class="layout.isWide ? 'as-cancel-inset-wide' : ''" :style="'height:' + cancelInsetPx + 'px;background-color:' + theme.skin.surfaceMuted + ';'" @click="close"></view>
     </template>
   </QtSheet>
 </template>
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch, nextTick, onMounted, onUnmounted } from "vue";
 import QtSheet from "@/uni_modules/qt-ui/components/qt-sheet/qt-sheet.uvue";
 import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtSelectionIndex } from "@/uni_modules/qt-ui/composables/selection";
 import { useQtSelectionReveal } from "@/uni_modules/qt-ui/composables/use-qt-selection-reveal";
+import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 
-export type SheetAction = { name: string; color?: string; disabled?: boolean };
+export type SheetAction = { name: string; description?: string; color?: string; disabled?: boolean };
 const props = withDefaults(defineProps<{
   visible: boolean;
   title?: string;
@@ -37,27 +42,86 @@ const emit = defineEmits<{
 const layout = useQtLayout();
 const theme = useThemeStore();
 const selectedIdx = computed((): number => qtSelectionIndex(props.selectedIndex, props.actions.length));
-const reveal = useQtSelectionReveal((): boolean => props.visible, (): number => selectedIdx.value, (): string => JSON.stringify(props.actions));
-// 一行的实际高度：紧凑行不设 min-height，高度=上下内边距 + 一行文字
-// （见 qt-option 的 .qo-row-dense：手机 22rpx*2，宽屏 11px*2）。
-const rowHeight = computed((): number => {
-  if (layout.isWide) return 22 + 15 * fontScale.scale * 1.35;
-  const unit = layout.windowWidth / 750;
-  return (44 + 28 * fontScale.scale * 1.35) * unit;
+const measuredHeight = ref(0);
+const reveal = useQtSelectionReveal((): boolean => props.visible, (): number => selectedIdx.value,
+  (): string => JSON.stringify(props.actions) + ":" + measuredHeight.value);
+const contentId = reveal.itemId(0) + "-content";
+const panelWidth = computed((): number => layout.isWide ? qtSheetWidth("drawer") : layout.paneWidth);
+const unit = computed((): number => layout.isWide ? 1 : layout.windowWidth / 750);
+/** 手机取消键只消费窗口尚未避让的安全区，不添加装饰空白；宽屏保留面板内边距。 */
+const cancelInsetPx = computed((): number => layout.isWide ? 12 : layout.safeBottomPx);
+/** First-frame estimate only. Native content measurement is authoritative after wrapping. */
+function textLines(text: string, fontPx: number, width: number): number {
+  let lines = 0;
+  for (const paragraph of text.split("\n")) {
+    let span = 0;
+    for (const glyph of Array.from(paragraph)) span += (glyph.charCodeAt(0) > 255 ? 1 : 0.58) * fontPx;
+    lines += Math.max(1, Math.ceil(span / Math.max(1, width)));
+  }
+  return lines;
+}
+const estimatedHeight = computed((): number => {
+  const width = panelWidth.value - (layout.isWide ? 40 : 64 * unit.value);
+  const labelFont = layout.isTv ? qtFontValuePx(15) : (layout.isWide ? 15 : 28 * unit.value) * fontScale.scale;
+  const descriptionFont = layout.isTv ? qtFontValuePx(12) : (layout.isWide ? 12 : 23 * unit.value) * fontScale.scale;
+  let total = 0;
+  for (const action of props.actions) {
+    const description = action.description != null ? action.description : "";
+    const labelLine = layout.isTv ? Math.ceil(labelFont * 1.35) : labelFont * 1.35;
+    const descriptionLine = layout.isTv ? Math.ceil(descriptionFont * 1.4) : descriptionFont * 1.4;
+    const body = textLines(action.name, labelFont, width) * labelLine
+      + (description.length > 0 ? textLines(description, descriptionFont, width) * descriptionLine + (layout.isWide ? 3 : 6 * unit.value) : 0);
+    const padding = layout.isTv || action.description != null ? 16 : (layout.isWide ? 22 : 44 * unit.value);
+    total += Math.max(layout.isTv ? 76 : action.description != null ? 44 : 0, body + padding) + unit.value;
+  }
+  return total;
+});
+const contentHeight = computed((): number => measuredHeight.value > 0 ? measuredHeight.value : estimatedHeight.value);
+const availableHeight = computed((): number => {
+  const titleFont = layout.isTv ? qtFontValuePx(16) : (layout.isWide ? 16 : 30 * unit.value) * fontScale.scale;
+  const titleWidth = panelWidth.value - (layout.isTv ? 108 : layout.isWide ? 86 : 144 * unit.value);
+  const titleLine = layout.isTv ? Math.ceil(titleFont * 1.35) : titleFont * 1.4;
+  const heading = textLines(props.title, titleFont, titleWidth) * titleLine;
+  const header = props.title.length > 0 ? (layout.isWide ? 28 : 48 * unit.value) + Math.max(layout.isTv ? 56 : layout.isWide ? 36 : 64 * unit.value, heading) + unit.value : 0;
+  const footer = layout.isTv ? 60 : layout.isWide ? 52 : 104 * unit.value;
+  const bottom = cancelInsetPx.value;
+  return Math.max(0, Math.floor(layout.paneHeight * 0.86 - layout.safeBottomPx - header - footer - bottom - 2));
 });
 const listStyle = computed((): string => {
-  const unit = layout.isWide ? 1 : layout.windowWidth / 750;
-  const header = props.title.length > 0 ? (layout.isWide ? 64 : 112 * unit) : 0;
-  const footer = layout.isWide ? 60 : 112 * unit;
-  const available = Math.max(0, layout.windowHeight * 0.86 - layout.safeBottomPx - header - footer);
-  const need = props.actions.length * rowHeight.value;
-  const row = rowHeight.value;
-  // Native scroll-view needs an explicit bounded viewport, including for a one-row menu.
-  // 放得下就贴合内容（不留空白拖尾）；放不下时留半行露头，让人一眼看出还能下滑 ——
-  // 直接按可用高度截断，下一行会被整行盖住，看不出列表还能滚。
-  const height = need <= available ? need : Math.max(row * 2, available - row * 0.45);
-  return "height:" + Math.round(Math.min(need, available, height)) + "px;";
+  return "height:" + Math.min(Math.ceil(contentHeight.value), availableHeight.value) + "px;";
 });
+let mounted = false;
+let generation = 0;
+let measureTimer: number | null = null;
+function cancelMeasure(): void {
+  generation++;
+  if (measureTimer != null) clearTimeout(measureTimer);
+  measureTimer = null;
+}
+function measureContent(token: number, attempt: number): void {
+  if (!mounted || !props.visible || token != generation) return;
+  uni.createSelectorQuery().select("#" + contentId).boundingClientRect((rect: UniNodeInfo) => {
+    if (!mounted || !props.visible || token != generation) return;
+    if (rect != null && rect.height > 0) {
+      measuredHeight.value = Math.ceil(rect.height);
+    } else if (attempt < 3) {
+      measureTimer = setTimeout(() => { measureTimer = null; measureContent(token, attempt + 1); }, 80) as number;
+    }
+  }).exec();
+}
+function refreshMeasure(): void {
+  cancelMeasure();
+  measuredHeight.value = 0;
+  if (!mounted || !props.visible) return;
+  const token = generation;
+  nextTick(() => {
+    if (!mounted || !props.visible || token != generation) return;
+    measureTimer = setTimeout(() => { measureTimer = null; measureContent(token, 0); }, 32) as number;
+  });
+}
+watch((): string => String(props.visible) + ":" + JSON.stringify(props.actions) + ":" + layout.sizeEpoch + ":" + fontScale.scale, refreshMeasure);
+onMounted((): void => { mounted = true; refreshMeasure(); });
+onUnmounted((): void => { mounted = false; cancelMeasure(); });
 function close(): void { emit("update:visible", false); emit("close"); }
 function pick(index: number): void {
   const action = props.actions[index];
@@ -68,8 +132,11 @@ function pick(index: number): void {
 </script>
 <style>
 .as-list { flex-shrink: 1; min-height: 0; }
+.as-content { flex-shrink: 0; }
 .as-cancel { height: 96rpx; align-items: center; justify-content: center; margin-top: 8rpx; }
 .as-cancel-wide { height: 48px; margin-top: 4px; }
+.as-cancel-inset { flex-shrink: 0; }
+.as-cancel-inset-wide { flex-shrink: 0; }
 .as-cancel-text { font-size: 28rpx; }
 .as-cancel-text-wide { font-size: 15px; }
 </style>

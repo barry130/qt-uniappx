@@ -1,16 +1,17 @@
 <template>
-  <view v-if="notice != null" class="nts-mask" :style="maskStyle" @click="onMaskTap">
-    <view class="nts-card" :class="layout.isWide ? 'nts-card-wide' : ''" :style="cardStyle" @click.stop>
-      <view v-if="hasTitle" class="nts-title-wrap" :class="layout.isWide ? 'nts-title-wrap-wide' : ''">
-        <text class="nts-title" :class="layout.isWide ? 'nts-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(34, 20)">{{ notice!.title }}</text>
+  <view v-if="notice != null" class="nts-mask qt-tv-skip" :style="maskStyle" @click="onMaskTap">
+    <view ref="tvPanel" class="nts-card qt-tv-skip" :class="layout.isWide ? 'nts-card-wide' : ''" :style="cardStyle" @click.stop>
+      <view v-if="hasTitle && !tv.enabled" class="nts-title-wrap" :class="layout.isWide ? 'nts-title-wrap-wide' : ''">
+        <text class="nts-title" :class="layout.isWide ? 'nts-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(34, 20) + tvLine(20)">{{ notice!.title }}</text>
       </view>
       <scroll-view
-        v-if="hasContent"
-        class="nts-content"
+        v-if="hasContent || (tv.enabled && hasTitle)"
+        class="nts-content qt-tv-scroll"
         direction="vertical"
         :show-scrollbar="false"
         :style="contentStyle"
       >
+        <text v-if="tv.enabled && hasTitle" class="nts-title nts-title-wide" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(34, 20) + tvLine(20) + 'margin-bottom:12px;'">{{ notice!.title }}</text>
         <QtRichText
           :html="notice!.content ?? ''"
           :color="themeStore.skin.textMuted"
@@ -19,15 +20,17 @@
           align="left"
         />
       </scroll-view>
-      <view class="nts-btn nts-btn-primary" :class="layout.isWide ? 'nts-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @click="onKnow">
-        <text class="nts-btn-text-primary" :class="layout.isWide ? 'nts-btn-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(26, 15)">我知道了</text>
-      </view>
-      <view v-if="hasJump" class="nts-btn nts-btn-secondary" :class="layout.isWide ? 'nts-btn-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';'" @click="onJump">
-        <text class="nts-btn-text-secondary" :class="layout.isWide ? 'nts-btn-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 15)">点击跳转</text>
-      </view>
-      <view v-if="hasClose" class="nts-check-row" :class="layout.isWide ? 'nts-check-row-wide' : ''" @click.stop="toggleHideToday">
-        <QtCheckbox :checked="hideToday" :size="layout.isWide ? 'sm' : 'md'" @change="onHideTodayChange" />
-        <text class="nts-check-text" :class="layout.isWide ? 'nts-check-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13)">今天不显示</text>
+      <view class="nts-actions" :style="tvActionsStyle">
+        <view class="nts-btn nts-btn-primary" data-qt-tv-id="notice-know" :class="layout.isWide ? 'nts-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';' + tvPrimaryStyle" @click="onKnow">
+          <text class="nts-btn-text-primary" :class="layout.isWide ? 'nts-btn-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(26, 15) + tvLine(15)">我知道了</text>
+        </view>
+        <view v-if="hasJump" class="nts-btn nts-btn-secondary" data-qt-tv-id="notice-jump" :class="layout.isWide ? 'nts-btn-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';' + tvSecondaryStyle" @click="onJump">
+          <text class="nts-btn-text-secondary" :class="layout.isWide ? 'nts-btn-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 15) + tvLine(15)">点击跳转</text>
+        </view>
+        <view v-if="hasClose" class="nts-check-row" :class="[layout.isWide ? 'nts-check-row-wide' : '', tv.enabled ? 'qt-tv-skip' : '']" :style="tvCheckStyle" @click.stop="toggleHideToday">
+          <QtCheckbox data-qt-tv-id="notice-hide-today" :checked="hideToday" :size="layout.isWide ? 'sm' : 'md'" @change="onHideTodayChange" />
+          <text class="nts-check-text" :class="layout.isWide ? 'nts-check-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13) + tvLine(13)">今天不显示</text>
+        </view>
       </view>
     </view>
   </view>
@@ -40,13 +43,48 @@ import QtRichText from "@/uni_modules/qt-ui/components/qt-rich-text/qt-rich-text
 import type { Notice } from "@/types/notice";
 import { openNoticeUrl } from "@/services/notice";
 import { exitApp } from "@/services/app-native";
-import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtFixedPaneStyle, useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { useQtTv } from "@/uni_modules/qt-ui/composables/use-qt-tv";
+import { useQtTvModal } from "@/uni_modules/qt-ui/composables/use-qt-tv-modal";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const layout = useQtLayout();
 const themeStore = useThemeStore();
+const tv = useQtTv();
+const tvPanel = ref<UniElement | null>(null);
+function tvLine(basePx: number): string {
+  return tv.enabled ? "line-height:" + Math.ceil(qtFontValuePx(basePx) * 1.4) + "px;" : "";
+}
+const tvInlineActions = computed((): boolean => tv.enabled && layout.isShort);
+const tvInnerWidth = computed((): number => Math.max(0, Math.min(qtSheetWidth("modal"), layout.paneWidth - 56) - 48));
+const tvCheckWidth = computed((): number => 56 + 8 + Math.ceil(qtFontValuePx(13) * 5));
+// Keep both original actions on the first short-screen line. The checkbox gets
+// its own full-width line when three complete labels would exceed the pane.
+const tvCheckOwnLine = computed((): boolean => tvInlineActions.value && hasClose.value && tvInnerWidth.value < (hasJump.value ? 2 : 1) * Math.ceil(qtFontValuePx(15) * 4 + 16) + tvCheckWidth.value + (hasJump.value ? 24 : 12));
+const tvActionWidth = computed((): number => {
+  const reserved = hasClose.value && !tvCheckOwnLine.value ? tvCheckWidth.value + 12 : 0;
+  return Math.max(0, Math.floor((tvInnerWidth.value - reserved - (hasJump.value ? 12 : 0)) / (hasJump.value ? 2 : 1)));
+});
+const tvControlHeight = computed((): number => Math.max(56, Math.ceil(qtFontValuePx(15) * 1.4) + 16));
+const tvActionsStyle = computed((): string => tv.enabled ? (tvInlineActions.value ? "flex-direction:row;flex-wrap:wrap;align-items:center;flex-shrink:0;margin-top:16px;" : "flex-shrink:0;") : "flex-shrink:0;");
+const tvPrimaryStyle = computed((): string => {
+  if (!tv.enabled) return "";
+  const h = tvControlHeight.value;
+  return "height:" + h + "px;min-height:" + h + "px;flex-shrink:0;border-radius:28px;" + (tvInlineActions.value ? "width:" + tvActionWidth.value + "px;margin-top:0px;" : "margin-top:16px;");
+});
+const tvSecondaryStyle = computed((): string => {
+  if (!tv.enabled) return "";
+  const h = tvControlHeight.value;
+  return "height:" + h + "px;min-height:" + h + "px;flex-shrink:0;border-radius:28px;" + (tvInlineActions.value ? "width:" + tvActionWidth.value + "px;margin-top:0px;margin-left:12px;" : "margin-top:12px;");
+});
+const tvCheckStyle = computed((): string => {
+  if (!tv.enabled) return "";
+  const h = tvControlHeight.value;
+  const w = tvCheckOwnLine.value ? tvInnerWidth.value : tvCheckWidth.value;
+  return "min-height:" + h + "px;flex-shrink:0;" + (tvInlineActions.value ? "width:" + w + "px;margin-top:" + (tvCheckOwnLine.value ? 12 : 0) + "px;margin-left:" + (tvCheckOwnLine.value ? 0 : 12) + "px;" : "margin-top:12px;");
+});
 
 /**
  * 宽屏宽度走统一浮层契约（QT_SHEET_WIDTH.modal = 560），并夹到窗口内。
@@ -58,13 +96,18 @@ const themeStore = useThemeStore();
  */
 const cardStyle = computed((): string => {
   const bg = "background-color:" + themeStore.skin.sheetSurface + ";";
-  if (!layout.isWide) return bg + "width:620rpx;";
-  const maxH = Math.max(260, layout.windowHeight - 32); // 32 = 上下各 16 的呼吸位
+  if (tv.enabled) {
+    const width = Math.max(0, Math.min(qtSheetWidth("modal"), layout.paneWidth - 56));
+    const maxH = Math.max(0, layout.paneHeight - 56);
+    return bg + "width:" + width + "px;max-height:" + maxH + "px;padding:24px;border-radius:16px;";
+  }
+  if (!layout.isWide) return bg + "width:" + Math.min(layout.paneWidth - 24, layout.windowWidth * 620 / 750) + "px;";
+  const maxH = Math.max(260, layout.paneHeight - 32); // 32 = 上下各 16 的呼吸位
   return bg + "width:" + qtSheetWidth("modal") + "px;max-height:" + maxH + "px;";
 });
 
 /** 遮罩底色随主题（浅色 0.52 / 深色 0.64 的 scrim，深色下纯黑遮罩太闷） */
-const maskStyle = computed((): string => "background-color:" + themeStore.skin.scrim + ";");
+const maskStyle = computed((): string => qtFixedPaneStyle() + "background-color:" + themeStore.skin.scrim + ";" + (tv.enabled ? "z-index:1700;" : ""));
 
 /**
  * 正文区尺寸：宽屏给**确定高度**（scroll-view 在 Vapor 宽屏下 max-height 不保证形成可滚动区块，
@@ -72,8 +115,16 @@ const maskStyle = computed((): string => "background-color:" + themeStore.skin.s
  * 所以按窗口高反算并夹到 [120, 360]。
  */
 const contentStyle = computed((): string => {
+  if (tv.enabled) {
+    // Backend titles can wrap arbitrarily; TV title and body share one scroll area.
+    const control = tvControlHeight.value;
+    const actions = tvInlineActions.value ? 16 + control + (tvCheckOwnLine.value ? 12 + control : 0) : 16 + control + (hasJump.value ? 12 + control : 0) + (hasClose.value ? 12 + control : 0);
+    const fixed = 48 + actions;
+    const h = Math.max(0, Math.min(360, layout.paneHeight - 56 - fixed));
+    return "height:" + h + "px;min-height:0px;flex-shrink:1;margin-top:0px;margin-bottom:0px;";
+  }
   if (!layout.isWide) return "margin-top:24rpx;margin-bottom:4rpx;max-height:760rpx;";
-  const h = Math.max(120, Math.min(360, layout.windowHeight - 220));
+  const h = Math.max(120, Math.min(360, layout.paneHeight - 220));
   return "height:" + h + "px;margin-top:14px;margin-bottom:2px;";
 });
 
@@ -85,6 +136,8 @@ const emit = defineEmits<{
   // 回传是否勾选“今天不显示”
   closed: [value: boolean];
 }>();
+// Locked notices keep consuming Back; exit remains the explicit know action.
+useQtTvModal(tvPanel, (): boolean => props.notice != null, (): void => onMaskTap(), 1700);
 
 const hideToday = ref(false);
 

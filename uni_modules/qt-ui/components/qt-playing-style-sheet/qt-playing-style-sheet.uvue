@@ -1,9 +1,9 @@
 <template>
   <QtSheet :visible="visible" title="播放页风格" @update:visible="emit('update:visible', $event)">
-    <scroll-view direction="vertical" :style="'height:' + viewportPx + 'px;'" :scroll-into-view="revealId" :show-scrollbar="false">
+    <scroll-view class="ps-scroll" :class="layout.isTv ? 'qt-tv-scroll' : ''" data-qt-tv-id="playing-style:scroll" direction="vertical" :style="'height:' + viewportPx + 'px;'" :scroll-into-view="revealId" :show-scrollbar="false">
       <view id="playing-styles" class="ps-cards" :class="layout.isWide ? 'ps-cards-wide' : ''">
       <view v-for="item in PLAYING_STYLES" :id="'playing-style-' + item.id" :key="item.id" class="ps-card" :style="'width:' + cardPx + 'px;'">
-        <QtOption :label="item.label" :description="item.description" kind="card" :preview="true" :indicator="true" :selected="preference.style == item.id" @select="selectPlayingStyle(item.id)">
+        <QtOption :label="item.label" :data-qt-tv-id="'playing-style:' + item.id" :description="item.description" kind="card" :preview="true" :indicator="true" :selected="preference.style == item.id" @select="selectPlayingStyle(item.id)">
           <template #preview>
             <view class="ps-preview" :style="previewStyle(item.id)">
               <view v-if="item.id == 'classic'" class="ps-disc" :style="'width:' + previewPx * 0.62 + 'px;height:' + previewPx * 0.62 + 'px;'">
@@ -13,7 +13,7 @@
                 <view class="ps-album-light"></view><view class="ps-album-dark"></view>
               </view>
               <view v-if="item.id == 'rhythm'" class="ps-words">
-                <text v-for="(word, i) in ['随','心','而','动']" :key="i" class="ps-word" :style="'font-size:' + previewPx * 0.28 + 'px;transform:translateY(' + (i == 1 ? -5 : i == 2 ? 3 : 0) + 'px) rotate(' + (i == 1 ? -12 : i == 2 ? 8 : 0) + 'deg);'">{{ word }}</text>
+                <text v-for="(word, i) in ['随','心','而','动']" :key="i" class="ps-word" :style="'font-size:' + (layout.isTv ? qtFontValuePx(previewPx * 0.28) : previewPx * 0.28) + 'px;' + tvLine(previewPx * 0.28) + 'transform:translateY(' + (i == 1 ? -5 : i == 2 ? 3 : 0) + 'px) rotate(' + (i == 1 ? -12 : i == 2 ? 8 : 0) + 'deg);'">{{ word }}</text>
               </view>
               <view v-else class="ps-lines" :style="'width:' + previewPx * (item.id == 'focus' ? 0.95 : 0.60) + 'px;'">
                 <view v-for="n in [0,1,2]" :key="n" class="ps-line" :style="previewLineStyle(item.id, n)"></view>
@@ -24,12 +24,12 @@
       </view>
       </view>
       <view class="ps-background-heading" :style="'border-top-color:' + theme.skin.divider + ';'">
-        <text :style="'color:' + theme.skin.text + ';' + qtFontDual(25, 13)">背景</text>
-        <text :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 12)">{{ backgroundLabel }}</text>
+        <text class="ps-bg-title" :style="'color:' + theme.skin.text + ';' + qtFontDual(25, 13) + tvLine(13)">背景</text>
+        <text class="ps-bg-value" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 12) + tvLine(12)">{{ backgroundLabel }}</text>
       </view>
-      <view class="ps-backgrounds" :class="layout.isWide ? 'ps-backgrounds-wide' : ''">
+      <view class="ps-backgrounds" :class="layout.isWide ? 'ps-backgrounds-wide' : ''" :style="layout.isTv ? 'flex-wrap:wrap;' : ''">
         <view v-for="item in PLAYING_BACKGROUNDS" :id="'playing-bg-' + item.id" :key="item.id" class="ps-choice">
-          <QtOption :label="item.label" kind="swatch" :indicator="true" :style="'width:' + swatchPx + 'px;height:' + swatchPx + 'px;'" :selected="preference.background == item.id" :disabled="picking" @select="selectBackground(item.id)">
+          <QtOption :label="item.label" :data-qt-tv-id="'playing-background:' + item.id" kind="swatch" :indicator="true" :style="'width:' + swatchPx + 'px;height:' + swatchPx + 'px;'" :selected="preference.background == item.id" :disabled="picking" @select="selectBackground(item.id)">
             <view class="ps-swatch" :style="'background-color:' + swatchColor(item.id) + ';'">
               <view v-if="item.id == 'auto' || item.id == 'theme'" class="ps-swatch-half" :style="'background-color:' + (item.id == 'auto' ? '#2e2b3c' : theme.skin.accent) + ';'"></view>
               <image v-if="item.id == 'cover' && cover.length > 0" class="ps-swatch-image" :src="cover" mode="aspectFill" />
@@ -41,7 +41,7 @@
       </view>
       <view v-if="preference.image.length > 0" class="ps-retry"><QtButton label="更换背景图片" icon="disc" variant="ghost" size="sm" :disabled="picking" @click="pickImage" /></view>
       <view v-if="preference.saveError" class="ps-retry"><QtButton label="保存失败，点击重试" variant="outline" size="sm" @click="savePlayingStyle" /></view>
-      <text class="ps-note" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)">{{ picking ? '正在保存图片…' : '风格与背景可自由搭配，下次打开沿用。' }}</text>
+      <text class="ps-note" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12) + tvLine(12)">{{ picking ? '正在保存图片…' : '风格与背景可自由搭配，下次打开沿用。' }}</text>
     </scroll-view>
   </QtSheet>
 </template>
@@ -53,8 +53,9 @@ import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useQtLayout } from "../../composables/use-qt-layout";
 import { qtSheetWidth } from "../../composables/use-qt-widths";
+import { qtTvSheetBodyHeightPx } from "../../composables/qt-sheet-metrics";
 import { useThemeStore } from "../../stores/theme";
-import { qtFontDual, useFontScaleStore } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx, useFontScaleStore } from "@/uni_modules/qt-ui/stores/font-scale";
 import { PLAYING_STYLES, PLAYING_BACKGROUNDS, playingBackgroundColor } from "../../composables/playing-style";
 import { usePlayingStyle, selectPlayingStyle, selectPlayingBackground, savePlayingStyle } from "../../stores/playing-style";
 import { chooseImage } from "@/services/media";
@@ -71,15 +72,17 @@ const columns = computed((): number => fontScale.scale > 1.3 ? 1 : 2);
 const contentPx = computed((): number => layout.isWide ? qtSheetWidth("drawer") - 40 : layout.windowWidth - 64 * layout.windowWidth / 750);
 const cardPx = computed((): number => (contentPx.value - (columns.value - 1) * 8) / columns.value);
 const previewPx = computed((): number => Math.min(112, (cardPx.value - 16) * (layout.isWide ? 0.38 : 0.55)));
-const swatchPx = computed((): number => Math.min(48, (contentPx.value - 6 * 8) / 7));
+const swatchPx = computed((): number => layout.isTv ? 56 : Math.min(48, (contentPx.value - 6 * 8) / 7));
 const backgroundLabel = computed((): string => PLAYING_BACKGROUNDS.find(item => item.id == preference.background)?.label ?? "风格默认");
 const viewportPx = computed((): number => {
+  if (layout.isTv) return qtTvSheetBodyHeightPx({ title: "播放页风格" });
   const unit = layout.isWide ? 1 : layout.windowWidth / 750;
   const cardText = layout.isWide ? 46 * fontScale.scale : 82 * unit * fontScale.scale;
   const contentHeight = (4 / columns.value) * (previewPx.value + cardText + 32) + 180 * (layout.isWide ? 1 : unit) + swatchPx.value + (preference.image.length > 0 || preference.saveError ? 54 : 0);
   const header = layout.isWide ? 60 * fontScale.scale : 120 * unit * fontScale.scale;
-  return Math.max(80, Math.min(contentHeight, layout.windowHeight * 0.86 - layout.safeBottomPx - header));
+  return Math.max(80, Math.min(contentHeight, layout.paneHeight * 0.86 - layout.safeBottomPx - header));
 });
+function tvLine(basePx: number): string { return layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(basePx) * 1.5) + "px;" : ""; }
 function previewStyle(id: string): string {
   const color = id == "classic" ? "#e8e5ee" : id == "rhythm" ? "#542638" : id == "gallery" ? "#3b414d" : "#1d2b43";
   return "height:" + previewPx.value + "px;background-color:" + color + ";";
@@ -94,11 +97,11 @@ function swatchColor(id: string): string {
   if (id == "cover") return "#9cacae";
   return playingBackgroundColor(id);
 }
-watch(() => props.visible + ":" + preference.style + ":" + layout.windowWidth + ":" + layout.windowHeight + ":" + fontScale.scale, () => {
+watch(() => props.visible + ":" + preference.style + ":" + layout.paneWidth + ":" + layout.paneHeight + ":" + fontScale.scale, () => {
   if (!props.visible) return;
   revealId.value = "";
-  nextTick(() => { revealId.value = columns.value == 2 ? "playing-styles" : "playing-style-" + preference.style; });
-});
+  nextTick(() => { revealId.value = !layout.isTv && columns.value == 2 ? "playing-styles" : "playing-style-" + preference.style; });
+}, { immediate: layout.isTv });
 watch(() => preference.background, () => {
   if (!props.visible) return;
   revealId.value = "";

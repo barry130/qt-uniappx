@@ -1,9 +1,35 @@
 # Qt UI · 音乐 HD 设计系统
 
+## Android TV 展示与遥控（2026-11-15）
+
+TV 复用同一套页面与 QtUI。通过 [use-qt-tv](<composables/use-qt-tv.ts>) 的 `qtSetTvMode("auto" | "tv" | "touch")` 选择自动识别、电视或触控展示；`useQtTv()` 返回模式与原生可用状态，组件只从共享 `useQtLayout().isTv` 读取展示态。宽屏不等同电视；原手机、平板断点继续生效。
+
+[TV 令牌](<composables/qt-tv-tokens.ts>) 统一 20px 字号下限、1.2 字体倍率、56px 动作、76px 列表行、136px 导航、104px 播放栏、28px 页边距及 208px 卡片最小宽。字体通过原 font-scale helper 计算，行高跟随实际字体；短窗正文独立滚动。焦点描边为 3px 青色，设置选中仍用原红色。
+
+页面外壳自动注册可见内容 scope，方向键按真实几何移动，OK 触发原点击，Menu 复用原更多/长按入口。业务行可用 `tvId` 传入出现项身份，重复歌曲应有不同出现项 ID；不要使用随排序改变的视觉下标。原生 `data-qt-tv-id` 在同一页面中须唯一。分段控件使用 `segment:<instance.uid>:<index>`，同次挂载内稳定，重新挂载产生新实例身份。
+
+普通弹层继续使用 QtSheet。专用业务壳用 [useQtTvModal](<composables/use-qt-tv-modal.ts>) 绑定实际 panel ref、可见状态与原 Back 关闭守卫。无动作的遮罩/容器用 `qt-tv-skip` 排除自身；长文档将 `qt-tv-scroll` 放在实际 scroll/list 容器，OK 不新增业务动作。`QtButton` 的可选 `wrap` 允许 TV 长标签换行，`fullWidth` 使根节点横向伸展，默认保持原按钮契约。
+
+应用前后台生命周期负责 `qtInitTv()`、`qtSetTvForeground()`，隐藏时释放轮询/按键处理。Android 输入法、WebView、系统媒体键由原生桥保留各自所有权，详情见 [原生集成与设备验收](<../../docs/TV_NATIVE_INTEGRATION.md>)。执行 `npm run check:tv` 与原 `npm run check` 后还须核对 HBuilderX 实际编译日志；模板回归、编译成功和电视设备验收分别记录。
+
+折叠设备使用共享布局的 `paneWidth/paneHeight/paneLeft/paneTop` 表示可用的完整屏区，
+物理铰链由 AndroidX WindowManager 提供；桌面姿态使用上半屏，书本姿态使用较宽屏区。
+`windowWidth/windowHeight` 仍是实际窗口，`qtRpx` 与原生 CSS rpx 保持一致。
+页面和托管工具页在 `qt-page-frame` / `qt-wide-workspace` 统一避让，fixed 弹层使用
+`qtFixedPaneStyle()`，absolute 子层继承父屏区。没有折叠信息时保持完整窗口。
+宽度达到 600px 的实际窗口被垂直铰链分开时，各屏区使用固定 px 控件和紧凑侧栏；播放器
+几何辅助函数额外接受实际窗口宽度，避免把半屏宽度误用为原生 rpx 比例。
+`qtPerformance` 统一接收低内存、省电和系统关闭动画信号，控制壁纸、歌词柔焦、
+歌词滚动、封面淡入及完整/迷你播放器旋转。歌单跟随界面复用 QtSwitch / QtSheet / QtButton。
+完整 classic 歌词复用 [lyric-presentation](<composables/lyric-presentation.ts>) 的实际视口距离曲线；
+2026-11-13 扩大清晰上下文，基础柔焦降为最多 1.2px、原生绘制最多 1.5px，保持居中、行高、逐字时钟和手动浏览契约。
+
 宽屏底栏的队列按钮发出 `queue` 事件，由当前 `qt-page-frame` 或 `qt-wide-workspace` 挂载
 `qt-playback-queue`，在底栏右上方查看/播放/排序/移除队列，不导航到播放页。
 它是特殊锚定抽屉业务组件：普通 `qt-sheet` 的宽屏居中位置不符合底栏入口，故保留独立定位外壳，
 复用主题、字号、共享布局及播放器队列虚拟窗口。只在打开时挂载，关闭或换页即释放；返回键优先关闭队列。
+播放页自身的全高/底部队列另保留歌曲＋行内比例锚点；首次正高度测量和虚拟内容提交后重发当前歌曲定位，
+同值命令以整数 px 重下发，关闭/换页/新目标/用户触摸使旧回放失效，窗口的实际 rpx 比例变化亦重建。
 
 这是一个面向 uni-app x Vapor 模式的独立 UI 组件模块。
 
@@ -20,6 +46,8 @@
 `qt-playlist-picker` 的单曲和批量模式均在列表上方提供新建歌单：宿主通过 `createPlaylist(name)` 返回新歌单或 null；成功清空输入，失败保留名称。单曲新建自动加入选择草稿，确定后保存歌曲；批量新建直接收藏当前选曲。空列表展示引导并收紧高度。目标歌单右侧使用 `qt-checkbox indicator="check"` 显示白勾，其他复选默认保持 dot。`qt-option` 提供 trailing slot 承载右侧控件。
 
 `qt-sort-panel` 的“按歌曲名 / 按专辑名 / 按歌手名”横竖屏均独占一行，标题说明排序用途，不再用左侧重复标签挤压按钮。完整标签沿用共享 `qt-option` 字号，支持最大字号；方向仍独立一行，选中即生效，再点当前方式恢复默认顺序。
+
+播放设置“升降调”复用 [qt-pitch-controls](<components/qt-pitch-controls/qt-pitch-controls.uvue>)：以 QtSheet 承载 −1 / 原调 / +1 三枚 QtButton，输入 `visible / value(-12..12) / supported`，发出 `update:visible / change(integer)`。值均为整数半音，0为原调且不改倍速；页面负责真实服务、能力订阅、onMounted/onShow幂等回读和隐藏/卸载清理，隐藏或false回执不显示预提交值。
 
 详细设计、CSS 约束、组件 API、换肤模型和宽屏策略请阅读：
 
@@ -39,11 +67,59 @@
 
 横屏、竖屏的页面进入与返回统一无动画。`App.onLaunch` 最早调用 `installQtNavigationMotion()`，通过 `navigateTo` / `navigateBack` 拦截器将 `animationType` 设为 `none`，覆盖共享导航、业务直接调用与系统返回键，保留路由参数、回调和返回拦截。`switchTab` / `redirectTo` / `reLaunch` 沿用框架自身的无动画切换；宽屏工具仍就地托管。关闭转场不改变首次加载、弹层动画或列表滚动。
 
+Android 内置输入控件的生命周期兼容放在 `services/native-input-lifecycle.ts`，由 `main.uts` 在 `createSSRApp` 注册组件后安装。HBuilderX 5.34 的 input 有未在卸载时取消的 80ms 原生样式同步；快速关闭搜索、换页或重挂控件会调用已注销的 `_uni-form` 实例。textarea 的 80ms 高度初始化也会在卸载后执行，一并按实例取消。兼容层通过实际内置 Input / Textarea 的对象身份跟踪 timeout，覆盖所有页面、公共搜索栏和弹窗；卸载取消，排队回调检查存活，保留原生 ID、参数、活跃输入和异常传播。其他 timer 直接转交原 API，iOS / Harmony / Web 不安装。`npm run check:native-input` 验证兼容层，`npm run check:ui-lifecycle` 验证页面与组件自己的延迟任务，两者均接入全量门禁；升级基座后复核原生用例再决定是否移除此兼容层。
+
+页面自身的原生测量需同时检查“发起时仍存活”和“异步回执仍有效”。路由页面在 `onUnload` 作废，被宽屏工作区作为组件托管时在 `onBeforeUnmount` 作废；卸载后不能再从网络回执或 `nextTick` 创建定时器。`useQtReveal` 用批次号取消旧淡入；加载圆环、骨架扫光、公告跑马灯在访问原生元素前检查存活；`qt-page-frame` 的托管内容延迟挂载与标签测量也随实例清理。页面和控件恢复挂载时使用新的实例，不影响持续播放、下载和全局同步任务。
+
 设置总览的“首页返回按键”复用全局 `qt-action-sheet` 单选：一次回到后台或两次退出 APP，`stores/home-back.ts` 用单一枚举立即保存，默认保持两次退出。Android / Harmony 展示入口，其他平台隐藏。仅首页系统返回生效，优先关闭选择弹层、播放队列和宽屏托管工具；程序返回、子页返回不改。两次退出窗口为2秒，离开/返回首页及更改模式均清除计时；后台模式不停止音乐，退出模式保留既有 `stopForExit` 的队列/进度保存。
 
 ## 宽屏导航选中状态
 
 宽屏侧栏的选中底色始终由当前路由决定：当前项使用 `accentSoft`，其余项显式恢复透明；按压反馈只改变透明度，不能覆盖选中背景。发现、我的、全部工具和设置入口统一采用选中底色、强调色图标与文字，设置子页延续设置入口高亮。
+
+## 音源平台管理（2026-11-13）
+
+设置入口和窄屏标题统一为“音源平台管理”，继续使用 [原管理页](<../../pages/source-auth/index.uvue>) 的 `/pages/source-auth/index` 路由和 `source-auth` 设置键。页面只有一套平台卡片：拖动右侧手柄调整优先级，点标题展开平台启用、参与聚合搜索、账号登录、meta/play 授权和播放/下载音质。[音源包管理](<../../pages/source-pack/index.uvue>) 只维护安装、更新、包激活和卸载，不重复展示平台开关。默认浏览音源仍独立选择；宽屏保持 rail | 设置总览 | 内容三栏和 `redirectTo`，页面保持 `flow` / `max-width=720`。
+
+复用 QtCard / QtSwitch / QtButton，并由通用 [QtReorderList](<components/qt-reorder-list/qt-reorder-list.uvue>) 承载可变高度卡片排序。手柄与标题/登录动作分离；拖动期间禁止父滚动，松手后一次提交完整目录顺序并等待真实引擎应用，不在每帧触摸时写设置。取消或迟到回执不保存，禁用平台仍可排序，遗留账号卡是不可跨越的固定锚点。原 [策略服务](<../../services/source-policy.ts>) 保留不可用 ID 与原 enabled 状态；`enabled=null` 是默认，`enabled=[]` 是在线平台全关，本地音乐和播客不受影响。关闭平台不清除账号、授权或音质，也不开始播放。
+
+每卡的“参与聚合搜索”使用 QtSwitch，与平台启用和账号授权独立；平台关闭时该开关不可编辑，保存的参与意愿保留。原 [聚合服务](<../../services/aggregate-sources.ts>) 同键兼容：未配置、旧空数组为默认全部；新显式全关保存 `{"version":1,"sources":[]}`，读取为 `[]`，不发起在线聚合搜索或热词请求。非空白名单仍保留旧数组格式和暂不可用 ID。保存失败保持旧选择，不发成功事件。账号登录按钮继续单行左右滚动，不改为换行。
+
+外部策略/聚合事件、注册表 generation 和真实 `onShow` 刷新缓存；卸载精确撤销本页监听并抑制迟到 UI 回执，不回滚全局设置。`check:source-platform` 执行真实页面模板、QtReorderList/QtCard/QtSwitch、策略/聚合/账号/音质服务、注册表和 MusicApi，使用真实 Vue；native 测量、触摸、生命周期、存储与引擎传输，以及非目标 UI 外壳/按钮由离线 fixture 持有，并包含聚合与拖动组件独立回归；原扫码和完整 `npm run check` 门禁保留。**HBuilderX/Vapor 编译、本人账号和紧凑/宽屏实机触摸视觉验收仍为 NOT RUN**，host 模板通过不能替代原生结果。
+
+## QtReorderList 公开 API
+
+[组件源码](<components/qt-reorder-list/qt-reorder-list.uvue>) 只负责列表几何与手势，不保存业务数据；QtSortPanel 的键/方向选择和 QtMiniPlayer 的浮球拖动不能替代这一职责。
+
+- `items: { id: string; disabled?: boolean }[]`：使用唯一非空 ID；保留传入对象供 slot 使用。`disabled` 项是固定且不可跨越的锚点，与业务“平台未启用”不是同一状态。
+- `disabled?: boolean`：全局禁止开始拖动，变为 true 时取消当前手势。
+- default slot：`{ item, id, index, handle }`。`handle` 包含 `start/move/end/cancel/click/style`，触达区 44×44px；绑定在专用手柄而非整张卡片。
+- `active(true)` 在 touchstart 立即发出，父 scroll-view 应切换到 `direction="none"`。有效拖动结束先 `reorder(ids)` 后 `active(false)`；数组是完整新顺序，宿主仅在这次事件保存。取消只释放 active，不发 reorder。
+- 实测各行高度/间距、跟手及目标占位；至少 8px 实际 touchmove 才提交。无效几何、500ms 未回执、多指、items/字体/窗口变化、hide/unload/unmount 取消旧手势与迟到回执。
+
+```vue
+<qt-reorder-list :items="cards" :disabled="saving" @reorder="saveOrder" @active="dragging = $event">
+  <template #default="{ item, id, index, handle }">
+    <qt-card>
+      <view :style="handle.style" @touchstart.stop="handle.start" @touchmove.stop="handle.move"
+            @touchend.stop="handle.end" @touchcancel.stop="handle.cancel" @click.stop="handle.click">
+        <text>拖动</text>
+      </view>
+      <!-- 卡片内容由宿主提供 -->
+    </qt-card>
+  </template>
+</qt-reorder-list>
+```
+
+原生触摸是本次入口，不新增 Web 鼠标/键盘排序。25 项完整 Vue 模板回归与管理页实际组件接线均属离线 host 证据，不能代替 Vapor/Kotlin 编译、Native Yoga 绘制或设备验收。
+
+## 账号推荐来源
+
+[qt-recommendation-source-control](<components/qt-recommendation-source-control/qt-recommendation-source-control.uvue>) 是日推 / FM 的业务适配器，`kind="daily"` / `kind="fm"` 两份选择独立，默认应用算法；`change(kind)` 仅报告选择变化。它复用 QtOption 和全局 action-sheet，不新增通用选择外壳，也不修改首页浏览音源、AI 模式或账号的 meta/play 授权。入口常驻于加载、失败和空态之外；长标签、选择色和面板宽窄布局由既有组件处理。
+
+账号选项只认当前数据包的严格能力声明（`accountRecommendations[kind] === true`）。2026-11-14 用户裁定对齐桌面四源口径：网易云、QQ、酷狗、咪咕的日推与私人 FM 均可声明启用（音源包侧 QQ 日推 30 首、咪咕日推 60 首与咪咕 FM 已真账号实测；KG FM 为包内只读 login 批次，不提交播放反馈）；酷我、B 站上游无账号协议，继续不出现。旧数据包没有声明或入口时提示更新。使用所选音源当前保存且允许数据授权的本人账号，先等待 meta setAuth 成功 ACK，再读取官方供给；未登录、失效、身份不符、限流或网络错误不会退回公共账号或应用算法。官方日推不补齐/重排，账号 FM 不提交喜欢、跳过、播放进度反馈，“下一首”仅本机切歌。
+
+选择菜单捕获快照和全局请求 ID；账号/选择/包变化、取消和卸载使旧回调失效，不迟到保存或导航，不关闭其他功能的弹层。FM 行点击在 Store 内同步确认实际有序队列归属，并只使用当前队列中的曲目对象；用户删除/改序后立即让位，不等待心跳、不恢复旧快照覆盖用户队列。回归入口为 `check:account-recommendations`、`check:account-daily`、`check:account-radio`、`check:recommendation-source-ui`，并入完整 `npm run check`。本次仅应用层 services/stores/pages/Qt UI 改动，不要求重打原生基座；设备需更新具备账号动作的数据包，再由用户在 HBuilderX 重新运行验证。离线/静态门禁不是 Native 或本人真实 Cookie 验收。
 
 ## 首页音源选择器
 
@@ -66,7 +142,7 @@
 **容器约定**：组件不自带卡片外壳，白底/描边/圆角/内边距由宿主给（首页竖屏用 `.section`、宽屏用 `.wide-panel`，与推荐歌单等区块同容器）；`embedded` 与宽屏下自身内边距为 0，`content-width` 必须传**卡片内宽**而非窗口宽，`card-width` 用于与同页其他横向架对齐卡面尺寸（未传才由组件估算）。
 
 
-`stores/mini-player.ts` 保存「播放设置 → 迷你播放器」的四档偏好，竖屏与宽屏共用：`expandable` 默认点击球展开、再点条进入播放页；`ball` 仅球、点击进入；`bar` 仅长条、点击进入；`docked` 固定底栏、点击进入。前三档复用 `qt-mini-player` 与共享位置/旋转状态，支持拖动吸附；仅默认档会因页面点击或进入播放页收起。固定档在手机复用长条，在宽屏复用 `qt-player-bar`；手机 Tab 页的长条通过 `above-tab` 放到导航上方，二级页固定在安全底边。`mini-player-layout.ts` 统一底部尺寸与内容让位，无歌时不占播放栏空间。工具托管层统一接管播放入口，关闭时不会残留另一份。
+`stores/mini-player.ts` 保存「播放设置 → 迷你播放器」的四档偏好，竖屏与宽屏共用：`expandable` 默认点击球展开、再点条进入播放页；`ball` 仅球、点击进入；`bar` 仅长条、点击进入；`docked` 固定底栏、点击进入。前三档复用 `qt-mini-player` 与共享位置/旋转状态，支持拖动吸附；仅默认档会因页面点击或进入播放页收起。固定档在手机复用长条，在宽屏复用 `qt-player-bar`；手机 Tab 页的长条通过 `above-tab` 放到导航上方，二级页固定在安全底边。`mini-player-layout.ts` 统一底部尺寸与内容让位，无歌时不占播放栏空间；固定档的播放/暂停红圆比上一曲/下一曲小一圈（36px 主键 + 44px 切歌键）。任何 `qt-sheet` 底部弹层打开期间整条隐藏：`qt-sheet` 向 `stores/sheet-visibility.ts` 登记计数，迷你播放栏挂在框架层、z 序高于页面内容，不藏会浮在弹窗上，计数归零才恢复。工具托管层统一接管播放入口，关闭时不会残留另一份。
 
 ## 听歌报告详情
 
@@ -78,7 +154,7 @@
 
 `full-width` 沉浸模式将顶部与底部安全区交给页面自身处理，frame 不重复添加状态栏或底部 padding。播放页的唱片/歌词和底部工具均使用同一份窗口快照；三键导航进入时，窗口 845/安全区42 与窗口803/安全区0 对应相同的可用底边，工具行不会被框架底色裁住。
 
-播放页横竖屏的顶部、底部与歌词工具统一透明背景，图标和文字直接显示；保留原点击区域、功能状态色与中央圆形播放按钮。
+播放页顶部保留“风格 / 投屏 / 分享”，歌词工具使用透明底的次级色图标与文字，主播放按钮独立强调。歌曲信息与播放来源的布局、44px 触控区和四风格兼容规则见下方“播放页歌曲信息与来源”。
 
 ```vue
 <qt-page-frame width-kind="list">
@@ -97,7 +173,7 @@
 - 全站 `navigationStyle: "custom"`：宽屏不画顶部标题，窄屏画功能性「返回 + 标题」栏；
 - 设置子页与我的页族（收藏/本地/下载/最近播放/听歌报告/音乐助手/反馈/关于/个人信息）在桌面可用宽度足够时自动变成 `rail | 总览 | 子页内容` 三栏，中栏分别复用真实的设置总览（`qt-settings-overview`）与「我的」总览（`qt-profile-overview`）并高亮当前项；总览里的音乐助手入口按权限码 `user:ai:music:use` 显隐（无权限/未登录不显示，与 qt-pc 同一判定）；
 - 竖屏底部导航是 `qt-tab-bar` 悬浮胶囊：左右缩 40rpx、高 120rpx、圆角 60rpx，发现 / 我的两个入口，路由当前项仍用 accentSoft（不是设置选项）。`qtTabBarFloatGapPx()` 根据完整 `navigationInsetPx` 判断系统栏是否已提供间隔，不随本页剩余 `safeBottomPx` 变换而跳动；无系统栏且确认无导航键时额外间距最多 24rpx（375px 屏宽为 12px）。`qtTabBarHeightPx()` 按实际间距、高 120rpx 和剩余安全区计算总占位，toast 与固定播放栏共用。固定模式下 `frame-dock` 让导航挂在框架根部，避开内容预留区；有歌时 `joined` 使用 88rpx 横向图文导航，与上方固定播放行共用圆角底座。原生设备像素先换逻辑 px，页面不能重复叠底部避让；
-- Android `safeBottomPx` 表示当前窗口尚未避让的高度：原生导航栏高度需减去 `screenHeight - screenTop - windowHeight` 已留在窗口外的部分。窗口缩短后即使原生栏高不变也重新计算，防止设置页底部和操作表“取消”下方重复留白；真实 edge-to-edge 的导航键/手势条仍正常避让。页面及 `qt-sheet` 继续只消费共享值。
+- Android `safeBottomPx` 表示当前窗口尚未避让的高度：原生导航栏高度需减去 `screenHeight - screenTop - windowHeight` 已留在窗口外的部分。窗口缩短后即使原生栏高不变也重新计算，防止设置页底部和操作表“取消”下方重复留白；真实 edge-to-edge 的导航键/手势条仍正常避让。页面及 `qt-sheet` 继续只消费共享值。`qt-action-sheet` 走 `footerFlush`：手机取消键只消费真实剩余安全区，`safeBottomPx=0` 时下方不加装饰垫条；滚动预算与垫条使用同一值。普通手机页的 `qt-sheet` 蒙层通过 `qtFixedPaneStyle()` 锚定完整 pane，避免页面预留迷你播放器区域把弹层抬高；不改变列表高度或滚动位置。宽屏和 `qt-page-frame` 提供的 `qt-sheet-in-workspace` 托管实例仍用 absolute，跨断点/深页覆盖也不逃出固定宿主；其余弹层（列表/按钮结尾）仍由面板 padding 让位。
 - 切页安全区与窗口高来自同一次 `getWindowInfo()`，原生回调也更新整份几何；首帧零尺寸/读取失败保留上次完整快照，原生 `(0,-1)` 表示未知，不能当作无导航栏。Android 负值保留完整栏高，按窗口已消费高度计算剩余避让，不能先清零。框架 shell 显式使用快照高度且不参与 flex 收缩，再扣同快照的内容预留；不把原生根的即时缩短与上一帧 padding 拼在一起。手机/宽屏固定播放条、joined 底座和框架底部导航使用同快照的 `top`，避免切页短暂空白与二次下移；固定栏不继承悬浮球吸附动画。转屏、分屏、键盘 resize 与导航模式变化仍实时更新。
 - 鸿蒙端四处平台差异已在组件内兜住：① 鸿蒙 **不注册 tabBar**（`pages.json` 的 `"tabBar"` 整块包进 `#ifndef APP-HARMONY`）——原生 Tabs 容器在追加第二个 tab 页时不生效，`switchTab` / `reLaunch` 到 tab 页都会回调 success、页面栈也变了，但原生视图不切换；切 tab 统一走 `qt-nav.ts` 的 `qtSwitchTab()`（鸿蒙 `reLaunch`，其它平台 `switchTab` + fail 兜底 `reLaunch`），不要再直接写 `uni.switchTab`；② 首页首帧 `getCurrentPages()` 可能还是空栈，`qt-mini-player` 改为 50ms 轮询补齐宿主注册（最多 1s）；③ 鸿蒙 **fixed 宿主里的 fixed 子节点收不到触摸**（点悬浮球没反应、事件穿透到下层），子级必须改 `position: absolute` 且 `left/top` 固定为 0（位置只由 fixed 宿主负责），否则会二次偏移、`clickable` 变 false；④ 鸿蒙 **`READ_WRITE_DOWNLOAD_DIRECTORY` 在手机上是 INVALID**（2in1 专属），系统 Download 目录写不进去，公共目录必须走 `DocumentViewPicker` 选目录 + `fileShare.persistPermission` 持久化 URI 授权，下载设置页「更改位置」与权限管理页对应条目都按此改写；
 - 沉浸式页面可通过 `full-width` 保持全宽。
@@ -110,9 +186,35 @@
 
 ## 歌名与歌手跑马灯
 
-`components/qt-marquee/qt-marquee.uvue` 是单文本往返跑马灯：必填 `text`、`size-rpx`、`size-px`、`color`、`width-px`（视口最大逻辑像素宽，不含兄弟按钮）；可选 `weight`、`active`（默认开，页面隐藏时必须传 false）。外层由原生布局按文字自然宽度收拢，只用计算好的 px `max-width` 限制长文：短文本完整静止，旁边的平台签和歌手箭头紧跟文字，不钉在行右侧；长文本按溢出距离往返，两端各停 1.2 秒。不渲染第二份文本，也不在首次测量、切歌或页面恢复后回写外层宽度造成横向拉动。组件随文字、可用宽、字号倍率和宽窄档重测，卸载取消定时器与动画。旧 `gap-rpx` / `gap-px` 属性已删除。
+`components/qt-marquee/qt-marquee.uvue` 是单文本跑马灯：必填 `text`、`size-rpx`、`size-px`、`color`、`width-px`（视口最大逻辑像素宽，不含兄弟按钮）；可选 `weight`、`active`（默认开，页面隐藏时必须传 false）、`line-height-px`（落点已有固定行高契约时锁定行高，如 pt-title 的 metrics.titleLinePx、迷你条 38rpx 行；不传则用字号×1.4+4 默认）。外层由原生布局按文字自然宽度收拢，只用计算好的 px `max-width` 限制长文：短文本完整静止单份展示，旁边的平台签和歌手箭头紧跟文字，不钉在行右侧；长文挂载第二份同文副本、按实测副本偏移做公告栏同款无缝循环（40 逻辑 px/s、单圈最少 3000ms，不回扫、不停顿、不做设备缩放换算）。组件随文字、可用宽、字号倍率、行高和宽窄档重测，卸载取消定时器与动画。旧 `gap-rpx` / `gap-px` 属性已删除。
 
-手机播放页使用两个独立实例，歌名与歌手各占一行；行高随全局字号同步，唱片尺寸先扣掉两行、状态栏、安全区和底部控件预算，不能反过来挤掉歌手。纯几何回归由 `tools/check-player-presentation.mjs` 校验，视觉效果仍须设备验收。
+播放页歌手、歌名（2026-11-14 用户裁定：单行跑马灯，放得下静止、溢出滚动）与当前歌词复用独立的 `qt-marquee`，收藏按钮始终有自己的 44px 命中区。唱片尺寸先扣歌曲信息、状态栏、安全区和底部控件预算，不能反过来挤掉文字。纯几何回归由 `tools/check-player-presentation.mjs` 校验，视觉效果仍须设备验收。
+
+## 播放页歌曲信息与来源（2026-11-10）
+
+`qt-playing-track` 是不访问播放器的展示组件：接收 `name / artist / sourceLabel / liked / active / widthPx / ink / muted / rail`，可选 `compact / cover`，输出 `collect(event) / artist / source / coverError`。普通态歌名最多两行，歌手复用跑马灯，来源与音质是无底色的普通文字标签（2026-11-13 去胶囊；同日二次裁定：歌手 `flex:1` 撑满整行，来源回到行尾最右）；三行（歌名/歌手·来源/词作）行距收紧——行间 margin 4→2px，歌手与词作行触控底 44→36px，来源命中区宽度仍 ≥44px；只有较长组合或窄折叠区域才把来源单独排到歌手下一行。中英文按各自字宽估计，`rail` 只用于 `compact` 态的小封面底色。收藏和来源仍有 44px 宽命中区。`compact=true` 用于展开歌词：小封面、单行歌名与歌手/来源摘要，收藏和来源仍有 44px 命中区。`playing-track-metrics` 使用实际 pane 宽度与整个窗口的 rpx 比例预算，歌手宽度参与 stacked 判定（页面预算与组件渲染共用同一 artist 文本）。单文本跑马灯无法同时负责标题、固定动作和来源，因此扩展此展示组件而不复制新信息栏。
+
+`useCoverPalette(source, enabled)` 是媒体取色 composable，返回只用于展示的 `MediaPalette | null` ref；图片读取封装在 `services/media-image.ts`，纯配色与 64 项 LRU 位于 `services/media-palette.ts`。封面变化后延迟 120ms，通过原生 `getImageInfo/compressImage` 生成 32×32 缩略图，再使用 jpeg-js/fast-png 解码这个小样本；临时缩略文件读取后清理，不保留大封面位图。生成深色背景、正文、次要文字、播放按钮与轨道颜色，以及 1×128 渐变 PNG，通过现有 image 显示，兼容没有注册 canvas 的 Vapor 基座。运行用的 `services/vendor/media-codecs.js` 由 `npm run build:media-codecs` 从固定版本生成，适配 CommonJS 导出及 Android 不支持的 Latin-1 TextDecoder，不改图片解码算法；许可与再生成说明放在 vendor 目录，检查脚本验证产物一致。快速切歌、隐藏和卸载后的旧回调不得提交，不订阅播放进度。缺图、取色失败或 `qtPerformance` 降级时回落现有主题。画廊的默认背景仍为 cover；手选主题、色系或本地图片继续优先，经典唱片默认仍跟随主题。设置选中态不使用媒体配色。
+
+画廊封面按约 0.765 倍屏宽且最大 300px 限制，并服从字号/控制区预算。非经典竖屏主播放按钮为 82×64px（窄屏会缩宽），经典保留 60px；展开歌词与封面页共用底部行高。顶部去掉“正在播放”文字。画廊横竖屏复用完整歌词列表，左对齐显示每句及其译文/罗马音，跟随播放并允许手动上下浏览；点击不跳播或收起，长按复制，顶部唱片按钮返回封面。逐字填充、实测行高和手动浏览后恢复跟随复用现有时间轴，不另开计时器。纯净歌词继续使用 `qt-focus-lyrics alignStart`，律动保留居中与原时间轴。
+
+换源候选复用 `qt-action-sheet` / `qt-option`，`SheetAction.description` 可提供次要信息：主行保留完整歌名和版本名，副行展示歌手、包内平台名、有效时长和专辑。行高随内容换行，列表原生实测后贴合内容，超出可用高度时独立滚动，“取消”位于列表外。打开、候选更新及窗口/字号变化重新测量，关闭/卸载使旧测量失效；选中项随最终高度重新定位。使用音源和检查音源继续经过原有详情与播放守卫。
+
+播放器用页级 `setNavigationBarColor` 保证深色媒体背景下的系统状态栏可读，不切换应用主题。导航和舞台直接消费逻辑 px 安全区，不把状态栏高度除以取整后的 1rpx。
+
+来源与音质面板使用 `QtOption.rowMinHeightPx=44` 与 `labelAlign="center"`，行高下限在原生根节点实现，8px 上下留白放在正文容器内；长名称、说明和大字号可自然撑高。不能给组件外壳简单叠加 `min-height:44px` 与 dense 行上下 padding，否则 Android 实际行高会涨到约 65px。左右两列的分组标题和选项标签都在各自列内居中，视口按相同行高预算，当前来源及音质继续自动露出。
+
+`qt-playback-source-sheet` 是当前播放的业务适配器，复用 QtSheet / QtOption / selection-reveal，不复制通用选择控件。`visible / source / quality / local / podcast / fileText / section` 为输入，输出 `update:visible / source(id) / quality(id)`。名称、启用顺序与音质来自音源包注册表和生效档位清单，账号或包更新会重新计算；无效 ID 不冒充选中。它与改变首页浏览来源的 `qt-source-switcher` 分开：只发出播放动作，由页面搜索所选平台并保存该歌曲的播放来源。
+
+播放命中备用来源后，选择原曲所属平台会直接提供已知原曲的检查与播放入口，候选副本清掉备用 URL；原曲不依赖会排除自身 ID 的换源搜索结果。再次切歌或修改配置后，旧面板选择仍会失效。
+
+显示来源与音质按正在使用的 URL 读取，包含保存的播放偏好和跨源兜底；预检另一档音质不会提前改写仍在播放的标签。本地优先命中显示“本地文件”，音质由文件决定；播客显示“播客音频”，不展示音乐平台档位。换源和换音质保留原歌曲身份、队列、当前进度、暂停状态与私人电台会话，迟到的切歌/配置请求不能提交。
+
+顶部三入口与“模式 / 上一首 / 播放暂停 / 下一首 / 队列”在四风格中常驻。保留 `classic / rhythm / gallery / focus` 与原存储结构，背景仍独立于风格；转屏不重置正在展开的歌词。紧凑页固定底部控制，优先压缩封面，极短窗口的歌曲信息允许滚动；宽屏左封面和歌曲信息、右歌词，工具不足一行时移到独立次行。短横屏左栏保留完整内容高度，溢出时从顶部滚动阅读歌曲与来源，底部控制预算不变。导航、收藏、侧键、工具与来源行均保留至少 44px 命中区；手机固定迷你播放栏同时保留上一首、播放暂停、下一首，其他浮动模式保持原交互。设置页保留现有 UI，底部 Tab 只在主 Tab 页显示。
+
+已挂载的迷你播放器按共享窗口重新绑定封面、文字和控件的 px 尺寸，避免宽屏缩回竖屏时旧 rpx 比例挤掉歌名。`qt-icon` 的 size 调用方式仍为紧凑 rpx / 宽屏 px，内部统一换算当前 px；不增加轮询，也不重挂播放器。播放设置的音效说明跟随真实 capabilities，部分支持与完全不支持分别显示，不引用已删除的旧变量。
+
+来源元信息只随歌曲、配置及取链事件更新，不增加进度轮询；URL 元信息与既有 80 条播放地址缓存一起淘汰，搜索缓存上限 32 组、每组 20 首、有效期 10 分钟，结束请求释放守卫。`check:playback-source` 执行真实服务、页面动作和组件模板，覆盖包清单、异步更新、本地/播客、暂停重推及宽屏/折叠区域的五档字号；这些模拟边界检查与 HBuilderX 编译、重新部署后的设备验收分开记录。
 
 ## 约束
 
@@ -371,7 +473,7 @@ Vapor 禁用 CSS 变量且文字样式不继承，所以缩放只能逐 `<text>`
 
 ## 2026-11-06 DLNA 投屏
 
-Android 播放页和 HD 播放栏增加投屏入口，`qt-dlna-sheet` 作为业务适配器复用 `qt-sheet`、`qt-option`、`qt-button`，提供设备搜索、选择、断开和切回本机。宽窄屏与当前选择定位复用共享布局和 selection-reveal；接收端不支持的拖动/音量控制禁用。其余平台暂时隐藏入口。
+Android 播放页和 HD 播放栏增加投屏入口，`qt-dlna-sheet` 作为业务适配器复用 `qt-sheet`、`qt-option`、`qt-button`，提供设备搜索、选择、断开和切回本机。宽窄屏与当前选择定位复用共享布局和 selection-reveal；接收端不支持的拖动/音量控制禁用。2026-11-09 已通过共享原生能力接入 HarmonyOS 和 iOS，两个平台也使用同一入口和业务适配器。
 
 原生网络与媒体代理位于 `qt-audio-player/utssdk/app-android/dlna.uts`，系统媒体控制由独立 `DlnaSessionPlayer` 路由到远端，本地播放器停止解码。电视使用自身播放器界面；音乐及私有封面通过当前会话的令牌 URL 提供，支持单段 Range；切歌/设备切换使用代次隔离。改动原生插件需要重建自定义基座。
 
@@ -414,9 +516,9 @@ Android 播放页和 HD 播放栏增加投屏入口，`qt-dlna-sheet` 作为业�
 
 ### 播放风格（2026-11-07）
 
-`qt-playing-style-sheet` 是复用 QtSheet/QtOption/QtButton 的业务适配器，不另造选择控件。`stores/playing-style` 只保存呈现偏好；经典唱片、歌词律动、专辑画廊、纯净歌词在横竖屏共享。`qt-focus-lyrics` 负责三行与律动呈现，输入 lines/activeIndex/position（已减歌词偏移）、ink/muted/heightPx/loading，仅输出长按 copy；普通点击不跳转播放进度。长句溢出仍可滑动阅读。经典滚动歌词继续使用原有逐字、滚动测量与手动浏览逻辑，手动滚动后点击目标行才定位播放。
+`qt-playing-style-sheet` 是复用 QtSheet/QtOption/QtButton 的业务适配器，不另造选择控件。`stores/playing-style` 只保存呈现偏好；经典唱片、歌词律动、专辑画廊、纯净歌词在横竖屏共享。`qt-focus-lyrics` 负责三行与律动呈现，输入 lines/activeIndex/position（已减歌词偏移）、ink/muted/heightPx/loading，以及可选的 `sizeScale`（播放页「字号」倍率，与全局字号缩放相乘、缺省 1），仅输出长按 copy；普通点击不跳转播放进度。长句溢出仍可滑动阅读。经典滚动歌词继续使用原有逐字、滚动测量与手动浏览逻辑，手动滚动后点击目标行才定位播放。
 
-竖屏唱机与专辑画廊共用 `portraitPlayerMetrics`：先保证状态栏、安全区、三行歌曲信息与底部触控区，再按宽度限制主视觉。长屏额外高度分散到主视觉上方、歌曲信息上下，唱机与歌名间距最多92rpx；短屏和大字号优先压缩主视觉，不压缩控件。`check:player-presentation` 覆盖短屏、长屏及平板竖屏五档字号的几何预算与歌词点击行为。
+竖屏唱机与专辑画廊共用 `portraitPlayerMetrics`：先保证状态栏、安全区、两行标题、歌手/来源信息与底部触控区，再按宽度限制主视觉。长屏额外高度分散到主视觉上方和歌曲信息上下；短屏和大字号优先压缩主视觉，不压缩控件，文字不足时使用滚动区域。`check:player-presentation` 覆盖短屏、长屏及平板竖屏五档字号的几何预算与歌词点击行为。
 
 ### 播放风格预览卡片
 

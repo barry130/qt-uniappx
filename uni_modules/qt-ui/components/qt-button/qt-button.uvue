@@ -1,7 +1,7 @@
 <template>
   <view
     class="qt-button"
-    :class="[variantClass, sizeClass, disabled ? 'qt-button-disabled' : '']"
+    :class="[variantClass, sizeClass, disabled ? 'qt-button-disabled qt-tv-skip' : '']"
     :style="buttonStyle"
     :hover-class="hoverClass"
     @click="onTap"
@@ -18,7 +18,7 @@ import { computed } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const props = defineProps<{
   label: string;
@@ -26,6 +26,8 @@ const props = defineProps<{
   variant?: "primary" | "secondary" | "ghost" | "outline";
   size?: "sm" | "md" | "lg";
   disabled?: boolean;
+  wrap?: boolean;
+  fullWidth?: boolean;
 }>();
 const emit = defineEmits<{ click: [] }>();
 const theme = useThemeStore();
@@ -49,7 +51,9 @@ const buttonStyle = computed((): string => {
   else if (variant.value == "secondary") style += "background-color:" + theme.skin.accentSoft + ";border-color:transparent;";
   else if (variant.value == "outline") style += "background-color:transparent;border-color:" + theme.skin.border + ";";
   else style += "background-color:transparent;border-color:transparent;";
-  if (layout.isWide) style += "height:" + (size.value == "sm" ? 44 : 48) + "px;padding:0 18px;border-radius:12px;";
+  if (layout.isTv) style += (props.wrap == true ? "height:auto;min-height:56px;padding:8px 22px;" : "height:56px;padding:0 22px;") + "min-width:56px;border-radius:12px;";
+  else if (layout.isWide) style += "height:" + (size.value == "sm" ? 44 : 48) + "px;padding:0 18px;border-radius:12px;";
+  if (props.fullWidth == true) style += "align-self:stretch;";
   return style;
 });
 /**
@@ -62,6 +66,8 @@ const buttonStyle = computed((): string => {
 const labelStyle = computed((): string => {
   let style = "color:" + labelColor.value + ";";
   style += qtFontDual(size.value == "sm" ? 23 : 26, size.value == "sm" ? 14 : 16);
+  if (layout.isTv) style += "line-height:" + Math.ceil(qtFontValuePx(size.value == "sm" ? 14 : 16) * 1.35) + "px;";
+  if (layout.isTv && props.wrap == true) style += "flex-shrink:1;min-width:0px;white-space:normal;text-align:center;";
   return style;
 });
 function onTap(): void {

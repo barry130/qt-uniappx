@@ -8,12 +8,16 @@
     <view v-if="twoColumn" class="cols">
       <view class="col" :style="colStyle">
         <view v-for="g in columns[0]" :key="g.id" class="group group-wide group-col" :style="groupStyle">
-          <view v-for="(c, ci) in g.cells" :key="c.key" class="cell cell-wide" :class="ci == g.cells.length - 1 ? 'cell-no-border' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="c.go">
+          <view v-for="(c, ci) in g.cells" :key="c.key" class="cell cell-wide" :class="ci == g.cells.length - 1 ? 'cell-no-border' : ''" :style="cellStyleFor(c.key)" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="c.go">
             <QtIcon class="cell-icon cell-icon-wide" :name="c.icon" :size="36" :color="c.color" />
-            <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ c.title }}</text>
+            <view v-if="stackedCell(c.key)" class="cell-main">
+              <text class="cell-title cell-title-stack" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + overviewFont(28, 17)">{{ c.title }}</text>
+              <text class="cell-value cell-summary" :style="('color:' + theme.skin.textMuted + ';') + overviewFont(24, 14)">{{ c.value }}</text>
+            </view>
+            <text v-else class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + overviewFont(28, 17)">{{ c.title }}</text>
             <view v-if="c.dot" class="cell-dot" />
             <view class="cell-right">
-              <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ c.value }}</text>
+              <text v-if="!stackedCell(c.key)" class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + overviewFont(24, 14)">{{ c.value }}</text>
               <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
             </view>
           </view>
@@ -21,12 +25,16 @@
       </view>
       <view class="col col-right" :style="colStyle">
         <view v-for="g in columns[1]" :key="g.id" class="group group-wide group-col" :style="groupStyle">
-          <view v-for="(c, ci) in g.cells" :key="c.key" class="cell cell-wide" :class="ci == g.cells.length - 1 ? 'cell-no-border' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="c.go">
+          <view v-for="(c, ci) in g.cells" :key="c.key" class="cell cell-wide" :class="ci == g.cells.length - 1 ? 'cell-no-border' : ''" :style="cellStyleFor(c.key)" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="c.go">
             <QtIcon class="cell-icon cell-icon-wide" :name="c.icon" :size="36" :color="c.color" />
-            <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ c.title }}</text>
+            <view v-if="stackedCell(c.key)" class="cell-main">
+              <text class="cell-title cell-title-stack" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + overviewFont(28, 17)">{{ c.title }}</text>
+              <text class="cell-value cell-summary" :style="('color:' + theme.skin.textMuted + ';') + overviewFont(24, 14)">{{ c.value }}</text>
+            </view>
+            <text v-else class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + overviewFont(28, 17)">{{ c.title }}</text>
             <view v-if="c.dot" class="cell-dot" />
             <view class="cell-right">
-              <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ c.value }}</text>
+              <text v-if="!stackedCell(c.key)" class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + overviewFont(24, 14)">{{ c.value }}</text>
               <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
             </view>
           </view>
@@ -39,11 +47,15 @@
       <view v-for="g in visibleGroups" :key="g.id" class="group" :class="[layout.isWide ? 'group-wide' : '', inPane ? 'group-pane' : '']" :style="groupStyle">
         <view v-for="(c, ci) in g.cells" :key="c.key" class="cell" :class="[layout.isWide ? 'cell-wide' : '', inPane ? 'cell-pane' : '', ci == g.cells.length - 1 ? 'cell-no-border' : '']" :style="cellStyleFor(c.key)" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="c.go">
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '', inPane ? 'cell-icon-pane' : '']" :name="c.icon" :size="inPane ? 22 : 36" :color="c.color" />
-          <text class="cell-title" :class="[layout.isWide ? 'cell-title-wide' : '', inPane ? 'cell-title-pane' : '']" :style="('color:' + (cellActive(c.key) ? theme.skin.accent : theme.skin.text) + ';') + qtFontDual(28, 17)">{{ c.title }}</text>
+          <view v-if="stackedCell(c.key)" class="cell-main">
+            <text class="cell-title cell-title-stack" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + (cellActive(c.key) ? theme.skin.accent : theme.skin.text) + ';') + overviewFont(28, 17)">{{ c.title }}</text>
+            <text class="cell-value cell-summary" :style="('color:' + theme.skin.textMuted + ';') + overviewFont(24, 14)">{{ c.value }}</text>
+          </view>
+          <text v-else class="cell-title" :class="[layout.isWide ? 'cell-title-wide' : '', inPane ? 'cell-title-pane' : '']" :style="('color:' + (cellActive(c.key) ? theme.skin.accent : theme.skin.text) + ';') + overviewFont(28, 17)">{{ c.title }}</text>
           <view v-if="c.dot" class="cell-dot" />
           <!-- 中间栏不显示行尾摘要：400px 宽下「倍速 1x · 播完本曲关闭」这类串必然折行挤掉标题 -->
           <view v-if="!inPane" class="cell-right">
-            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ c.value }}</text>
+            <text v-if="!stackedCell(c.key)" class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + overviewFont(24, 14)">{{ c.value }}</text>
             <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
           </view>
         </view>
@@ -56,7 +68,8 @@
 
 <script setup lang="ts">
 import { qtShowToast } from "@/services/toast";
-import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtTv, qtSetTvMode, qtTvTokens } from "@/uni_modules/qt-ui/composables/use-qt-tv";
 import { qtContentWidth, qtSplitByHeight, QT_GUTTER_PX } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { settingsOverviewTwoColumn } from "@/uni_modules/qt-ui/composables/detail-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
@@ -92,7 +105,7 @@ import { useSourceUpdateStore } from "@/stores/source-update";
 import { readSourceAuthEntries } from "@/services/source-auth";
 import { formatFileSize } from "@/services/upgrade";
 import { logBytes, logSupported } from "@/services/logger";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtTopRoute, qtIsSettingsRoute } from "@/uni_modules/qt-ui/composables/qt-page-chrome";
 
 /**
@@ -145,9 +158,13 @@ const qtAdmin = ref(isQtAdmin());
 /** 全局 AI 模式（音乐助手与每日推荐共用，见 ai-mode.ts 与 daily-recommend.ts） */
 const aiMode = ref<AiEngineMode>(readAiMode());
 const layout = useQtLayout();
+const tv = useQtTv();
 const theme = useThemeStore();
 const groupStyle = computed<string>(() => "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";");
-const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
+const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";" + (tv.enabled ? "height:auto;min-height:" + qtTvTokens().rowPx + "px;" : ""));
+function overviewFont(compact: number, wide: number): string {
+  return qtFontDual(compact, wide) + (layout.isTv ? "line-height:" + Math.round(qtFontValuePx(wide) * 1.4) + "px;" : "");
+}
 
 /**
  * 三栏中栏的「当前项」高亮。
@@ -184,9 +201,15 @@ function cellActive(key: string): boolean {
 }
 
 /** 当前项除了把标题染成强调色，还给一行淡淡的强调底色 —— 深色皮肤下只有文字变色不够醒目 */
+function stackedCell(key: string): boolean {
+  return props.inPane != true && (tv.enabled || key == "tv-mode");
+}
 function cellStyleFor(key: string): string {
-  if (!cellActive(key)) return cellStyle.value;
-  return cellStyle.value + "background-color:" + theme.skin.accentSoft + ";";
+  let style = cellStyle.value;
+  // 新增模式摘要较长；触控只放宽这一条，已有入口保持原行高和行尾排列。
+  if (!tv.enabled && stackedCell(key)) style += "height:auto;min-height:" + (layout.isWide ? 64 : qtRpx(96)) + "px;";
+  if (cellActive(key)) style += "background-color:" + theme.skin.accentSoft + ";";
+  return style;
 }
 
 // 音源清单不在这里维护：设置页「默认音源」的清单/高亮/滚动定位统一由
@@ -195,7 +218,7 @@ function cellStyleFor(key: string): string {
 const sourceUpdateStore = useSourceUpdateStore();
 // 桌面歌词（响应式镜像：服务是非响应式单例，模板要靠 ref 刷新）
 const lyricOn = ref(desktopLyric.isEnabled());
-// 音源账号摘要（readSourceAuthEntries 读 storage 非响应式，靠 tick 在 refreshAll 里重算）
+// 音源平台管理的账号摘要（readSourceAuthEntries 读 storage 非响应式，靠 tick 在 refreshAll 里重算）
 const authTick = ref(0);
 /**
  * 「运行日志」行尾占用。日志大小是异步读出来的，不能写进 computed（会变成 Promise），
@@ -236,8 +259,8 @@ const groups = computed((): SettingsGroup[] => [
   {
     id: "pack",
     cells: [
-      { key: "pack", icon: "music", color: "#5f9ea0", title: "音源包管理", value: "安装 / 更新 / 启停", dot: sourceUpdateStore.updatePending, go: showSourcePackage },
-      { key: "source-auth", icon: "user", color: "#c9904f", title: "音源账号", value: authSummaryText(), dot: false, go: goSourceAuth },
+      { key: "pack", icon: "music", color: "#5f9ea0", title: "音源包管理", value: "安装 / 更新 / 卸载", dot: sourceUpdateStore.updatePending, go: showSourcePackage },
+      { key: "source-auth", icon: "user", color: "#c9904f", title: "音源平台管理", value: authSummaryText(), dot: false, go: goSourceAuth },
     ],
   },
   {
@@ -252,6 +275,7 @@ const groups = computed((): SettingsGroup[] => [
     id: "appearance",
     cells: [
       { key: "theme", icon: "edit", color: "#7c6cf2", title: "外观与皮肤", value: "宽屏 / 壁纸 / 主题", dot: false, go: goTheme },
+      { key: "tv-mode", icon: "sliders", color: "#5f9ea0", title: "电视/遥控器展示设置", value: tvModeSummary(), dot: false, go: showTvMode },
       { key: "dislikes", icon: "ban", color: "#d97b66", title: "不喜欢列表", value: dislikesCountText(), dot: false, go: goDislikes },
     ],
   },
@@ -309,13 +333,13 @@ const twoColumn = computed((): boolean => {
 });
 
 /**
-   * 按「累计高度」切分。宽屏每个 cell 行高固定 64px、组间 14px，
+   * 按「累计高度」切分。触控宽屏 cell 沿用 64px；TV 使用共享 76px 下限、组间 14px，
    * 另外每组还有约 48px 的组头（标题 + 上下内边距）—— 这一项漏掉的话，
    * cell 少的组会被严重低估，切分点被推到偏左（真机症状：左列下方空一大块）。
    */
 const columns = computed((): [SettingsGroup[], SettingsGroup[]] => {
   const list = visibleGroups.value;
-  const heights = list.map((g: SettingsGroup): number => 48 + g.cells.length * 64 + 14);
+  const heights = list.map((g: SettingsGroup): number => 48 + g.cells.length * (tv.enabled ? qtTvTokens().rowPx : 64) + 14);
   return qtSplitByHeight<SettingsGroup>(list, heights);
 });
 
@@ -471,6 +495,25 @@ function goTheme(): void {
   goSubpage("/pages/theme/index");
 }
 
+/** 展示档位不等于原生按键桥能力；缺桥时仍可手动选择大屏展示。 */
+function tvModeSummary(): string {
+  const mode = tv.mode == "auto" ? "自动（识别为" + (tv.detected ? "电视" : "触控") + "）"
+    : tv.mode == "tv" ? "电视" : "触控";
+  return mode + " · " + (tv.nativeAvailable ? "原生遥控已就绪，随电视展示启用" : "原生遥控未接入，仅调整展示");
+}
+
+function showTvMode(): void {
+  const modes: string[] = ["auto", "tv", "touch"];
+  qtShowActionSheet({
+    title: "电视/遥控器展示设置",
+    itemList: ["自动", "电视", "触控"],
+    selectedIndex: modes.indexOf(tv.mode),
+  }).then((index: number): void => {
+    if (index < 0 || index >= modes.length) return;
+    qtSetTvMode(modes[index]);
+  });
+}
+
 function homeBackSummary(): string {
   const option = QT_HOME_BACK_OPTIONS.find((item): boolean => item.id == homeBackSettings.mode);
   return option != null ? option.summary : "两次退出";
@@ -528,10 +571,12 @@ function showSourcePackage(): void {
   goSubpage("/pages/source-pack/index");
 }
 
-// ==================== 音源账号（独立页 pages/source-auth/index，这里只留入口） ====================
+// ==================== 音源平台管理（沿用 pages/source-auth/index，这里只留入口） ====================
 // 原入口在音源包页，2026-10-25 隐藏；2026-10-28 用户要求恢复并改放设置页。
-// 行尾摘要 = 已登录音源数（readSourceAuthEntries 读 storage 非响应式，refreshAll 里 authTick 重算）。
-/** 行尾摘要：登录了几个音源，一眼看出要不要去补登录 */
+// 2026-11-12 承接平台启用/优先级与聚合范围，保留原路由及账号统计。
+// readSourceAuthEntries 读 storage 非响应式，refreshAll 里 authTick 重算。
+/** 行尾摘要：只给音源账号登录状态。过长会把 flex:1 的标题挤成竖排多行，
+ *  2026-11-13 移除原「平台 / 聚合 / 账号 · 」前缀（页面内容标题已自述）。 */
 function authSummaryText(): string {
   void authTick.value;
   const count = readSourceAuthEntries().length;
@@ -565,6 +610,18 @@ function goLogs(): void {
 </script>
 
 <style>
+.cell-main {
+  flex: 1;
+  min-width: 0;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+.cell-title-stack {
+  flex: 0;
+}
+.cell-summary {
+  margin-top: 4px;
+}
 .page {
   flex: 1;
   min-height: 0;

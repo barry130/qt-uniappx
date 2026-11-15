@@ -1,5 +1,5 @@
 import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
-import { fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { fontScale, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 
 /** Label-only chip border-box width in logical px, matching QtOption typography and padding.
  * Read the live window/font state so a page's computed rows reflow on both changes.
@@ -8,8 +8,8 @@ import { fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 export function qtOptionChipWidthPx(label: string, singleLine: boolean = false): number {
   const layout = useQtLayout();
   const unit = layout.isWide ? 1 : qtRpx(1);
-  const font = (layout.isWide ? 15 : 28 * unit) * fontScale.scale;
-  const padding = layout.isWide ? 14 : 24 * unit;
+  const font = layout.isTv ? qtFontValuePx(15) : (layout.isWide ? 15 : 28 * unit) * fontScale.scale;
+  const padding = layout.isTv ? 22 : layout.isWide ? 14 : 24 * unit;
   const border = unit;
   let units = 0;
   for (let i = 0; i < label.length; i++) {
@@ -27,10 +27,10 @@ export function qtOptionChipWidthPx(label: string, singleLine: boolean = false):
 export function qtOptionChipMinHeightPx(): number {
   const layout = useQtLayout();
   const unit = layout.isWide ? 1 : qtRpx(1);
-  const font = (layout.isWide ? 15 : 28 * unit) * fontScale.scale;
-  const paddingY = layout.isWide ? 6 : 12 * unit;
+  const font = layout.isTv ? qtFontValuePx(15) : (layout.isWide ? 15 : 28 * unit) * fontScale.scale;
+  const paddingY = layout.isTv ? 8 : layout.isWide ? 6 : 12 * unit;
   const border = unit;
-  const minimum = layout.isWide ? 36 : 64 * unit;
+  const minimum = layout.isTv ? 56 : layout.isWide ? 36 : 64 * unit;
   return Math.ceil(Math.max(minimum, font * 1.35 + paddingY * 2 + border * 2));
 }
 

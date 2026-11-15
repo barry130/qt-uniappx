@@ -474,10 +474,9 @@ class ThemeStore {
     // 响应式依赖（几乎所有 :style/:class 都读它的字段），换对象（哪怕内容相同）
     // 会作废全部 theme.skin.* 绑定并触发一次全量重算。App.uvue 的 onShow 每次
     // 回前台都会走 syncSystemTheme → resolveSkin，等于「每次回前台全 app 样式
-    // 重算」；更严重的是它会唤醒运行时已销毁页面/组件的泄漏 effect——Android
-    // 蒸汽运行时对已注销的原生实例调 _uni-form beginUpdateBatch，直接抛
-    // `UTS instance N is not registered`（2026-10-30 用户上报的大规模报错，
-    // 崩溃页遍布各页面 = 回前台时正停在哪个页就在哪页炸）。
+    // 重算」。这里只减少无效更新，不能代替原生 input 的生命周期清理：
+    // 5.34 input 挂载后的 80ms 样式定时器在卸载后仍会调 beginUpdateBatch，
+    // 该问题由 services/native-input-lifecycle.ts 绑定控件生命周期处理。
     // tabBar 对齐是幂等的单次原生调用，保持每次都跑（与旧行为一致）。
     if (JSON.stringify(resolved) != JSON.stringify(this.skin)) {
       this.skin = resolved;

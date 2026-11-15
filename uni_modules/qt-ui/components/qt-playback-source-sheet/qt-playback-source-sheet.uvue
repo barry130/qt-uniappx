@@ -1,0 +1,112 @@
+<template>
+  <QtSheet :visible="visible" title="播放来源与音质" subtitle="调整正在播放的歌曲；首页浏览来源分别设置。" @close="close">
+    <view class="pso-body" :style="'height:' + viewportPx + 'px;'">
+      <view class="pso-col" :style="'width:' + columnWidthPx + 'px;'">
+        <text class="pso-heading" :style="'color:' + theme.skin.textMuted + ';height:' + headingPx + 'px;line-height:' + headingPx + 'px;' + qtFontDual(25, 13)">播放来源</text>
+        <scroll-view class="pso-list" :class="layout.isTv ? 'qt-tv-scroll' : ''" data-qt-tv-id="playback-sources" direction="vertical" :style="'height:' + listPx + 'px;'" :scroll-into-view="reveal.anchor.value" :show-scrollbar="false">
+          <view v-if="local || podcast" :id="reveal.itemId(0)">
+            <QtOption :data-qt-tv-id="podcast ? 'playback-source:podcast' : 'playback-source:local'" :label="podcast ? '播客音频' : '本地文件'" :selected="true" :dense="true" :row-min-height-px="44" label-align="center" @select="close" />
+          </view>
+          <view v-for="(item, index) in sources" :key="item.id" :id="reveal.itemId(index + specialCount)">
+            <QtOption :data-qt-tv-id="'playback-source:' + item.id" :label="item.name" :selected="!local && item.id == source" :disabled="local" :dense="true" :row-min-height-px="44" label-align="center" @select="pickSource(item.id)" />
+          </view>
+          <text v-if="!podcast && sources.length == 0" class="pso-note" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 12) + tvNoteLine()">{{ registry.ready ? '暂无已启用的音乐源，可在音源平台管理中启用。' : '请在音源包管理中安装数据包。' }}</text>
+          <text v-if="podcast" class="pso-note" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 12) + tvNoteLine()">音频由节目提供，无法切换音乐平台或音质。</text>
+        </scroll-view>
+      </view>
+      <view v-if="!podcast" class="pso-col pso-col-right" :style="'width:' + columnWidthPx + 'px;'">
+        <text class="pso-heading" :style="'color:' + theme.skin.textMuted + ';height:' + headingPx + 'px;line-height:' + headingPx + 'px;' + qtFontDual(25, 13)">音质</text>
+        <scroll-view class="pso-list" :class="layout.isTv ? 'qt-tv-scroll' : ''" data-qt-tv-id="playback-qualities" direction="vertical" :style="'height:' + listPx + 'px;'" :scroll-into-view="qualityReveal.anchor.value" :show-scrollbar="false">
+          <text v-if="fileText.length > 0" class="pso-note" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 12) + tvNoteLine()">{{ fileText }}</text>
+          <view v-for="(item, index) in qualities" :key="item.id" :id="qualityReveal.itemId(index)">
+            <QtOption :data-qt-tv-id="'playback-quality:' + item.id" :label="item.name" :selected="item.id == quality" :dense="true" :row-min-height-px="44" label-align="center" @select="pickQuality(item.id)" />
+          </view>
+          <text v-if="local" class="pso-note" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 12) + tvNoteLine()">当前播放本地文件，音质由文件决定。</text>
+          <text v-else-if="qualities.length == 0" class="pso-note" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 12) + tvNoteLine()">当前音源包未提供可选音质。</text>
+        </scroll-view>
+      </view>
+    </view>
+  </QtSheet>
+</template>
+<script setup lang="ts">
+import { computed } from "vue";
+import QtSheet from "@/uni_modules/qt-ui/components/qt-sheet/qt-sheet.uvue";
+import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { useQtSelectionReveal } from "@/uni_modules/qt-ui/composables/use-qt-selection-reveal";
+import { qtTvSheetBodyHeightPx } from "@/uni_modules/qt-ui/composables/qt-sheet-metrics";
+import { playbackSourceViewport } from "@/uni_modules/qt-ui/composables/playing-track-metrics";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontDual, qtFontValuePx, useFontScaleStore } from "@/uni_modules/qt-ui/stores/font-scale";
+import { useSourceRegistryStore } from "@/stores/source-registry";
+import type { RegistryQuality, RegistrySource } from "@/services/music-api";
+
+const props = withDefaults(defineProps<{
+  visible: boolean; source: string; quality: string; local: boolean; podcast: boolean;
+  fileText?: string; section?: string;
+}>(), { fileText: "", section: "source" });
+const emit = defineEmits<{
+  "update:visible": [value: boolean]; source: [id: string]; quality: [id: string];
+}>();
+const layout = useQtLayout();
+const theme = useThemeStore();
+const fontScale = useFontScaleStore();
+const registry = useSourceRegistryStore();
+const sources = computed((): RegistrySource[] => props.podcast ? [] : registry.sources);
+const specialCount = computed((): number => props.local || props.podcast ? 1 : 0);
+const qualities = computed((): RegistryQuality[] => {
+  const epoch = registry.qualityGeneration;
+  return epoch >= 0 && !props.local && !props.podcast && registry.has(props.source) ? registry.sourceQualities(props.source) : [];
+});
+const sourceSelected = computed((): number => {
+  if (props.local || props.podcast) return 0;
+  const index = sources.value.findIndex(item => item.id == props.source);
+  return index < 0 ? -1 : index;
+});
+const qualitySelected = computed((): number => {
+  if (props.local || props.podcast) return -1;
+  const index = qualities.value.findIndex(item => item.id == props.quality);
+  return index < 0 ? -1 : index;
+});
+// 左右双列：左播放来源、右音质，各自滚动并在打开时露出当前选中项。
+const reveal = useQtSelectionReveal((): boolean => props.visible, (): number => sourceSelected.value,
+  (): string => JSON.stringify(sources.value));
+const qualityReveal = useQtSelectionReveal((): boolean => props.visible, (): number => qualitySelected.value,
+  (): string => JSON.stringify([qualities.value, props.source]));
+const sheetWidthPx = computed((): number => layout.isWide ? qtSheetWidth("drawer") : layout.paneWidth);
+const columnWidthPx = computed((): number => {
+  const inner = Math.max(0, sheetWidthPx.value - 32);
+  if (props.podcast) return inner;
+  return Math.max(0, Math.floor((inner - 16) / 2));
+});
+const headingPx = computed((): number => layout.isTv ? Math.ceil(qtFontValuePx(13) * 1.5) : layout.isWide ? 28 : Math.max(24, Math.ceil(25 * Math.max(1, layout.windowWidth) / 750 * fontScale.scale * 1.4 + 10)));
+const sourceRowCount = computed((): number => sources.value.length + specialCount.value);
+const qualityRowCount = computed((): number => props.podcast ? 0 : qualities.value.length);
+const viewportPx = computed((): number => layout.isTv ? qtTvSheetBodyHeightPx({ title: "播放来源与音质", subtitle: "调整正在播放的歌曲；首页浏览来源分别设置。" }) : playbackSourceViewport(layout.isWide ? qtSheetWidth("drawer") : layout.paneWidth,
+  layout.paneHeight, layout.isWide, layout.safeBottomPx, fontScale.scale,
+  Math.max(sourceRowCount.value, qualityRowCount.value), layout.windowWidth));
+const listPx = computed((): number => layout.isTv ? Math.max(0, viewportPx.value - headingPx.value - 2) : Math.max(44, viewportPx.value - headingPx.value));
+function tvNoteLine(): string { return layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(12) * 1.5) + "px;" : ""; }
+function close(): void { emit("update:visible", false); }
+function pickSource(id: string): void {
+  if (!props.visible || props.local || props.podcast || !registry.has(id)) return;
+  close();
+  if (!props.local && id == props.source) return;
+  emit("source", id);
+}
+function pickQuality(id: string): void {
+  if (!props.visible || props.local || props.podcast || !qualities.value.some(item => item.id == id)) return;
+  close();
+  if (id == props.quality) return;
+  emit("quality", id);
+}
+</script>
+<style>
+.pso-body { flex-direction: row; padding: 0 16px; }
+.pso-col { flex-direction: column; min-height: 0; }
+.pso-col-right { margin-left: 16px; }
+.pso-list { min-height: 0; }
+.pso-heading { margin: 0 8px 2px; font-weight: 600; font-size: 25rpx; text-align: center; }
+.pso-note { margin: 6px 8px; font-size: 23rpx; line-height: 1.5; text-align: center; }
+</style>

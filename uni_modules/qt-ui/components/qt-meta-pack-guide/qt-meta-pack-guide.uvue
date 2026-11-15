@@ -1,6 +1,20 @@
 <template>
-  <view v-if="visible" class="mg-mask" :style="maskStyle" @click="onMaskTap">
-    <view class="mg-card" :class="layout.isWide ? 'mg-card-wide' : ''" :style="cardStyle" @click.stop>
+  <view v-if="visible" class="mg-mask qt-tv-skip" :style="maskStyle" @click="onMaskTap">
+    <view ref="tvPanel" class="mg-card qt-tv-skip" :class="layout.isWide ? 'mg-card-wide' : ''" :style="cardStyle" @click.stop>
+      <scroll-view v-if="layout.isTv" direction="vertical" class="mg-tv-document qt-tv-scroll" data-qt-tv-id="meta-guide-document" :style="documentStyle" :show-scrollbar="true">
+        <view class="mg-tv-content" :style="'width:' + qtSheetWidth('dialog') + 'px;'">
+          <view class="mg-icon-wrap mg-icon-wrap-wide" :style="'background-color:' + themeStore.skin.surfaceMuted + ';'"><QtIcon name="disc" :size="28" :color="themeStore.skin.accent" /></view>
+          <text class="mg-title mg-title-wide" :style="'color:' + themeStore.skin.text + ';' + qtFontDual(34, 18) + tvLine(18)">安装数据包，启用在线功能</text>
+          <text class="mg-sub mg-sub-wide" :style="'color:' + themeStore.skin.textMuted + ';' + qtFontDual(24, 13) + tvLine(13)">在线搜索 · 歌单 · 歌词 · 封面</text>
+          <view class="mg-divider mg-divider-wide" :style="'background-color:' + themeStore.skin.border + ';width:' + Math.max(0, qtSheetWidth('dialog') - 44) + 'px;'"></view>
+          <text class="mg-body mg-body-wide" :style="'color:' + themeStore.skin.textMuted + ';' + qtFontDual(26, 14) + tvLine(14)">应用未内置数据包：需在「音源包管理」页安装一次，支持从链接或本地文件安装。未安装时在线功能不可用（搜索/歌单/歌词/在线播放），本地音乐播放不受影响。</text>
+          <view class="mg-tv-actions">
+            <QtButton data-qt-tv-id="meta-guide-dismiss" label="暂不" variant="ghost" size="md" :wrap="true" :full-width="true" @click="onDismiss" />
+            <view class="mg-tv-go"><QtButton data-qt-tv-id="meta-guide-go" label="去安装" variant="primary" size="md" :wrap="true" :full-width="true" @click="onGo" /></view>
+          </view>
+        </view>
+      </scroll-view>
+      <template v-else>
       <view class="mg-icon-wrap" :class="layout.isWide ? 'mg-icon-wrap-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';'">
         <QtIcon name="disc" :size="layout.isWide ? 28 : 52" :color="themeStore.skin.accent" />
       </view>
@@ -12,6 +26,7 @@
         <qt-button class="mg-btn" :class="layout.isWide ? 'mg-btn-wide' : ''" label="暂不" variant="ghost" size="md" @click="onDismiss" />
         <qt-button class="mg-btn" :class="layout.isWide ? 'mg-btn-wide' : ''" label="去安装" variant="primary" size="md" @click="onGo" />
       </view>
+      </template>
     </view>
   </view>
 </template>
@@ -31,14 +46,21 @@
  * emit dismiss。
  */
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
-import { computed } from "vue";
-import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { computed, ref } from "vue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import { useQtTvModal } from "@/uni_modules/qt-ui/composables/use-qt-tv-modal";
+import { qtFixedPaneStyle, useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const layout = useQtLayout();
 const themeStore = useThemeStore();
+const tvPanel = ref<UniElement | null>(null);
+function tvLine(basePx: number): string {
+  return "line-height:" + Math.ceil(qtFontValuePx(basePx) * 1.5) + "px;align-self:stretch;min-width:0px;";
+}
+const documentStyle = computed((): string => "width:" + qtSheetWidth("dialog") + "px;height:" + Math.max(0, layout.paneHeight - layout.safeBottomPx - 56) + "px;");
 
 /**
  * 宽屏宽度走统一浮层契约（QT_SHEET_WIDTH.dialog = 420），并夹到窗口内。
@@ -46,22 +68,24 @@ const themeStore = useThemeStore();
  */
 const cardStyle = computed((): string => {
   const bg = "background-color:" + themeStore.skin.sheetSurface + ";";
-  if (!layout.isWide) return bg + "width:600rpx;";
+  if (layout.isTv) return bg + "width:" + qtSheetWidth("dialog") + "px;padding:0px;overflow:hidden;";
+  if (!layout.isWide) return bg + "width:" + Math.min(layout.paneWidth - 24, layout.windowWidth * 600 / 750) + "px;";
   return bg + "width:" + qtSheetWidth("dialog") + "px;";
 });
 
 /** 遮罩底色随主题（skin.scrim），与 qt-notice-splash 同口径 */
-const maskStyle = computed((): string => "background-color:" + themeStore.skin.scrim + ";");
+const maskStyle = computed((): string => qtFixedPaneStyle() + "background-color:" + themeStore.skin.scrim + ";");
 
 const emit = defineEmits<{
   (e: "go"): void;
   (e: "dismiss"): void;
 }>();
 
-defineProps({
+const props = defineProps({
   /** 是否显示（首页据 sourceUpdateStore.metaMissing && 未在本会话关闭过） */
   visible: { type: Boolean, default: false },
 });
+useQtTvModal(tvPanel, (): boolean => props.visible, onDismiss, 1600);
 
 function onGo(): void {
   emit("go");
@@ -167,4 +191,8 @@ function onMaskTap(): void {
 .mg-btn-wide {
   margin-left: 12px;
 }
+.mg-tv-document { min-height: 0; }
+.mg-tv-content { padding: 22px; align-items: center; }
+.mg-tv-actions { padding-top: 20px; align-self: stretch; flex-shrink: 0; }
+.mg-tv-go { margin-top: 12px; align-self: stretch; flex-shrink: 0; }
 </style>

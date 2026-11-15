@@ -5,23 +5,25 @@
   <view
     class="fb-item"
     :class="[[layout.isWide ? 'fb-item-wide' : ''], [inColumn ? 'fb-in-col' : '']]"
-    :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'"
+    :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';' + (layout.isTv ? 'min-height:56px;' : '')"
     :hover-class="layout.isWide ? 'fb-item-hover' : 'none'"
     @tap="emit('tap')"
   >
-    <view class="fb-head" :class="layout.isWide ? 'fb-head-wide' : ''">
+    <view class="fb-head" :class="layout.isWide ? 'fb-head-wide' : ''" :style="layout.isTv ? 'flex-direction:column;align-items:flex-start;' : ''">
       <view class="type-badge" :class="layout.isWide ? 'type-badge-wide' : ''" :style="'background-color:' + typeColor + ';'">
-        <text class="type-badge-text" :class="layout.isWide ? 'type-badge-text-wide' : ''" :style="qtFontDual(20, 11)">{{ typeText }}</text>
+        <text class="type-badge-text" :class="layout.isWide ? 'type-badge-text-wide' : ''" :style="qtFontDual(20, 11) + tvLine(11)">{{ typeText }}</text>
       </view>
-      <text class="fb-title" :class="layout.isWide ? 'fb-title-wide' : ''" :max-lines="1" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(29, 16)">{{ title }}</text>
+      <text v-if="layout.isTv" class="fb-title fb-title-wide" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(29, 16) + tvLine(16) + 'flex:none;min-width:0px;align-self:stretch;margin-top:12px;margin-bottom:12px;margin-left:0px;margin-right:0px;'">{{ title }}</text>
+      <text v-else class="fb-title" :class="layout.isWide ? 'fb-title-wide' : ''" :max-lines="1" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(29, 16)">{{ title }}</text>
       <view class="status-badge" :class="layout.isWide ? 'status-badge-wide' : ''" :style="'background-color:' + statusColor + ';'">
-        <text class="status-badge-text" :class="layout.isWide ? 'status-badge-text-wide' : ''" :style="qtFontDual(20, 11)">{{ statusText }}</text>
+        <text class="status-badge-text" :class="layout.isWide ? 'status-badge-text-wide' : ''" :style="qtFontDual(20, 11) + tvLine(11)">{{ statusText }}</text>
       </view>
     </view>
-    <text class="fb-content" :class="layout.isWide ? 'fb-content-wide' : ''" :max-lines="2" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(25, 14)">{{ content }}</text>
-    <view class="fb-foot" :class="layout.isWide ? 'fb-foot-wide' : ''">
-      <text class="fb-time" :class="layout.isWide ? 'fb-time-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(22, 12)">{{ timeText }}</text>
-      <text v-if="showPublic" class="fb-public" :class="layout.isWide ? 'fb-public-wide' : ''" :style="qtFontDual(22, 12)">已公开</text>
+    <text v-if="layout.isTv" class="fb-content fb-content-wide" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(25, 14) + tvLine(14) + 'align-self:stretch;min-width:0px;'">{{ content }}</text>
+    <text v-else class="fb-content" :class="layout.isWide ? 'fb-content-wide' : ''" :max-lines="2" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(25, 14)">{{ content }}</text>
+    <view class="fb-foot" :class="layout.isWide ? 'fb-foot-wide' : ''" :style="layout.isTv ? 'flex-direction:column;align-items:flex-start;' : ''">
+      <text class="fb-time" :class="layout.isWide ? 'fb-time-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(22, 12) + tvLine(12)">{{ timeText }}</text>
+      <text v-if="showPublic" class="fb-public" :class="layout.isWide ? 'fb-public-wide' : ''" :style="qtFontDual(22, 12) + tvLine(12)">已公开</text>
     </view>
   </view>
 </template>
@@ -29,7 +31,7 @@
 <script setup lang="ts">
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 
 defineProps<{
   title: string;
@@ -48,6 +50,9 @@ const emit = defineEmits<{ tap: [] }>();
 
 const themeStore = useThemeStore();
 const layout = useQtLayout();
+function tvLine(basePx: number): string {
+  return layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(basePx) * 1.5) + "px;" : "";
+}
 </script>
 
 <style>

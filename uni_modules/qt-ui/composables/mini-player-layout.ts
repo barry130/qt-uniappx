@@ -10,7 +10,7 @@ export function qtMiniStripHeightPx(): number {
 
 /** Fixed compact row uses a smaller text rhythm, with room for large fonts. */
 export function qtMiniDockBarHeightPx(): number {
-  return qtLayout().isWide ? qtPlayerBarHeightPx() : qtRpx(Math.max(112, Math.ceil(60 * fontScale.scale + 28)));
+  return qtLayout().isWide ? qtPlayerBarHeightPx() : Math.max(52, qtRpx(Math.max(112, Math.ceil(60 * fontScale.scale + 28))));
 }
 
 export function qtMiniDockBottomPx(aboveTab: boolean): number {
@@ -26,5 +26,5 @@ export function qtMiniDockReservePx(aboveTab: boolean): number {
 
 /** 同一快照的 height - inset：新页面原生根先缩短时，不会再叠上一页的 bottom。 */
 export function qtMiniDockTopPx(aboveTab: boolean): number {
-  return Math.max(0, qtLayout().windowHeight - qtMiniDockReservePx(aboveTab));
+  return Math.max(0, qtLayout().paneHeight - qtMiniDockReservePx(aboveTab));
 }

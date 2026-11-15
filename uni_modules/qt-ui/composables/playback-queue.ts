@@ -1,5 +1,6 @@
 import type { Song } from "@/types/music";
 import { playerQueueMetrics } from "./player-presentation";
+import { QT_TV_TOKENS } from "./qt-tv-tokens";
 
 /** The in-page queue uses the same timeline and persistence contract as the player. */
 export type PlaybackQueueController = {
@@ -44,10 +45,10 @@ export function movePlaybackQueueItem(player: PlaybackQueueController, index: nu
 }
 
 /** Fit above the wide dock; compact uses a bottom sheet. Short queues do not leave a tall blank panel. */
-export function playbackQueueMetrics(width: number, height: number, wide: boolean, status: number, safeBottom: number, dock: number, scale: number, count: number) {
+export function playbackQueueMetrics(width: number, height: number, wide: boolean, status: number, safeBottom: number, dock: number, scale: number, count: number, tv: boolean = false) {
   const unit = Math.max(1, width) / 750;
-  const stridePx = playerQueueMetrics(width, height, wide, safeBottom, scale).stridePx;
-  const headerPx = wide ? Math.max(60, Math.ceil(24 * scale + 24)) : Math.max(100, Math.ceil(36 * scale + 40)) * unit;
+  const stridePx = tv ? Math.max(QT_TV_TOKENS.rowPx, Math.ceil(38 * Math.max(1, scale) + 22)) : playerQueueMetrics(width, height, wide, safeBottom, scale).stridePx;
+  const headerPx = tv ? Math.max(QT_TV_TOKENS.rowPx, Math.ceil(24 * scale + 32)) : wide ? Math.max(60, Math.ceil(24 * scale + 24)) : Math.max(100, Math.ceil(36 * scale + 40)) * unit;
   const insetBottomPx = wide ? Math.max(0, dock) + 12 : 0;
   const panelBottomPx = wide ? 8 : Math.max(12 * unit, safeBottom);
   const available = Math.max(0, height - Math.max(0, status) - insetBottomPx - panelBottomPx - headerPx - 24);

@@ -69,6 +69,8 @@ class FontScaleStore {
   tier: QtFontTier = DEFAULT_TIER;
   /** 当前倍率（1.15 = 标准；随 setTier 联动更新） */
   scale: number = defaultTier().scale;
+  /** Presentation-only; phone font tier remains the stored preference. */
+  tv: boolean = false;
 
   init(): void {
     try {
@@ -101,6 +103,8 @@ export const fontScale = reactive(new FontScaleStore());
 export function useFontScaleStore(): FontScaleStore {
   return fontScale;
 }
+export function setQtTvFontPresentation(enabled: boolean): void { fontScale.tv = enabled; }
+export function qtFontValuePx(basePx: number): number { return scaledPx(basePx); }
 
 /**
  * 生成「rpx 基准字号 x 全局倍率」的内联字号样式串（Vapor 只能这样逐节点绑）。
@@ -108,6 +112,7 @@ export function useFontScaleStore(): FontScaleStore {
  * @param baseRpx 设计稿上该节点的基准字号（rpx）
  */
 export function qtFont(baseRpx: number): string {
+  if (fontScale.tv) return qtFontPx(baseRpx / 2);
   return "font-size:" + scaledRpx(baseRpx) + "rpx;";
 }
 
@@ -166,6 +171,7 @@ function scaledRpx(baseRpx: number): number {
 export const QT_MIN_WIDE_FONT_PX = 11;
 
 function scaledPx(basePx: number): number {
+  if (fontScale.tv) return Math.max(20, Math.round(basePx * fontScale.scale * 1.2 * 100) / 100);
   const v = Math.round(basePx * fontScale.scale * 100) / 100;
   if (qtIsWide() && v < QT_MIN_WIDE_FONT_PX) return QT_MIN_WIDE_FONT_PX;
   return v;

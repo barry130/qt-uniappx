@@ -3,6 +3,7 @@ import { qtLayout, qtRpx, qtRailWidth } from "../composables/use-qt-layout";
 import { logWarn } from "@/services/logger";
 import { useMiniPlayerSettings } from "../stores/mini-player";
 import { qtMiniStripHeightPx } from "../composables/mini-player-layout";
+import { qtPerformance } from "../composables/use-qt-performance";
 
 /**
  * 悬浮播放器（qt-mini-player）的全站共享 UI 状态。
@@ -105,6 +106,7 @@ const mounts = new Map<number, boolean>();
 const SPIN_FRAME_MS = 1000 / 30;
 
 function spinVisible(): boolean {
+  if (qtPerformance.reduceMotion) return false;
   if (!appForeground || settings.mode == "docked" || !spinPlaying) return false;
   let visible = false;
   mounts.forEach((active: boolean) => { if (active) visible = true; });
@@ -202,8 +204,8 @@ export function ensureMiniPositioned(): void {
   const win = uni.getWindowInfo();
   // 高度优先取 useQtLayout 的量测值（响应式、与整套分栏判定同口径），
   // getWindowInfo 只在量测未就绪时兜底。
-  const winW = layout.windowWidth > 0 ? layout.windowWidth : win.windowWidth;
-  const winH = layout.windowHeight > 0 ? layout.windowHeight : win.windowHeight;
+  const winW = layout.paneWidth > 0 ? layout.paneWidth : win.windowWidth;
+  const winH = layout.paneHeight > 0 ? layout.paneHeight : win.windowHeight;
   const unstable = winW <= 0 || winH <= 0
     || (win.windowHeight > 0 && layout.windowHeight > 0 && Math.abs(win.windowHeight - layout.windowHeight) > 24);
   if (unstable && initRetryLeft > 0) {
@@ -266,7 +268,7 @@ export function ensureMiniPositioned(): void {
 function persistPosition(): void {
   if (!miniPositioned.value) return;
   const win = uni.getWindowInfo();
-  const winH = layout.windowHeight > 0 ? layout.windowHeight : win.windowHeight;
+  const winH = layout.paneHeight > 0 ? layout.paneHeight : win.windowHeight;
   if (winH <= 0 || (win.windowHeight > 0 && layout.windowHeight > 0 && Math.abs(win.windowHeight - layout.windowHeight) > 24)) return;
   try {
     uni.setStorageSync(POS_KEY, POS_VERSION + "," + Math.round(miniFabX.value) + "," + Math.round(miniFabY.value) + "," + Math.round(winH));
@@ -417,7 +419,7 @@ export function onMiniPlayerHidden(): void {
 
 // Module lifetime: a watcher created inside the first component's setup/onMounted
 // would be disposed when that page unmounts, even if another instance survives.
-watch(() => settings.mode, () => {
+watch(() => settings.mode + ":" + qtPerformance.reduceMotion, () => {
   onMiniPlayerHidden();
   miniExpanded.value = settings.mode == "bar";
   syncSpinLoop();
@@ -426,7 +428,7 @@ watch(() => settings.mode, () => {
   miniSyncRenderSize();
 }, { immediate: true });
 
-watch(() => [layout.windowWidth, layout.windowHeight, layout.isWide, layout.safeBottomPx, qtMiniStripHeightPx()], () => {
+watch(() => [layout.paneWidth, layout.paneHeight, layout.isWide, layout.safeBottomPx, qtMiniStripHeightPx()], () => {
   syncSpinLoop();
   if (mounts.size == 0 || settings.mode == "docked") return;
   onMiniWindowResize();

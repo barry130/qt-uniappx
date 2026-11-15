@@ -1,5 +1,36 @@
 # Qt UI 设计文档
 
+## 2026-11-15 TV 设计与焦点契约
+
+电视展示是共享布局的显式 `isTv` 状态，设备识别使用 Android TV/Leanback 能力；窗口宽度只决定可用几何。设置提供 auto/tv/touch 三态，离开 TV 恢复原触控字号和尺寸。TV 采用单主内容区，导航与播放栏由统一外壳管理，托管工具仅活动 owner 接收按键。
+
+[QT_TV_TOKENS](<../composables/qt-tv-tokens.ts>) 是共享尺寸来源：字号下限20、倍率1.2、动作56、列表行76、rail136、播放栏104、gutter28、卡片最小宽208、sheet680、二维码280（单位px）。字体 helper 与行高使用同一最终字号。20px是下限，用户大字号继续放大；控件按内容增长或进入可滚区域，不为塞进短窗而缩回触控字号。
+
+[空间导航](<../composables/qt-tv-navigation.ts>) 优先同方向重叠束，再比较距离，不环绕；排除隐藏、禁用和无尺寸候选。同一滚动组到边缘先滚动，实际耗尽后才离开至导航/播放栏。方向重复节流85ms，OK/Menu/Back的重复DOWN不重复业务操作。精确完整ID或唯一custom后缀可恢复焦点；移除项退回几何候选。重复业务记录的出现项必须区分身份；QtSegmented使用挂载实例uid隔离同页的多组下标。
+
+业务页面沿用原事件/服务；增加可见更多入口与遥控可达的±操作，不模拟slider拖动。`qt-tv-skip` 只排除容器自身，子业务节点仍参与；`qt-tv-scroll` 明确标记只读滚动容器，OK/Menu不产生业务提交。QtButton新增可选wrap/fullWidth，以真实标签行高预算TV长动作；歌曲行的可选tvId由列表宿主传出现项身份。
+
+[useQtTvModal](<../composables/use-qt-tv-modal.ts>) 注册实际panel而非遮罩，关闭调用原业务守卫。层级从普通999、听歌详情1000、队列1400、指南1600、公告1700、升级1800、确认3000到免责声明3200；焦点scope优先级与视觉层级一致。busy/强制/倒计时守卫保持原规则，Back不绕过。输入法与嵌入WebView所有权、TV launcher和AndroidX依赖见 [原生集成](<../../../docs/TV_NATIVE_INTEGRATION.md>)。
+
+验收分三层：完整production模板+公开native事件+真实业务服务回归；真实HBuilderX Vapor/CSS/UTS编译；包含新插件的TV设备遥控、IME/WebView、滚动与实际布局。前两层不代替第三层。原手机/平板回归始终与TV套件并行保留。
+
+## 2026-11-09 折叠屏与性能策略
+
+业务几何以 `paneWidth/paneHeight` 为准，原生 rpx 换算仍使用实际 `windowWidth`。
+只有真实分隔/遮挡特征贯穿窗口时才选择单个安全屏区，不凭横竖屏推断铰链。
+页面根应用屏区偏移；托管工具页由 workspace 偏移一次，其 frame 不重复偏移。
+窗口 fixed 控件用 `qtFixedPaneStyle()` 或显式加 paneLeft/paneTop；普通 absolute sheet
+继承页面根坐标。底部安全区仅在屏区触及窗口底边时保留，桌面姿态上屏不重复留白。
+实际窗口宽度达到 600px 时，竖向分隔屏区使用 fixed-px 宽屏控件（屏区不足 900px 时
+使用 64px 紧凑侧栏），避免 CSS rpx 按整窗放大后挤入半屏；正常窗口断点保持原规则。`portraitPlayerMetrics`、
+`playerQueueMetrics`、`playerOffsetMetrics` 的末尾可选参数为实际 `windowWidth`，
+未传时兼容旧调用；屏区负责可用尺寸，窗口负责 CSS 比例，滑块坐标加屏区偏移。
+
+低内存或省电状态关闭昂贵背景与歌词柔焦；系统关闭动画和省电状态减少动态效果。
+该策略由原生信号驱动，不修改用户保存的皮肤/播放风格。Android 桌面歌词小组件
+按下一歌词时间点调度，暂停、缓冲、熄屏、无小组件时停止定时更新；主题同步到
+RemoteViews，并提供“我的歌单”入口。iOS/Harmony 暂用无铰链/默认性能回退。
+
 ## 2026-11-07 底栏就地队列
 
 底栏队列留在当前页面：宽屏在右下方、底栏上方展示有上限高度的抽屉，短队列按内容收缩；
@@ -9,6 +40,14 @@
 实例状态由 frame/workspace 持有，非全局可见广播；切换工具或隐藏宿主立即关闭，避免重复队列和错页弹层。
 
 ## 2026-11-07 短标签字体与盒模型
+
+2026-11-10 来源与音质面板补充：`QtOption` 可选 `rowMinHeightPx` 保证原生行的触控高度下限；使用时根节点不叠加上下 padding，正文容器内保留各 8px，避免 44px 最小行高再加 22rpx×2 后变成约 65px。此 API 仅由当前播放来源面板启用，普通选项保持原密度。分组容器为上下 4px、标题间距为 8px/2px，视口预算跟随真实字体与行高；长包名、说明或大字号自然撑高，短横窗仍独立滚动并露出当前选择。
+
+2026-11-13 播放页歌曲信息块（用户反馈「太分散、来源胶囊和其他不和谐」）：`qt-playing-track` 普通态的来源标签去掉胶囊底色与描边（`pt-source` 不再有 background/border/padding/radius），改为与歌手同色系的普通文字 + 下箭头，与 `compact` 态标题的来源行观感一致；歌手不再 `flex:1` 撑满整行，改为按真实文字宽收窄，来源紧随其后左对齐成一组，消除「歌手在左、胶囊贴右」的分散感。`playing-track-metrics` 新增 `artist` 参数：`naturalArtistPx = textWidth(artist) + 箭头 + 4`，stacked 判定改为 `naturalSource + naturalArtist + gap > width`（不再用 5 字代理宽），`artistWidthPx = min(natural, 剩余)`；`portraitPlayerMetrics` 与播放页 wide 预算同步透传 artist 文本，保证预算与渲染同源（`check-player-presentation` 的 trackHeightPx 等式继续成立）。来源命中区宽仍 ≥44px（`.pt-source-hit` 固定 `sourceWidthPx`/`metaRowPx`），胶囊常量 `+26` 收窄为 `+8`。回归：`check-playback-source` 新增「plain source grouped after artist」用例。
+
+2026-11-14 取消尾部留白更正：11-13 的同色垫条只处理面板内部颜色，没有消除播放栏预留导致的面板外大块空白。普通手机页 `qt-sheet` 改以 `position:fixed` + `qtFixedPaneStyle()` 绑定完整 pane，不再跟随被 dock padding 缩短的页面内容底边；`qt-page-frame` 的列表预算保持原样，避免打开/关闭弹层时改变列表视口和滚动锚点。框架提供 setup 固定的 `qt-sheet-in-workspace` 实例上下文，宽屏及托管实例仍保持 absolute，避免跨断点/深页覆盖后 fixed 套 fixed 逃逸。手机取消脚部仅取 `safeBottomPx`（0 时无垫条），宽屏 12px 不变；`availableHeight` 共用 `cancelInsetPx`，不再额外扣8rpx装饰值。实际源码回归覆盖普通compact、pane resize、wide和托管跨断点；设备绘制另行核验。
+
+2026-11-13 弹窗展示修正（阶段记录，尾部留白结论以11-14更正为准；用户反馈「取消键下面还有一行空行，其他弹窗也扫一遍」）：① `qt-action-sheet` 取消键改为贴弹层底边——`qt-sheet` 新增 `footerFlush` 属性（true 时面板 `padding-bottom` 归零），取消键下方用同色 `as-cancel-inset` 垫条补齐底部安全区（高度与面板原让位同源：窄屏 `max(8rpx 等价, safeBottomPx)`、宽屏 12px），灰色从取消键一直铺到弹层底边，取消键下不再出现整行白色空行；垫条本身可点击关闭。竖屏/宽屏、全部走 `qt-action-sheet` 的单选弹层（倍速/定时/蓝牙歌词/换源候选/歌单操作等）一并生效。② 全代码弹窗 z 序扫描：`qt-confirm-host` 980 → 1200——此前迷你播放栏（998）画在确认弹窗（980）上面，历史/缓存/下载等页删除确认会被红栏压住；现在确认弹窗压过 998 播放栏、999 各弹层与 1000 宽屏托管层，仍在 1400 播放队列抽屉之下。toast 970 压页头不压播放球/弹层、队列 1400 等既有分层不动。回归：`check-ui-selection` 新增 footerFlush/垫条/确认 z 序断言；`check-responsive-layout` 的 panelStyle 沙箱补 `props:{footerFlush:false}`（默认路径断言不变）。
 
 `qt-option` 的 chip 使用真实字号、padding、border 计算单行最小高度，随五档字号和窗口变化。
 `qtOptionChipWidthPx(label)` 从 [qt-option-metrics](<../composables/qt-option-metrics.ts>) 计算无 leading/default slot 的标签 border-box 逻辑 px 宽；页面固定行分组使用此度量，不再假定未缩放 15px + 20px padding。
@@ -107,6 +146,7 @@ uni_modules/
         ├── qt-skeleton/  qt-skeleton-list/  qt-skeleton-shine/
         ├── qt-meta-pack-guide/     # 数据包安装引导弹窗（业务组件：未装数据包时首页指路设置页）
         ├── qt-playlist-picker/  qt-back-to-top/  qt-rich-text/  qt-sort-panel/
+        ├── qt-reorder-list/        # 实测可变高度卡片的手柄拖动；松手一次发出完整顺序
         ├── qt-batch-bar/           # 批量管理条（不自带外框，必须放进宿主的横向行容器）
         ├── qt-listen-detail/  qt-local-mixes/  qt-feedback-card/
         ├── qt-settings-overview/  qt-profile-overview/  qt-player-bar/  qt-wide-workspace/
@@ -290,7 +330,8 @@ qt-button-label-sm
 - 设置子页的三栏：rail | 原设置总览 | 子页内容。中栏复用 `qt-settings-overview`，不是另一份精简菜单。
 - 我的页族的三栏（2026-10-19 起，与设置族同一套机制）：rail | 「我的」总览 | 子页内容。中栏复用 `qt-profile-overview`（从「我的」页抽出的真实总览，含用户卡/五宫格/功能分组与实时数据），当前项高亮；「设置」cell 属设置族，仍走 `navigateTo` 进另一套三栏，不做 redirectTo 就地替换。总览里的音乐助手 cell 按权限显隐（`canUseMusicAssistant`，`services/music-api.ts`）：账号权限里没有 `user:ai:music:use`（超管 `*:*:*` / 前缀通配 `user:ai:*` 等价）或未登录时整个入口不显示，而不是点进去才看到「无权限」——判定与 qt-pc 侧边栏同一个权限码（后端 `/api/v1/app/ai/agents` 已按它过滤，无码账号拉到的就是空列表）；AI 页自身的空态/错误展示保留为第二道守卫。竖屏/中等宽度的 `pages/user` 账户组也有同一个入口（2026-10-24 起，「听歌统计」下方，`sparkles` 图标 + 同一 `canUseMusicAssistant` 门禁，隐藏时统计行补回 `cell-no-border`），AI 页本体是 `pages/ai-assistant/index.uvue` + `composables/use-ai-chat.ts` + `services/ai.ts` + `types/ai.ts`（与 qt-pc 的 useAiChat/lib/ai 同一套后端口径：短轮询事件、提交前自搜候选，无本地算法）。
 - **设置总览新增 AI 分组（2026-10-24，qt-pc 设置页 AiSection 的移动端形态）**：`qt-settings-overview` 在「桌面歌词」组后新增 `ai` 组两行——「AI 模式」（值 = `AI_MODE_LABEL_*`，弹 action-sheet 三选一：纯规则/本地模型/服务端 AI，**服务端仅 `isQtAdmin()` 可见**，非管理员任何路径都存不进 server；选中后 toast 该档说明）与「接口配置」（值 = 生效供应商名 + 生效模型，或 未配置/未选生效档）。模式直接读写同步真源 `ai-mode.ts` 的 `readAiMode/saveAiMode`（存储键 `dailyRecommend.mode`，音乐助手与每日推荐全局共用）。**推荐口味行已按用户要求删除**（口味只在每日推荐页内切换）。「接口配置」进入新页 `pages/ai-providers/index.uvue`（qt-pc AiProvidersDialog 的移动端形态：供应商卡片列表 + 底部弹层编辑器——名称/接口地址/协议 action-sheet（openai/openai-responses/anthropic/gemini）/模型手填或「拉取列表」/密钥（明文只存本机，列表与占位只显 `maskKey` 掩码，编辑留空 = 保留旧值）/证书校验开关/测试连接（一条「你好」走全链路，回显 HTTP 状态 + 耗时 + 回复片段）），数据面在 `services/ai-providers.ts`（键 `qt-ai-providers`；`aiLocalChat` 按协议构造请求并解析回复，`listModels` 网关不支持时可手填模型）。`daily-recommend.ts` 的 `askModelForPicks` 已接真实 `aiLocalChat`（两轮温度 0.4/0.2 + JSON 纠正重试，失败仍自动退回规则推荐）。分组两列切分由 `qtSplitByHeight` 自动重算。**2026-10-30 合并为一页两步（用户要求「看不出来这两个的联系性」）**：`ai` 组两行并成一行「AI 与模型」（key 仍是 `ai-providers`，值 = 引擎名 + `local` 时的生效供应商·模型），内联的模式 action-sheet（原 `showAiMode`/`openSheet`/`aiModeHintOf`）随之删除，模式只在页内改；`pages/ai-providers/index.uvue` 顶部加「第 1 步 · 选 AI 引擎」单选卡（2026-11 起复用 QtOption，选中红字与红边），下半「第 2 步 · 模型配置」用 `v-if="isLocal"` 才展开，非 `local` 只留一张说明卡与「改用本地模型精选」按钮；页面标题、`pages.json` 的 `navigationBarTitleText`、以及 `services/ai-providers.ts` 两处报错文案同步改成「AI 与模型 / 模型配置」口径；页面 `onShow` 增模式对账（模式可能在每日推荐页或助手胶囊里被改过）。文件路径仍是 `pages/ai-providers/index.uvue`（改名要同步四处路由/键表与五处文档引用，对用户零收益）。
-- **音源账号入口移到设置总览（2026-10-28）**：「音源账号」行加入 `qt-settings-overview` 的 `pack` 组（「音源包管理」下方），值 = `已登录 N 个音源 / 未登录，点此添加`（`readSourceAuthEntries().length`，storage 非响应式，`refreshAll` 里 `authTick` 递增触发重算），点击 `goSubpage("/pages/source-auth/index")`。`/pages/source-auth/index` 同时注册进 `QT_ROUTES`/`QT_TITLES`（窄屏标题「音源账号」）与 `QT_SETTINGS_ROUTES`（宽屏三栏：rail | 设置总览（当前项高亮，`CURRENT_CELL_ROUTES` 加 `source-auth`）| 账号页内容），从其它设置子页中栏点入走 `redirectTo` 就地换右栏。原音源包页的入口残留（注释块 + `authSummary`/`openSourceAuth` + `readSourceAuthEntries` import）已删除；该页 2026-10-25 隐藏入口时留的恢复注释随之失效。账号页本体与 `pages/web-login/index`（网页登录）未改动。
+- **音源账号入口移到设置总览（2026-10-28 历史记录；当前标题与内容由下条更新）**：「音源账号」行加入 `qt-settings-overview` 的 `pack` 组（「音源包管理」下方），值 = `已登录 N 个音源 / 未登录，点此添加`（`readSourceAuthEntries().length`，storage 非响应式，`refreshAll` 里 `authTick` 递增触发重算），点击 `goSubpage("/pages/source-auth/index")`。`/pages/source-auth/index` 同时注册进 `QT_ROUTES`/`QT_TITLES`（窄屏标题「音源账号」）与 `QT_SETTINGS_ROUTES`（宽屏三栏：rail | 设置总览（当前项高亮，`CURRENT_CELL_ROUTES` 加 `source-auth`）| 账号页内容），从其它设置子页中栏点入走 `redirectTo` 就地换右栏。原音源包页的入口残留（注释块 + `authSummary`/`openSourceAuth` + `readSourceAuthEntries` import）已删除；该页 2026-10-25 隐藏入口时留的恢复注释随之失效。账号页本体与 `pages/web-login/index`（网页登录）未改动。
+- **音源平台管理（2026-11-13，用户纠正为同一套可拖动卡片）**：设置行、窄屏 chrome 和 [pages.json](<../../../pages.json>) 标题统一为「音源平台管理」，继续使用 `/pages/source-auth/index` 路由与 `source-auth` 设置键；总览摘要「平台 / 聚合 / 账号」保留登录数量。[平台页](<../../../pages/source-auth/index.uvue>) 只有一套 QtCard，由通用 [QtReorderList](<../components/qt-reorder-list/qt-reorder-list.uvue>) 承载：右侧手柄直接拖动优先顺序，标题展开平台启用、参与聚合搜索、登录、meta/play 和播放/下载音质。测量实际可变高度，跟手和目标占位只在拖动期间存在；pending 测量立即锁父滚动，松手一次保存并应用引擎，取消/迟到/外部变化不保存。禁用平台仍可拖动，遗留账号是固定锚点；完整策略保留不可用 ID 和 `enabled` 原值。`enabled=null` 为默认，`enabled=[]` 为在线平台全关，本地/播客不受影响；关闭平台不清凭据、授权或音质、不开始播放。每卡聚合布尔复用 QtSwitch，平台关闭时不可编辑，但原参与意愿保留。未配置/旧空数组保持默认全部，新全关同键保存 `{"version":1,"sources":[]}`，读取 `[]` 并在 MusicApi 调用包前返回空结果；非空白名单仍保留旧数组与暂不可用 ID，保存失败不广播成功。包页只保留安装/更新/包激活/卸载；缺包及策略升级提示仍去「音源包管理」。登录动作保持单行左右滚动（紧凑 88rpx / 宽屏 44px），`flow` / `maxWidth=720`、宽屏三栏与 `redirectTo` 不变。外部策略/聚合事件、registry generation、真实 `onShow` 重算；unload/unmount 仅撤销本页监听和迟到 UI 回执，不回滚全局偏好。`check:source-platform` 包含完整生产页面模板+实际 QtReorderList/QtSwitch/QtCard 与实际服务、registry、MusicApi，原扫码和全量检查链保留。**Native/HBuilderX、本人账号及紧凑/宽屏实机触摸与视觉验收 NOT RUN**；Vue host 模板不是 Vapor/Kotlin 编译证据。
 - **每日推荐页（2026-10-24，qt-pc DailyRecommendPage 全量对齐）**：`pages/daily-recommend/index.uvue`（与「每日新歌」`pages/daily` 是两个页面——后者是新歌流，前者是个性化推荐）。服务层 `services/daily-recommend.ts`（约 2840 行，qt-pc `src/lib/daily-recommend.ts` 的移植）+ `services/recommend-rank.ts` / `recommend-dimensions.ts` / `music-style.ts` / `recommend-types.ts` / `recommend-text.ts` / `ai-mode.ts` / `ai-server-picks.ts` 六件套；偏好数据源全走本地：收听统计 `stores/listen-stats`（effectiveCount 降序取 topTracks、聚合歌手）、收藏 `player.likedSongs`、本地歌单成员经 `pids` 反查、在线收藏歌单走 `musicApi.playlist` 详情、播放历史 `player.history`。模式三档**全局**（rule/local/server，真源 `ai-mode.ts`，每日推荐与音乐助手共用），页面上的「AI 模式设置」弹窗即写它；`server` 选项仅 `isQtAdmin()` 可见（qt-pc 同款门禁）。缓存按 `日期+模式+口味` 命中（`dailyRecommend.cache`，版本号 DAILY_RULE_VERSION），换一批同日合并 keys 供 7 天跨天去重。口味三档（心动/常听/探索）与冷启动风格种子（`dailyRecommend.seeds`，冷启动时展示平台分类 chips 让用户勾选）同 qt-pc。页面 UI 复用详情页骨架（qt-page-frame width-kind=detail + 宽屏左栏 whero + 窄屏 hero + list-view），行是自定义 `rc-row`（序号/封面/名称/`歌手 · 推荐理由`副行/更多），批量操作与排序走既有 useBatchSelect/useBatchActions。注意服务层导出多为 **async**（loadTodayResult/clearTodayResult/readMode/generateDailyRecommend），页面侧等待后再用；模式高亮等同步场景直接用 `ai-mode.ts` 的 readAiMode/saveAiMode。
 
 - **全站 UI 统一轮（2026-10-29，用户「按建议全部优化修复」）**：可复用的三条硬规矩写进本文——① **颜色只用皮肤令牌**：模板/CSS 里不再出现手写深色调色板（`-dark` 类 26 个已清零）与手写浅色分隔线（21 处清零），分隔线走 `themeStore.skin.divider`、次要文字只用 `skin.textMuted`（`#737b8e`）/`skin.textSubtle`（`#969dad`）两个值；`page-dark` 这类零 CSS 定义的死绑定一并删除，`themeStore.dark ?` 只允许出现在「颜色常量按明暗取值」的真实场景（现仅 `qt-skeleton-shine` 一处）。② **触控热区 ≥44dp**：纯图标按钮一律外套命中块而非放大图标——行内操作用 `qt-song-row`/`qt-song-row-lite` 的 `.row-hit`/`.lite-hit`（68rpx / 宽屏 40px），播放页工具键用 `.action-hit`/`.lyric-tool`，进度条 `.prog-range` 加高到可拖，首页搜索/铃铛 88rpx。③ **状态与动效分层**：空态与错误态统一用 `qt-empty`（错误态传 `icon="alert"` + `action-text="重新加载"`，与真空态文案分开）；进入动效统一 `uni_modules/qt-ui/composables/use-qt-reveal.ts`（列表错峰淡入，320ms/60ms，带兜底闸门），面板用「v-if 保留 + opacity/transform transition」而非直出直收（`qt-action-sheet` 0.22s、播放页底部面板 translateY 0.24s、封面淡入 0.32s），动效只碰 opacity/transform（Vapor 下位移需乘 pixelRatio）。**圆角家族化**（卡片 20rpx / 面板顶部 32rpx / 胶囊 999 / 封面 12rpx）列为下一轮独立改动，本轮未动，详见 `uni_modules/qt-ui/docs/ui-review.md` §3.12–3.13。
@@ -853,6 +894,10 @@ type Props = {
 
 ### 6.14 播放设置页（2026-10 新增 `pages/play-settings`）
 
+**升降调（2026-11-15）**：宽屏双列和手机单列均提供入口，统一使用 [qt-pitch-controls](<../components/qt-pitch-controls/qt-pitch-controls.uvue>)。组件由 QtSheet 和三枚 QtButton（−1 / 原调 / +1）组成；接收 `visible: boolean`、`value: number`（整数半音 −12～+12）、`supported: boolean`，发出 `update:visible(boolean)` 和 `change(number)`。原调为 0；上下界禁用对应步进按钮，隐藏或能力失效时忽略迟到点击。TV 按钮沿用共享焦点与56px动作尺寸，说明行高按最终缩放字号计算。
+
+页面在 `onMounted` 和 `onShow` 幂等订阅真实服务并回读已确认值，兼容首次挂载的宽屏托管工具；在 hide/unload/unmount 关闭弹层、移除升降调订阅。服务 `setPitch()` 返回成功后才更新显示，数值事件负责外部修改同步。Android 本地播放支持独立音调和倍速，偏好分别保存；DLNA 使用原始音频，控制器禁用并保留本地偏好；其他平台显示未支持。恢复设置同时将本地升降调归零。
+
 播放设置从设置页里拆成独立一页（`pages/play-settings/index`，`:max-width="640"`），把原来散在设置主页两组里的六行整体搬过来：默认倍速、定时关闭、均衡器、同时播放、播放默认音质、音乐缓存上限（含「自定义…」页内输入弹层）。
 
 拆分理由与 6.13 相同：设置主页已有 9 组，这六行既不属于「数据/账号」也不属于「危险操作」，混在里面既长又难找。设置主页现在只留一行「播放设置」入口，行尾摘要 `playSummaryText()` 显示 `倍速 1x · 音质 无损`（定时关闭为「播完本曲关闭」时前置一段）。
@@ -1086,6 +1131,12 @@ type Props = {
 
 ### 6.22 统一选择与普通弹层（2026-11）
 
+**账号推荐来源（2026-11-12）**：[qt-recommendation-source-control](<../components/qt-recommendation-source-control/qt-recommendation-source-control.uvue>) 是两页共用的业务适配器，不是新的选择组件族。它复用 QtOption 行、全局 action-sheet、统一选择色与已有揭示/宽窄布局；首页音源切换器没有 daily/fm 独立偏好、账号/授权提示及失效请求 ID 契约，故不混用首页浏览来源。`kind="daily"/"fm"` 两份选择默认应用算法且独立持久化，取消/当前项不写，旧包与无效来源不偷选其他项。常驻触发入口放在骨架、错误和空态之外，宽屏日推位于左栏、非分栏日推位于列表首部、FM 位于 hero；加载私人 FM 时保留取消准备按钮。
+
+账号候选只认当前 metadata 包 `accountRecommendations[kind] === true`（2026-11-14 用户裁定对齐桌面四源口径：wyy/qq/kg/migu 的日推与私人 FM 均可启用；KG FM 为包内只读 login 批次，无 play/hash/playtime 反馈；kw/bili 上游无账号协议不出现）。选择使用该源当前保存且开启数据授权的本人账号，不修改 meta/play 开关、首页浏览源或 AI 模式。严格等待 meta setAuth ACK、当前账号/元包/策略后直接读取官方供给，失败不回退公共或应用算法。日推保留源顺序/数量/重复，账号模式隐藏应用口味和 AI 设置；FM 入队按曲目键去重、遵循本地屏蔽，下一首仅本机动作，无官方 like/skip/scrobble。
+
+菜单快照与全局请求 ID 共同守卫：账号/选择/包/策略变化、卸载、其他功能替换已选请求后，旧回调不保存、不导航、不关闭别人的弹层。日推页面用请求序号/选择 revision/非秘密 Context 防旧结果重露；FM 取消/外部队列优先，只有实际接受供给才提交 cursor；行点击由 Store 同步检查实际有序队列归属，只播放当前队列对象，删除/改序后立即 stop(false) 让位、不等待心跳或恢复旧快照。应用层改动无需重打原生基座，用户更新支持账号动作的数据包后在 HBuilderX 重新运行；离线/静态门禁不等同 Native、compact/wide 观感或本人 Cookie 现网验收。
+
 先查 [完整组件目录](<component-catalog.md>) 与源码再修改页面。选项族统一由 QtOption / QtCheckbox / QtSwitch / QtSegmented 表达状态，普通选择外壳用 QtSheet；禁止页面复制私 radio、勾号后缀、当前使用或开关。
 
 - 浅色选择 `#d93c43`、深色 `#ff7378`，来自 [selection](<../composables/selection.ts>)，独立于可换肤 accent。选中红优先于自定义 action color；未知 ID / 无效 index 不默认选首项。成功、签到、签名、收藏、播放 current 和路由不是设置选择。
@@ -1286,7 +1337,7 @@ backdrop-filter
 - 播放页背景层**不再用封面满铺底图**（2026-10 用户要求「播放详情里面的背景不要用封面的背景图片，改为无背景图片」）：删掉 `<image class="bg" mode="aspectFill">` 与平台色薄层 `.bg-tint`（后者由 `platformTint(platformKey(), 0.14)` 算色相），页面里只剩一层 `.shade`（`background-color: theme.skin.mediaScrim`，即 `rgba(0,0,0,0.52)`）。**保留 `.shade` 的理由**：播放页全部文字/图标走 `mediaText`（恒 `#ffffff`）/`mediaMuted`（恒白 70%），而浅色皮肤（linen `background ≈ #f6f7f8`）下不压暗会直接糊在浅底上；要彻底去掉这层，必须把整套 `media*` token 换成随皮肤明暗切换的 foreground 色，回归面大得多。封面图本身仍在宽屏 `.cover-img`、竖屏 `.disc-img`、队列与弹窗里正常展示，删的只是「铺满整页当背景」这一层。
 - 榜单/专辑详情页 hero 由 URL 参数构建：入口页必须把 `name` / `desc` / `pic` 随 `uni.navigateTo` 传入（依赖接口回填可能拿到空，版权受限专辑即返回空数据）。
 - 批量选择（§6.11）已接入歌单详情页、每日推荐页与歌手详情页：三页都复用 `use-batch-select.ts` + `qt-batch-bar` + `use-batch-actions.ts`，回执走底部居中的 `qt-toast-host`。2026-10-19 起歌单/每日两页接线一致、2026-10-22 歌手页并入：**窄屏**管理条放进吸顶 `.list-head`（`md` 档）；**宽屏**操作（含选择态批量条 `column` 档）全收进左栏封面块，列表顶不再有操作条。**选择态切换时不要给容器加/去 `border`**：`.list-head` 是定高 + 默认 `content-box`，补一条边框会让整条高出 2px，切进切出页面会跳。**只有歌单详情页显示收藏红心**（`canSavePlaylist = type != 'chart' && type != 'album'`；歌手页从无收藏钮），专辑/排行榜/歌手详情都不收藏——用户 2026-10-22 明确要求「只有歌单详情页面可以进行收藏，其他都不可以」。
-- 搜索页聚合搜索（2026-10-24，对齐 qt-pc SearchPage 的聚合形态）：歌曲分 Tab 下新增「聚合搜索」开关 chip（`.agg-row`，默认关、持久化 `qt-search-aggregate-mode`），开启后并发打全部音源合并成一条按相关性排序的列表（数据包 v7 走包内 `searchMerged` 入口；旧包降级为 `searchAll` 批次 + `services/aggregate-merge.ts` 本地合并——打分/去重/垃圾词规则与 qt-pc/src/lib/aggregate-merge.ts、qt-sources/src/actions/merge-search.ts 三方逐字一致，改一处必须三处同步）。歌曲分 Tab 行恒显音源徽标（`qt-song-row-lite :show-badge="true"`），翻页按 `aggregateSongKey` 跨页去重、包侧 `full=false` 即收尾；聚合模式每页条数 = 各源 `searchPageMax` 最小值，单源模式改为 `searchPageMaxOf(当前源)`（原写死 30）。「聚合只用哪几个音源」白名单（`services/aggregate-sources.ts`，空=全部）：设置入口在音源包管理页「聚合搜索音源」卡片（全部音源行 + 各源参与/不参与行，全不选归一为全部），改动后广播 `AGGREGATE_SOURCES_CHANGED_EVENT`，搜索页监听并自动刷新进行中的聚合搜索。
+- 搜索页聚合搜索（2026-10-24，对齐 qt-pc SearchPage 的聚合形态）：歌曲分 Tab 下新增「聚合搜索」开关 chip（`.agg-row`，默认关、持久化 `qt-search-aggregate-mode`），开启后并发打全部音源合并成一条按相关性排序的列表（数据包 v7 走包内 `searchMerged` 入口；旧包降级为 `searchAll` 批次 + `services/aggregate-merge.ts` 本地合并——打分/去重/垃圾词规则与 qt-pc/src/lib/aggregate-merge.ts、qt-sources/src/actions/merge-search.ts 三方逐字一致，改一处必须三处同步）。歌曲分 Tab 行恒显音源徽标（`qt-song-row-lite :show-badge="true"`），翻页按 `aggregateSongKey` 跨页去重、包侧 `full=false` 即收尾；聚合模式每页条数 = 各源 `searchPageMax` 最小值，单源模式改为 `searchPageMaxOf(当前源)`（原写死 30）。「参与聚合搜索」白名单（[聚合服务](<../../../services/aggregate-sources.ts>)，未配置/旧空数组=默认全部，新显式全关=`[]`）：设置入口为音源平台管理的每张平台卡内 QtSwitch（2026-11-13，不再单独聚合卡片或 chips；新全关在包调用前返回空列表，非空白名单保留暂不可用 ID），改动后广播 `AGGREGATE_SOURCES_CHANGED_EVENT`，搜索页监听并自动刷新进行中的聚合搜索。
 
 播放器和 MV 播放页使用 `fullWidth` 沉浸式模式；其他内容页使用居中限宽模式。页面改动后需要重新运行自定义基座，不能只依赖旧页面热刷新验证宽屏效果。
 
@@ -1324,9 +1375,9 @@ backdrop-filter
 首个消费点 = 播放页宽屏舞台（`pages/player/index.uvue`）：
 
 - 封面尺寸原来是 `windowHeight - 108`（下限 112），780×360 时算出 240 —— 而顶部留白 + 底部三行控件之后实际只剩一百多 px，封面卡直接盖住进度行与控制行；
-- 2026-11 起由 `composables/player-presentation.ts` 的宽屏纯几何统一预算**剩余宽高**：先扣状态栏/导航、safeBottom、底部三行和必要的独立工具次行，再给封面与歌词剩余空间。基础三行正常 `138px`，矮窗校正为实际 CSS 总和 **`124px`**（旧脚本 116px 漏掉 8px）；工具组放不下左右两翼时迁到独立次行，矮窗另加 `42px`、正常另加 `44px`。触达尺寸不靠缩小按钮来换空间；safeBottom 为逻辑 px，仅加一次。封面不再以固定最小值穿透可用高度；
+- 由 `composables/player-presentation.ts` 统一预算**剩余宽高**：先扣状态栏/导航、safeBottom、进度与五键播放控制、必要的独立工具次行，再给歌曲信息、封面与歌词剩余空间。2026-11-10 起实际行高与间距直接绑定同一份 metrics；工具组放不下左右两翼时迁到独立次行。触达尺寸不靠缩小按钮来换空间；safeBottom 为逻辑 px，仅加一次。封面不再以固定最小值穿透可用高度；
 - 矮窗额外把三行与按钮收紧：模板给三个行容器与三类按钮追加 `-short` 绑定（`.lyric-tools-row-short` / `.progress-row-short` / `.controls-short` / `.control-side-short` / `.icon-main-short` / `.tool-btn-short`），CSS 写在 `-wide` 批次**之后**（同级单类选择器靠书写顺序覆盖）；
-- `navStyle` 的宽屏高度同步收窄（`statusBar + 44` 而不是 `+ 52`），因为 `widePadTop` 与它同源 —— 两处不同步的话封面要么钻到导航按钮下面、要么白留一条缝。
+- `navStyle` 与宽屏 metrics 使用同一份 `statusBar + 52px` 高度，容纳带文字的风格、投屏、分享入口；短窗仍先压缩封面，两处不能使用不同的导航占位。
 
 规则：**任何按 `windowHeight` 反算的宽屏尺寸，都要先扣掉本页固定的顶部/底部行占位，不要写 `windowHeight - 常数` 这种只对 pad 成立的公式**。
 
@@ -1391,10 +1442,10 @@ wideCoverSize  = wideAsideWidth - 卡片 padding/border（artist/playlist/daily 
 
 ### 手机播放页与单文本跑马灯（2026-11-01）
 
-- 手机曲名区域固定为歌名、歌手、当前歌词三行，前两行与歌词行分别使用 `qt-marquee`（歌词行 26rpx/14px 弱化色）；平台签和收藏不参与文字位移，歌手行仍可点击进入歌手页，歌词行点击进入歌词态。歌手缺失时显示「未知歌手」，不拼接专辑。当前歌词行复用现有取词管线与逐行判定：加载中显示「歌词加载中…」，失败显示「暂无歌词」，纯音乐/间奏的空行留空不前窥；取词按代次守卫，旧请求不得把词或 loading 复位盖到新歌上。歌手行最右有「本地文件」标签（`playingLocalFile`：本地曲库歌，或在线歌被本地优先命中；口径同管理端「当前播放地址」判定 `platform=="local" || localFirstPathOf(cur)!=""`）——本地优先命中发生在取链回调里、晚于切歌帧，`localFirstUsed` 是普通 Map 追踪不到，标签的 computed 读 store 版本号 `localFirstTick`（每次写入/拉黑 +1）建立响应式依赖；标签可见时歌手 marquee 让出 标签宽+12rpx（`portraitArtistWidthPx` 动态扣减）。
-- 唱机主视觉服从文字可读性：`composables/player-presentation.ts` 先预算状态栏、安全区、三行字号和 284rpx 固定页脚，再给整个唱机画布余量（高度上限 613rpx，宽度不超过 682rpx）。达到宽度上限后，把剩余高度分配到唱机上方与歌曲信息上下；唱机到歌名的间距限制在28–92rpx，不再通过 `track-block flex:1 / justify-content:flex-end` 把所有留白堆在歌名前。专辑画廊共用这份间距预算。短屏、大字号仍先保证文字和控件，压缩主视觉而不缩点击区域。
-- 底部控件收紧纵向留白：进度行保持 64rpx 拖动区、上间距 4rpx，播放控制行 96rpx、上间距 4rpx，工具行 88rpx、上间距 0；连同底部 28rpx 留白共 284rpx（音质时间行另按字号预算）。主播放命中区 96×96rpx、侧键 80×88rpx、工具命中区高 88rpx 均不缩小，图标与字号不变；宽屏行高/间距保持原值。
-- `qt-marquee` 公共属性：`text: string`、`sizeRpx: number`、`sizePx: number`、`color: string`、`widthPx: number`（视口上限，逻辑 px）；`weight?: number`、`active?: boolean`。外层只设计算好的 px `max-width`，不设固定 `width`，`flex-grow:0 / flex-shrink:1 / min-width:0` 由原生布局从首帧按内容决定宽度：短文完整静止单份展示，平台签和歌手箭头紧贴文字；长文在上限内按首页公告栏同款跑马灯无缝循环，不用省略号。内部 track/text 不缩窄，测量只决定内部文字动画，不回写外层宽度；挂载、切歌、隐藏后恢复都不能因为异步先占满再缩宽而拉动兄弟控件。
+- 2026-11-14 用户裁定起歌名由 `qt-playing-track` 单行跑马灯显示（放得下静止、溢出滚动，不再两行换行），歌手与当前歌词复用 `qt-marquee`（歌词行 26rpx/14px 弱化色）。收藏不参与文字位移，歌手行仍可进入歌手页，歌词行点击进入歌词态。歌手缺失时显示「未知歌手」，不拼接专辑。当前歌词行复用现有取词管线与逐行判定：加载中显示「歌词加载中…」，失败显示「暂无歌词」，纯音乐/间奏空行留空不前窥；旧请求不得把词或 loading 复位盖到新歌上。来源标签显示正在播放的音源与音质，长标签可独立成行；本地优先通过 `localFirstTick` 追踪晚到命中并显示“本地文件”。
+- 唱机主视觉服从文字可读性：`composables/player-presentation.ts` 先预算状态栏、安全区、两行标题、歌手/来源与实际页脚行高，再给整个唱机画布余量（高度上限 613rpx，画布宽度不超过 pane 内宽）。达到宽度上限后，把剩余高度分配到唱机上方与歌曲信息上下。专辑画廊共用这份预算。短屏、大字号先保证文字和控件，压缩主视觉而不缩点击区域，必要时文字区域可滚动。
+- 2026-11-10 底部控件按逻辑 px 保留触控区：紧凑进度拖动区 36px，播放键 60×60px，模式、上/下一首、队列为 44×44px，工具行最小 44px。行高、间距和字号余量由 metrics 直接绑定；来源与音质在歌曲信息标签中切换，进度附近只显示时间和实测码率。
+- `qt-marquee` 公共属性：`text: string`、`sizeRpx: number`、`sizePx: number`、`color: string`、`widthPx: number`（视口上限，逻辑 px）；`weight?: number`、`active?: boolean`、`lineHeightPx?: number`（固定行高契约时锁定行高，默认字号×1.4+4）。外层只设计算好的 px `max-width`，不设固定 `width`，`flex-grow:0 / flex-shrink:1 / min-width:0` 由原生布局从首帧按内容决定宽度：短文完整静止单份展示，平台签和歌手箭头紧贴文字；长文在上限内按首页公告栏同款跑马灯无缝循环，不用省略号。内部 track/text 不缩窄，测量只决定内部文字动画，不回写外层宽度；挂载、切歌、隐藏后恢复都不能因为异步先占满再缩宽而拉动兄弟控件。
 - 每实例一个原生动画、两份同文 text（仅溢出滚动时才挂载第二份副本）。位移 = 副本相对 track 起点的实测偏移（一份文本宽 + 副本间距），与 `qt-notice-bar` 完全同口径：实测值直接作为 `translateX` 距离，40 逻辑 px/s、单圈最少 3000ms、linear 无限循环，迭代边界无感复位——不回扫、不停顿、不做设备缩放换算（旧往返实现把逻辑距离乘设备比会超射出文本尾部，真机症状即「滚出一段空白再回扫」）。`composables/marquee-motion.ts` 提供 `marqueeOverflows`（≤1px 视为放得下）与 `marqueeLoopDuration`。
 - 测量无效与文字放得下分开处理；无效最多补测四次，显示/文字/父可用宽/字号变化重新测量，副本挂载后等 nextTick 再量偏移。隐藏停止、显示重建；generation/disposed 同时保护 nextTick 和定时器，取消时不允许重启旧任务。没有周期性测量看门狗。
 - 参考唱机重做：`static/player-turntable/{deck,record,arm}.png` 为原创透明材质图，由 `tools/render-player-turntable.py` 可重复生成（无 CSS 渐变/投影）。2000×1800 设计画布上圆盘位置 `(180,170,1560,1560)`，app 素材导出 1500×1350/1170×1170；`composables/turntable-presentation.ts` 同比例映射，全部转轮、传动带、白胶、银白唱臂与柔和阴影均在预算内。只在实际圆盘大小/中心的 `discSpinRef` 中转动唱片和 46% 中央真实封面；底座/转轮/传动带/唱臂静止并忽略点击，无轴芯遮挡封面。封面点击/长按、隐藏/暂停停止、显示重建保持，布局或节点更换先取消旧动画。
@@ -1406,7 +1457,8 @@ wideCoverSize  = wideAsideWidth - 卡片 padding/border（artist/playlist/daily 
 - FM / 播客的宽屏尺寸以平坦 `-wide` 类覆盖封面、行高、按钮、间距与圆角。输入内容与 placeholder 复用同一 `qtFontDual(25,14)` 字号计算，不再出现 25rpx 输入配 14px placeholder。
 - 歌单分栏基于 `qtContentWidth("detail")` 的有效内宽：先扣页内 40px，只有内宽 `>=220+16+360=596px` 才分左信息栏/右列表；不足时保留宽屏 px 密度的单列与所有原有操作，不强行挤压右栏。脚本控制的 aside / cover 节点不再留类内固定宽度去压过内联尺寸。其他详情页不在本次改动范围。
 - 设置总览双列额外要求 `layout.isWide`，与 `qtFontDual` 的密度判据一致；托管中栏仍为单列。812–899px 竖屏不再只切固定 px 卡片而继续使用放大的 rpx 字号。
-- 播放队列以统一 stride 驱动行 top、占位总高、可见范围与滚动锚点。viewport 来自面板预算并在挂载/resize 后原生测量，不再用固定 800px；尺寸/字体/安全区变化重测，异步回写须受代次与卸载守卫约束。优先保留当前可见歌曲及行内比例偏移，歌曲被移除时回退最近索引。
+- 播放队列以统一 stride 驱动行 top、占位总高、可见范围与滚动锚点。viewport 来自面板预算并在挂载/resize 后原生测量，不再用固定 800px；尺寸/字体/安全区及实际 windowWidth 的 rpx 比例变化重测，异步回写须受代次与卸载守卫约束。优先保留当前可见歌曲及行内比例偏移，歌曲被移除时回退最近索引。
+- 2026-11-13 播放页队列首次显示修复：初始 scroll-top 可能在占位总高提交前被原生钳到零；保持当前歌曲打开意图到首次有效高度后，先提交非收缩占位与有界虚拟行，再以捕获的稳定目标重下发。相同目标用整数 1px 差异触发属性更新、不启动动画；当前下标/数组监听在尾部钳到同目标时复用待提交回放，不互相取消。close/新尺寸/新目标/卸载使旧回放失效；用户 touch epoch 从排队测量起贯穿重试，晚高度只更新窗口、不抢手势。 [公开队列回归](<../../../tools/check-playback-queue.mjs>)由原 `check:hd-layout` / `npm run check` 入口持续执行，覆盖首次/重开/尾部/零高度重试/同跨档锚点/切歌改序/批量 tick/手势/卸载；模拟宿主命令与可见行，不等同设备绘制。
 - 歌词偏移浮层宽屏壳体与内部控件全部同为 px，窗口变化重新测量 slider；窄屏保留 rpx，安全底边仅由壳体消费一次。
 
 **自动与设备验证边界**：`npm run check` 已接入 `check:responsive`（共享窗口/工作区真实 API + 详情几何/实际模板 CSS 接线），播放器保留原回归并追加几何向量。合成边界测试不验证 Vapor 原生渲染或触控。按项目既有分工，HBuilderX 编译与真机检查由用户完成；本轮未改原生插件、AAR、内置包和 orientation 配置，不要求因此重打自定义基座，但必须重新编译运行应用层，不能以旧热加载布局缓存验收。
@@ -1416,6 +1468,7 @@ wideCoverSize  = wideAsideWidth - 卡片 padding/border（artist/playlist/daily 
 | 场景 | 检查点 |
 | --- | --- |
 | 375×812、500×800 及同档缩放 | 队列滚到中段后缩放，歌曲锚点连续，行距/占位一致，无跳到首行 |
+| 冷开播放页队列，当前歌曲在首/中/尾，关闭后重开 | 不触摸即能看见歌曲和当前项；61首与大队列均无空白，重开仍定位当前歌；尾部当前项上移及打开测量期间拖动不造成空白或抢手势 |
 | 600×360、640×360、700×360，工具全部开启 | 播放/上下一首与七个工具可点；必要次行不被裁，封面不盖进度/歌词 |
 | 900×600、1280×800、1920×1080 | FM/播客按钮封面不过度放大，输入与 placeholder 同密度；歌词偏移按钮和 slider 不溢出 |
 | 歌单实际内容宽 635/636px | 635px 单列、636px 可分栏；右列表至少 360px，播放/搜索/排序/批量入口仍在 |
@@ -1504,7 +1557,7 @@ SVG 图标缓存限 384 条，应对自定义颜色滑动产生高基数颜色�
 
 ## 普通 DLNA 设备选择（2026-11-06）
 
-`qt-dlna-sheet` 是播放器业务组件，使用现有 sheet/option/button 组件；新增仅因设备发现、播放目标、断开/切回本机需要业务适配，没有复制通用选择控件。搜索状态与错误在内容区展示，设备按稳定 UDN 选择并由 selection-reveal 定位；不添加“当前使用”或勾号后缀。入口位于播放页导航和 HD 播放栏，Android 之外隐藏。
+`qt-dlna-sheet` 是播放器业务组件，使用现有 sheet/option/button 组件；新增仅因设备发现、播放目标、断开/切回本机需要业务适配，没有复制通用选择控件。搜索状态与错误在内容区展示，设备按稳定 UDN 选择并由 selection-reveal 定位；不添加“当前使用”或勾号后缀。入口位于播放页导航和 HD 播放栏；2026-11-09 已接入 Android、HarmonyOS 和 iOS，按原生能力显示。
 
 设备能力决定拖动和音量是否可用。投屏期间隐藏本地倍速/均衡器工具，界面进度使用远端快照和有界插值。断开不自动让本机出声；“切回本机”是独立用户动作。固定宽屏两翼的音量区域预算额外投屏按钮，空间不足时收起音量区域，保留投屏/模式/队列入口。
 
@@ -1530,7 +1583,7 @@ SVG 图标缓存限 384 条，应对自定义颜色滑动产生高基数颜色�
 
 参考居中歌词样式：当前主句高对比且清晰，邻近行仍可读，远行更淡、更柔。手机主句基准 44rpx、上下留白各 28rpx；普通行与逐字行同字号，高亮不放大，不改变已测行高。宽屏保留双栏与原 px 字号、9px 行留白；原有底部控件和浅/深共享背景均不重排。
 
-[lyric-presentation](<../composables/lyric-presentation.ts>) 是纯展示契约。距离取实测每行中心到实际视口中心的绝对逻辑 px，除以视口半高：0.22 内不透明，0.30 内不柔焦，0.86 处淡出；两段使用平滑曲线，柔焦上限 4px。偏移、双语长行及手动浏览不按歌词下标差估算距离。未实测时保持 opacity 1 / blur 0；80ms 位置合并保留尾帧，旧 4 秒手滚抑制、时间提示、点行 seek 与逐字 rAF 不变。
+[lyric-presentation](<../composables/lyric-presentation.ts>) 是纯展示契约。距离取实测每行中心到实际视口中心的绝对逻辑 px，除以视口半高。2026-11-13 按「歌词过度模糊、上方空白」反馈扩展可读带：0.42 内不透明，0.56 内不柔焦，曲线终点 0.98；两段使用平滑曲线，基础柔焦上限 1.2px，字号倍乘后的原生绘制硬上限 1.5px（替代原 0.22 / 0.30 / 0.86 / 4px）。实际 opacity 保留两位小数，因此近边缘可能先四舍五入为零。扩大的是视口内可读上下文，不压缩歌曲标题、不删除首末行居中所需的半视口留白、不移动歌词中心。偏移、双语长行及手动浏览不按歌词下标差估算距离。未实测时保持 opacity 1 / blur 0；80ms 位置合并保留尾帧，旧 4 秒手滚抑制、时间提示、点行 seek 与逐字 rAF 不变。
 
 普通主句、罗马音、译文、逐字底色和高亮填充必须分别在真实 `<text>` 上绑定 `lyricTextFocusStyle`。柔焦用 `color:transparent` 隐去锐利本体，并以 `text-shadow:0px 0px Npx <显式原色>` 画文字阴影；清晰态明确恢复原色并设置 `text-shadow:none`，避免复用节点残留。高亮身份仍来自播放时钟，视觉聚焦来自物理距离；手动滑远的当前行不强制绕过淡化/柔焦。
 
@@ -1566,11 +1619,11 @@ SVG 图标缓存限 384 条，应对自定义颜色滑动产生高基数颜色�
 
 ### 播放页风格与宽屏布局（2026-11-07）
 
-对照 qt-pc：左侧约 38% 放黑胶唱片或方形专辑，右侧上方歌名/歌手/平台、歌词工具，其下开放歌词；底部通栏保留进度、歌曲摘要、居中传输与配置工具。窄横屏工具改第二行，尺寸由 player-presentation 统一预算。歌词移除深色盒子，字体沿用系统中文无衬线，歌名 22–26px/600–700、次级信息14px，歌词按模式区分层次。基础色跟随主题（默认浅灰 #f5f6f7 / 墨色 #191d26 / 次级灰 #778095）；背景色酒红 #542638、午夜蓝 #172b46、松林绿 #203e36，深背景字色 #fff8f4。封面/本地图片分别铺满窗口并添加明暗遮罩。
+宽屏左侧放黑胶唱片或方形专辑及歌曲信息，右侧上方为歌词工具，其下开放歌词；底部通栏保留进度、歌曲摘要、居中五键控制与配置工具。窄横屏工具改第二行，尺寸由 player-presentation 统一预算。歌词移除深色盒子，字体沿用系统中文无衬线，歌名 22–26px/700，歌词按模式区分层次。基础色跟随主题（默认浅灰 #f5f6f7 / 墨色 #191d26 / 次级灰 #778095）；背景色酒红 #542638、午夜蓝 #172b46、松林绿 #203e36，深背景字色 #fff8f4。封面/本地图片分别铺满实际 pane 并添加明暗遮罩。
 
 设计复核：只用唱片作为主视觉，取消旧歌词卡片的厚边框和阴影；底部按钮收紧，歌词工具移到歌词上方。风格面板使用既有选项卡，选中由固定红色表现。背景与风格独立保存，系统选图必须 saveFile 成功后写入，失败可重试；无播放/队列变更。新三行歌词组件是独立时间轴呈现，现有滚动歌词无法表达固定前后句与逐词起伏，因此新增该专用业务组件，而非复制通用选择控件。
 
-经典模式维持原生旋转、滚动跟随和逐字填充；画廊/纯净显示当前与相邻非空句；律动基于播放时钟做当前词抬升，暂停/跳转同步停止/定位，不开独立计时器。无逐词时间时按 LRC 行区间分摊轻微起伏，超过100字的元信息保持静态。长句允许竖向阅读，工具、进度与传输优先保留。画廊、纯净、律动只展示相邻句，点击歌词不跳转进度，长按复制保留；只有经典完整滚动歌词的手动浏览目标行可点击定位播放，页面同时拒绝切换风格后残留的定位事件。切换风格重置歌词测量与旧唱片动画，主题/偏好不触碰播放服务。
+经典模式维持原生旋转、滚动跟随和逐字填充；画廊横竖屏展示完整歌词及译文/罗马音，支持播放跟随和手动上下浏览；纯净显示当前与相邻非空句。律动基于播放时钟做当前词抬升，暂停/跳转同步停止/定位，不开独立计时器。无逐词时间时按 LRC 行区间分摊轻微起伏，超过100字的元信息保持静态。长句允许竖向阅读，工具、进度与传输优先保留。画廊、纯净、律动点击歌词不跳转进度，长按复制保留；只有经典完整滚动歌词的手动浏览目标行可点击定位播放，页面同时拒绝切换风格后残留的定位事件。切换风格重置歌词测量与旧唱片动画，主题/偏好不触碰播放服务。
 
 ### Android 导航栏已避让窗口（2026-11-07）
 
@@ -1588,7 +1641,31 @@ QtOption 新增 `preview` 布尔与 `preview` 插槽，用于竖向图文卡；�
 
 ### 播放页控件一致性复核
 
-顶部返回/预览/投屏/更多与底部工具统一使用透明底的次级色图标，不再绘制圆角方框；只有播放主按钮使用反色圆形强调。歌词工具也去掉底色，保留文字以解释动作。收藏、投屏、定时等生效状态保留语义强调色。保留所有原有布局与点击区域，竖屏侧键仍为80×88rpx、工具命中区高88rpx，横竖屏及四种播放风格使用同一规则。播放列表与其他弹层统一主题 sheetSurface/text/textMuted，修正深色媒体面板与白色设置弹层混用。顶部仅图标，无“风格”文字。
+顶部返回和“风格 / 投屏 / 分享”保留透明底的次级色图标，三入口同时有简短文字；主播放按钮使用反色强调。歌词工具保留文字解释动作，收藏、投屏、定时等生效状态使用语义色。导航命中区 44×48px，歌曲收藏、侧键、工具及来源选项不小于 44px，四风格与横竖屏共用规则。播放列表与其他弹层统一主题 sheetSurface/text/textMuted。
+
+### 播放来源、旧偏好与宽屏适配（2026-11-10）
+
+画廊视觉对照补充：封面按屏宽约 0.765、最多 300px 并服从可用高度，内容横向约 22px 留白。正常歌名按实际行数占位，来源区按中英文真实字宽近似预算，常见平台/档位与歌手同行。顶部去掉“正在播放”文字。展开歌词使用 `qt-playing-track compact/cover` 小信息栏，不继续占用大标题块；收藏、来源与封面动作保留 44px 触控区。画廊复用原生完整滚动歌词，正文 44rpx / 24px、左对齐和统一行高，当前句以颜色高亮，其余句保持可读；浏览时不显示跳播覆盖条，歌词点击不收起，通过顶部唱片按钮返回封面。纯净歌词使用 `alignStart`，律动仍保留居中和歌词时钟；点击不跳播、长按复制契约不变。非经典竖屏主播放键为最大 82×64px 圆角矩形，进度和底部工具行与封面态共用几何。
+
+封面氛围使用 `useCoverPalette` 与 `services/media-image.ts / media-palette.ts`，复用原生图片接口和 image 元素，不新增 UI 组件族。通过 `getImageInfo/compressImage` 取得 32×32 缩略样本，jpeg-js/fast-png 只解码小图，取色后清理独立临时文件；不依赖当前 Vapor 基座没有注册的 canvas 元素。量化封面色相后生成深色背景、文字、轨道与淡色主控制令牌，并用 1×128 PNG 实现原生渐变背景。64 项 LRU 仅存颜色和小 PNG，120ms 合并连续换歌，按代次和封面键丢弃过期结果，隐藏/卸载取消待处理任务；不订阅播放进度、不引入持续绘图。无封面、失败或性能降级用现有主题。手动主题、固定色和本地背景继续优先，classic 的风格默认保持主题，设置选中红不受取色影响。颜色对比度、缓存、迟到图片回调与多字号几何由 `check-media-palette` 验证，App 绘制仍须原生构建和设备截图验收。
+
+`qt-playing-track` 是展示组件：单行歌名跑马灯、固定收藏动作、歌手跑马灯和可点的来源/音质标签。`qt-marquee` 继续只负责单文本；混合行的宽度、长音源名换行和字号高度由 `playing-track-metrics` 统一预算，因此不把整首歌的布局塞进跑马灯。封面、展开歌词和宽屏左栏均接同一个展示组件。
+
+`qt-playback-source-sheet` 是复用 QtSheet / QtOption / selection-reveal 的业务适配器，与首页浏览来源切换器分开。平台名称和启用顺序来自 `registry.sources`；音质来自该平台包声明的生效清单，旧包回落其注册表档位。异步清单更新有代次守卫并触发重新定位，未知/移除 ID 不选中其他行；选择只发出 source / quality，由页面处理搜索与播放，不改首页浏览来源。指定平台单独搜索和缓存，避免聚合前 20 条候选漏掉用户所选平台。
+
+换源结果继续复用 QtActionSheet，不新建选择组件族。`SheetAction.description` 将候选歌手、平台、时长和专辑从完整歌名中分离，版本名称允许自然换行；可选副文本使用 QtOption 的 44px 原生最小触控行高与内部文本留白。操作表按原生内容实测高度收紧，首帧估算包含中英文换行、副文本与字号；列表高度扣除标题、取消与安全区，超长列表独立滚动。打开、异步条目及窗口/字号变化使旧测量失效，最终高度参与选中定位；关闭或卸载不接受迟到回调。点击候选仍进入原有使用/检查详情，不绕过来源配置与播放动作代次守卫。
+
+来源标签按当前使用 URL 的元信息显示跨源结果与真实档位，音质预检不会重标仍在播放的旧 URL。本地优先命中显示“本地文件”，禁止用在线档位改变实际文件；播客只显示“播客音频”。切换保留原歌身份、队列、进度、暂停状态及私人电台；暂停时直接提交 `autoPlay=false` 的原生时间线，避免先播放再暂停。页面、播放动作、音源配置及音质变化后的旧请求不提交。
+
+实际来源与原曲所属平台不同时，切回原平台直接复用已知原曲并清掉候选副本的备用 URL，仍经过原有详情检查/播放入口及动作代次守卫；不能让排除当前歌曲 ID 的搜索过滤器隐藏原曲。
+
+`classic / rhythm / gallery / focus` 与原偏好结构保持兼容，背景选择仍单独保存；风格变化只更新呈现。转屏/分屏只作废几何和动画测量，不重置已展开歌词。紧凑布局优先保证顶部三入口与底部五键，压缩封面，过短时信息可以滚动；宽屏左封面和信息、右歌词，工具组不足两翼宽时另成一行，封面不设穿透可用高度的下限。短横屏左栏使用 `leftContentHeightPx` 保留整个信息块的高度，原生滚动容器顶对齐、内容不收缩；放得下时内层居中，溢出时显示滚动条，避免两行歌名及来源首尾被裁。滚动内容增高不改变底部控制预算。实际 pane 宽高与整窗 rpx 比例分开传入，涵盖物理折叠区域和五档字号；safeBottom 仅消费一次。
+
+设置页沿用现有布局，底部 Tab 仅在主 Tab 页显示。固定迷你栏三键保持上一首 / 播放暂停 / 下一首，命中区 44px；其它浮动模式不变。来源元信息只随歌曲、设置与取链事件更新，无新增动画时钟或进度轮询。元信息随 80 条 URL 缓存淘汰，搜索最多缓存 32 组 × 20 首、10 分钟有效；搜索完成/失败后释放请求守卫。
+
+原生设备复核发现，宽屏缩回竖屏后，已挂载首页的迷你封面和图标会保留旧 rpx 比例，挤掉歌名。`qt-mini-player` 的封面、文字、内边距、球形控件和进度轨均按 `qtRpx` 的当前共享快照绑定 px；`qt-icon` 保持外部 size 单位，内部绑定当前 px，不要求各页面修改调用。转屏只重新计算几何，不增加监听或重新挂载播放器。播放设置的音效说明也直接读取实际 capabilities，支持音量增强而不支持输出格式的播放方式有独立说明，避免旧 `effectsSupported` 引用导致整个子页渲染失败。
+
+`check:playback-source` 执行真实 MusicApi / 注册表 / 页面动作 / 组件模板，在模拟原生边界下覆盖音源包增删、官方档位、选中定位、本地/播客、跨源与异步失效、暂停原生意图，以及紧凑/短横屏/宽屏/物理折叠区域的五档字号。`check:player-presentation` 继续验证旧风格偏好和歌词行为；这些检查不能替代 HBuilderX 编译和重新部署后的设备显示验证，证据分别记录。
 
 ### 内容卡片与唱机图层（2026-11-08）
 
@@ -1619,3 +1696,47 @@ QtOption 新增 `preview` 布尔与 `preview` 插槽，用于竖向图文卡；�
 卡片高度确定，标题和页脚 `flex-shrink:0`，正文 `flex:1;min-height:0` 独立滚动并显示滚动条，去除旧260rpx/180px正文上限。正文内边距与标题、按钮对齐，顶部与底部细线区分固定区域；切换版本重新挂载正文滚动容器。所有颜色来自主题的 sheetSurface/text/textMuted/divider/scrim/accent，不再写死浅色弹窗。
 
 手机双下载入口并排，可关闭时“以后再说”放次行；单下载入口与稍后操作同排。宽屏三项操作保持一行，矮横窗的标题和版本信息也同排，并缩减标题/页脚上下留白，将高度让给正文。下载进度固定显示在操作区内，下载/测速时禁用直接下载且隐藏取消和浏览器入口，保留强制更新失败后的退出路径。按钮复用共享组件，避免三个窄按钮压缩手机标签；不改变服务端公告、下载链接、强制更新或保存安装逻辑。
+
+### Android 输入框卸载后的样式回调（2026-11-10）
+
+HBuilderX 5.34 内置 input 的 mounted 会启动 80ms 样式同步定时器，beforeUnmount 只执行原生 `destroy()`，没有取消 timer 或清空闭包里的原生实例。Android 自定义基座的 `_uni-form methodId=19` 已确认对应 `NativeInputView.beginUpdateBatch()`；10～60ms 内挂载并卸载 input 可复现 `UTS instance … is not registered`。错误日志显示的是回调执行时的当前页面，所以搜索、歌单和我的页可以记录同一问题。主题内容不变时保留 skin 对象仍是性能优化，但不能解决这个定时器生命周期缺口。
+
+`services/native-input-lifecycle.ts` 由 main 在 createSSRApp 注册内置组件后、mount 前安装。通过 `app.component("Input")` / `app.component("Textarea")` 获取实际内置组件，用实例类型的对象身份判断归属；仅将这些实例创建的 timeout 绑定到 beforeUnmount。每实例一份清理，销毁时取消全部未完成任务；回调执行前再次检查取消与销毁状态，防止已排队回调访问已注销实例。正常完成和手动 clearTimeout 均释放记录，重复安装不会重复包装，另一个 app 实例可追加自己的内置类型。
+
+保留原生 timer ID、延时、参数与 callback 上下文，活跃回调的真实异常继续传播；不更换 input 或延迟销毁，不取消页面、播放器和网络任务，不修改 interval。iOS / Harmony / Web 条件编译后不安装这个兼容层。`check:native-input` 已接入全量检查，覆盖旧错复现、排队回调、快速替换、多任务、手动取消、重复安装与模块重载、平台隔离、100次循环以及真实 main 入口接线。Android 实测使用同一基座、同一输入框挂载/卸载时序对比修复前后；升级基座后复核原生用例，再决定是否移除此兼容层。
+
+项目内所有内置 input（包含 `qt-page-frame` 与 `qt-playlist-picker` 内的控件）均受该层保护；多行输入位于 AI 助手、音源账号、意见反馈。实际 5.34 Textarea 也在 mounted 创建未清理的 80ms 高度初始化：Android 对比确认 10/30/60ms 卸载后仍执行回调，修复后取消；该回调访问元素高度，与 Input 的 `methodId=19` 样式批次不是同一函数。正常挂载的文本框保留多行输入、自动高度及动态文字颜色更新。当前项目没有内置 picker / picker-view，slider 的延迟测量只由 showValue 变化触发，而现有页面未设置该属性。
+
+2026-11-10 全项目生命周期核查同时补齐应用自己的延迟任务：
+
+- `qt-page-frame` 取消托管内容的 30ms 挂载及标签测量；`useQtReveal` 在 nextTick、每个分拍、收尾和兜底都校验批次与存活，finish/reset 后旧任务不能重启。
+- 骨架扫光在隐藏/卸载后取消重试，并使旧 nextTick 失效；加载圆环、公告跑马灯阻止卸载后启动原生动画。
+- 歌单详情、每日歌曲、每日推荐阻止已失效的首轮查询再发嵌套查询；歌单广场、桌面歌词四条轨道、听歌统计和播放页阻止过期几何回执写入或重建重试。路由 onUnload 和组件 onBeforeUnmount 都可独立触发清理。
+- 播放页清理封面/弹层入场定时器；搜索页作废请求批次，等待加载更多的循环在离开后退出；分享卡片取消截图并防止排队回调复用捕获的原生元素。
+- 登录、找回密码、资料编辑、反馈、缓存清理在异步完成后先检查存活，再通知或延迟跳转；找回密码不在卸载后创建验证码倒计时。升级弹窗的下载进度和延迟关闭不再写入已卸载实例，已开始的文件处理仍按原业务完成。
+
+`check:ui-lifecycle` 的 22 组回归执行上述真实生产函数/生命周期注册，以可控 nextTick、定时器、网络 Promise 和原生测量回执模拟“先卸载、再返回”。同时检查活跃控件正常完成、快速替换只影响旧实例和取消后的排队回调不再访问原生控件。已有全量业务、组件布局与共享弹层回归继续保留。
+
+### 可变高度卡片直接拖动（2026-11-13）
+
+[QtReorderList](<../components/qt-reorder-list/qt-reorder-list.uvue>) 是纯 UI 手势容器，QtSortPanel 只选排序键/方向、QtMiniPlayer 只移动单个浮球，均不承担完整卡片顺序。卡片仍由 QtCard/QtSwitch/QtIcon 和原登录按钮构成，不复制选择控件。
+
+公开输入为 `items: { id: string; disabled?: boolean }[]` 和全局 `disabled`；ID 必须唯一非空。default slot 只提供 `{ item, id, index, handle }`，handle 为 `start/move/end/cancel/click/style`，宿主在独立 44×44px 手柄绑定 touchstart/move/end/cancel 和 click.stop。列表行实测原生 border-box 的高度与间距，临时 transform 跟手和目标占位不写业务状态。`disabled` 项不可拖也不可跨越，关闭业务平台不等于禁用 UI 拖动。
+
+事件顺序是 touchstart 立即 `active(true)` → 有效放手 `reorder(完整 ids)` → `active(false)`；父 scroll-view 以 `direction="none"` 锁滚动，即使 native query 未返回也先锁。至少 8px 实际 touchmove 才提交，取消/同位不发 reorder。500ms 无测量回执、无效/重叠几何、多指、items/global-disabled/字体/窗口及布局 pane 变化、hide/unload/unmount 均作废代次并释放 active；旧回执不恢复手势。
+
+[管理页](<../../../pages/source-auth/index.uvue>) 松手一次保存全目录顺序，保留策略原 enabled 与缺失 ID 槽位；保存/引擎 ACK 期间禁止再次拖动和开关。聚合参与使用每卡 QtSwitch，平台关闭时记住其选择；默认与显式全关独立。25 个组件模板用例及完整页面+实际组件+真实服务离线交互进入原 `check:source-platform`，不改 package/lock 或原其它门禁。**Native 编译、原生绘制、紧凑/宽屏设备触摸与本人账号仍 NOT RUN**；本次不提供或冒充设备截图。
+
+2026-11-13 二次裁定（用户「来源放到最右边，三行间隙变小一点」）：来源保持普通文字（无胶囊），但位置回到行尾最右——`.pt-artist` 恢复 `flex: 1` 撑满整行，来源贴右；三行（歌名 / 歌手·来源 / 词作）行距收紧：`.pt-meta` 与 `.track-row-lyric` 行间 margin 4→2px（`heightPx = title + 2 + meta`、`baseReservedPx` 同步 +4→+2），歌手行与词作行触控底 44→36px（`metaRowPx`/`lyricRowPx` floor 44→36；来源命中宽仍 ≥44px、收藏仍 44px），stacked 换行间隙 4→2px。超宽组合仍落到歌手下一行。`check-playback-source` 用例改为「plain text pinned right over tightened block」，模板沙箱断言 metaRowPx ≥36；`check-player-presentation`/`check-media-palette`/`check-responsive-layout`/`npm run check` 全绿。
+
+### 播放页歌词字号与反馈页双渠道入口（2026-11-14）
+
+歌词字号是**用户级全局倍率**（`stores/lyric-size.ts`，KV `qt-lyric-size`，0.8–1.6 步长 0.1，默认 1.0），不是每首歌独立设置——与歌词偏移（逐曲）刻意分工：字号是「我这台设备看得清」的偏好，切歌不该变。`LyricSizeStore` 的 `clampScale` 先把入参量化到 0.1 再夹取，非正值回落默认，避免 103% 这类不可复现的中间态。
+
+倍率必须与 `fontScale.scale`（系统/应用字号缩放）**相乘**而不是互相覆盖，四个渲染口径同乘一个值：经典滚动主行 `lrcStyle`、译文/罗马音 `lrcTrStyle`/`lrcRomaStyle`（基准比主行小 12）、逐字 `karaokeFontSize`、沉浸式 `qt-focus-lyrics` 新增可选 prop `sizeScale`（非法值按 1 处理）。基准仍是宽屏 px / 竖屏 rpx 两套（QtFontDual 内部再乘 fontScale），所以调用方传的是**未缩放**基准值。
+
+改动字号后行高变化而 `scrollTop` 是像素值，必须 `resetKaraoke(); updateLyricScroll(true)` 强制重定位——不强制会被 4 秒用户滚动窗口拦住，歌词停在旧的像素位置。播放页入口是工具行「字号 xx%」（自定义时不落默认色），弹层复用 `offset-*` 类与 `QtSheet`，只给 `A- / 恢复默认 / A+` 三键枚举九档，不做滑杆（滑杆会产出无法复现的中间百分比）。
+
+`tools/check-lyric-viewport.mjs` 沙箱新增 `lyricSize` 依赖，并断言 `size × fontScale` 在 0.8/1/1.2/1.6 × 1/1.5 八组组合下主行、逐字、译文、罗马音四处同口径——这条门禁是「改了字号但某一级没跟上」的唯一自动化防线。
+
+反馈页（[pages/feedback/index.uvue](<../../../pages/feedback/index.uvue>)）改为两个直达仓库新建 Issue 的按钮：CNB 与 GitHub，URL 收敛在 `services/official-site.ts`（`OFFICIAL_ISSUE_CNB_URL` / `OFFICIAL_ISSUE_GITHUB_URL`），页面经 `openInBrowser` 打开系统浏览器，不做登录门禁。原「我的 / 公开」双 Tab 列表 + 提交入口**整段注释保留在同一文件内**（template 段每行各自包 HTML 注释、script 段每行前置 `//`、style 段逐行包 `/* */`，跨行注释用状态机识别后原样保留），`pages/feedback/submit` 与 `pages/feedback/detail` 两个路由本轮不动。

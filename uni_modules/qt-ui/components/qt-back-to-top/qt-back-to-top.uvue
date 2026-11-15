@@ -9,10 +9,16 @@
   absolute 会锚到 frame 内容区或页内容器，原点在标题栏/状态栏之下（搜索/歌单页还
   额外让开内容列内边距），窗口坐标直接用必然错位。代价是宽屏托管工具页里本按钮被
   覆盖层压住不可见（既有表现），关工具后偶有残留副本与宿主页自己的同位按钮重叠。
+
+  弹层期间必须整体隐藏（2026-11-14 用户截图实锤）：fixed 节点在 Vapor 下被提升到
+  窗口层参与 z 序，而 QtSheet 家族遮罩是 absolute + z 999、被 .qt-page-frame-content
+  的 z-index:2 层叠上下文约束在内容层里 —— 于是 z 950 的 fixed 火箭必然穿透遮罩浮在
+  动作单上（截图：长按菜单里火箭压在「屏蔽该歌手」右侧）。这与迷你播放栏 2026-11-13
+  同一类问题，统一走 sheet-visibility 计数：计数 > 0 期间不渲染。
 -->
 <template>
   <view
-    v-if="visible"
+    v-if="visible && sheetHidden"
     class="qt-back-to-top"
     :class="layout.isWide ? 'qt-back-to-top-wide' : ''"
     :style="posStyle"
@@ -29,6 +35,7 @@ import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useMiniPlayerSettings } from "@/uni_modules/qt-ui/stores/mini-player";
 import { qtMiniDockReservePx } from "@/uni_modules/qt-ui/composables/mini-player-layout";
 import { usePlayerStore } from "@/stores/player";
+import { qtSheetOverlayCount } from "@/uni_modules/qt-ui/stores/sheet-visibility";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 
 defineProps<{
@@ -39,6 +46,13 @@ const layout = useQtLayout();
 const player = usePlayerStore();
 const miniSettings = useMiniPlayerSettings();
 const theme = useThemeStore();
+
+/**
+ * 底部弹层（QtSheet 家族）打开期间不渲染：本组件是 fixed 节点（窗口层 z 950），
+ * 弹层遮罩是 absolute z 999 且被 .qt-page-frame-content 的 z-index:2 层叠上下文
+ * 约束在内容层里 —— 不藏必然穿透遮罩浮在动作单上。计数由 qt-sheet 维护。
+ */
+const sheetHidden = computed((): boolean => qtSheetOverlayCount().value == 0);
 
 defineEmits<{
   (e: "tap"): void;
@@ -51,9 +65,9 @@ const posStyle = computed((): string => {
   const bottom = miniSettings.mode == "docked" && player.current != null
     ? qtMiniDockReservePx(!layout.isWide) + (layout.isWide ? 20 : qtRpx(16))
     : (layout.isWide ? layout.safeBottomPx + 20 : qtTabBarHeightPx() + qtRpx(16));
-  const left = Math.max(0, layout.windowWidth - right - size);
-  const top = Math.max(0, layout.windowHeight - bottom - size);
-  return "left:" + left + "px;top:" + top + "px;";
+  const left = Math.max(0, layout.paneWidth - right - size);
+  const top = Math.max(0, layout.paneHeight - bottom - size);
+  return "left:" + (layout.paneLeft + left) + "px;top:" + (layout.paneTop + top) + "px;";
 });
 </script>
 

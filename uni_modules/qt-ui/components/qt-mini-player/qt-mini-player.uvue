@@ -1,6 +1,6 @@
 <template>
   <view
-    v-if="player.current != null && (settings.mode != 'docked' || !layout.isWide)"
+    v-if="player.current != null && !layout.isTv && (settings.mode != 'docked' || !layout.isWide) && sheetHidden"
     class="mini-player-host"
     :style="hostStyle"
   >
@@ -18,15 +18,15 @@
       v-if="!showStrip"
       class="fab-inner"
       :class="layout.isWide ? 'fab-inner-wide' : ''"
-      :style="'background-color:' + theme.skin.mediaSurface + ';border-color:' + theme.skin.mediaBorder + ';'"
+      :style="fabSizeStyle + 'background-color:' + theme.skin.mediaSurface + ';border-color:' + theme.skin.mediaBorder + ';'"
     >
-      <view class="fab-cover-spin" :class="layout.isWide ? 'fab-cover-spin-wide' : ''" :style="discStyle">
-        <image class="fab-cover" :class="layout.isWide ? 'fab-cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="currentCover()" mode="aspectFill" @error="onCoverError" />
+      <view class="fab-cover-spin" :class="layout.isWide ? 'fab-cover-spin-wide' : ''" :style="fabSizeStyle + discStyle">
+        <image class="fab-cover" :class="layout.isWide ? 'fab-cover-wide' : ''" :style="fabSizeStyle + 'background-color:' + theme.skin.coverPlaceholder + ';'" :src="currentCover()" mode="aspectFill" @error="onCoverError" />
       </view>
       <view
         class="fab-state"
         :class="layout.isWide ? 'fab-state-wide' : ''"
-        :style="'background-color:' + (player.playing ? theme.skin.mediaControl : theme.skin.mediaScrim) + ';'"
+        :style="fabStateStyle + 'background-color:' + (player.playing ? theme.skin.mediaControl : theme.skin.mediaScrim) + ';'"
         @click.stop="onBallStateClick"
       >
         <QtIcon :name="player.playing ? 'pause' : 'play'" :size="layout.isWide ? 20 : 26" :color="theme.skin.mediaText" />
@@ -39,29 +39,40 @@
       :class="isDocked ? 'mini-player-inner-docked' : (layout.isWide ? 'mini-player-inner-wide' : '')"
       :style="stripStyle"
     >
-      <view class="mini-cover-wrap" :class="isDocked ? 'mini-cover-wrap-docked' : (layout.isWide ? 'mini-cover-wrap-wide' : '')" :style="discStyle">
-        <image v-if="currentCover().length > 0" class="mini-cover" :class="isDocked ? 'mini-cover-docked' : (layout.isWide ? 'mini-cover-wide' : '')" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="currentCover()" mode="aspectFill" @error="onCoverError" />
+      <view class="mini-cover-wrap" :class="isDocked ? 'mini-cover-wrap-docked' : (layout.isWide ? 'mini-cover-wrap-wide' : '')" :style="coverSizeStyle + discStyle">
+        <image v-if="currentCover().length > 0" class="mini-cover" :class="isDocked ? 'mini-cover-docked' : (layout.isWide ? 'mini-cover-wide' : '')" :style="coverSizeStyle + 'background-color:' + theme.skin.coverPlaceholder + ';'" :src="currentCover()" mode="aspectFill" @error="onCoverError" />
         <view v-else class="mini-cover-fallback" :style="'background-color:' + theme.skin.accentSoft + ';'"><QtIcon name="music" :size="layout.isWide ? 22 : 36" :color="theme.skin.accent" /></view>
       </view>
       <view class="mini-copy" :class="layout.isWide ? 'mini-copy-wide' : ''" :style="copyHeightStyle">
-        <text class="mini-title" :class="layout.isWide ? 'mini-title-wide' : ''" :style="miniTitleStyle" :max-lines="1">{{ currentName() }}</text>
+        <!-- 用户 2026-11-14：迷你条歌名改单行跑马灯（长名滚动看全）；字号/行高沿用原 miniTitleStyle 口径，页面隐藏时由 active 关停。 -->
+        <QtMarquee
+          class="mini-title"
+          :text="currentName()"
+          :size-rpx="isDocked ? 26 : 27"
+          :size-px="14"
+          :weight="600"
+          :color="theme.skin.text"
+          :width-px="miniTitleWidthPx"
+          :line-height-px="miniTitleLinePx"
+          :active="pageVisible"
+        />
         <text class="mini-artist" :class="layout.isWide ? 'mini-artist-wide' : ''" :style="miniArtistStyle" :max-lines="1">{{ currentArtist() }}</text>
       </view>
-      <view v-if="isDocked" class="mini-action mini-action-docked" @click.stop="previousTrack">
+      <view v-if="isDocked" class="mini-action mini-action-docked" :style="actionSizeStyle" @click.stop="previousTrack">
         <QtIcon name="skip-back" :size="32" :color="theme.skin.text" />
       </view>
       <view
         class="mini-action"
         :class="isDocked ? 'mini-action-docked' : (layout.isWide ? 'mini-action-wide' : '')"
-        :style="'background-color:' + (isDocked ? theme.skin.accent : theme.skin.surfaceMuted) + ';'"
+        :style="toggleSizeStyle + 'background-color:' + (isDocked ? theme.skin.accent : theme.skin.surfaceMuted) + ';'"
         @click.stop="togglePlayback"
       >
-        <QtIcon :name="player.playing ? 'pause' : 'play'" :size="layout.isWide ? 18 : (isDocked ? 30 : 24)" :color="isDocked ? theme.skin.onAccent : theme.skin.text" />
+        <QtIcon :name="player.playing ? 'pause' : 'play'" :size="layout.isWide ? 18 : 24" :color="isDocked ? theme.skin.onAccent : theme.skin.text" />
       </view>
       <view
         class="mini-action"
         :class="isDocked ? 'mini-action-docked' : (layout.isWide ? 'mini-action-wide' : '')"
-        :style="'background-color:' + (isDocked ? 'transparent' : theme.skin.surfaceMuted) + ';'"
+        :style="actionSizeStyle + 'background-color:' + (isDocked ? 'transparent' : theme.skin.surfaceMuted) + ';'"
         @click.stop="nextTrack"
       >
         <QtIcon name="skip-forward" :size="layout.isWide ? 18 : (isDocked ? 32 : 24)" :color="theme.skin.text" />
@@ -89,6 +100,7 @@ import { usePlayerStore } from "@/stores/player";
 import { useQtLayout, qtRailWidth } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtMarquee from "@/uni_modules/qt-ui/components/qt-marquee/qt-marquee.uvue";
 import {
   miniFabX,
   miniFabY,
@@ -110,39 +122,89 @@ import {
   miniExpandFromFab,
   miniCollapse,
 } from "@/uni_modules/qt-ui/services/mini-player-singleton";
-import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDualPx, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useMiniPlayerSettings } from "@/uni_modules/qt-ui/stores/mini-player";
 import { qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtMiniDockTopPx, qtMiniDockBarHeightPx } from "@/uni_modules/qt-ui/composables/mini-player-layout";
+import { qtSheetOverlayCount } from "@/uni_modules/qt-ui/stores/sheet-visibility";
 
 const props = defineProps<{ aboveTab?: boolean }>();
 const settings = useMiniPlayerSettings();
 const isDocked = computed((): boolean => settings.mode == "docked");
+/**
+ * 底部弹层（QtSheet 家族）打开期间整条隐藏：本组件渲染在框架层，z 序在页面内容
+ * 之上，不藏会浮在弹窗上（sheet-visibility.ts 记录计数）。dock 预留与 tab 栏
+ * 不动，弹层遮罩盖在其后即可。
+ */
+const sheetHidden = computed((): boolean => qtSheetOverlayCount().value == 0);
 const joinedDock = computed((): boolean => isDocked.value && props.aboveTab == true);
 const showStrip = computed((): boolean => isDocked.value || settings.mode == "bar" || miniExpanded.value);
-const renderWidth = computed((): number => isDocked.value ? layout.windowWidth - qtRpx(48) : miniRenderWidth.value);
+const renderWidth = computed((): number => isDocked.value ? layout.paneWidth - qtRpx(48) : miniRenderWidth.value);
 const renderHeight = computed((): number => isDocked.value ? qtMiniDockBarHeightPx() : miniRenderHeight.value);
-const stripStyle = computed((): string => "width:" + renderWidth.value + "px;height:" + renderHeight.value + "px;background-color:" + (joinedDock.value ? "transparent" : theme.skin.surface) + ";border-color:" + theme.skin.border + ";" + (joinedDock.value ? "border-width:0;border-radius:28rpx 28rpx 0 0;" : ""));
-const copyHeightStyle = computed((): string => "height:" + (layout.isWide ? Math.max(42, 37 * fontScale.scale) : qtRpx(isDocked.value ? 60 * fontScale.scale : Math.max(72, 68 * fontScale.scale))) + "px;");
+// Native nodes can retain their page's old rpx basis after a wide/compact switch.
+// Bind the shared window's current pixel sizes for every persistent mini shape.
+const stripStyle = computed((): string => {
+  const left = isDocked.value ? qtRpx(20) : layout.isWide ? 8 : qtRpx(16);
+  const right = isDocked.value ? qtRpx(16) : layout.isWide ? 7 : qtRpx(14);
+  const radius = isDocked.value ? qtRpx(28) : renderHeight.value / 2;
+  const corners = joinedDock.value ? radius + "px " + radius + "px 0 0" : radius + "px";
+  return "width:" + renderWidth.value + "px;height:" + renderHeight.value + "px;padding-left:" + left + "px;padding-right:" + right + "px;border-radius:" + corners + ";background-color:" + (joinedDock.value ? "transparent" : theme.skin.surface) + ";border-color:" + theme.skin.border + ";" + (joinedDock.value ? "border-width:0;" : "");
+});
+const copyHeightStyle = computed((): string => {
+  const height = layout.isWide ? Math.max(42, 37 * fontScale.scale) : qtRpx(isDocked.value ? 60 * fontScale.scale : Math.max(72, 68 * fontScale.scale));
+  return "height:" + height + "px;padding-left:" + (layout.isWide ? 10 : qtRpx(16)) + "px;padding-right:" + (layout.isWide ? 6 : qtRpx(12)) + "px;";
+});
+const coverSizeStyle = computed((): string => {
+  const size = isDocked.value ? qtRpx(76) : layout.isWide ? 42 : qtRpx(80);
+  const radius = isDocked.value ? qtRpx(16) : size / 2;
+  return "width:" + size + "px;height:" + size + "px;border-radius:" + radius + "px;";
+});
+const actionSizeStyle = computed((): string => {
+  const size = isDocked.value ? 44 : layout.isWide ? 34 : qtRpx(64);
+  const margin = isDocked.value ? 2 : layout.isWide ? 5 : qtRpx(8);
+  return "width:" + size + "px;height:" + size + "px;border-radius:" + size / 2 + "px;margin-left:" + margin + "px;";
+});
+/** 播放/暂停主键：停靠条的红色圆比上一曲/下一曲小一圈（2026-11-13 用户反馈太大）。 */
+const toggleSizeStyle = computed((): string => {
+  if (!isDocked.value) return actionSizeStyle.value;
+  const size = 36;
+  const margin = 2;
+  return "width:" + size + "px;height:" + size + "px;border-radius:" + size / 2 + "px;margin-left:" + margin + "px;";
+});
+const fabSizeStyle = computed((): string => {
+  const size = layout.isWide ? 72 : qtRpx(120);
+  return "width:" + size + "px;height:" + size + "px;border-radius:" + size / 2 + "px;";
+});
+const fabStateStyle = computed((): string => {
+  const size = layout.isWide ? 34 : qtRpx(56);
+  return "width:" + size + "px;height:" + size + "px;border-radius:" + size / 2 + "px 0 " + size / 2 + "px 0;";
+});
 
 /**
- * 歌名/歌手字号跟全局缩放（class 里的 27/22rpx、14/12px 只是基准值）。
- * 行高按同倍率联动，否则「很大」档下字形高度超过 class 的 38/30rpx 行高，
- * 单行文本上下会被裁掉（同页头 tab / 免责声明标题的联动先例）。
+ * 歌名跑马灯（2026-11-14 用户批准）：字号跟全局缩放，行高沿用原 miniTitleStyle 口径
+ * （窄 38rpx/停靠 34rpx、宽 20px，乘 scale），避免组件默认 1.4×+4 行高把 72rpx 双行小列顶爆。
  */
-const miniTitleStyle = computed((): string => {
-  const s = fontScale.scale;
-  const line = layout.isWide
-    ? "line-height:" + Math.round(20 * s * 100) / 100 + "px;"
-    : "line-height:" + Math.round((isDocked.value ? 34 : 38) * s * 100) / 100 + "rpx;";
-  return ("color:" + theme.skin.text + ";") + qtFontDual(isDocked.value ? 26 : 27, 14) + line;
+const miniTitleLinePx = computed((): number =>
+  layout.isWide ? Math.round(20 * fontScale.scale * 100) / 100 : qtRpx((isDocked.value ? 34 : 38) * fontScale.scale)
+);
+/** 跑马灯宽度上限 = 条宽 − 两侧内边距 − 封面 − 文案列内边距 − 三个按键（含左边距）；实际以实测视口为准。 */
+const miniTitleWidthPx = computed((): number => {
+  const padL = isDocked.value ? qtRpx(20) : layout.isWide ? 8 : qtRpx(16);
+  const padR = isDocked.value ? qtRpx(16) : layout.isWide ? 7 : qtRpx(14);
+  const cover = isDocked.value ? qtRpx(76) : layout.isWide ? 42 : qtRpx(80);
+  const copyL = layout.isWide ? 10 : qtRpx(16);
+  const copyR = layout.isWide ? 6 : qtRpx(12);
+  const toggle = isDocked.value ? 38 : layout.isWide ? 34 + 5 : qtRpx(64) + qtRpx(8);
+  const next = isDocked.value ? 46 : layout.isWide ? 34 + 5 : qtRpx(64) + qtRpx(8);
+  const prev = isDocked.value ? 46 : 0;
+  return Math.max(0, renderWidth.value - padL - padR - cover - copyL - copyR - toggle - next - prev);
 });
 const miniArtistStyle = computed((): string => {
   const s = fontScale.scale;
   const line = layout.isWide
     ? "line-height:" + Math.round(17 * s * 100) / 100 + "px;"
-    : "line-height:" + Math.round((isDocked.value ? 26 : 30) * s * 100) / 100 + "rpx;";
-  return ("color:" + theme.skin.textMuted + ";") + qtFontDual(isDocked.value ? 20 : 22, 12) + line;
+    : "line-height:" + qtRpx((isDocked.value ? 26 : 30) * s) + "px;";
+  return ("color:" + theme.skin.textMuted + ";") + qtFontDualPx(qtRpx(isDocked.value ? 20 : 22), 12) + line;
 });
 
 /**
@@ -173,13 +235,22 @@ const progressRatio = computed((): number => {
   if (duration <= 0) return 0;
   return Math.max(0, Math.min(1, player.progress / duration));
 });
-const progressTrackStyle = computed((): string => "background-color:" + theme.skin.divider + ";" + (isDocked.value && !joinedDock.value ? "bottom:8rpx;" : ""));
-const progressStyle = computed((): string => "width:" + Math.round(progressRatio.value * 100) + "%;background-color:" + theme.skin.accent + ";");
+const progressRailSizeStyle = computed((): string => {
+  const height = isDocked.value ? qtRpx(2) : layout.isWide ? 2 : qtRpx(4);
+  return "height:" + height + "px;border-radius:" + (isDocked.value ? 0 : height / 2) + "px;";
+});
+const progressTrackStyle = computed((): string => {
+  const left = isDocked.value ? qtRpx(20) : layout.isWide ? 50 : qtRpx(84);
+  const right = isDocked.value ? qtRpx(20) : layout.isWide ? 78 : qtRpx(156);
+  const bottom = isDocked.value ? (joinedDock.value ? 0 : qtRpx(8)) : layout.isWide ? 4 : qtRpx(7);
+  return progressRailSizeStyle.value + "left:" + left + "px;right:" + right + "px;bottom:" + bottom + "px;background-color:" + theme.skin.divider + ";";
+});
+const progressStyle = computed((): string => progressRailSizeStyle.value + "width:" + Math.round(progressRatio.value * 100) + "%;background-color:" + theme.skin.accent + ";");
 
 const hostStyle = computed((): string => {
-  if (isDocked.value) return "left:" + qtRpx(24) + "px;top:" + qtMiniDockTopPx(props.aboveTab == true) + "px;right:auto;bottom:auto;width:" + renderWidth.value + "px;height:" + renderHeight.value + "px;";
+  if (isDocked.value) return "left:" + (qtRpx(24) + layout.paneLeft) + "px;top:" + (layout.paneTop + qtMiniDockTopPx(props.aboveTab == true)) + "px;right:auto;bottom:auto;width:" + renderWidth.value + "px;height:" + renderHeight.value + "px;";
   // 宿主始终只覆盖球或展开条本身；展开时不能铺满窗口，否则会截获页面滚动。
-  return "left:" + miniFabX.value + "px;top:" + miniFabY.value + "px;right:auto;bottom:auto;width:" + miniRenderWidth.value + "px;height:" + miniRenderHeight.value + "px;pointer-events:auto;";
+  return "left:" + (miniFabX.value + layout.paneLeft) + "px;top:" + (miniFabY.value + layout.paneTop) + "px;right:auto;bottom:auto;width:" + miniRenderWidth.value + "px;height:" + miniRenderHeight.value + "px;pointer-events:auto;";
 });
 
 const containerStyle = computed((): string => {
@@ -196,8 +267,10 @@ const containerStyle = computed((): string => {
 });
 
 const discStyle = computed((): string => {
+  // Reset the native transform even on covered pages when entering the fixed bar.
+  if (settings.mode == "docked") return "transform: rotate(0deg);";
   // Covered pages keep their last frame without subscribing to every animation tick.
-  if (pageVisible.value && settings.mode != "docked") lastRotation = miniRotateDeg.value;
+  if (pageVisible.value) lastRotation = miniRotateDeg.value;
   return "transform: rotate(" + lastRotation + "deg);";
 });
 
@@ -238,8 +311,8 @@ function onTouchMove(event: UniTouchEvent): void {
   const minX = layout.isWide ? qtRailWidth() + 8 : 0;
   let nx = origX + dx;
   let ny = origY + dy;
-  nx = Math.max(minX, Math.min(nx, layout.windowWidth - miniCurrentWidth.value));
-  ny = Math.max(0, Math.min(ny, layout.windowHeight - layout.safeBottomPx - miniCurrentHeight.value));
+  nx = Math.max(minX, Math.min(nx, layout.paneWidth - miniCurrentWidth.value));
+  ny = Math.max(0, Math.min(ny, layout.paneHeight - layout.safeBottomPx - miniCurrentHeight.value));
   miniFabX.value = nx;
   miniFabY.value = ny;
 }
@@ -448,8 +521,7 @@ onUnmounted(() => {
 .mini-cover-wide { width: 42px; height: 42px; border-radius: 21px; }
 .mini-copy { flex: 1; min-width: 0; height: 72rpx; justify-content: center; padding-left: 16rpx; padding-right: 12rpx; overflow: hidden; }
 .mini-copy-wide { height: 42px; padding-left: 10px; padding-right: 6px; }
-.mini-title { font-size: 27rpx; line-height: 38rpx; font-weight: 600; }
-.mini-title-wide { font-size: 14px; line-height: 20px; }
+/* mini-title 现为 QtMarquee 根 view（字号/行高/字重走组件 props），迷你条无独立标题样式规则。 */
 .mini-artist { font-size: 22rpx; line-height: 30rpx; }
 .mini-artist-wide { font-size: 12px; line-height: 17px; }
 .mini-action { width: 64rpx; height: 64rpx; border-radius: 32rpx; justify-content: center; align-items: center; margin-left: 8rpx; }
@@ -462,7 +534,7 @@ onUnmounted(() => {
 .mini-cover-wrap-docked { width: 76rpx; height: 76rpx; border-radius: 16rpx; }
 .mini-cover-docked { width: 76rpx; height: 76rpx; border-radius: 16rpx; }
 .mini-cover-fallback { width: 100%; height: 100%; align-items: center; justify-content: center; }
-.mini-action-docked { width: 64rpx; height: 64rpx; margin-left: 8rpx; border-radius: 32rpx; flex-shrink: 0; }
+.mini-action-docked { width: 44px; height: 44px; margin-left: 2px; border-radius: 22px; flex-shrink: 0; }
 .mini-progress-track-docked { left: 20rpx; right: 20rpx; bottom: 0; height: 2rpx; border-radius: 0; }
 .mini-progress-fill-docked { height: 2rpx; border-radius: 0; }
 </style>

@@ -1,12 +1,12 @@
 <template>
-  <view v-if="visible" class="qs-mask" :class="layout.isWide ? 'qs-mask-wide' : ''" :style="'background-color:' + theme.skin.scrim + ';'" @click="close">
-    <view class="qs-panel" :class="layout.isWide ? 'qs-panel-wide' : ''" :style="panelStyle" @click.stop>
+  <view v-if="visible" class="qs-mask qt-tv-skip" :class="layout.isWide ? 'qs-mask-wide' : ''" :style="maskStyle" @click="close">
+    <view ref="tvPanel" class="qs-panel qt-tv-skip" :class="layout.isWide ? 'qs-panel-wide' : ''" :style="panelStyle" @click.stop>
       <view v-if="title.length > 0" class="qs-header" :class="layout.isWide ? 'qs-header-wide' : ''" :style="'border-bottom-color:' + theme.skin.divider + ';'">
         <view class="qs-heading">
-          <text class="qs-title" :class="layout.isWide ? 'qs-title-wide' : ''" :style="'color:' + theme.skin.text + ';' + qtFontDual(30, 16)">{{ title }}</text>
-          <text v-if="subtitle.length > 0" class="qs-subtitle" :class="layout.isWide ? 'qs-subtitle-wide' : ''" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 12)">{{ subtitle }}</text>
+          <text class="qs-title" :class="layout.isWide ? 'qs-title-wide' : ''" :style="'color:' + theme.skin.text + ';' + qtFontDual(30, 16) + (layout.isTv ? 'line-height:' + Math.ceil(qtFontValuePx(16) * 1.35) + 'px;' : '')">{{ title }}</text>
+          <text v-if="subtitle.length > 0" class="qs-subtitle" :class="layout.isWide ? 'qs-subtitle-wide' : ''" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 12) + (layout.isTv ? 'line-height:' + Math.ceil(qtFontValuePx(12) * 1.4) + 'px;' : '')">{{ subtitle }}</text>
         </view>
-        <view v-if="dismissible" class="qs-close" :class="layout.isWide ? 'qs-close-wide' : ''" @click="close"><QtIcon name="close" :size="layout.isWide ? 18 : 28" :color="theme.skin.iconMuted" /></view>
+        <view v-if="dismissible" class="qs-close" :class="layout.isWide ? 'qs-close-wide' : ''" data-qt-tv-id="sheet-close" :style="layout.isTv ? 'width:56px;height:56px;margin-left:12px;' : ''" @click="close"><QtIcon name="close" :size="layout.isWide ? 18 : 28" :color="theme.skin.iconMuted" /></view>
       </view>
       <view class="qs-body"><slot></slot></view>
       <view class="qs-footer" :class="layout.isWide ? 'qs-footer-wide' : ''"><slot name="footer"></slot></view>
@@ -14,20 +14,51 @@
   </view>
 </template>
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, watch, onUnmounted, inject, ref } from "vue";
+import { useQtTvModal } from "@/uni_modules/qt-ui/composables/use-qt-tv-modal";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
-import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtLayout, qtFixedPaneStyle } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
-const props = withDefaults(defineProps<{ visible: boolean; title?: string; subtitle?: string; dismissible?: boolean }>(), { title: "", subtitle: "", dismissible: true });
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtSheetOverlayOpen, qtSheetOverlayClose } from "@/uni_modules/qt-ui/stores/sheet-visibility";
+const props = withDefaults(defineProps<{ visible: boolean; title?: string; subtitle?: string; dismissible?: boolean; footerFlush?: boolean }>(), { title: "", subtitle: "", dismissible: true, footerFlush: false });
 const emit = defineEmits<{ "update:visible": [value: boolean]; close: [] }>();
 const layout = useQtLayout();
 const theme = useThemeStore();
+const tvPanel = ref<UniElement | null>(null);
+useQtTvModal(tvPanel, (): boolean => props.visible, close);
+const inWorkspace = inject<boolean>("qt-sheet-in-workspace", false);
+const maskStyle = computed((): string => {
+  const background = "background-color:" + theme.skin.scrim + ";";
+  // 普通手机页内容被播放栏预留缩短，蒙层须锚定完整 pane，不能跟着内容底边抬高。
+  // 宽屏/托管实例保持 absolute；不逃出覆盖层，也不改变列表 viewport 和滚动位置。
+  if (layout.isWide || inWorkspace) return background;
+  return "position:fixed;" + qtFixedPaneStyle() + background;
+});
+// 底部弹层打开期间框架层迷你播放栏整体隐藏（qt-mini-player 读这个计数）。
+// 防重入：同一次打开只登记一次；宿主带着 open 状态卸载时也要注销，避免计数泄漏。
+let overlayRegistered = false;
+watch((): boolean => props.visible, (open: boolean): void => {
+  if (open && !overlayRegistered) {
+    overlayRegistered = true;
+    qtSheetOverlayOpen();
+  } else if (!open && overlayRegistered) {
+    overlayRegistered = false;
+    qtSheetOverlayClose();
+  }
+}, { immediate: true });
+onUnmounted((): void => {
+  if (overlayRegistered) {
+    overlayRegistered = false;
+    qtSheetOverlayClose();
+  }
+});
 const panelStyle = computed((): string => {
-  const width = layout.isWide ? qtSheetWidth("drawer") : layout.windowWidth;
+  const width = layout.isWide ? qtSheetWidth("drawer") : layout.paneWidth;
   const bottom = layout.isWide ? 12 : Math.max(8 * layout.windowWidth / 750, layout.safeBottomPx);
-  return "width:" + width + "px;max-height:" + Math.max(0, layout.windowHeight * 0.86 - layout.safeBottomPx) + "px;background-color:" + theme.skin.sheetSurface + ";padding-bottom:" + bottom + "px;";
+  // 用户 2026-11-13：带底部动作条的弹层不再在取消键下留一整行空白（安全区改由 footer 自己垫满）。
+  return "width:" + width + "px;max-height:" + Math.max(0, layout.paneHeight * 0.86 - layout.safeBottomPx) + "px;background-color:" + theme.skin.sheetSurface + ";padding-bottom:" + (props.footerFlush ? 0 : bottom) + "px;";
 });
 function close(): void { if (!props.dismissible) return; emit("update:visible", false); emit("close"); }
 </script>

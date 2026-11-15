@@ -23,7 +23,7 @@
  * 绝对定位盖在内容层上，否则两份内容同时占位会把页面撑高。
  */
 
-import { ref, nextTick, onUnmounted, type Ref } from "vue";
+import { ref, nextTick, onBeforeUnmount, type Ref } from "vue";
 
 /** 单块淡入 / 淡出时长（毫秒） */
 export const QT_REVEAL_DURATION_MS = 320;
@@ -80,8 +80,11 @@ export function useQtReveal(): QtRevealHandle {
   const revealedCount = ref<number>(QT_REVEAL_ALL);
   const revealing = ref<boolean>(false);
   let timers: number[] = [];
+  let disposed = false;
+  let generation = 0;
 
   function clearTimers(): void {
+    generation++;
     for (let i = 0; i < timers.length; i++) {
       clearTimeout(timers[i]);
     }
@@ -89,7 +92,9 @@ export function useQtReveal(): QtRevealHandle {
   }
 
   function startReveal(count: number, onDone?: () => void): void {
+    if (disposed) return;
     clearTimers();
+    const token = generation;
     if (count <= 0) {
       revealedCount.value = QT_REVEAL_ALL;
       revealing.value = false;
@@ -100,11 +105,13 @@ export function useQtReveal(): QtRevealHandle {
     revealing.value = true;
     // 等一帧再排定时器：先把 opacity:0 渲染出来，transition 才有起点可补
     nextTick(() => {
+      if (disposed || token != generation) return;
       for (let i = 0; i < count; i++) {
         const at = QT_REVEAL_LEAD_MS + i * QT_REVEAL_STEP_MS;
         const isLast = i == count - 1;
         timers.push(
           setTimeout(() => {
+            if (disposed || token != generation) return;
             // 最后一拍直接置哨兵而不是 count：触底加载追加的条目索引 >= count，
             // 若停在 count 它们会永远停在 opacity:0
             revealedCount.value = isLast ? QT_REVEAL_ALL : i + 1;
@@ -114,6 +121,7 @@ export function useQtReveal(): QtRevealHandle {
               // 会立刻卸载整层，收尾那一下变成硬切 —— 前面所有行的淡出也一起被砍断。
               timers.push(
                 setTimeout(() => {
+                  if (disposed || token != generation) return;
                   revealing.value = false;
                   if (onDone != null) onDone!();
                 }, QT_REVEAL_DURATION_MS) as number
@@ -130,6 +138,7 @@ export function useQtReveal(): QtRevealHandle {
       // 正常路径先到这里时此定时器是幂等的空操作。
       timers.push(
         setTimeout(() => {
+          if (disposed || token != generation) return;
           revealedCount.value = QT_REVEAL_ALL;
           revealing.value = false;
         }, QT_REVEAL_LEAD_MS + count * QT_REVEAL_STEP_MS + QT_REVEAL_DURATION_MS + QT_REVEAL_GUARD_MS) as number
@@ -138,12 +147,14 @@ export function useQtReveal(): QtRevealHandle {
   }
 
   function finishReveal(): void {
+    if (disposed) return;
     clearTimers();
     revealedCount.value = QT_REVEAL_ALL;
     revealing.value = false;
   }
 
   function resetReveal(): void {
+    if (disposed) return;
     clearTimers();
     revealedCount.value = 0;
     revealing.value = false;
@@ -157,7 +168,8 @@ export function useQtReveal(): QtRevealHandle {
     return opacityStyle(index >= revealedCount.value, extra);
   }
 
-  onUnmounted(() => {
+  onBeforeUnmount(() => {
+    disposed = true;
     clearTimers();
   });
 

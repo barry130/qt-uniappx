@@ -1,8 +1,8 @@
 <template>
-  <view class="qo" :class="[kindClass, disabled ? 'qo-disabled' : '']" :style="optionStyle" @click.stop="pick">
+  <view class="qo" :class="[kindClass, disabled ? 'qo-disabled qt-tv-skip' : '']" :style="optionStyle" @click.stop="pick">
     <view v-if="preview" class="qo-preview"><slot name="preview"></slot></view>
     <slot name="leading"></slot>
-    <view class="qo-body" :class="[kind == 'row' ? 'qo-body-row' : '', preview ? 'qo-body-visual' : '', kind == 'swatch' ? 'qo-body-swatch' : '', singleLine ? 'qo-body-single-line' : '']">
+    <view class="qo-body" :class="[kind == 'row' ? 'qo-body-row' : '', preview ? 'qo-body-visual' : '', kind == 'swatch' ? 'qo-body-swatch' : '', singleLine ? 'qo-body-single-line' : '']" :style="bodyStyle">
       <view v-if="preview" class="qo-title-row">
         <text class="qo-label qo-label-visual" :class="layout.isWide ? 'qo-label-wide' : ''" :style="labelStyle">{{ label }}</text>
         <QtIcon v-if="indicator && selected" name="check" :size="layout.isWide ? 14 : 26" :color="red" />
@@ -20,7 +20,7 @@ import { computed } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtSelectionColor } from "@/uni_modules/qt-ui/composables/selection";
 import { qtOptionChipMinHeightPx } from "@/uni_modules/qt-ui/composables/qt-option-metrics";
 
@@ -42,7 +42,11 @@ const props = withDefaults(defineProps<{
    * 单行菜单里用同一套会显得行间空隙过大，所以由调用方（action sheet）显式声明。
    */
   dense?: boolean;
-}>(), { description: "", selected: false, disabled: false, kind: "row", color: "", dense: false, indicator: false, preview: false, singleLine: false });
+  /** Row touch-target floor belongs to the native root, not a component wrapper. */
+  rowMinHeightPx?: number;
+  /** 标签对齐；双列选择面板等需要整列居中的场景传 center。 */
+  labelAlign?: "left" | "center";
+}>(), { description: "", selected: false, disabled: false, kind: "row", color: "", dense: false, indicator: false, preview: false, singleLine: false, rowMinHeightPx: 0, labelAlign: "left" });
 const emit = defineEmits<{ select: [] }>();
 const layout = useQtLayout();
 const theme = useThemeStore();
@@ -54,15 +58,25 @@ const kindClass = computed((): string => {
   return base + (layout.isWide ? " qo-row-dense qo-row-dense-wide" : " qo-row-dense");
 });
 const optionStyle = computed((): string => {
-  if (props.kind == "row") return "border-bottom-color:" + theme.skin.divider + ";";
-  const box = props.kind == "chip" ? "min-height:" + qtOptionChipMinHeightPx() + "px;" : "";
-  return box + "background-color:" + theme.skin.surfaceMuted + ";border-color:" + (props.selected ? red.value : theme.skin.border) + ";";
+  if (props.kind == "row") {
+    const floor = layout.isTv ? Math.max(76, props.rowMinHeightPx) : props.rowMinHeightPx;
+    return "border-bottom-color:" + theme.skin.divider + ";" + (floor > 0 ? "min-height:" + floor + "px;padding-top:0;padding-bottom:0;" : "");
+  }
+  const box = props.kind == "chip" ? "min-height:" + qtOptionChipMinHeightPx() + "px;" : layout.isTv && props.kind == "card" ? "min-height:76px;" : layout.isTv && props.kind == "swatch" ? "width:56px;height:56px;" : "";
+  const padding = layout.isTv && props.kind == "chip" ? "padding-top:8px;padding-bottom:8px;padding-left:22px;padding-right:22px;" : "";
+  return box + padding + "background-color:" + theme.skin.surfaceMuted + ";border-color:" + (props.selected ? red.value : theme.skin.border) + ";";
 });
+// Keep breathing room inside the text body. Native min-height otherwise adds
+// the root's vertical padding on top of the requested touch-target floor.
+const bodyStyle = computed((): string => props.kind == "row" && (layout.isTv || props.rowMinHeightPx > 0) ? "padding-top:8px;padding-bottom:8px;" : "");
 const labelStyle = computed((): string => {
   const color = props.disabled ? theme.skin.textSubtle : props.selected ? red.value : props.color.length > 0 ? props.color : theme.skin.text;
-  return "color:" + color + ";font-weight:" + (props.selected ? "600" : "400") + ";" + qtFontDual(28, 15) + (props.singleLine ? "white-space:nowrap;" : "");
+  return "color:" + color + ";font-weight:" + (props.selected ? "600" : "400") + ";" + qtFontDual(28, 15)
+    + (layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(15) * 1.35) + "px;" : "")
+    + (props.singleLine ? "white-space:nowrap;" : "")
+    + (props.labelAlign == "center" ? "align-self:stretch;text-align:center;" : "");
 });
-const descriptionStyle = computed((): string => "color:" + (props.selected && !props.preview ? red.value : theme.skin.textMuted) + ";" + qtFontDual(23, 12));
+const descriptionStyle = computed((): string => "color:" + (props.selected && !props.preview ? red.value : theme.skin.textMuted) + ";" + qtFontDual(23, 12) + (layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(12) * 1.4) + "px;" : ""));
 function pick(): void { if (!props.disabled) emit("select"); }
 </script>
 <style>

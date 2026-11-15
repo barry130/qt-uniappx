@@ -1,17 +1,22 @@
 <template>
   <!-- 普通安装引导使用统一 Sheet；全局服务仍是唯一业务状态来源。 -->
   <QtSheet :visible="st.visible.value" title="安装播放音源包" :dismissible="!st.installing.value" @update:visible="onVisibleChange">
-    <scroll-view direction="vertical" class="qpis-body" :style="bodyStyle" :show-scrollbar="false">
+    <scroll-view direction="vertical" class="qpis-body" :class="layout.isTv ? 'qt-tv-scroll' : ''" :data-qt-tv-id="layout.isTv ? 'play-install-document' : ''" :style="bodyStyle" :show-scrollbar="layout.isTv">
       <view class="qpis-content" :class="layout.isWide ? 'qpis-content-wide' : ''">
-        <text class="qpis-desc" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(24, 13)">在线播放需要安装一次播放音源包。这里一键安装官方包，也可以到「音源包管理」手动安装。</text>
+        <text class="qpis-desc" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(24, 13) + tvLine(13)">在线播放需要安装一次播放音源包。这里一键安装官方包，也可以到「音源包管理」手动安装。</text>
         <view class="qpis-info" :class="layout.isWide ? 'qpis-info-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';border-color:' + theme.skin.border + ';'">
-          <text :style="'color:' + theme.skin.text + ';font-weight:600;' + qtFontDual(26, 14)">{{ offerTitleText }}</text>
-          <text v-if="st.offerNotes.value.length > 0" class="qpis-info-notes" :class="layout.isWide ? 'qpis-info-notes-wide' : ''" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)" :max-lines="4">{{ st.offerNotes.value }}</text>
+          <text class="qpis-info-title" :style="'color:' + theme.skin.text + ';font-weight:600;' + qtFontDual(26, 14) + tvLine(14)">{{ offerTitleText }}</text>
+          <text v-if="st.offerNotes.value.length > 0 && layout.isTv" class="qpis-info-notes qpis-info-notes-wide" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12) + tvLine(12)">{{ st.offerNotes.value }}</text>
+          <text v-else-if="st.offerNotes.value.length > 0" class="qpis-info-notes" :class="layout.isWide ? 'qpis-info-notes-wide' : ''" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)" :max-lines="4">{{ st.offerNotes.value }}</text>
+        </view>
+        <view v-if="layout.isTv" class="qpis-tv-actions">
+          <QtButton data-qt-tv-id="play-install-now" label="立即安装" variant="primary" size="lg" :wrap="true" :full-width="true" :disabled="st.installing.value" @click="onInstall" />
+          <view class="qpis-tv-manual"><QtButton data-qt-tv-id="play-install-manual" label="手动管理" variant="outline" size="md" :wrap="true" :full-width="true" :disabled="st.installing.value" @click="onManual" /></view>
         </view>
       </view>
     </scroll-view>
     <template #footer>
-      <view class="qpis-actions" :class="layout.isWide ? 'qpis-actions-wide' : ''">
+      <view v-if="!layout.isTv" class="qpis-actions" :class="layout.isWide ? 'qpis-actions-wide' : ''">
         <QtButton label="立即安装" variant="primary" size="lg" :disabled="st.installing.value" @click="onInstall" />
         <view class="qpis-manual-btn" :class="layout.isWide ? 'qpis-manual-btn-wide' : ''"><QtButton label="手动管理" variant="outline" size="md" :disabled="st.installing.value" @click="onManual" /></view>
       </view>
@@ -24,7 +29,8 @@ import QtSheet from "@/uni_modules/qt-ui/components/qt-sheet/qt-sheet.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
-import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtTvSheetBodyHeightPx } from "@/uni_modules/qt-ui/composables/qt-sheet-metrics";
 import { packInstallSheetState, packInstallSheetClose, packInstallSheetGoManual, packInstallSheetInstall } from "@/services/pack-install-sheet";
 const st = packInstallSheetState();
 const theme = useThemeStore();
@@ -33,9 +39,13 @@ const offerTitleText = computed((): string => {
   const name = st.offerName.value;
   return name.length > 0 ? "官方播放包 v" + name : "官方播放包（版本号 " + st.offerCode.value + "）";
 });
+function tvLine(basePx: number): string {
+  return layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(basePx) * 1.5) + "px;align-self:stretch;min-width:0px;" : "";
+}
 const bodyStyle = computed((): string => {
+  if (layout.isTv) return "height:" + Math.min(420, qtTvSheetBodyHeightPx({ title: "安装播放音源包", dismissible: !st.installing.value })) + "px;";
   const preferred = (layout.isWide ? 180 : qtRpx(310)) * fontScale.scale;
-  const available = Math.max(0, layout.windowHeight * 0.86 - layout.safeBottomPx - (layout.isWide ? 210 : qtRpx(360)) * fontScale.scale);
+  const available = Math.max(0, layout.paneHeight * 0.86 - layout.safeBottomPx - (layout.isWide ? 210 : qtRpx(360)) * fontScale.scale);
   return "height:" + Math.min(preferred, available) + "px;";
 });
 function onVisibleChange(value: boolean): void {
@@ -61,4 +71,6 @@ function onManual(): void {
 .qpis-actions-wide { padding: 20px 20px 12px; }
 .qpis-manual-btn { margin-top: 16rpx; }
 .qpis-manual-btn-wide { margin-top: 10px; }
+.qpis-tv-actions { padding-top: 20px; padding-bottom: 20px; align-self: stretch; flex-shrink: 0; }
+.qpis-tv-manual { margin-top: 12px; align-self: stretch; flex-shrink: 0; }
 </style>

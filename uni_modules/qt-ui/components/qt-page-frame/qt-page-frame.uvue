@@ -1,5 +1,5 @@
 <template>
-  <view ref="frameElement" class="qt-page-frame" :style="rootStyle" @click="onFrameClick">
+  <view ref="frameElement" class="qt-page-frame qt-tv-skip" :style="rootStyle" @click="onFrameClick">
     <image
       v-if="backgroundImage.length > 0"
       class="qt-page-frame-wallpaper"
@@ -50,7 +50,7 @@
           <input
             class="qt-page-frame-search-input"
             :value="barSearchValue"
-            :focus="true"
+            :focus="!layout.isTv"
             confirm-type="search"
             @input="onSearchInput"
             @confirm="onSearchConfirm"
@@ -178,6 +178,7 @@
                     v-for="(chipText, chipIndex) in headerChips"
                     :key="'qt-frame-widechip-' + chipIndex"
                     class="qt-page-frame-chip qt-page-frame-barchip"
+                    :data-qt-tv-id="'header-chip:' + chipIndex"
                     :style="chipBoxInline"
                     @click="onChipTap(chipIndex)"
                   ><text class="qt-page-frame-chip-text" :style="barChipTextStyle(chipIndex)">{{ chipText }}</text></view>
@@ -186,12 +187,13 @@
               <view
                 v-if="paneHeadText.length > 0"
                 class="qt-page-frame-pane-btn"
-                :style="'background-color:' + theme.skin.accentSoft + ';'"
+                data-qt-tv-id="pane-head-action"
+                :style="'background-color:' + theme.skin.accentSoft + ';' + (layout.isTv ? 'height:56px;padding:0 22px;border-radius:12px;' : '')"
                 @click="onPaneHeadTap"
               >
                 <QtIcon name="play" :size="12" :color="theme.skin.accent" />
-                <text class="qt-page-frame-pane-btn-text" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 15)">{{ paneHeadText }}</text>
-                <text v-if="paneHeadCount >= 0" class="qt-page-frame-pane-btn-count" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 12)">({{ paneHeadCount }})</text>
+                <text class="qt-page-frame-pane-btn-text" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 15) + (layout.isTv ? 'line-height:' + Math.ceil(qtFontValuePx(15) * 1.35) + 'px;' : '')">{{ paneHeadText }}</text>
+                <text v-if="paneHeadCount >= 0" class="qt-page-frame-pane-btn-count" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 12) + (layout.isTv ? 'line-height:' + Math.ceil(qtFontValuePx(12) * 1.35) + 'px;' : '')">({{ paneHeadCount }})</text>
               </view>
             </view>
             <!-- 托管工具页两段式挂载：切换 = 卸载旧面板 + 整页新建，一次同步 flush
@@ -235,12 +237,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch, getCurrentInstance } from "vue";
+import { computed, onMounted, onBeforeUnmount, onUnmounted, ref, watch, getCurrentInstance, provide } from "vue";
 import { onResize, onShow, onHide, onBackPress } from "@dcloudio/uni-app";
 import { closePlaybackQueue } from "@/uni_modules/qt-ui/composables/playback-queue-overlay";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { qtSelectionColor } from "@/uni_modules/qt-ui/composables/selection";
+import { qtTvRegisterScope, qtTvRefreshFocus } from "@/uni_modules/qt-ui/composables/use-qt-tv";
+import type { QtTvOwner } from "@/uni_modules/qt-ui/composables/use-qt-tv";
 const frameElement = ref<UniElement | null>(null);
+import { qtPerformance } from "@/uni_modules/qt-ui/composables/use-qt-performance";
 import { useQtLayout, refreshQtLayout, qtStatusBarPx, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import {
   qtContentWidthRaw,
@@ -270,7 +275,7 @@ import {
   qtCloseWideTool,
 } from "@/uni_modules/qt-ui/composables/qt-wide-workspace";
 import { qtSwitchTab } from "@/uni_modules/qt-ui/composables/qt-nav";
-import { qtFont, qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFont, qtFontDual, qtFontValuePx, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useSourceUpdateStore } from "@/stores/source-update";
 import { usePlayerStore } from "@/stores/player";
 import { useMiniPlayerSettings } from "@/uni_modules/qt-ui/stores/mini-player";
@@ -405,6 +410,8 @@ const kind = computed((): string => props.widthKind != null && props.widthKind.l
  */
 // 切 tab 时旧工具保留到目标成功；新宿主可能在旧工具仍活跃时 setup，不能认领旧工具身份。
 const hostedRoute = ((props.current == null || !qtIsWideToolHost(props.current)) && qtWideToolActive() && qtIsWideToolHost(qtTopRoute())) ? qtWideToolRoute() : "";
+// 托管身份跟实例固定；跨宽窄或深页覆盖时，弹层仍留在原覆盖层里，避免 fixed 套 fixed。
+provide("qt-sheet-in-workspace", hostedRoute.length > 0);
 // 页面生命周期监听宿主页；嵌入工具不重复注册，中央轮询仍作平台兜底。
 if (hostedRoute.length == 0) {
   onResize((): void => {
@@ -413,9 +420,23 @@ if (hostedRoute.length == 0) {
 }
 // 托管内容两段式挂载的第二拍（见模板处注释）。只在托管态起步为 false。
 const hostedContentReady = ref(hostedRoute.length == 0);
+let hostedContentDisposed = false;
+let hostedContentTimer: number | null = null;
 if (hostedRoute.length > 0) {
-  setTimeout(() => { hostedContentReady.value = true; }, 30);
+  hostedContentTimer = setTimeout(() => {
+    hostedContentTimer = null;
+    if (!hostedContentDisposed) hostedContentReady.value = true;
+  }, 30) as number;
 }
+onBeforeUnmount(() => {
+  hostedContentDisposed = true;
+  if (hostedContentTimer != null) clearTimeout(hostedContentTimer);
+  hostedContentTimer = null;
+  frameAlive = false;
+  chipMeasureGeneration++;
+  if (chipMeasureTimer != 0) clearTimeout(chipMeasureTimer);
+  chipMeasureTimer = 0;
+});
 
 /**
  * 宽屏才挂 rail；沉浸页与显式禁用的页面不挂；**被托管的工具页也不挂**。
@@ -438,10 +459,10 @@ const showDockTab = computed((): boolean => hasBottomTab.value && miniSettings.m
 // 被托管的工具页同样不画自带播放栏：宿主的底栏此刻被覆盖层盖住（z940 < z1000），
 // 工具页再画一条 fixed 底栏同样有「被盖住 + 关闭后漏显」的问题（同 showRail 注释）。
 // 托管期间的底栏由覆盖层自己以 docked 形态挂一份（qt-wide-workspace.uvue）。
-const showPlayerBar = computed((): boolean => miniSettings.mode == "docked" && layout.isWide && !fullWidth.value && player.current != null && hostedRoute.length == 0 && !workspaceCoversPlayer.value);
+const showPlayerBar = computed((): boolean => (layout.isTv || miniSettings.mode == "docked") && layout.isWide && !fullWidth.value && player.current != null && hostedRoute.length == 0 && !workspaceCoversPlayer.value);
 
 // Hosted tools reserve space too: their visible dock belongs to the workspace.
-const reservePlayerBar = computed((): boolean => miniSettings.mode == "docked" && !fullWidth.value && player.current != null);
+const reservePlayerBar = computed((): boolean => (layout.isTv || miniSettings.mode == "docked") && !fullWidth.value && player.current != null);
 const dockSurfaceStyle = computed((): string => {
   const bottom = qtTabBarFloatGapPx() + layout.safeBottomPx;
   return "top:" + qtMiniDockTopPx(true) + "px;bottom:auto;height:" + (qtMiniDockReservePx(true) - bottom) + "px;background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";";
@@ -502,7 +523,7 @@ const contentWidthPx = computed((): number => {
   // （上限 640）、source-pack / dislikes 传 max-width 720 —— 留着它们会让三栏
   // 判据 400+16+460=876 永远不成立，从总览点进这些子页时整页铺开、中栏
   // 直接消失（真机实测）。三栏形态下可读性由右栏自己承接，不需要整页收窄。
-  if (layout.isWide && (qtIsSettingsRoute(currentRoute.value) || qtIsProfileRoute(currentRoute.value))) {
+  if (layout.isWide && !layout.isTv && (qtIsSettingsRoute(currentRoute.value) || qtIsProfileRoute(currentRoute.value))) {
     const flowWidth = qtContentWidthRaw("flow");
     if (flowWidth >= QT_SPLIT_NAV_WIDTH + QT_SPLIT_NAV_GAP + QT_SPLIT_PANE_MIN) return flowWidth;
   }
@@ -511,8 +532,8 @@ const contentWidthPx = computed((): number => {
   return props.maxWidth < cap ? props.maxWidth : cap;
 });
 
-const backgroundImage = computed((): string => theme.skin.backgroundImage != null ? theme.skin.backgroundImage : "");
-const rootStyle = computed((): string => "background-color:" + theme.skin.background + ";");
+const backgroundImage = computed((): string => qtPerformance.expensiveEffects && theme.skin.backgroundImage != null ? theme.skin.backgroundImage : "");
+const rootStyle = computed((): string => "background-color:" + theme.skin.background + ";width:" + layout.paneWidth + "px;height:" + layout.paneHeight + "px;margin-left:" + (hostedRoute.length > 0 ? 0 : layout.paneLeft) + "px;margin-top:" + (hostedRoute.length > 0 ? 0 : layout.paneTop) + "px;");
 const overlayStyle = computed((): string => "background-color:" + theme.skin.overlay + ";");
 
 /**
@@ -523,7 +544,7 @@ const shellStyle = computed((): string => {
   // 原生根可能先扣掉系统导航栏，JS 稍后才收到新 windowHeight/safeBottom。
   // shell 高度和 content 的 bottom padding 必须取同一快照，不能让 flex 再缩一次。
   // 真正转屏、分屏和键盘 resize 仍由共享布局立即更新；不等待定时器/测量后再显示。
-  const height = "flex:none;height:" + layout.windowHeight + "px;";
+  const height = "flex:none;height:" + layout.paneHeight + "px;";
   if (fullWidth.value || !layout.isWide || selfHeader.value) return height;
   return height + "padding-top:" + qtStatusBarPx() + "px;";
 });
@@ -636,13 +657,13 @@ const chipRowRpx = computed((): number => {
 const chipBoxInline = computed((): string => {
   // 宽屏：类里的 padding/margin/radius 是 rpx（宽窗口膨胀数倍），内联整体换成桌面口径
   if (layout.isWide) {
-    return "height:" + WIDE_CHIP_BOX_PX + "px;padding:0 " + WIDE_CHIP_PADX_PX + "px;margin-left:" + WIDE_CHIP_GAP_PX
-      + "px;border-radius:" + Math.round(WIDE_CHIP_BOX_PX / 2) + "px;background-color:transparent;border-width:0;";
+    return "height:" + wideChipBoxPx.value + "px;padding:0 " + wideChipPadPx.value + "px;margin-left:" + wideChipGapPx.value
+      + "px;border-radius:" + Math.round(wideChipBoxPx.value / 2) + "px;background-color:transparent;border-width:0;";
   }
   return "height:" + chipBoxRpx.value + "rpx;background-color:transparent;border-width:0;";
 });
 const chipRowInline = computed((): string => {
-  return "height:" + (layout.isWide ? WIDE_CHIP_ROW_PX + "px;" : chipRowRpx.value + "rpx;");
+  return "height:" + (layout.isWide ? wideChipRowPx.value + "px;" : chipRowRpx.value + "rpx;");
 });
 
 function barChipTextStyle(index: number): string {
@@ -652,9 +673,8 @@ function barChipTextStyle(index: number): string {
   // 宽屏走固定 px（rpx 在宽窗口膨胀数倍，真机 1920 宽下 28rpx ≈ 72px 巨字）；
   // 降档机制（CHIP_FONT_TIERS_RPX）是窄屏标题栏「塞进一行」的事，宽屏宽度富余不参与。
   if (layout.isWide) {
-    const s = fontScale.scale;
-    return base + "font-size:" + Math.round(WIDE_CHIP_FONT_PX * s * 100) / 100
-      + "px;line-height:" + Math.round(WIDE_CHIP_LINE_PX * s * 100) / 100 + "px;";
+    return base + "font-size:" + Math.round(wideChipFontPx.value * 100) / 100
+      + "px;line-height:" + Math.round(wideChipLinePx.value * 100) / 100 + "px;";
   }
   return base + "line-height:" + chipLineRpx.value + "rpx;"
     + qtFont(chipFontRpx.value);
@@ -692,6 +712,14 @@ const WIDE_CHIP_FONT_PX = 14;
 const WIDE_CHIP_LINE_PX = 20;
 const WIDE_CHIP_PADX_PX = 14;
 const WIDE_CHIP_GAP_PX = 4;
+// TV uses the rendered font in both the target and its scroll viewport.
+// Normal wide chips keep their established 30/40px measurements unchanged.
+const wideChipFontPx = computed((): number => layout.isTv ? qtFontValuePx(WIDE_CHIP_FONT_PX) : WIDE_CHIP_FONT_PX * fontScale.scale);
+const wideChipLinePx = computed((): number => layout.isTv ? Math.ceil(wideChipFontPx.value * 1.35) : WIDE_CHIP_LINE_PX * fontScale.scale);
+const wideChipBoxPx = computed((): number => layout.isTv ? Math.max(56, wideChipLinePx.value + 16) : WIDE_CHIP_BOX_PX);
+const wideChipRowPx = computed((): number => layout.isTv ? wideChipBoxPx.value + 16 : WIDE_CHIP_ROW_PX);
+const wideChipPadPx = computed((): number => layout.isTv ? 22 : WIDE_CHIP_PADX_PX);
+const wideChipGapPx = computed((): number => layout.isTv ? 8 : WIDE_CHIP_GAP_PX);
 const CHIP_FONT_TIERS_RPX: number[] = [30, 28, 26];
 
 /** 可用行宽（px，与 layout.windowWidth 同单位）：窗口宽 − 返回键 − 栏内边距 − 右侧动作。
@@ -706,7 +734,7 @@ const chipRowAvailPx = computed((): number => {
     return w > 0 ? w : 0;
   }
   const u = layout.windowWidth / 750;
-  let w = layout.windowWidth - (88 + 8 + 24) * u;
+  let w = layout.paneWidth - (88 + 8 + 24) * u;
   const acts = props.headerActions;
   if (acts != null) w -= acts.length * 88 * u;
   return w > 0 ? w : 0;
@@ -719,8 +747,8 @@ function chipEstWidthAt(label: string, baseRpx: number): number {
   // 估算只服务首帧初值/居中兜底，真实内容宽由 measureChipRow 实测覆盖。
   const wide = layout.isWide;
   const rpxPx = layout.windowWidth / 750;
-  const fontPx = wide ? WIDE_CHIP_FONT_PX * fontScale.scale : baseRpx * fontScale.scale * rpxPx;
-  let w = wide ? (WIDE_CHIP_PADX_PX * 2 + WIDE_CHIP_GAP_PX) : (10 + 10 + 6) * rpxPx;
+  const fontPx = wide ? wideChipFontPx.value : baseRpx * fontScale.scale * rpxPx;
+  let w = wide ? (wideChipPadPx.value * 2 + wideChipGapPx.value) : (10 + 10 + 6) * rpxPx;
   for (let c = 0; c < label.length; c++) {
     w += label.charCodeAt(c) > 255 ? fontPx : fontPx * 0.56;
   }
@@ -765,7 +793,7 @@ let chipLeftNow = 0;
 const chipRowStyle = computed((): string => {
   // 宽屏在药丸行区域容器（横向 flex 行）里，flex:1 吃右侧动作按钮以外的剩余宽；
   // 不能给显式 px 宽：按钮随页面状态显隐，实测宽会过期（量宽不会跟着重跑）。
-  if (layout.isWide) return "flex:1;height:" + WIDE_CHIP_ROW_PX + "px;";
+  if (layout.isWide) return "flex:1;height:" + wideChipRowPx.value + "px;";
   return "width:" + chipRowAvailPx.value + "px;height:" + chipRowRpx.value + "rpx;";
 });
 let chipMeasureTimer = 0;
@@ -1026,12 +1054,12 @@ const isProfileRoute = computed((): boolean => qtIsProfileRoute(currentRoute.val
 
 /** 是否拆三栏：宽屏 + 族路由（设置/我的）+ 外层内容足够放下中栏与右栏 */
 const showSettingsSplit = computed((): boolean => {
-  if (!layout.isWide) return false;
+  if (!layout.isWide || layout.isTv) return false;
   if (!isSettingsRoute.value) return false;
   return contentWidthPx.value >= QT_SPLIT_NAV_WIDTH + QT_SPLIT_NAV_GAP + QT_SPLIT_PANE_MIN;
 });
 const showProfileSplit = computed((): boolean => {
-  if (!layout.isWide) return false;
+  if (!layout.isWide || layout.isTv) return false;
   if (!isProfileRoute.value) return false;
   return contentWidthPx.value >= QT_SPLIT_NAV_WIDTH + QT_SPLIT_NAV_GAP + QT_SPLIT_PANE_MIN;
 });
@@ -1058,6 +1086,26 @@ const paneCapToken = ref<number>(0);
 const capPageShown = ref<boolean>(true);
 // 托管工具的身份固定在创建时；切 tab 不能把旧工具副本重绑定到新宿主。
 const capHostRoute = hostedRoute.length > 0 ? qtWideToolHostRoute() : "";
+function tvFrameActive(): boolean {
+  const top = qtTopRoute();
+  return capPageShown.value && !hostedContentDisposed && (hostedRoute.length > 0
+    ? top == capHostRoute && hostedRoute == qtWideToolRoute() && capHostRoute == qtWideToolHostRoute()
+    : top == currentRoute.value && !(qtIsWideToolHost(top) && qtWideToolActive() && qtWideToolHostRoute() == top));
+}
+provide<QtTvOwner>("qt-tv-owner", { active: tvFrameActive });
+const disposeTvFrame = qtTvRegisterScope({ root: null,
+  // Hosted root must include its docked rail/player siblings, not the covered host frame.
+  getRoot: (): UniElement | null => {
+    if (hostedRoute.length > 0) {
+      let node = frameElement.value;
+      while (node != null) {
+        if (node.classList.includes("qtww-stage")) return node;
+        node = node.parentElement;
+      }
+    }
+    return frameElement.value;
+  }, active: tvFrameActive, modal: false, priority: 0 });
+onBeforeUnmount((): void => { disposeTvFrame(); });
 function syncPaneCap(): void {
   if (!frameAlive) return;
   const px = showSplit.value ? paneWidthPx.value : 0;
@@ -1065,6 +1113,7 @@ function syncPaneCap(): void {
   const active = capPageShown.value && (hostedRoute.length > 0
     ? top == capHostRoute && hostedRoute == qtWideToolRoute() && capHostRoute == qtWideToolHostRoute()
     : top == currentRoute.value && !(qtIsWideToolHost(top) && qtWideToolActive() && qtWideToolHostRoute() == top));
+  qtTvRefreshFocus();
   // 保留 owner 与隐藏时的新宽度；只有逻辑可见页参与全局内容宽度判定。
   if (paneCapToken.value == 0) {
     paneCapToken.value = qtPushContentWidthCap(px, active);

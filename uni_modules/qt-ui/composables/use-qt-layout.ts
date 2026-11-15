@@ -1,4 +1,6 @@
 import { reactive } from "vue";
+import { qtSafePane } from "./fold-geometry";
+import type { QtFold } from "./fold-geometry";
 
 /**
  * 窗口尺寸档位（宽屏改造成员：所有页面/组件只按本枚举分支，不再各自写数字阈值）。
@@ -24,9 +26,15 @@ export type QtSizeClass = "compact" | "medium" | "wide" | "desktop";
 
 export type QtLayoutState = {
   windowWidth: number;
+  paneWidth: number;
+  paneHeight: number;
+  paneLeft: number;
+  paneTop: number;
   windowHeight: number;
   breakpoint: number;
   isLandscape: boolean;
+  /** Explicit presentation policy. Window width and landscape never identify television. */
+  isTv: boolean;
   isWide: boolean;
   /** 宽度档位（只看 windowWidth，不含 isLandscape 的兼容分支） */
   sizeClass: QtSizeClass;
@@ -56,9 +64,11 @@ export type QtLayoutState = {
 
 const layout = reactive<QtLayoutState>({
   windowWidth: 375,
+  paneWidth: 375, paneHeight: 667, paneLeft: 0, paneTop: 0,
   windowHeight: 667,
   breakpoint: QT_BREAKPOINT_DEFAULT,
   isLandscape: false,
+  isTv: false,
   isWide: false,
   sizeClass: "compact",
   isDesktop: false,
@@ -69,6 +79,15 @@ const layout = reactive<QtLayoutState>({
   sizeEpoch: 0,
 });
 
+let foldGeometry: QtFold | null = null;
+/** Window-fixed overlays use the same unobstructed rectangle as page frames. */
+export function qtFixedPaneStyle(): string {
+  return "left:" + layout.paneLeft + "px;top:" + layout.paneTop + "px;right:auto;bottom:auto;width:" + layout.paneWidth + "px;height:" + layout.paneHeight + "px;";
+}
+export function applyQtFoldGeometry(fold: QtFold | null): void {
+  foldGeometry = fold;
+  refreshQtLayout();
+}
 let initialized = false;
 /** 窗口尺寸监听定时器：0 表示未启动 */
 let watcherTimer: number = 0;
@@ -131,11 +150,14 @@ function applyWindowSnapshot(info: GetWindowInfoResult): void {
   const changed = size.width != layout.windowWidth || size.height != layout.windowHeight;
   layout.windowWidth = size.width;
   layout.windowHeight = size.height;
+  const pane = qtSafePane(size.width, size.height, foldGeometry);
+  const paneChanged = pane.width != layout.paneWidth || pane.height != layout.paneHeight || pane.left != layout.paneLeft || pane.top != layout.paneTop;
+  layout.paneWidth = pane.width; layout.paneHeight = pane.height; layout.paneLeft = pane.left; layout.paneTop = pane.top;
   // 两个维度都必须是有效值才敢判横屏。某些 ROM 在转屏瞬间会把 windowHeight 报成 0
   // （getSystemInfoSync 拿到中间态），此时 `width > height` 恒真，竖屏手机被当成横屏：
   // 720x1280 的竖屏窗口会走「横屏 + medium」分支进入宽屏布局，长出 64px 图标 rail、
   // 底部 TabBar 消失。有效性保护已在赋值前拒绝中间态，保留最后有效快照。
-  layout.isLandscape = size.width > 0 && size.height > 0 && size.width > size.height;
+  layout.isLandscape = pane.width > pane.height;
 
   // Android 模拟器的 1600x900 往往经过高 DPI 缩放，
   // getSystemInfoSync().windowWidth 可能只有 400 左右，不能只用 720px 判断宽屏。
@@ -148,20 +170,23 @@ function applyWindowSnapshot(info: GetWindowInfoResult): void {
   // **不能再用历史遗留的 breakpoint=720**：720dp 是 medium 档（600–899），
   // 竖屏手机/平板在高 DPI 缩放下很容易正好落在 720dp，用 720 判宽屏会让
   // 「竖着的手机」也长出侧边 rail（真机症状：竖屏出现图标轨 + 无底部 TabBar）。
-  layout.isWide = layout.windowWidth >= QT_BREAKPOINT_WIDE
-    || (layout.isLandscape && layout.windowWidth >= QT_BREAKPOINT_MEDIUM);
-  layout.sizeClass = sizeClassOf(layout.windowWidth);
+  layout.isWide = layout.isTv || layout.paneWidth >= QT_BREAKPOINT_WIDE
+    || (layout.isLandscape && layout.paneWidth >= QT_BREAKPOINT_MEDIUM)
+    // A physical vertical split needs fixed-px controls even when each half is
+    // phone-sized: native rpx is based on the whole window, not on that half.
+    || (pane.width < size.width && size.width >= QT_BREAKPOINT_MEDIUM);
+  layout.sizeClass = sizeClassOf(layout.paneWidth);
   layout.isDesktop = layout.sizeClass == "desktop";
-  layout.isShort = layout.windowHeight < QT_BREAKPOINT_SHORT;
+  layout.isShort = layout.paneHeight < QT_BREAKPOINT_SHORT;
   // 底部安全区：三键导航 / 鸿蒙虚拟导航条的高度。随窗口快照更新而不是
   // 挂载时读一次就完事，因为用户可以在系统设置里切换「三键导航 ↔ 手势导航」，
   // 窗口尺寸不变（不触发上面的 changed），但安全区变了。
-  layout.safeBottomPx = safeBottom;
+  layout.safeBottomPx = pane.top + pane.height < size.height ? 0 : safeBottom;
   layout.navigationInsetPx = nativeBottomInsetPx >= 0 ? nativeBottomInsetPx : safeBottom;
   // #ifdef APP-IOS
   layout.navigationKeys = 0;
   // #endif
-  if (changed) layout.sizeEpoch = layout.sizeEpoch + 1;
+  if (changed || paneChanged) layout.sizeEpoch = layout.sizeEpoch + 1;
   initialized = true;
 }
 
@@ -311,6 +336,7 @@ export function qtLayout(): QtLayoutState {
 
 /** 状态栏高度（px）；navigationStyle: custom 的页面用它给内容让位 */
 export function qtStatusBarPx(): number {
+  if (layout.paneTop > 0) return 0;
   try {
     const info = uni.getWindowInfo();
     return Math.round(info.statusBarHeight > 0 ? info.statusBarHeight : 0);
@@ -358,6 +384,12 @@ export function qtRpx(n: number): number {
 export function qtIsWide(): boolean {
   return layout.isWide;
 }
+export function applyQtTvLayout(enabled: boolean): void {
+  if (layout.isTv == enabled) return;
+  layout.isTv = enabled;
+  layout.sizeEpoch = layout.sizeEpoch + 1;
+  refreshQtLayout();
+}
 
 /** 只读档位判定（同上，给 helper 用） */
 export function qtSizeClass(): QtSizeClass {
@@ -380,10 +412,11 @@ export function qtIsDesktop(): boolean {
  */
 export function qtRailWidth(): number {
   if (!layout.isWide) return 0;
+  if (layout.isTv) return 136;
   // 2026-10-25 对齐网易云 Pad：wide/desktop 档 rail 收成 96px 的「图标上、
   // 小字下」紧凑栏（原 208px 文字横排栏在 1097dp 窗口吃掉近 1/5 内容宽）。
   // medium 档仍是 64px 纯图标栏。
-  return layout.sizeClass == "medium" ? 64 : 96;
+  return layout.paneWidth < QT_BREAKPOINT_WIDE ? 64 : 96;
 }
 
 /** Legacy maximum (120rpx bar + 64rpx gap); actual gap depends on navigation keys. */
@@ -408,5 +441,5 @@ export const QT_PLAYER_BAR_HEIGHT_PX = 84;
 
 /** Dock controls + system navigation inset. Frame, toast and back-to-top share this budget. */
 export function qtPlayerBarHeightPx(): number {
-  return QT_PLAYER_BAR_HEIGHT_PX + layout.safeBottomPx;
+  return (layout.isTv ? 104 : QT_PLAYER_BAR_HEIGHT_PX) + layout.safeBottomPx;
 }

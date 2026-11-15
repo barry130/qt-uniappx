@@ -1,0 +1,43 @@
+<template>
+  <QtSheet :visible="visible" title="升降调" @update:visible="updateVisible">
+    <view class="pitch-body" :class="layout.isWide ? 'pitch-body-wide' : ''">
+      <text class="pitch-value" :style="'color:' + theme.skin.text + ';' + qtFontDual(44, 24) + (layout.isTv ? 'line-height:' + Math.ceil(qtFontValuePx(24) * 1.4) + 'px;' : '')">{{ pitchLabel }}</text>
+      <view class="pitch-step-row">
+        <QtButton class="pitch-button" :class="layout.isWide ? 'pitch-button-wide' : ''" label="−1" variant="secondary" :disabled="disabled || value <= -12" data-qt-tv-id="pitch-decrease" @click="change(value - 1)" />
+        <QtButton class="pitch-button" :class="layout.isWide ? 'pitch-button-wide' : ''" label="原调" variant="primary" :disabled="disabled" data-qt-tv-id="pitch-reset" @click="change(0)" />
+        <QtButton class="pitch-button" :class="layout.isWide ? 'pitch-button-wide' : ''" label="+1" variant="secondary" :disabled="disabled || value >= 12" data-qt-tv-id="pitch-increase" @click="change(value + 1)" />
+      </view>
+      <text class="pitch-note" :class="layout.isWide ? 'pitch-note-wide' : ''" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(26, 14) + (layout.isTv ? 'line-height:' + Math.ceil(qtFontValuePx(14) * 1.5) + 'px;' : '')">{{ supported ? '每次调整 1 个半音，范围 −12～+12；选择原调恢复 0，倍速保持不变。' : '升降调仅支持 Android 本地播放；DLNA 投屏使用原调。' }}</text>
+    </view>
+  </QtSheet>
+</template>
+<script setup lang="ts">
+import { computed } from "vue";
+import QtSheet from "@/uni_modules/qt-ui/components/qt-sheet/qt-sheet.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
+
+const props = defineProps<{ visible: boolean; value: number; supported: boolean }>();
+const emit = defineEmits<{ "update:visible": [value: boolean]; change: [semitones: number] }>();
+const layout = useQtLayout();
+const theme = useThemeStore();
+const disabled = computed((): boolean => !props.supported);
+const pitchLabel = computed((): string => props.value == 0 ? "0 半音 · 原调" : (props.value > 0 ? "+" : "") + props.value + " 半音");
+function change(next: number): void {
+  if (props.visible && props.supported) emit("change", Math.max(-12, Math.min(12, Math.round(next))));
+}
+function close(): void { emit("update:visible", false); }
+function updateVisible(open: boolean): void { if (!open) close(); }
+</script>
+<style>
+.pitch-body { padding: 64rpx 40rpx 48rpx; }
+.pitch-body-wide { padding: 26px 36px 32px; }
+.pitch-value { text-align: center; font-size: 44rpx; font-weight: 600; line-height: 1.4; }
+.pitch-step-row { flex-direction: row; align-items: stretch; justify-content: space-between; margin-top: 40rpx; }
+.pitch-button { min-height: 112rpx; padding-left: 40rpx; padding-right: 40rpx; }
+.pitch-button-wide { min-height: 56px; padding-left: 24px; padding-right: 24px; }
+.pitch-note { margin-top: 32rpx; text-align: center; font-size: 26rpx; line-height: 1.5; }
+.pitch-note-wide { margin-top: 22px; font-size: 14px; }
+</style>

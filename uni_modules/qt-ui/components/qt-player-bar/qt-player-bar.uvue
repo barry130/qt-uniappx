@@ -1,7 +1,14 @@
 <!-- HD dock: equal wings keep the transport centered; native slider handles hosted-page dragging. -->
 <template>
-  <view v-if="visible" class="pbar" :style="barStyle" @click.stop="openPlayerPage">
-    <view class="pbar-left" :style="wingStyle">
+  <view v-if="visible" class="pbar" :class="layout.isTv ? 'qt-tv-skip' : ''" :style="barStyle" @click.stop="openPlayerPage">
+    <view v-if="tvEditing" class="pbar-tv-editor qt-tv-skip" @click.stop>
+      <QtButton :label="tvSeekEditing ? '后退 10 秒' : '减少 5%'" variant="secondary" :disabled="tvSeekEditing ? tvSeekValue <= 0 : tvVolumeValue <= 0" @click="adjustTvPreview(-1)" />
+      <view class="pbar-tv-preview"><text :style="'color:' + theme.skin.textMuted + ';' + qtFontPx(14)">{{ tvSeekEditing ? '进度预览' : '音量预览' }}</text><text :style="'color:' + theme.skin.text + ';' + qtFontPx(16)">{{ tvSeekEditing ? formatTime(tvSeekValue) + ' / ' + durText : tvVolumeValue + '%' }}</text></view>
+      <QtButton :label="tvSeekEditing ? '前进 10 秒' : '增加 5%'" variant="secondary" :disabled="tvSeekEditing ? tvSeekValue >= player.duration : tvVolumeValue >= 100" @click="adjustTvPreview(1)" />
+      <QtButton label="取消" variant="ghost" @click="cancelTvEdit" />
+      <QtButton id="pbar-tv-confirm" label="确定" @click="confirmTvEdit" />
+    </view>
+    <view v-if="!tvEditing" class="pbar-left" :style="leftWingStyle">
       <view class="pbar-song" @click.stop="openPlayerPage">
         <image class="pbar-cover" :style="coverStyle" :src="cover" mode="aspectFill" @error="onCoverError" />
         <view class="pbar-copy" :style="copyStyle">
@@ -9,35 +16,37 @@
           <text class="pbar-artist" :style="('color:' + theme.skin.textMuted + ';') + qtFontPx(12)" :max-lines="1">{{ artist }}</text>
         </view>
       </view>
-      <view v-if="metrics.showLike" class="pbar-btn" hover-class="pbar-btn-hover" @click.stop="toggleLike">
+      <view v-if="metrics.showLike" class="pbar-btn" :style="controlStyle" hover-class="pbar-btn-hover" @click.stop="toggleLike">
         <QtIcon :name="liked ? 'heart-fill' : 'heart'" :size="19" :color="liked ? theme.skin.danger : theme.skin.iconMuted" />
       </view>
     </view>
-    <view class="pbar-center" :style="centerStyle" @click.stop>
+    <view v-if="!tvEditing" class="pbar-center qt-tv-skip" :style="centerStyle" @click.stop>
       <view class="pbar-controls">
-        <view class="pbar-btn" hover-class="pbar-btn-hover" @click.stop="prevTrack"><QtIcon name="skip-back" :size="20" :color="theme.skin.icon" /></view>
-        <view class="pbar-main" :style="'background-color:' + theme.skin.accent + ';'" hover-class="pbar-btn-hover" @click.stop="togglePlay"><QtIcon :name="playing ? 'pause' : 'play'" :size="21" :color="theme.skin.onAccent" /></view>
-        <view class="pbar-btn" hover-class="pbar-btn-hover" @click.stop="nextTrack"><QtIcon name="skip-forward" :size="20" :color="theme.skin.icon" /></view>
+        <view class="pbar-btn" :style="controlStyle" hover-class="pbar-btn-hover" @click.stop="prevTrack"><QtIcon name="skip-back" :size="20" :color="theme.skin.icon" /></view>
+        <view class="pbar-main" :style="mainControlStyle" hover-class="pbar-btn-hover" @click.stop="togglePlay"><QtIcon :name="playing ? 'pause' : 'play'" :size="21" :color="theme.skin.onAccent" /></view>
+        <view class="pbar-btn" :style="controlStyle" hover-class="pbar-btn-hover" @click.stop="nextTrack"><QtIcon name="skip-forward" :size="20" :color="theme.skin.icon" /></view>
       </view>
       <view class="pbar-progress" :style="progressStyle">
         <text v-if="metrics.showTimes" class="pbar-time" :style="timeStyle">{{ posText }}</text>
-        <slider class="pbar-seek" :min="0" :max="1000" :step="1" :value="seekPercent" :disabled="player.duration <= 0 || !castCanSeek" track-class="pbar-slider-track" track-active-class="pbar-slider-active" thumb-class="pbar-slider-thumb" @touchstart="onSeekStart" @touchcancel="onSeekCancel" @changing="onSeekChanging" @change="onSeekChange" />
+        <QtButton v-if="layout.isTv" id="pbar-tv-seek" class="pbar-tv-seek" :style="tvSeekStyle" :label="metrics.centerPx < 400 ? '进度' : posText + ' / ' + durText" size="sm" variant="ghost" :disabled="player.duration <= 0 || !castCanSeek" @click="startTvSeek" />
+        <slider v-else class="pbar-seek" :min="0" :max="1000" :step="1" :value="seekPercent" :disabled="player.duration <= 0 || !castCanSeek" track-class="pbar-slider-track" track-active-class="pbar-slider-active" thumb-class="pbar-slider-thumb" @touchstart="onSeekStart" @touchcancel="onSeekCancel" @changing="onSeekChanging" @change="onSeekChange" />
         <text v-if="metrics.showTimes" class="pbar-time" :style="timeStyle">{{ durText }}</text>
       </view>
     </view>
-    <view class="pbar-right" :style="wingStyle" @click.stop>
-      <view v-if="dlnaSupported()" class="pbar-btn" hover-class="pbar-btn-hover" @click.stop="openDlna"><QtIcon name="cast" :size="19" :color="casting ? theme.skin.accent : theme.skin.iconMuted" /></view>
-      <view class="pbar-btn" hover-class="pbar-btn-hover" @click.stop="cycleMode"><QtIcon :name="modeIcon" :size="19" :color="theme.skin.iconMuted" /></view>
+    <view v-if="!tvEditing" class="pbar-right qt-tv-skip" :style="wingStyle" @click.stop>
+      <view v-if="dlnaSupported()" class="pbar-btn" :style="controlStyle" hover-class="pbar-btn-hover" @click.stop="openDlna"><QtIcon name="cast" :size="19" :color="casting ? theme.skin.accent : theme.skin.iconMuted" /></view>
+      <view class="pbar-btn" :style="controlStyle" hover-class="pbar-btn-hover" @click.stop="cycleMode"><QtIcon :name="modeIcon" :size="19" :color="theme.skin.iconMuted" /></view>
       <view v-if="showVolume" class="pbar-volume">
-        <view class="pbar-btn" hover-class="pbar-btn-hover" @click.stop="toggleMute"><QtIcon :name="volumeIconName()" :size="19" :color="theme.skin.iconMuted" /></view>
-        <slider class="pbar-vol-slider" :min="0" :max="100" :step="1" :value="volPercent" track-class="pbar-slider-track" track-active-class="pbar-slider-active" thumb-class="pbar-slider-thumb" @changing="onVolChanging" @change="onVolChange" />
+        <view class="pbar-btn" :style="controlStyle" hover-class="pbar-btn-hover" @click.stop="toggleMute"><QtIcon :name="volumeIconName()" :size="19" :color="theme.skin.iconMuted" /></view>
+        <QtButton v-if="layout.isTv" id="pbar-tv-volume" class="pbar-tv-volume" :style="tvVolumeStyle" :label="volPercent + '%'" size="sm" variant="ghost" @click="startTvVolume" />
+        <slider v-else class="pbar-vol-slider" :min="0" :max="100" :step="1" :value="volPercent" track-class="pbar-slider-track" track-active-class="pbar-slider-active" thumb-class="pbar-slider-thumb" @touchstart="onVolStart" @touchcancel="onVolCancel" @changing="onVolChanging" @change="onVolChange" />
       </view>
-      <view class="pbar-btn" hover-class="pbar-btn-hover" @click.stop="openQueue"><QtIcon name="list" :size="21" :color="theme.skin.icon" /></view>
+      <view class="pbar-btn" :style="controlStyle" hover-class="pbar-btn-hover" @click.stop="openQueue"><QtIcon name="list" :size="21" :color="theme.skin.icon" /></view>
     </view>
   </view>
 </template>
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted, watch } from "vue";
+import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { useMiniPlayerSettings } from "@/uni_modules/qt-ui/stores/mini-player";
 import { usePlayerStore } from "@/stores/player";
 import { useQtLayout, qtRailWidth } from "@/uni_modules/qt-ui/composables/use-qt-layout";
@@ -46,6 +55,9 @@ import { qtFontPx, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtPlayerBarHeightPx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtHdPlayerMetrics } from "@/uni_modules/qt-ui/composables/hd-layout";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import { useQtTvRemote, qtTvRefreshFocus, qtTvFocus } from "@/uni_modules/qt-ui/composables/use-qt-tv";
+import { QT_TV_TOKENS } from "@/uni_modules/qt-ui/composables/qt-tv-tokens";
 import { qtShowToast } from "@/services/toast";
 import { audioPlayer, PLAYER_VOLUME_CHANGED_EVENT } from "@/services/audio-player";
 import { dlnaSupported, openDlna, dlnaUiState } from "@/services/dlna";
@@ -75,7 +87,7 @@ const theme = useThemeStore();
  * 固定模式的宽屏布局；手机固定模式由 qt-mini-player 的长条承接。
  */
 const miniSettings = useMiniPlayerSettings();
-const visible = computed((): boolean => miniSettings.mode == "docked" && layout.isWide && player.current != null);
+const visible = computed((): boolean => (layout.isTv || miniSettings.mode == "docked") && layout.isWide && player.current != null);
 
 /**
  * 可用宽度 = 窗口宽 - rail 宽。
@@ -83,20 +95,41 @@ const visible = computed((): boolean => miniSettings.mode == "docked" && layout.
  * 直接拿 windowWidth 判断会在「900px 窗口 + rail」时高估一截 rail 宽，
  * 结果就是进度条被挤没（真机表现：总时长被裁掉）。
  */
-const innerWidth = computed((): number => Math.max(0, layout.windowWidth - qtRailWidth()));
+const innerWidth = computed((): number => Math.max(0, layout.paneWidth - qtRailWidth()));
 
-const metrics = computed(() => qtHdPlayerMetrics(innerWidth.value, fontScale.scale));
-const showVolume = computed((): boolean => metrics.value.showVolume && metrics.value.wingPx >= 216 + (dlnaSupported() ? 40 : 0) && (!casting.value || castUi.state.value!.canSetVolume));
+const tvVolumePx = computed((): number => Math.max(104, Math.ceil(44 + 14 * fontScale.scale * QT_TV_TOKENS.fontMultiplier * 3)));
+const tvUtilityPx = computed((): number => QT_TV_TOKENS.controlPx * (dlnaSupported() ? 4 : 3) + tvVolumePx.value);
+const tvTransportPx = QT_TV_TOKENS.controlPx * 3 + 16;
+const tvLeftPx = computed((): number => Math.max(0, Math.min(tvUtilityPx.value, Math.floor(innerWidth.value) - 32 - tvUtilityPx.value - tvTransportPx - 12 - 104)));
+const metrics = computed(() => {
+  if (!layout.isTv) return qtHdPlayerMetrics(innerWidth.value, fontScale.scale);
+  const inner = Math.max(0, Math.floor(innerWidth.value) - 32);
+  const wing = tvUtilityPx.value;
+  const left = tvLeftPx.value;
+  const cover = 48;
+  const like = left >= 244;
+  return { wingPx: wing, centerPx: Math.max(0, inner - left - wing), coverPx: cover,
+    copyPx: Math.max(0, left - cover - 12 - (like ? QT_TV_TOKENS.controlPx : 0)),
+    showLike: like, showVolume: true, showTimes: false, timePx: 0 };
+});
+const showVolume = computed((): boolean => metrics.value.showVolume && (layout.isTv || metrics.value.wingPx >= 216 + (dlnaSupported() ? 40 : 0)) && (!casting.value || castUi.state.value!.canSetVolume));
+const controlStyle = computed((): string => layout.isTv ? "width:56px;height:56px;border-radius:28px;" : "");
+const mainControlStyle = computed((): string => "background-color:" + theme.skin.accent + ";" + controlStyle.value + (layout.isTv ? "margin-left:8px;margin-right:8px;" : ""));
 const wingStyle = computed((): string => "width:" + metrics.value.wingPx + "px;");
-const centerStyle = computed((): string => "width:" + metrics.value.centerPx + "px;");
-const progressStyle = computed((): string => "width:" + Math.min(560, metrics.value.centerPx) + "px;");
+const leftWingStyle = computed((): string => "width:" + (layout.isTv ? tvLeftPx.value : metrics.value.wingPx) + "px;");
+const centerStyle = computed((): string => "width:" + metrics.value.centerPx + "px;" + (layout.isTv ? "flex-direction:row;" : ""));
+const progressStyle = computed((): string => layout.isTv
+  ? "width:" + Math.max(0, metrics.value.centerPx - tvTransportPx - 12) + "px;height:56px;margin-left:12px;justify-content:flex-end;"
+  : "width:" + Math.min(560, metrics.value.centerPx) + "px;");
+const tvSeekStyle = computed((): string => "width:" + Math.max(56, metrics.value.centerPx - tvTransportPx - 12) + "px;");
+const tvVolumeStyle = computed((): string => "width:" + tvVolumePx.value + "px;");
 const coverStyle = computed((): string => "width:" + metrics.value.coverPx + "px;height:" + metrics.value.coverPx + "px;background-color:" + theme.skin.coverPlaceholder + ";");
 const copyStyle = computed((): string => "width:" + metrics.value.copyPx + "px;");
 const timeStyle = computed((): string => "width:" + metrics.value.timePx + "px;color:" + theme.skin.textSubtle + ";" + qtFontPx(11));
 // fixed host and absolute hosted dock share the same safe-area budget as the frame.
 const barStyle = computed((): string => {
-  const base = "left:" + qtRailWidth() + "px;top:" + Math.max(0, layout.windowHeight - qtPlayerBarHeightPx()) + "px;bottom:auto;height:" + qtPlayerBarHeightPx() + "px;padding-bottom:" + layout.safeBottomPx + "px;background-color:" + theme.skin.surface + ";border-top-color:" + theme.skin.divider + ";";
-  return (props.docked == true ? "position:absolute;right:0;" : "") + base;
+  const base = "left:" + (qtRailWidth() + (props.docked == true ? 0 : layout.paneLeft)) + "px;top:" + ((props.docked == true ? 0 : layout.paneTop) + Math.max(0, layout.paneHeight - qtPlayerBarHeightPx())) + "px;bottom:auto;height:" + qtPlayerBarHeightPx() + "px;padding-bottom:" + layout.safeBottomPx + "px;background-color:" + theme.skin.surface + ";border-top-color:" + theme.skin.divider + ";";
+  return (props.docked == true ? "position:absolute;right:0;" : "right:auto;width:" + Math.max(0, layout.paneWidth - qtRailWidth()) + "px;") + base;
 });
 const title = computed((): string => {
   const cur = player.current;
@@ -132,6 +165,60 @@ const ratio = computed((): number => {
 const seekPercent = computed((): number => Math.round(ratio.value * 1000));
 // A drag belongs to the track that started it. A late release after a native track
 // transition must not seek the newly playing song.
+const tvSeekEditing = ref(false);
+const tvSeekValue = ref(0);
+const tvVolumeEditing = ref(false);
+const tvVolumeValue = ref(0);
+const tvEditing = computed((): boolean => tvSeekEditing.value || tvVolumeEditing.value);
+let tvSeekTrackKey = "";
+let tvVolumeTrackKey = "";
+function startTvSeek(): void {
+  if (!layout.isTv || !visible.value || player.duration <= 0 || !castCanSeek.value) return;
+  tvSeekTrackKey = currentTrackKey();
+  tvSeekValue.value = Math.max(0, Math.min(player.duration, player.progress));
+  tvSeekEditing.value = true;
+}
+function adjustTvSeek(offset: number): void {
+  if (!tvSeekEditing.value) return;
+  tvSeekValue.value = Math.max(0, Math.min(player.duration, tvSeekValue.value + offset));
+}
+function cancelTvSeek(): void { tvSeekEditing.value = false; tvSeekTrackKey = ""; }
+function confirmTvSeek(): void {
+  if (!tvSeekEditing.value) return;
+  const valid = tvSeekTrackKey == currentTrackKey() && player.duration > 0 && castCanSeek.value;
+  const value = Math.max(0, Math.min(player.duration, tvSeekValue.value));
+  cancelTvSeek();
+  if (valid) player.seek(value);
+}
+function startTvVolume(): void {
+  if (!layout.isTv || !visible.value || !showVolume.value) return;
+  tvVolumeTrackKey = currentTrackKey();
+  tvVolumeValue.value = Math.max(0, Math.min(100, Math.round(audioPlayer.getVolume() * 100)));
+  tvVolumeEditing.value = true;
+}
+function adjustTvPreview(direction: number): void {
+  if (tvSeekEditing.value) adjustTvSeek(direction * 10);
+  else if (tvVolumeEditing.value) tvVolumeValue.value = Math.max(0, Math.min(100, tvVolumeValue.value + direction * 5));
+}
+function cancelTvEdit(): void {
+  cancelTvSeek(); tvVolumeEditing.value = false; tvVolumeTrackKey = "";
+}
+function confirmTvEdit(): void {
+  if (tvSeekEditing.value) { confirmTvSeek(); return; }
+  if (!tvVolumeEditing.value) return;
+  const valid = tvVolumeTrackKey == currentTrackKey() && showVolume.value;
+  const value = tvVolumeValue.value;
+  cancelTvEdit();
+  if (!valid) return;
+  audioPlayer.setVolume(value / 100);
+  if (value > 0 && audioPlayer.getMuted()) audioPlayer.setMuted(false);
+}
+useQtTvRemote((key: string, _repeat: number): boolean => {
+  if (key == "left" || key == "right") { adjustTvPreview(key == "left" ? -1 : 1); return true; }
+  if (key == "ok") { confirmTvEdit(); return true; }
+  if (key == "back") { cancelTvEdit(); return true; }
+  return false;
+}, (): boolean => layout.isTv && visible.value && tvEditing.value);
 let seekTrackKey = "";
 function currentTrackKey(): string {
   const cur = player.current;
@@ -157,7 +244,13 @@ function onSeekChange(event: UniSliderChangeEvent): void {
   dragValue.value = -1;
   if (valid && player.duration > 0) player.seek(Math.max(0, Math.min(1000, event.detail.value)) / 1000 * player.duration);
 }
-watch(() => currentTrackKey(), () => { dragValue.value = -1; });
+watch(() => currentTrackKey(), () => { dragValue.value = -1; cancelTvEdit(); syncVolumeSnapshot(); });
+watch((): boolean => layout.isTv && visible.value, (active: boolean) => { if (!active) cancelTvEdit(); });
+watch((): string => tvSeekEditing.value ? "seek" : tvVolumeEditing.value ? "volume" : "", (mode: string, previous: string) => {
+  if (!layout.isTv || !visible.value) return;
+  const id = mode.length > 0 ? "pbar-tv-confirm" : previous == "volume" ? "pbar-tv-volume" : "pbar-tv-seek";
+  nextTick(() => { if (layout.isTv && visible.value) { qtTvRefreshFocus(); qtTvFocus(id); } });
+});
 // ── 收藏 / 播放模式 / 队列 ───────────────────────────────────────────────
 /**
  * 红心口径与播放页一致：player.isLiked = 「这首歌在任意一个自建歌单里」。
@@ -202,6 +295,7 @@ function openQueue(): void {
 
 const volPercent = ref(Math.round(audioPlayer.getVolume() * 100));
 const muted = ref(audioPlayer.getMuted());
+let volumeTrackKey = "";
 
 /**
  * 图标名用「函数 + return 字面量」而不是三元表达式：
@@ -218,12 +312,19 @@ function volumeIconName(): string {
  * 松手才 writeVolume——每帧都写一次持久化键会掉帧（同 player 页拖进度的手感要求）。
  * muted 与 volPercent 联动：拖到 >0 自动解除静音，拖到 0 自动变静音图标。
  */
+function onVolStart(): void { volumeTrackKey = currentTrackKey(); syncVolumeSnapshot(); }
+function onVolCancel(): void { volumeTrackKey = "cancelled"; syncVolumeSnapshot(); }
 function onVolChanging(event: UniSliderChangeEvent): void {
+  if (volumeTrackKey.length == 0) volumeTrackKey = currentTrackKey();
+  if (volumeTrackKey != currentTrackKey()) return;
   const next = Math.round(event.detail.value);
   if (next < 0 || next > 100) return;
   volPercent.value = next;
 }
 function onVolChange(event: UniSliderChangeEvent): void {
+  const valid = volumeTrackKey.length == 0 || volumeTrackKey == currentTrackKey();
+  volumeTrackKey = "";
+  if (!valid) { syncVolumeSnapshot(); return; }
   const next = Math.round(event.detail.value);
   volPercent.value = next < 0 ? 0 : next > 100 ? 100 : next;
   audioPlayer.setVolume(volPercent.value / 100);
@@ -288,6 +389,8 @@ onUnmounted(() => { uni.$off(PLAYER_VOLUME_CHANGED_EVENT, syncVolumeSnapshot); }
 </script>
 
 <style>
+.pbar-tv-editor { width: 100%; flex-direction: row; align-items: center; justify-content: space-around; }
+.pbar-tv-preview { flex: 1; min-width: 0; align-items: center; justify-content: center; }
 .pbar { position: absolute; right: 0; bottom: 0; z-index: 940; flex-direction: row; align-items: center; padding-left: 16px; padding-right: 16px; border-top-width: 1px; border-top-style: solid; }
 .pbar-left { flex-direction: row; align-items: center; flex-shrink: 0; }
 .pbar-song { flex-direction: row; align-items: center; min-width: 0; }

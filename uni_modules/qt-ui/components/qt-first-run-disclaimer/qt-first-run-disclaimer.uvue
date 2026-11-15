@@ -15,23 +15,24 @@
   与 toast 宿主、播放栏的既有结论一致，不需要额外的「只挂一份」判据。
 -->
 <template>
-  <view v-if="active" class="frd-mask" :style="maskStyle">
-    <view class="frd-card" :class="layout.isWide ? 'frd-card-wide' : ''" :style="cardStyle">
-      <text class="frd-title" :class="layout.isWide ? 'frd-title-wide' : ''" :style="titleStyle">{{ title }}</text>
+  <view v-if="active" class="frd-mask qt-tv-skip" :style="maskStyle">
+    <view ref="tvPanel" class="frd-card qt-tv-skip" :class="layout.isWide ? 'frd-card-wide' : ''" :style="cardStyle">
+      <text v-if="!tv.enabled" class="frd-title" :class="layout.isWide ? 'frd-title-wide' : ''" :style="titleStyle">{{ title }}</text>
       <scroll-view
-        class="frd-content"
+        class="frd-content qt-tv-scroll"
         :class="layout.isWide ? 'frd-content-wide' : ''"
         direction="vertical"
         :show-scrollbar="false"
         :style="contentStyle"
       >
+        <text v-if="tv.enabled" class="frd-title" :class="(tv.enabled || layout.isWide) ? 'frd-title-wide' : ''" :style="titleStyle">{{ title }}</text>
         <QtRichText :html="content" :color="theme.skin.text" :font-size="26" :line-height="1.7" align="left" />
       </scroll-view>
-      <view v-if="hasUrl" class="frd-link" :class="layout.isWide ? 'frd-link-wide' : ''" @click="onOpenUrl">
+      <view v-if="hasUrl" data-qt-tv-id="disclaimer-link" class="frd-link" :class="layout.isWide ? 'frd-link-wide' : ''" :style="linkStyle" @click="onOpenUrl">
         <QtIcon name="globe" :size="layout.isWide ? 14 : 26" :color="theme.skin.accent" />
         <text class="frd-link-text" :class="layout.isWide ? 'frd-link-text-wide' : ''" :style="linkTextStyle">查看完整条款</text>
       </view>
-      <view class="frd-btn" :class="layout.isWide ? 'frd-btn-wide' : ''" :style="buttonStyle" @click="onConfirm">
+      <view data-qt-tv-id="disclaimer-confirm" class="frd-btn" :class="[layout.isWide ? 'frd-btn-wide' : '', left > 0 ? 'qt-tv-skip' : '']" :style="buttonStyle" @click="onConfirm">
         <text class="frd-btn-text" :class="layout.isWide ? 'frd-btn-text-wide' : ''" :style="buttonTextStyle">{{ confirmLabel }}</text>
       </view>
     </view>
@@ -42,15 +43,19 @@
 import { computed, onUnmounted, ref, watch } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtRichText from "@/uni_modules/qt-ui/components/qt-rich-text/qt-rich-text.uvue";
-import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtFixedPaneStyle, useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { useQtTv } from "@/uni_modules/qt-ui/composables/use-qt-tv";
+import { useQtTvModal } from "@/uni_modules/qt-ui/composables/use-qt-tv-modal";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { openInBrowser } from "@/services/app-native";
 import type { DisclaimerNotice } from "@/stores/disclaimer";
 
 const layout = useQtLayout();
 const theme = useThemeStore();
+const tv = useQtTv();
+const tvPanel = ref<UniElement | null>(null);
 
 const props = defineProps<{
   visible: boolean;
@@ -70,13 +75,14 @@ const emit = defineEmits<{
  * 深色皮肤下写死 #ffffff 会得到一张白卡片压在暗界面上。
  */
 const cardStyle = computed((): string => {
-  let width = !layout.isWide ? "width:620rpx;" : "width:" + qtSheetWidth("modal") + "px;";
+  if (tv.enabled) return "width:" + Math.max(0, Math.min(layout.paneWidth - 56, qtSheetWidth("modal"))) + "px;max-height:" + Math.max(0, layout.paneHeight - 56) + "px;padding:24px;border-radius:16px;background-color:" + theme.skin.sheetSurface + ";";
+  let width = "width:" + Math.min(layout.paneWidth - 24, qtSheetWidth("modal")) + "px;";
   // `.frd-card-wide` 的 max-height:560px 只防「大屏内容太长」，横屏矮窗（如 780×360，
   // 会落进 isWide）整窗才 360px 高，必须再夹一道，否则标题和按钮被挤出屏幕。
-  if (layout.isWide) width += "max-height:" + Math.max(260, layout.windowHeight - 32) + "px;";
+  if (layout.isWide) width += "max-height:" + Math.max(260, layout.paneHeight - 32) + "px;";
   return width + "background-color:" + theme.skin.sheetSurface + ";";
 });
-const maskStyle = computed((): string => "background-color:" + theme.skin.scrim + ";");
+const maskStyle = computed((): string => qtFixedPaneStyle() + "background-color:" + theme.skin.scrim + ";" + (tv.enabled ? "z-index:3200;" : ""));
 
 /**
  * 正文区尺寸：照抄 qt-notice-splash 的口径 —— 窄屏 `max-height`（内容短时卡片自然收窄），
@@ -84,12 +90,20 @@ const maskStyle = computed((): string => "background-color:" + theme.skin.scrim 
  * 内容一长就会把确认键顶出屏幕）。固定 360px 在横屏矮窗里超过整窗高，按窗口高反算。
  */
 const contentStyle = computed((): string => {
+  if (tv.enabled) {
+    // Full TV title scrolls with the terms; no guessed one-line title reservation.
+    const fixed = 48 + 56 + 16 + (hasUrl.value ? 68 : 0);
+    const h = Math.max(0, Math.min(420, layout.paneHeight - 56 - fixed));
+    return "height:" + h + "px;flex-shrink:1;min-height:0px;margin-top:0px;margin-bottom:0px;";
+  }
   if (!layout.isWide) return "margin-top:24rpx;margin-bottom:4rpx;max-height:760rpx;";
-  const h = Math.max(120, Math.min(360, layout.windowHeight - 220));
+  const h = Math.max(120, Math.min(360, layout.paneHeight - 220));
   return "height:" + h + "px;margin-top:14px;";
 });
 
 const active = computed((): boolean => props.visible && props.notice != null);
+// This dedicated gate consumes Back without accepting or dismissing the notice.
+useQtTvModal(tvPanel, (): boolean => active.value, (): void => {}, 3200);
 const title = computed((): string => {
   const n = props.notice;
   if (n == null || n.title.length == 0) return "使用前请先阅读";
@@ -107,13 +121,15 @@ const hasUrl = computed((): boolean => {
  * 不联动的话「很大」档标题上下会被裁一行（同页头 tab 的行高联动先例）。
  */
 const titleStyle = computed((): string => {
+  if (tv.enabled) return "color:" + theme.skin.text + ";" + qtFontDual(34, 20) + "line-height:" + Math.ceil(qtFontValuePx(20) * 1.4) + "px;flex-shrink:0;margin-bottom:12px;";
   const s = fontScale.scale;
   const line = layout.isWide
     ? "line-height:" + Math.round(28 * s * 100) / 100 + "px;"
     : "line-height:" + Math.round(48 * s * 100) / 100 + "rpx;";
   return ("color:" + theme.skin.text + ";") + qtFontDual(34, 20) + line;
 });
-const linkTextStyle = computed((): string => ("color:" + theme.skin.accent + ";") + qtFontDual(24, 15));
+const linkStyle = computed((): string => tv.enabled ? "min-height:56px;flex-shrink:0;margin-top:12px;" : "");
+const linkTextStyle = computed((): string => ("color:" + theme.skin.accent + ";") + qtFontDual(24, 15) + (tv.enabled ? "line-height:" + Math.ceil(qtFontValuePx(15) * 1.4) + "px;" : ""));
 
 /**
  * 读秒。`<= 0` 表示后台没设读秒（或设成 0），确认键立即可点。
@@ -153,12 +169,13 @@ const confirmLabel = computed((): string => {
 
 /** 未读满时按钮置灰（不置灰的话用户会一直点，以为坏了） */
 const buttonStyle = computed((): string => {
-  if (left.value > 0) return "background-color:" + theme.skin.surfaceStrong + ";";
-  return "background-color:" + theme.skin.accent + ";";
+  const target = tv.enabled ? "height:56px;min-height:56px;flex-shrink:0;margin-top:16px;border-radius:28px;" : "";
+  if (left.value > 0) return target + "background-color:" + theme.skin.surfaceStrong + ";";
+  return target + "background-color:" + theme.skin.accent + ";";
 });
 const buttonTextStyle = computed((): string => {
   const color = left.value > 0 ? theme.skin.textMuted : theme.skin.onAccent;
-  return ("color:" + color + ";") + qtFontDual(26, 15);
+  return ("color:" + color + ";") + qtFontDual(26, 15) + (tv.enabled ? "line-height:" + Math.ceil(qtFontValuePx(15) * 1.4) + "px;" : "");
 });
 
 function onConfirm(): void {

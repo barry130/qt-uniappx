@@ -1,7 +1,7 @@
 <template>
   <view class="page">
     <!-- 宽屏 / 三栏中栏内容超出可视高度时能下滑；中栏高度由 .qt-page-frame-snav-body 撑满 -->
-    <scroll-view class="body" :class="inPane ? 'body-pane' : ''" direction="vertical" :show-scrollbar="false">
+    <scroll-view class="body" :class="[inPane ? 'body-pane' : '', layout.isTv ? 'qt-tv-scroll' : '']" data-qt-tv-id="profile-document" :style="layout.isTv ? 'padding-bottom:28px;' : ''" direction="vertical" :show-scrollbar="false">
     <!--
       宽屏整页形态两列：左列「用户卡 + 五宫格」，右列「功能分组」。
       分列在标记层写死而不是 flex-wrap：三张卡高度不等（用户卡 130、五宫格 100、
@@ -23,10 +23,10 @@
         />
       </view>
       <view class="info" :class="[layout.isWide ? 'info-wide' : '', inPane ? 'info-pane' : '']">
-        <text class="name" :class="[layout.isWide ? 'name-wide' : '']" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(31, 22)">{{
+        <text class="name" :class="[layout.isWide ? 'name-wide' : '']" :style="('color:' + themeStore.skin.text + ';') + profileFont(31, 22)">{{
           loggedIn ? nickname : "登录后同步收藏与歌单"
         }}</text>
-        <text class="sub" :class="[layout.isWide ? 'sub-wide' : '']" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 15)">{{
+        <text class="sub" :class="[layout.isWide ? 'sub-wide' : '']" :style="('color:' + themeStore.skin.textMuted + ';') + profileFont(23, 15)">{{
           loggedIn ? "轻听音乐账户 · 个人主页" : "点击登录"
         }}</text>
       </view>
@@ -34,41 +34,41 @@
     </view>
 
     <!-- 容器二：签到 / 收藏 / 本地 / 最近播放 / 下载 五宫格 -->
-    <view class="tiles" :class="[layout.isWide ? 'tiles-wide' : '', twoColumn ? 'card-col' : '', inPane ? 'tiles-pane' : '']" :style="cardStyle">
-      <view class="tile" @click="doDaka" :hover-class="layout.isWide ? 'tile-hover' : 'none'">
+    <view class="tiles" :class="[layout.isWide ? 'tiles-wide' : '', twoColumn ? 'card-col' : '', inPane ? 'tiles-pane' : '']" :style="cardStyle + (layout.isTv ? 'flex-wrap:wrap;justify-content:space-around;' : '')">
+      <view class="tile" :style="tvTileStyle" @click="doDaka" :hover-class="layout.isWide ? 'tile-hover' : 'none'">
         <view class="tile-icon" :class="[layout.isWide ? 'tile-icon-wide' : '', inPane ? 'tile-icon-pane' : '']" :style="tileIconStyle">
           <QtIcon name="check" :size="inPane ? 18 : (layout.isWide ? 20 : 38)" :color="themeStore.skin.accent" />
         </view>
-        <text class="tile-label" :class="[layout.isWide ? 'tile-label-wide' : '']" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(25, 15)">签到</text>
-        <text class="tile-count" :class="[layout.isWide ? 'tile-count-wide' : '']" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">{{ todayDakaDone ? "已签" : dakaDays + " 天" }}</text>
+        <text class="tile-label" :class="[layout.isWide ? 'tile-label-wide' : '']" :style="('color:' + themeStore.skin.text + ';') + profileFont(25, 15)">签到</text>
+        <text class="tile-count" :class="[layout.isWide ? 'tile-count-wide' : '']" :style="('color:' + themeStore.skin.textSubtle + ';') + profileFont(21, 12)">{{ todayDakaDone ? "已签" : dakaDays + " 天" }}</text>
       </view>
       <view class="tile" :style="tileStyleFor('/pages/collection/index')" @click="goCollection" :hover-class="layout.isWide ? 'tile-hover' : 'none'">
         <view class="tile-icon" :class="[layout.isWide ? 'tile-icon-wide' : '', inPane ? 'tile-icon-pane' : '']" :style="tileIconStyle">
           <QtIcon name="heart" :size="inPane ? 18 : (layout.isWide ? 20 : 38)" :color="themeStore.skin.accent" />
         </view>
-        <text class="tile-label" :class="[layout.isWide ? 'tile-label-wide' : '']" :style="('color:' + tileLabelColor('/pages/collection/index') + ';') + qtFontDual(25, 15)">收藏</text>
-        <text class="tile-count" :class="[layout.isWide ? 'tile-count-wide' : '']" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">{{ likedCount }}</text>
+        <text class="tile-label" :class="[layout.isWide ? 'tile-label-wide' : '']" :style="('color:' + tileLabelColor('/pages/collection/index') + ';') + profileFont(25, 15)">收藏</text>
+        <text class="tile-count" :class="[layout.isWide ? 'tile-count-wide' : '']" :style="('color:' + themeStore.skin.textSubtle + ';') + profileFont(21, 12)">{{ likedCount }}</text>
       </view>
       <view class="tile" :style="tileStyleFor('/pages/local/index')" @click="goLocal" :hover-class="layout.isWide ? 'tile-hover' : 'none'">
         <view class="tile-icon" :class="[layout.isWide ? 'tile-icon-wide' : '', inPane ? 'tile-icon-pane' : '']" :style="tileIconStyle">
           <QtIcon name="folder" :size="inPane ? 18 : (layout.isWide ? 20 : 38)" :color="themeStore.skin.accent" />
         </view>
-        <text class="tile-label" :class="[layout.isWide ? 'tile-label-wide' : '']" :style="('color:' + tileLabelColor('/pages/local/index') + ';') + qtFontDual(25, 15)">本地</text>
-        <text class="tile-count" :class="[layout.isWide ? 'tile-count-wide' : '']" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">扫描播放</text>
+        <text class="tile-label" :class="[layout.isWide ? 'tile-label-wide' : '']" :style="('color:' + tileLabelColor('/pages/local/index') + ';') + profileFont(25, 15)">本地</text>
+        <text class="tile-count" :class="[layout.isWide ? 'tile-count-wide' : '']" :style="('color:' + themeStore.skin.textSubtle + ';') + profileFont(21, 12)">扫描播放</text>
       </view>
       <view class="tile" :style="tileStyleFor('/pages/history/index')" @click="goRecent" :hover-class="layout.isWide ? 'tile-hover' : 'none'">
         <view class="tile-icon" :class="[layout.isWide ? 'tile-icon-wide' : '', inPane ? 'tile-icon-pane' : '']" :style="tileIconStyle">
           <QtIcon name="clock" :size="inPane ? 18 : (layout.isWide ? 20 : 38)" :color="themeStore.skin.accent" />
         </view>
-        <text class="tile-label" :class="[layout.isWide ? 'tile-label-wide' : '']" :style="('color:' + tileLabelColor('/pages/history/index') + ';') + qtFontDual(25, 15)">最近播放</text>
-        <text class="tile-count" :class="[layout.isWide ? 'tile-count-wide' : '']" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">{{ player.history.length }} 首</text>
+        <text class="tile-label" :class="[layout.isWide ? 'tile-label-wide' : '']" :style="('color:' + tileLabelColor('/pages/history/index') + ';') + profileFont(25, 15)">最近播放</text>
+        <text class="tile-count" :class="[layout.isWide ? 'tile-count-wide' : '']" :style="('color:' + themeStore.skin.textSubtle + ';') + profileFont(21, 12)">{{ player.history.length }} 首</text>
       </view>
       <view class="tile" :style="tileStyleFor('/pages/download/index')" @click="goDownload" :hover-class="layout.isWide ? 'tile-hover' : 'none'">
         <view class="tile-icon" :class="[layout.isWide ? 'tile-icon-wide' : '', inPane ? 'tile-icon-pane' : '']" :style="tileIconStyle">
           <QtIcon name="download" :size="inPane ? 18 : (layout.isWide ? 20 : 38)" :color="themeStore.skin.accent" />
         </view>
-        <text class="tile-label" :class="[layout.isWide ? 'tile-label-wide' : '']" :style="('color:' + tileLabelColor('/pages/download/index') + ';') + qtFontDual(25, 15)">下载</text>
-        <text class="tile-count" :class="[layout.isWide ? 'tile-count-wide' : '']" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">{{ downloads.items.length }}</text>
+        <text class="tile-label" :class="[layout.isWide ? 'tile-label-wide' : '']" :style="('color:' + tileLabelColor('/pages/download/index') + ';') + profileFont(25, 15)">下载</text>
+        <text class="tile-count" :class="[layout.isWide ? 'tile-count-wide' : '']" :style="('color:' + themeStore.skin.textSubtle + ';') + profileFont(21, 12)">{{ downloads.items.length }}</text>
       </view>
     </view>
 
@@ -78,30 +78,42 @@
     <view class="group" :class="[layout.isWide ? 'group-wide' : '', twoColumn ? 'card-col' : '', inPane ? 'group-pane' : '']" :style="cardStyle">
       <view class="cell" :class="[layout.isWide ? 'cell-wide' : '', inPane ? 'cell-pane' : '']" :style="cellStyleFor('/pages/ai-assistant/index')" @click="goAiAssistant">
         <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '', inPane ? 'cell-icon-pane' : '']" name="music" :size="inPane ? 22 : 36" :color="themeStore.skin.accent" />
-        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + cellTitleColor('/pages/ai-assistant/index') + ';') + qtFontDual(28, 17)">音乐助手</text>
-        <text v-if="!inPane" class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(24, 13)">说出想听的</text>
+        <view v-if="layout.isTv && !inPane" class="cell-main" style="flex:1;min-width:0px;padding-top:8px;padding-bottom:8px;">
+          <text class="cell-title" :style="('color:' + cellTitleColor('/pages/ai-assistant/index') + ';flex:0;') + profileFont(28, 17)">音乐助手</text>
+          <text class="cell-value" :style="('color:' + themeStore.skin.textSubtle + ';') + profileFont(24, 13)">说出想听的</text>
+        </view>
+        <template v-else>
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + cellTitleColor('/pages/ai-assistant/index') + ';') + profileFont(28, 17)">音乐助手</text>
+        <text v-if="!inPane" class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + profileFont(24, 13)">说出想听的</text>
+        </template>
         <QtIcon v-if="!inPane" name="chevron-right" :size="28" :color="themeStore.skin.iconMuted" />
       </view>
       <view class="cell" :class="[layout.isWide ? 'cell-wide' : '', inPane ? 'cell-pane' : '']" :style="cellStyleFor('/pages/stats/index')" @click="goStats">
         <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '', inPane ? 'cell-icon-pane' : '']" name="chart" :size="inPane ? 22 : 36" :color="themeStore.skin.accent" />
-        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + cellTitleColor('/pages/stats/index') + ';') + qtFontDual(28, 17)">听歌报告</text>
-        <text v-if="!inPane" class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(24, 13)">{{ player.history.length }} 首记录</text>
+        <view v-if="layout.isTv && !inPane" class="cell-main" style="flex:1;min-width:0px;padding-top:8px;padding-bottom:8px;">
+          <text class="cell-title" :style="('color:' + cellTitleColor('/pages/stats/index') + ';flex:0;') + profileFont(28, 17)">听歌报告</text>
+          <text class="cell-value" :style="('color:' + themeStore.skin.textSubtle + ';') + profileFont(24, 13)">{{ player.history.length }} 首记录</text>
+        </view>
+        <template v-else>
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + cellTitleColor('/pages/stats/index') + ';') + profileFont(28, 17)">听歌报告</text>
+        <text v-if="!inPane" class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + profileFont(24, 13)">{{ player.history.length }} 首记录</text>
+        </template>
         <QtIcon v-if="!inPane" name="chevron-right" :size="28" :color="themeStore.skin.iconMuted" />
       </view>
       <view class="cell" :class="[layout.isWide ? 'cell-wide' : '', inPane ? 'cell-pane' : '']" :style="cellStyleFor('/pages/settings/index')" @click="goSettings">
         <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '', inPane ? 'cell-icon-pane' : '']" name="settings" :size="inPane ? 22 : 36" :color="themeStore.skin.accent" />
-        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 17)">设置</text>
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + profileFont(28, 17)">设置</text>
         <view v-if="sourceUpdateStore.updatePending" class="cell-dot" />
         <QtIcon v-if="!inPane" name="chevron-right" :size="28" :color="themeStore.skin.iconMuted" />
       </view>
       <view class="cell" :class="[layout.isWide ? 'cell-wide' : '', inPane ? 'cell-pane' : '']" :style="cellStyleFor('/pages/feedback/index')" @click="goFeedback">
         <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '', inPane ? 'cell-icon-pane' : '']" name="feedback" :size="inPane ? 22 : 36" :color="themeStore.skin.accent" />
-        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + cellTitleColor('/pages/feedback/index') + ';') + qtFontDual(28, 17)">意见反馈</text>
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + cellTitleColor('/pages/feedback/index') + ';') + profileFont(28, 17)">意见反馈</text>
         <QtIcon v-if="!inPane" name="chevron-right" :size="28" :color="themeStore.skin.iconMuted" />
       </view>
       <view class="cell cell-no-border" :class="[layout.isWide ? 'cell-wide' : '', inPane ? 'cell-pane' : '']" :style="cellStyleFor('/pages/about/index')" @click="goAbout">
         <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '', inPane ? 'cell-icon-pane' : '']" name="info" :size="inPane ? 22 : 36" :color="themeStore.skin.accent" />
-        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + cellTitleColor('/pages/about/index') + ';') + qtFontDual(28, 17)">关于轻听</text>
+        <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + cellTitleColor('/pages/about/index') + ';') + profileFont(28, 17)">关于轻听</text>
         <QtIcon v-if="!inPane" name="chevron-right" :size="28" :color="themeStore.skin.iconMuted" />
       </view>
     </view>
@@ -117,7 +129,7 @@ import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtContentWidth, QT_GUTTER_PX } from "@/uni_modules/qt-ui/composables/use-qt-widths";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtTopRoute, qtIsProfileRoute } from "@/uni_modules/qt-ui/composables/qt-page-chrome";
 import { qtShowToast } from "@/services/toast";
 import { usePlayerStore } from "@/stores/player";
@@ -166,6 +178,9 @@ const props = defineProps<{
 
 const themeStore = useThemeStore();
 const layout = useQtLayout();
+function profileFont(compact: number, wide: number): string {
+  return qtFontDual(compact, wide) + (layout.isTv ? "line-height:" + Math.round(qtFontValuePx(wide) * 1.4) + "px;" : "");
+}
 const player = usePlayerStore();
 const downloads = useDownloadsStore();
 const sourceUpdateStore = useSourceUpdateStore();
@@ -245,12 +260,13 @@ function cardStyleFor(page: string): string {
 
 /** 卡片统一样式（颜色全部来自当前皮肤） */
 const cardStyle = computed<string>((): string => cardStyleFor(""));
-const tileIconStyle = computed<string>((): string => "background-color:" + themeStore.skin.accentSoft + ";");
+const tileIconStyle = computed<string>((): string => "background-color:" + themeStore.skin.accentSoft + ";" + (layout.isTv ? "width:56px;height:56px;" : ""));
 
 /** 当前项的宫格给一行淡淡的强调底色 —— 深色皮肤下只有文字变色不够醒目 */
+const tvTileStyle = computed((): string => layout.isTv ? "width:" + Math.ceil(qtFontValuePx(15) * 4 + 16) + "px;flex:0;flex-shrink:0;" : "");
 function tileStyleFor(page: string): string {
-  if (!routeActive(page)) return "";
-  return "background-color:" + themeStore.skin.accentSoft + ";border-radius:12px;";
+  if (!routeActive(page)) return tvTileStyle.value;
+  return tvTileStyle.value + "background-color:" + themeStore.skin.accentSoft + ";border-radius:12px;";
 }
 function tileLabelColor(page: string): string {
   return routeActive(page) ? themeStore.skin.accent : themeStore.skin.text;
@@ -258,7 +274,7 @@ function tileLabelColor(page: string): string {
 
 /** 分组行的分隔线颜色；当前项再叠一层强调底色 */
 function cellStyleFor(page: string): string {
-  const base = "border-bottom-color:" + themeStore.skin.divider + ";";
+  const base = "border-bottom-color:" + themeStore.skin.divider + ";" + (layout.isTv ? "height:auto;min-height:76px;" : "");
   if (!routeActive(page)) return base;
   return base + "background-color:" + themeStore.skin.accentSoft + ";";
 }

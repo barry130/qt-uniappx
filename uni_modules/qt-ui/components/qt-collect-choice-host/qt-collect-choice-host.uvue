@@ -1,18 +1,18 @@
 <template>
   <QtSheet :visible="state.visible.value" title="选择保留的歌曲" :subtitle="subtitle" @close="cancel">
-    <scroll-view class="choice-list" direction="vertical" :style="listStyle" :scroll-into-view="anchor">
+    <scroll-view class="choice-list" :class="layout.isTv ? 'qt-tv-scroll' : ''" data-qt-tv-id="collect:choices" direction="vertical" :style="listStyle" :scroll-into-view="anchor">
       <view v-for="(group, groupIndex) in state.groups.value" :key="group.id">
-        <text class="choice-group-title" :class="layout.isWide ? 'choice-group-title-wide' : ''" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 12)">重复组 {{ groupIndex + 1 }} · {{ group.songs.length }} 个版本</text>
+        <text class="choice-group-title" :class="layout.isWide ? 'choice-group-title-wide' : ''" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 12) + (layout.isTv ? 'line-height:' + Math.ceil(qtFontValuePx(12) * 1.5) + 'px;' : '')">重复组 {{ groupIndex + 1 }} · {{ group.songs.length }} 个版本</text>
         <view v-for="song in group.songs" :id="rowId(song)" :key="keyOf(song)">
-          <QtOption :label="optionLabel(song)" :description="description(song, group.existingKeys)" :selected="selected(song)" @select="toggle(song)">
-            <template #leading><view class="choice-check choice-row-check" :class="layout.isWide ? 'choice-check-wide choice-row-check-wide' : ''"><QtCheckbox :checked="selected(song)" @change="toggle(song)" /></view></template>
+          <QtOption :data-qt-tv-id="'collect-option:' + keyOf(song)" :label="optionLabel(song)" :description="description(song, group.existingKeys)" :selected="selected(song)" @select="toggle(song)">
+            <template #leading><view class="choice-check choice-row-check" :class="layout.isWide ? 'choice-check-wide choice-row-check-wide' : ''"><QtCheckbox :data-qt-tv-id="'collect-check:' + keyOf(song)" :checked="selected(song)" @change="toggle(song)" /></view></template>
           </QtOption>
         </view>
       </view>
     </scroll-view>
     <template #footer>
       <view class="choice-actions" :class="layout.isWide ? 'choice-actions-wide' : ''">
-        <text v-if="!valid" class="choice-validation" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 11)">每组至少保留一个版本</text>
+        <text v-if="!valid" class="choice-validation" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 11) + (layout.isTv ? 'line-height:' + Math.ceil(qtFontValuePx(11) * 1.5) + 'px;margin-bottom:8px;' : '')">每组至少保留一个版本</text>
         <view class="choice-buttons">
           <view class="choice-check" :class="layout.isWide ? 'choice-check-wide' : ''"><QtButton label="取消" variant="outline" size="sm" @click="cancel" /></view>
           <QtButton :disabled="!valid" label="保存选择" size="sm" @click="confirm" />
@@ -30,13 +30,14 @@ import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import { collectChoiceState, collectKey, toggleCollectChoice, finishCollectChoice } from "@/services/collect-choice";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useQtSelectionReveal } from "@/uni_modules/qt-ui/composables/use-qt-selection-reveal";
-import { fontScale, qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtTvSheetBodyHeightPx } from "@/uni_modules/qt-ui/composables/qt-sheet-metrics";
+import { fontScale, qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { platformLabel } from "@/services/platform";
 import type { Song } from "@/types/music";
 const state = collectChoiceState(), layout = useQtLayout();
 const theme = useThemeStore();
-const subtitle = computed((): string => '歌单：' + state.title.value + (layout.windowHeight < 500 ? '。只保留勾选版本。' : '。勾选要保留的版本，未勾选的已有版本将从此歌单移除。'));
+const subtitle = computed((): string => '歌单：' + state.title.value + (layout.paneHeight < 500 ? '。只保留勾选版本。' : '。勾选要保留的版本，未勾选的已有版本将从此歌单移除。'));
 const rows = computed((): Song[] => state.groups.value.flatMap(g => g.songs));
 // 仅以请求初始选择定位；用户勾选时不把滚动位置抢回第一项。
 const first = computed((): number => {
@@ -49,12 +50,12 @@ const rowIndices = computed((): Map<string, number> => {
   return indices;
 });
 const { anchor, itemId } = useQtSelectionReveal((): boolean => state.visible.value, (): number => first.value, (): string => String(state.requestId.value) + ':' + layout.sizeEpoch + ':' + fontScale.scale);
-const listStyle = computed((): string => 'height:' + Math.max(80, Math.min(420, layout.windowHeight * 0.56 - 30 * fontScale.scale)) + 'px;');
+const listStyle = computed((): string => 'height:' + (layout.isTv ? Math.min(420, qtTvSheetBodyHeightPx({ title: "选择保留的歌曲", subtitle: subtitle.value, footerPx: 84 + (valid.value ? 0 : Math.ceil(qtFontValuePx(11) * 1.5) + 8) })) : Math.max(80, Math.min(420, layout.paneHeight * 0.56 - 30 * fontScale.scale))) + 'px;');
 const valid = computed((): boolean => state.groups.value.every(g => g.songs.some((s: Song): boolean => selected(s))));
 function keyOf(song: Song): string { return collectKey(song); }
 function rowId(song: Song): string { return itemId(rowIndices.value.get(keyOf(song)) ?? -1); }
 function selected(song: Song): boolean { return state.selected.value.includes(keyOf(song)); }
-function optionLabel(song: Song): string { return layout.windowHeight < 500 ? platformLabel(song.platform) + ' · ' + song.name : song.name; }
+function optionLabel(song: Song): string { return layout.paneHeight < 500 ? platformLabel(song.platform) + ' · ' + song.name : song.name; }
 function description(song: Song, existing: string[]): string { return platformLabel(song.platform) + ' · ' + song.singer + ' · ' + (song.album.length > 0 ? song.album + ' · ' : '') + (song.duration != null && song.duration > 0 ? Math.floor(song.duration / 60) + ':' + String(Math.floor(song.duration % 60)).padStart(2, '0') + ' · ' : '') + (existing.includes(keyOf(song)) ? '已在歌单' : '待收藏'); }
 function toggle(song: Song): void { toggleCollectChoice(keyOf(song)); }
 function cancel(): void { finishCollectChoice(false); }

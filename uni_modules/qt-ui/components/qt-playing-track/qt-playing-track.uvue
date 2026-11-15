@@ -1,0 +1,103 @@
+<template>
+  <view v-if="compact" class="pt-context" :style="'width:' + widthPx + 'px;height:' + metrics.heightPx + 'px;'">
+    <view class="pt-context-cover" :style="'width:' + metrics.contextCoverPx + 'px;height:' + metrics.contextCoverPx + 'px;background-color:' + rail + ';'" @click.stop="emit('artist')">
+      <image v-if="cover != null && cover.length > 0" class="pt-context-image" :src="cover" mode="aspectFill" @error="emit('coverError')" />
+      <QtIcon v-else name="music" :size="layout.isWide ? 18 : 36" :color="muted" />
+    </view>
+    <view class="pt-context-copy" :style="'width:' + metrics.contextCopyPx + 'px;'" @click.stop="emit('source')">
+      <!-- 歌词页标题：第一行「歌名 - 歌手」跑马灯（长文本可滚动），第二行平台·音质全称不滚动 -->
+      <QtMarquee class="pt-context-name" :text="compactTitle" :size-rpx="compactMarqueeRpx" :size-px="compactTitlePx" :weight="600" :color="ink" :width-px="metrics.contextCopyPx" :active="active" />
+      <view class="pt-context-meta" :style="'height:' + metrics.contextMetaPx + 'px;'">
+        <text class="pt-context-detail" :style="'color:' + muted + ';' + qtFontPx(10)" :max-lines="1">{{ sourceLabel }}</text>
+        <QtIcon class="pt-source-arrow" name="chevron-down" :size="layout.isWide ? 12 : 16" :color="muted" />
+      </view>
+    </view>
+    <view class="pt-like" :style="hitStyle" @click.stop="emit('collect', $event)">
+      <QtIcon :name="liked ? 'heart-fill' : 'heart'" :size="layout.isWide ? 22 : 36" :color="liked ? theme.skin.danger : muted" />
+    </view>
+  </view>
+  <view v-else class="pt-track" :style="'width:' + widthPx + 'px;height:' + metrics.heightPx + 'px;'">
+    <view class="pt-title-row" :style="'height:' + metrics.titleHeightPx + 'px;'">
+      <!-- 用户 2026-11-14：歌名改单行跑马灯（长名滚动看全，不再两行换行）；行高沿用 metrics.titleLinePx，行框高度预算不变。 -->
+      <QtMarquee
+        class="pt-title"
+        :text="name"
+        :size-rpx="48"
+        :size-px="layout.isShort ? 22 : 26"
+        :weight="700"
+        :color="ink"
+        :width-px="titleWidthPx"
+        :line-height-px="metrics.titleLinePx"
+        :active="active"
+      />
+      <view class="pt-like" :style="hitStyle" @click.stop="emit('collect', $event)">
+        <QtIcon :name="liked ? 'heart-fill' : 'heart'" :size="layout.isWide ? 22 : 36" :color="liked ? theme.skin.danger : muted" />
+      </view>
+    </view>
+    <view class="pt-meta" :class="metrics.stacked ? 'pt-meta-stacked' : ''" :style="'height:' + metrics.metaHeightPx + 'px;'">
+      <view class="pt-artist" :style="'height:' + metrics.metaRowPx + 'px;'" @click.stop="emit('artist')">
+        <QtMarquee :text="artist" :size-rpx="25" :size-px="13" :weight="400" :color="muted" :width-px="metrics.artistWidthPx" :active="active" />
+        <QtIcon class="pt-artist-arrow" name="chevron-right" :size="layout.isWide ? 14 : 24" :color="muted" />
+      </view>
+      <view class="pt-source-hit" :class="metrics.stacked ? 'pt-source-stacked' : ''" :style="sourceStyle" @click.stop="emit('source')">
+        <!-- 用户 2026-11-13：来源改为无底色普通文字（与歌词页标题同款），随歌手同行左对齐，不再做胶囊。 -->
+        <view class="pt-source" :style="'width:' + metrics.sourceWidthPx + 'px;'">
+          <text class="pt-source-text" :style="'color:' + muted + ';font-size:' + metrics.sourceFontPx + 'px;'" :max-lines="1">{{ sourceLabel }}</text>
+          <QtIcon class="pt-source-arrow" name="chevron-down" :size="layout.isWide ? 13 : 22" :color="muted" />
+        </view>
+      </view>
+    </view>
+  </view>
+</template>
+<script setup lang="ts">
+import { computed } from "vue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtMarquee from "@/uni_modules/qt-ui/components/qt-marquee/qt-marquee.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { playingTrackMetrics } from "@/uni_modules/qt-ui/composables/playing-track-metrics";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { qtFontPx, useFontScaleStore } from "@/uni_modules/qt-ui/stores/font-scale";
+
+const props = defineProps<{
+  name: string; artist: string; sourceLabel: string; liked: boolean; active: boolean;
+  widthPx: number; ink: string; muted: string; rail: string;
+  compact?: boolean; cover?: string;
+}>();
+const emit = defineEmits<{ collect: [event: any]; artist: []; source: []; coverError: [] }>();
+const layout = useQtLayout();
+const theme = useThemeStore();
+const fontScale = useFontScaleStore();
+const metrics = computed(() => playingTrackMetrics(props.widthPx, layout.windowWidth, layout.isWide, layout.isShort, fontScale.scale, props.sourceLabel, props.compact == true, props.name, props.artist));
+/** 歌名单行跑马灯的可用宽度：整块宽 − 收藏键 − 间距（与 metrics.titleLines 分母同式）。 */
+const titleWidthPx = computed((): number => Math.max(0, props.widthPx - metrics.value.hitPx - metrics.value.gapPx));
+/** 歌词页两行标题：第一行歌名-歌手整条滚动，第二行来源全称静态。 */
+const compactTitle = computed((): string => props.artist.length > 0 ? props.name + " - " + props.artist : props.name);
+const compactTitlePx = 15;
+const compactMarqueeRpx = computed((): number => Math.round(compactTitlePx * 750 / Math.max(1, layout.windowWidth)));
+const hitStyle = computed((): string => "width:" + metrics.value.hitPx + "px;height:" + metrics.value.hitPx + "px;margin-left:" + metrics.value.gapPx + "px;");
+const sourceStyle = computed((): string => "width:" + metrics.value.sourceWidthPx + "px;height:" + metrics.value.metaRowPx + "px;" + (metrics.value.stacked ? "" : "margin-left:" + metrics.value.gapPx + "px;"));
+</script>
+<style>
+.pt-track { flex-shrink: 0; }
+.pt-title-row { flex-direction: row; align-items: center; min-width: 0; }
+/* pt-title 现在是 QtMarquee 根 view：字重/行高/截断都由组件内 text 承担，这里只管占位。 */
+.pt-title { flex: 1; min-width: 0; }
+.pt-like { align-items: center; justify-content: center; flex-shrink: 0; }
+.pt-meta { flex-direction: row; align-items: center; margin-top: 2px; min-width: 0; }
+.pt-meta-stacked { flex-direction: column; align-items: stretch; }
+/* 用户 2026-11-13 二次裁定：歌手 flex:1 撑满整行，来源（无胶囊底色）贴回最右。 */
+.pt-artist { min-width: 0; flex: 1; flex-direction: row; align-items: center; }
+.pt-artist-arrow { flex-shrink: 0; margin-left: 4px; }
+.pt-source-hit { flex-shrink: 0; justify-content: center; }
+.pt-source { flex-direction: row; align-items: center; justify-content: flex-start; }
+.pt-source-stacked { margin-top: 2px; align-self: flex-start; }
+.pt-source-text { flex: 1; min-width: 0; font-size: 25rpx; text-align: center; text-overflow: ellipsis; }
+.pt-source-arrow { flex-shrink: 0; margin-left: 6px; }
+.pt-context { flex-direction: row; align-items: center; flex-shrink: 0; }
+.pt-context-cover { margin-right: 10px; border-radius: 8px; overflow: hidden; align-items: center; justify-content: center; flex-shrink: 0; }
+.pt-context-image { width: 34px; height: 34px; border-radius: 6px; }
+.pt-context-copy { flex-shrink: 0; }
+.pt-context-name { flex-shrink: 0; }
+.pt-context-meta { flex-direction: row; align-items: center; margin-top: 2px; }
+.pt-context-detail { flex: 1; min-width: 0; text-overflow: ellipsis; }
+</style>

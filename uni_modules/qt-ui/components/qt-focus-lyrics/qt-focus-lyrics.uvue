@@ -1,13 +1,13 @@
 <template>
   <scroll-view direction="vertical" class="fl-scroll" :show-scrollbar="false">
-    <view class="fl-stage" :style="'min-height:' + heightPx + 'px;'">
+    <view class="fl-stage" :class="alignStart ? 'fl-stage-start' : ''" :style="'min-height:' + heightPx + 'px;'">
       <view v-for="row in rows" :key="row.index" class="fl-row" :class="layout.isWide ? 'fl-row-wide' : ''" @longpress.stop="emit('copy', row.line, row.index)">
-        <view v-if="row.index == currentIndex && currentWords.length > 0" class="fl-words">
+        <view v-if="row.index == currentIndex && currentWords.length > 0" class="fl-words" :class="alignStart ? 'fl-words-start' : ''">
           <text v-for="(word, index) in currentWords" :key="index" :style="wordStyle(word.startMs, word.durationMs)" class="fl-word">{{ word.text.replace(/ /g, '\u00a0') }}</text>
         </view>
-        <text v-else class="fl-text" :style="lineStyle(row.index)">{{ row.line.text.trim().length > 0 ? row.line.text : '···' }}</text>
-        <text v-if="row.index == currentIndex && row.line.romanization" class="fl-sub" :style="subStyle">{{ row.line.romanization }}</text>
-        <text v-if="row.index == currentIndex && row.line.translation" class="fl-sub" :style="subStyle">{{ row.line.translation }}</text>
+        <text v-else class="fl-text" :class="alignStart ? 'fl-text-start' : ''" :style="lineStyle(row.index)">{{ row.line.text.trim().length > 0 ? row.line.text : '···' }}</text>
+        <text v-if="row.index == currentIndex && row.line.romanization" class="fl-sub" :class="alignStart ? 'fl-text-start' : ''" :style="subStyle">{{ row.line.romanization }}</text>
+        <text v-if="row.index == currentIndex && row.line.translation" class="fl-sub" :class="alignStart ? 'fl-text-start' : ''" :style="subStyle">{{ row.line.translation }}</text>
       </view>
       <text v-if="rows.length == 0" class="fl-text" :style="subStyle">{{ loading ? '正在加载歌词' : '纯音乐，请欣赏' }}</text>
     </view>
@@ -19,10 +19,19 @@ import type { LyricLine, LyricWord } from "@/types/music";
 import { useQtLayout } from "../../composables/use-qt-layout";
 import { qtFontDual, useFontScaleStore } from "@/uni_modules/qt-ui/stores/font-scale";
 import { playingLyricNeighbours, playingWordPulse } from "../../composables/playing-style";
-const props = defineProps<{ lines: LyricLine[]; activeIndex: number; position: number; rhythm: boolean; ink: string; muted: string; heightPx: number; loading: boolean }>();
+const props = defineProps<{ lines: LyricLine[]; activeIndex: number; position: number; rhythm: boolean; ink: string; muted: string; heightPx: number; loading: boolean; alignStart?: boolean; sizeScale?: number }>();
 const emit = defineEmits<{ copy: [line: LyricLine, index: number] }>();
 const layout = useQtLayout();
 const fontScale = useFontScaleStore();
+/**
+ * 用户自选的歌词字号倍率（播放页「字号」入口，stores/lyric-size.ts）。
+ * 缺省/非法值一律按 1 处理：沉浸式歌词有自己的基准字号，不能因为宿主忘传就变 0。
+ * 它与 fontScale.scale（系统/应用字号缩放）是**相乘**关系，两个缩放互不覆盖。
+ */
+const resolvedSizeScale = computed((): number => {
+  const value = props.sizeScale;
+  return value != null && value > 0 ? value : 1;
+});
 const currentIndex = computed((): number => Math.max(0, props.activeIndex));
 const currentWords = computed((): LyricWord[] => {
   const line = props.lines[currentIndex.value];
@@ -42,13 +51,13 @@ const rows = computed(() => playingLyricNeighbours(props.lines, props.activeInde
 const currentSize = computed((): number => {
   const text = props.lines[currentIndex.value]?.text ?? "";
   const density = text.length > 80 ? 0.68 : text.length > 40 ? 0.84 : 1;
-  return (layout.isWide ? (props.rhythm ? 36 : 27) : (props.rhythm ? 52 : 42)) * density * fontScale.scale;
+  return (layout.isWide ? (props.rhythm ? 36 : 32) : (props.rhythm ? 52 : 60)) * density * fontScale.scale * resolvedSizeScale.value;
 });
-const subStyle = computed((): string => "color:" + props.muted + ";" + qtFontDual(24, 14));
+const subStyle = computed((): string => "color:" + props.muted + ";" + qtFontDual(Math.round(24 * resolvedSizeScale.value), Math.round(14 * resolvedSizeScale.value)));
 function lineStyle(index: number): string {
   return index == currentIndex.value
     ? "color:" + props.ink + ";font-weight:600;font-size:" + Math.round(currentSize.value) + (layout.isWide ? "px;" : "rpx;")
-    : "color:" + props.muted + ";opacity:0.65;" + qtFontDual(28, 18);
+    : "color:" + props.muted + ";opacity:0.42;font-weight:600;" + qtFontDual(Math.round(40 * resolvedSizeScale.value), Math.round(21 * resolvedSizeScale.value));
 }
 function wordStyle(startMs: number, durationMs: number): string {
   const line = props.lines[currentIndex.value];
@@ -61,10 +70,13 @@ function wordStyle(startMs: number, durationMs: number): string {
 <style>
 .fl-scroll { flex: 1; min-height: 0; }
 .fl-stage { justify-content: center; padding: 16rpx; }
+.fl-stage-start { padding-left: 0; padding-right: 0; }
 .fl-row { padding: 22rpx 0; flex-shrink: 0; }
 .fl-row-wide { padding: 20px 0; }
 .fl-text { text-align: center; line-height: 1.5; }
 .fl-sub { text-align: center; line-height: 1.5; margin-top: 8px; }
 .fl-words { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: center; }
 .fl-word { font-weight: 600; line-height: 1.5; }
+.fl-text-start { text-align: left; }
+.fl-words-start { justify-content: flex-start; }
 </style>

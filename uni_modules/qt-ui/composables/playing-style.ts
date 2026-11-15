@@ -2,7 +2,7 @@
 export const PLAYING_STYLES = [
   { id: "classic", label: "经典唱片", description: "唱片与滚动歌词", icon: "disc" },
   { id: "rhythm", label: "歌词律动", description: "大字随唱词起伏", icon: "music" },
-  { id: "gallery", label: "专辑画廊", description: "封面与三行歌词", icon: "disc" },
+  { id: "gallery", label: "专辑画廊", description: "封面与完整歌词", icon: "disc" },
   { id: "focus", label: "纯净歌词", description: "专注三行歌词", icon: "type" },
 ];
 export const PLAYING_BACKGROUNDS = [

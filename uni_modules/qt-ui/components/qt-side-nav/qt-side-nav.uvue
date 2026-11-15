@@ -15,6 +15,7 @@
       <view
         v-for="(tab, tabIndex) in tabs"
         :key="tab.page"
+        :data-qt-tv-id="'nav:' + tab.page"
         :id="navigationScroll.itemId(tabIndex)"
         class="qsn-item"
         :class="compact ? 'qsn-item-compact' : ''"
@@ -40,6 +41,7 @@
         <view
           v-for="(tool, toolIndex) in tools"
           :key="tool.page"
+          :data-qt-tv-id="'nav:' + tool.page"
           :id="navigationScroll.itemId(tabs.length + toolIndex)"
           class="qsn-item"
           :class="compact ? 'qsn-item-compact' : ''"
@@ -53,7 +55,7 @@
       </view>
     </scroll-view>
     <view class="qsn-footer" :style="'padding-bottom:' + layout.safeBottomPx + 'px;'">
-      <view class="qsn-item" :class="compact ? 'qsn-item-compact' : ''" :style="navItemStyle('/pages/settings/index')" hover-class="qsn-item-hover" @click="goPage('/pages/settings/index')">
+      <view class="qsn-item" data-qt-tv-id="nav:/pages/settings/index" :class="compact ? 'qsn-item-compact' : ''" :style="navItemStyle('/pages/settings/index')" hover-class="qsn-item-hover" @click="goPage('/pages/settings/index')">
         <QtIcon name="settings" :size="21" :color="itemActive('/pages/settings/index') ? theme.skin.accent : theme.skin.iconMuted" />
         <text v-if="!compact" class="qsn-label" :style="('color:' + (itemActive('/pages/settings/index') ? theme.skin.accent : theme.skin.textSubtle) + ';') + qtFontPx(11)">设置</text>
       </view>
@@ -106,7 +108,7 @@ const theme = useThemeStore();
 // rail 工具入口宽屏下走 qt-wide-workspace 就地托管（不再创建原生页面，也就不需要
 // 预热页面树；旧的 qt-page-preload.ts 已删除 —— uni.preloadPage 在 uni-app x 不支持，
 // 就地托管后宽屏连预热的目标都不存在了）。
-const compact = computed((): boolean => layout.sizeClass == "medium");
+const compact = computed((): boolean => !layout.isTv && layout.sizeClass == "medium");
 /** 固定在窗口左缘（不随 qt-page-frame 限宽居中）；停靠模式随覆盖层撑满 */
 const railStyle = computed((): string => {
   // 恒加状态栏高度：全站 navigationStyle=custom 后页面区从窗口顶缘起，
@@ -116,7 +118,7 @@ const railStyle = computed((): string => {
   // surfaceInset + divider，在浅色皮肤里呈现为一条竖灰板，跟内容区割裂。
   // 改成全透明：rail 固定在 qt-page-frame 根上，底下就是整窗壁纸/页面底色，
   // 透出去后左右天然同底（壁纸皮肤也成立，不会盖掉左缘壁纸）。
-  const base = "padding-top:" + sb + "px;background-color:transparent;border-right-color:transparent;";
+  const base = (layout.isTv ? "width:136px;padding-left:12px;padding-right:12px;" : "") + "padding-top:" + sb + "px;background-color:transparent;border-right-color:transparent;";
   if (props.docked == true) {
     // 停靠：四边锚定的 absolute（内联压过类里的 fixed），高度随覆盖层撑满。
     // 不能沿用 fixed + 显式 height：见 docked prop 注释（窗口层 z 序 + 漏显隐）。
@@ -124,7 +126,7 @@ const railStyle = computed((): string => {
   }
   // 高度必须显式给 px：position:fixed 下 top+bottom 双锚拉伸在 Vapor 不可靠
   // （2026-10-24 宽屏 rail 整条消失的根因，同 stats hero 底图），塌成高 0 就不可见
-  return "height:" + layout.windowHeight + "px;" + base;
+  return "left:" + layout.paneLeft + "px;top:" + layout.paneTop + "px;height:" + layout.paneHeight + "px;" + base;
 });
 
 type NavItem = { page: string; label: string; icon: string };
@@ -164,7 +166,7 @@ const tools = computed<NavItem[]>(() => {
 });
 
 function navItemStyle(page: string): string {
-  const height = compact.value ? 44 : Math.ceil(46 + 14 * fontScale.scale);
+  const height = layout.isTv ? 76 : compact.value ? 44 : Math.ceil(46 + 14 * fontScale.scale);
   return "height:" + height + "px;background-color:" + (itemActive(page) ? theme.skin.accentSoft : "transparent") + ";";
 }
 function itemActive(page: string): boolean {

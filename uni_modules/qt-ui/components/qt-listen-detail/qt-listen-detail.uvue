@@ -1,14 +1,14 @@
 <template>
-  <view class="detail-mask" :class="layout.isWide ? 'detail-mask-wide' : ''" :style="'background-color:' + theme.skin.scrim + ';'" @click="close">
-    <view class="detail-panel" :style="panelStyle" @click.stop>
-      <view class="detail-header" :style="'border-color:' + theme.skin.divider + ';'">
-        <view v-if="target != ''" class="detail-icon-button" @click="back">
+  <view class="detail-mask" :class="[layout.isWide ? 'detail-mask-wide' : '', layout.isTv ? 'qt-tv-skip' : '']" :style="'background-color:' + theme.skin.scrim + ';'" @click="close">
+    <view ref="panelRef" class="detail-panel" :class="layout.isTv ? 'qt-tv-skip' : ''" :style="panelStyle" @click.stop>
+      <view class="detail-header" :style="'border-color:' + theme.skin.divider + ';' + (layout.isTv ? 'min-height:81px;flex-shrink:0;' : '')">
+        <view v-if="target != ''" class="detail-icon-button" :style="controlStyle" :data-qt-tv-id="layout.isTv ? 'listen-back' : ''" @click="back">
           <QtIcon name="chevron-left" :size="layout.isWide ? 20 : 32" :color="theme.skin.text" />
         </view>
         <text class="detail-title" :style="textStyle(30, 18)" :max-lines="1">{{ heading }}</text>
-        <view class="detail-icon-button" @click="close"><QtIcon name="close" :size="layout.isWide ? 20 : 32" :color="theme.skin.textMuted" /></view>
+        <view class="detail-icon-button" :style="controlStyle" :data-qt-tv-id="layout.isTv ? 'listen-close' : ''" @click="close"><QtIcon name="close" :size="layout.isWide ? 20 : 32" :color="theme.skin.textMuted" /></view>
       </view>
-      <scroll-view :key="kind + ':' + target" class="detail-scroll" direction="vertical" :show-scrollbar="false">
+      <scroll-view :key="kind + ':' + target" class="detail-scroll" :class="layout.isTv ? 'qt-tv-scroll' : ''" :data-qt-tv-id="layout.isTv ? 'listen-document' : ''" direction="vertical" :show-scrollbar="false" :scroll-into-view="layout.isTv ? returnAnchor : ''" :scroll-with-animation="false">
         <view class="detail-content" :style="contentStyle">
           <template v-if="kind == 'info'">
             <text class="detail-section" :style="textStyle(27, 16)">怎样统计</text>
@@ -19,7 +19,7 @@
             <text class="detail-copy" :style="mutedStyle">{{ storageLabel }}</text>
             <text v-if="stats.storagePath != ''" class="detail-copy" :style="mutedStyle">{{ stats.storagePath }}</text>
             <text class="detail-copy" :style="mutedStyle">成功保存到公共目录后，卸载不会删除该文件；重装后重新授予所有文件访问权限即可读取。未授权或写入失败时暂存应用目录。</text>
-            <view v-if="stats.storagePath != ''" class="detail-primary" :style="'background-color:' + theme.skin.accentSoft + ';'" @click="openPermissions">
+            <view v-if="stats.storagePath != ''" class="detail-primary" :style="'background-color:' + theme.skin.accentSoft + ';' + (layout.isTv ? 'min-height:56px;' : '')" :data-qt-tv-id="layout.isTv ? 'listen-permissions' : ''" @click="openPermissions">
               <text class="detail-settings-label" :style="accentStyle">前往权限设置</text>
               <QtIcon name="chevron-right" :size="layout.isWide ? 18 : 28" :color="theme.skin.accent" />
             </view>
@@ -52,18 +52,18 @@
                 <text class="detail-copy" :style="mutedStyle">歌手：{{ selected!.subtitle || '未知歌手' }}</text>
                 <text class="detail-copy" :style="mutedStyle">专辑：{{ selected!.song!.album || '暂无专辑信息' }}</text>
                 <text class="detail-copy" :style="mutedStyle">音源：{{ sourceLabel(selected!.platform) }}</text>
-                <view class="detail-primary" :style="'background-color:' + theme.skin.accentSoft + ';'" @click="playEntry(selected!)">
+                <view class="detail-primary" :class="layout.isTv && loadingKey != '' ? 'qt-tv-skip' : ''" :style="'background-color:' + theme.skin.accentSoft + ';' + (layout.isTv ? 'min-height:56px;' : '')" :data-qt-tv-id="layout.isTv ? 'listen-selected-play' : ''" @click="playEntry(selected!)">
                   <QtIcon name="play" :size="layout.isWide ? 18 : 28" :color="theme.skin.accent" />
                   <text class="detail-play-label" :style="accentStyle">{{ loadingKey == selected!.id ? '正在获取播放地址' : '播放这首歌' }}</text>
                 </view>
               </template>
             </template>
-            <view v-if="target == '' || kind != 'songs'" class="detail-list-head">
-              <text class="detail-section detail-list-title" :style="textStyle(26, 15)">{{ target == '' ? '全部排行' : '听过的歌曲' }} · {{ rows.length }}</text>
-              <view class="detail-sort"><QtSegmented :list="['次数', '时长']" :model-value="order == 'count' ? 0 : 1" @change="onOrderChange" /></view>
+            <view v-if="target == '' || kind != 'songs'" class="detail-list-head" :style="layout.isTv ? 'flex-direction:column;align-items:stretch;' : ''">
+              <text class="detail-section detail-list-title" :style="textStyle(26, 15) + (layout.isTv ? 'flex:0;flex-shrink:0;' : '')">{{ target == '' ? '全部排行' : '听过的歌曲' }} · {{ rows.length }}</text>
+              <view class="detail-sort" :style="layout.isTv ? 'width:auto;align-self:flex-end;margin-left:0px;margin-top:8px;' : ''"><QtSegmented :list="['次数', '时长']" :model-value="order == 'count' ? 0 : 1" @change="onOrderChange" /></view>
             </view>
             <template v-if="target == '' || kind != 'songs'">
-              <view v-for="(entry, index) in visibleRows" :key="entry.id" class="detail-row" :style="rowStyle" @click="openEntry(entry)">
+              <view v-for="(entry, index) in visibleRows" :key="entry.id" :id="rowAnchor(rowsKind, entry.id)" class="detail-row" :style="rowStyle" :data-qt-tv-id="layout.isTv ? 'listen-row:' + rowsKind + ':' + entry.id : ''" @click="openEntry(entry)">
                 <text class="detail-rank" :style="textStyle(24, 14)">{{ index + 1 }}</text>
                 <image v-if="rowPicture(entry) != ''" class="detail-row-cover" :style="rowCoverStyle" :src="rowPicture(entry)" mode="aspectFill" @error="failedImages.push(rowPicture(entry))" />
                 <view v-else class="detail-row-cover detail-placeholder" :style="rowCoverStyle + 'background-color:' + theme.skin.accentSoft + ';'">
@@ -74,13 +74,13 @@
                   <text class="detail-row-sub" :style="rowSubStyle" :max-lines="1">{{ rowsKind == 'songs' ? entry.subtitle + ' · ' + sourceLabel(entry.platform) : entry.tracks + ' 首歌曲' }}</text>
                   <text class="detail-row-sub" :style="rowSubStyle">{{ entry.count }} 次 · {{ reportDuration(entry.seconds) }}</text>
                 </view>
-                <view v-if="rowsKind == 'songs'" class="detail-icon-button detail-row-icon" @click.stop="playEntry(entry)">
+                <view v-if="rowsKind == 'songs'" class="detail-icon-button detail-row-icon" :class="layout.isTv && loadingKey != '' ? 'qt-tv-skip' : ''" :style="controlStyle" :data-qt-tv-id="layout.isTv ? 'listen-play:' + entry.id : ''" @click.stop="playEntry(entry)">
                   <QtIcon :name="loadingKey == entry.id ? 'loader' : 'play'" :size="layout.isWide ? 20 : 26" :color="theme.skin.accent" />
                 </view>
                 <QtIcon v-else name="chevron-right" :size="layout.isWide ? 16 : 26" :color="theme.skin.textSubtle" />
               </view>
               <text v-if="rows.length == 0" class="detail-copy" :style="mutedStyle">暂时没有播放记录</text>
-              <view v-if="visibleRows.length < rows.length" class="detail-more" @click="limit += 50"><text :style="accentStyle">加载更多（已显示 {{ visibleRows.length }} / {{ rows.length }}）</text></view>
+              <view v-if="visibleRows.length < rows.length" class="detail-more" :style="layout.isTv ? 'min-height:56px;' : ''" :data-qt-tv-id="layout.isTv ? 'listen-more' : ''" @click="limit += 50"><text :style="accentStyle">加载更多（已显示 {{ visibleRows.length }} / {{ rows.length }}）</text></view>
             </template>
             <text v-if="target != '' && selected == null" class="detail-copy" :style="mutedStyle">这条统计记录已清除</text>
           </template>
@@ -91,12 +91,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref, watch, nextTick, onUnmounted } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { useQtTvModal } from "@/uni_modules/qt-ui/composables/use-qt-tv-modal";
+import { qtTvFocus } from "@/uni_modules/qt-ui/composables/use-qt-tv";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useListenStatsStore } from "@/stores/listen-stats";
 import { useSourceRegistryStore } from "@/stores/source-registry";
 import { reportEntries, reportTracks, reportDuration, reportSourceIcon } from "@/services/listen-report";
@@ -106,12 +109,17 @@ import type { Song } from "@/types/music";
 const props = defineProps<{ kind: string; target: string; loadingKey: string }>();
 const emit = defineEmits<{ close: []; play: [song: Song] }>();
 const layout = useQtLayout();
+const panelRef = ref<UniElement | null>(null);
+useQtTvModal(panelRef, (): boolean => true, onTvBack, 1000);
 const theme = useThemeStore();
 const stats = useListenStatsStore();
 const registry = useSourceRegistryStore();
 const kind = ref(props.kind);
 const target = ref(props.target);
-const trail = ref<{ kind: string; target: string }[]>([]);
+const trail = ref<{ kind: string; target: string; focus: string; order: string; limit: number }[]>([]);
+const returnAnchor = ref("");
+let returnGeneration = 0;
+let returnTimer = 0;
 const order = ref("count");
 const limit = ref(50);
 const failedImages = ref<string[]>([]);
@@ -130,18 +138,20 @@ const playShare = computed((): string => {
   return total > 0 && selected.value != null ? (selected.value!.count * 100 / total).toFixed(1) : "0";
 });
 const panelStyle = computed((): string => {
-  const height = Math.round(layout.windowHeight * (layout.isWide ? 1 : 0.88));
+  if (layout.isTv) return "width:" + qtSheetWidth("drawer") + "px;height:" + layout.paneHeight + "px;padding-bottom:0px;border-radius:0;background-color:" + theme.skin.sheetSurface + ";";
+  const height = Math.round(layout.paneHeight * (layout.isWide ? 1 : 0.88));
   return "height:" + height + "px;background-color:" + theme.skin.sheetSurface + ";" +
-    (layout.isWide ? "width:" + Math.min(560, Math.round(layout.windowWidth * 0.75)) + "px;border-radius:0;" : "width:" + layout.windowWidth + "px;border-radius:24px 24px 0 0;");
+    (layout.isWide ? "width:" + Math.min(560, Math.round(layout.paneWidth * 0.75)) + "px;border-radius:0;" : "width:" + layout.paneWidth + "px;border-radius:24px 24px 0 0;");
 });
 const contentStyle = computed((): string => "padding:" + (layout.isWide ? "12px 24px 28px" : "16px 12px 28px") + ";");
-const rowStyle = computed((): string => "padding:" + (layout.isWide ? "12px 0" : "11px 0") + ";border-color:" + theme.skin.divider + ";");
+const controlStyle = computed((): string => layout.isTv ? "width:56px;height:56px;" : "");
+const rowStyle = computed((): string => "padding:" + (layout.isWide ? "12px 0" : "11px 0") + ";border-color:" + theme.skin.divider + ";" + (layout.isTv ? "min-height:" + Math.max(76, Math.round(qtFontValuePx(15) * 1.4) + Math.round(qtFontValuePx(13) * 1.4) * 2 + 31) + "px;" : ""));
 const rowCoverStyle = computed((): string => "width:34px;height:34px;border-radius:" + (rowsKind.value == "artists" ? 17 : 7) + "px;");
 const largeCoverStyle = computed((): string => "width:68px;height:68px;border-radius:" + (kind.value == "artists" ? 34 : 14) + "px;");
-const mutedStyle = computed(() => "color:" + theme.skin.textMuted + ";" + qtFontDual(22, 13));
+const mutedStyle = computed(() => "color:" + theme.skin.textMuted + ";" + qtFontDual(22, 13) + tvLine(13));
 /** 列表副行：比正文说明再小一档，三行并排时才不会挤 */
-const rowSubStyle = computed(() => "color:" + theme.skin.textMuted + ";" + qtFontDual(19, 13));
-const accentStyle = computed(() => "color:" + theme.skin.accent + ";" + qtFontDual(24, 14));
+const rowSubStyle = computed(() => "color:" + theme.skin.textMuted + ";" + qtFontDual(19, 13) + tvLine(13));
+const accentStyle = computed(() => "color:" + theme.skin.accent + ";" + qtFontDual(24, 14) + tvLine(14));
 const storageLabel = computed((): string => {
   if (stats.publicSaved) return "已保存到公共目录";
   if (stats.storagePath == "") {
@@ -155,7 +165,8 @@ const storageLabel = computed((): string => {
   return "暂存应用目录，请检查所有文件访问权限";
 });
 watch(() => target.value, () => { limit.value = 50; order.value = "count"; });
-function textStyle(compact: number, wide: number): string { return "color:" + theme.skin.text + ";" + qtFontDual(compact, wide); }
+function tvLine(base: number): string { return layout.isTv ? "line-height:" + Math.round(qtFontValuePx(base) * 1.4) + "px;" : ""; }
+function textStyle(compact: number, wide: number): string { return "color:" + theme.skin.text + ";" + qtFontDual(compact, wide) + tvLine(wide); }
 function sourceLabel(id: string): string { return registry.label(id) || id.toUpperCase(); }
 function entryName(entry: ReportEntry): string { return kind.value == "sources" ? sourceLabel(entry.id) : entry.name; }
 function rowName(entry: ReportEntry): string { return rowsKind.value == "sources" ? sourceLabel(entry.id) : entry.name; }
@@ -165,14 +176,43 @@ function rawPicture(entry: ReportEntry, category: string): string {
 function picture(entry: ReportEntry): string { const url = rawPicture(entry, kind.value); return failedImages.value.includes(url) ? "" : url; }
 function rowPicture(entry: ReportEntry): string { const url = rawPicture(entry, rowsKind.value); return failedImages.value.includes(url) ? "" : url; }
 function imageFailed(entry: ReportEntry): void { failedImages.value.push(rawPicture(entry, kind.value)); }
-function close(): void { emit("close"); }
+function rowAnchor(category: string, id: string): string { return "qt-listen-row-" + encodeURIComponent(category + ":" + id); }
+function cancelReturn(): void {
+  returnGeneration++;
+  if (returnTimer != 0) { clearTimeout(returnTimer); returnTimer = 0; }
+  returnAnchor.value = "";
+}
+onUnmounted(cancelReturn);
+function close(): void { cancelReturn(); emit("close"); }
+function onTvBack(): void { if (target.value.length > 0) back(); else close(); }
 function back(): void {
+  cancelReturn();
   const previous = trail.value.pop();
-  if (previous != null) { kind.value = previous.kind; target.value = previous.target; }
+  if (previous != null) {
+    kind.value = previous.kind; target.value = previous.target;
+    const generation = returnGeneration;
+    if (previous.focus.length > 0) nextTick((): void => {
+      if (!layout.isTv || generation != returnGeneration || panelRef.value == null) return;
+      // The normal target watcher resets the report; restore only the TV trail afterwards.
+      order.value = previous.order; limit.value = previous.limit;
+      const entry = rows.value.find((row) => "listen-row:" + rowsKind.value + ":" + row.id == previous.focus);
+      if (entry == null) return;
+      returnAnchor.value = rowAnchor(rowsKind.value, entry.id);
+      nextTick((): void => {
+        if (generation != returnGeneration) return;
+        // Let native scroll-into-view reveal the returning row before collecting clipped candidates.
+        returnTimer = setTimeout((): void => {
+          returnTimer = 0;
+          if (layout.isTv && generation == returnGeneration && panelRef.value != null && kind.value == previous.kind && target.value == previous.target) qtTvFocus(previous.focus);
+        }, 32) as number;
+      });
+    });
+  }
   else target.value = "";
 }
 function openEntry(entry: ReportEntry): void {
-  trail.value.push({ kind: kind.value, target: target.value });
+  cancelReturn();
+  trail.value.push({ kind: kind.value, target: target.value, focus: layout.isTv ? "listen-row:" + rowsKind.value + ":" + entry.id : "", order: order.value, limit: limit.value });
   kind.value = rowsKind.value;
   target.value = entry.id;
   if (kind.value == "artists") {

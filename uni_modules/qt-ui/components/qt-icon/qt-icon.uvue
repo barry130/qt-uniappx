@@ -7,6 +7,7 @@
   调用方在 isWide 分支传入的值本来就按 px 预期。注意 rpx 并不封顶 ——
   uni-app x 不支持 pages.json 的 rpxCalcMaxDeviceWidth（该键 schema 里标了不支持），
   1rpx 恒等于 windowWidth/750，所以 720dp 窗口里 48rpx 是 46dp 而不是 24dp。
+  接口单位不变，渲染前用共享窗口换算成 px，避免已挂载图标在缩窗后保留旧 rpx 比例。
 -->
 <template>
   <image
@@ -19,8 +20,9 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
-import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { iconSrc } from "@/uni_modules/qt-ui/services/icons";
+import { QT_TV_TOKENS } from "@/uni_modules/qt-ui/composables/qt-tv-tokens";
 
 const props = defineProps<{
   name: string;
@@ -36,8 +38,9 @@ const weight = computed((): number => (props.strokeWidth != null ? props.strokeW
 
 const src = computed((): string => iconSrc(props.name, tint.value, weight.value));
 const sizeStyle = computed((): string => {
-  const unit = layout.isWide ? "px" : "rpx";
-  return "width:" + px.value + unit + ";height:" + px.value + unit + ";";
+  const size = layout.isTv ? Math.max(QT_TV_TOKENS.iconPx, Math.round(px.value * QT_TV_TOKENS.fontMultiplier * 100) / 100)
+    : layout.isWide ? px.value : qtRpx(px.value);
+  return "width:" + size + "px;height:" + size + "px;";
 });
 </script>
 

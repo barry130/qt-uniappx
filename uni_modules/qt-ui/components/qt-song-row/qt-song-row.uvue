@@ -2,14 +2,15 @@
   <view
     class="row"
     :class="layout.isWide ? 'row-wide' : ''"
-    :style="'background-color:' + themeStore.skin.surface + ';'"
+    :data-qt-tv-id="rowTvId"
+    :style="'background-color:' + themeStore.skin.surface + ';' + qtTvSongRowStyle() + (layout.isTv ? 'padding:0 28px;' : '')"
     :hover-class="layout.isWide ? 'row-hover' : 'none'"
     @click="emit('play')"
     @longpress="onLongPress"
   >
     <view class="cover-wrap" :class="layout.isWide ? 'cover-wrap-wide' : ''">
       <image class="cover" :class="layout.isWide ? 'cover-wide' : ''" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
-      <view v-if="selecting || selected" class="select-mark">
+      <view v-if="selecting || selected" class="select-mark" :style="layout.isTv ? 'width:56px;height:56px;' : ''">
         <QtCheckbox :checked="selected == true" :size="layout.isWide ? 'sm' : 'md'" @change="onCheckChange" />
       </view>
     </view>
@@ -18,23 +19,23 @@
       <view class="name-row">
         <text
           class="name" :class="layout.isWide ? 'name-wide' : ''"
-          :style="('color:' + (disliked ? themeStore.skin.textMuted : themeStore.skin.text) + ';') + qtFontDual(29, 17)"
+          :style="('color:' + (disliked ? themeStore.skin.textMuted : themeStore.skin.text) + ';') + qtFontDual(29, 17) + qtTvSongLineStyle(17)"
           :max-lines="1"
           >{{ song.name }}</text
         >
-        <view v-if="showBadge" class="pbadge" :class="layout.isWide ? 'pbadge-wide' : ''" :style="('color:' + badgeColor + ';border-color:' + badgeColor + ';')"
-          ><text class="pbadge-text" :class="layout.isWide ? 'pbadge-text-wide' : ''" :style="('color:' + badgeColor + ';') + qtFontDual(19, 11)">{{ shortName(song.platform) }}</text></view
+        <view v-if="showBadge" class="pbadge" :class="layout.isWide ? 'pbadge-wide' : ''" :style="('color:' + badgeColor + ';border-color:' + badgeColor + ';') + (layout.isTv ? 'height:32px;padding:0 6px;justify-content:center;' : '')"
+          ><text class="pbadge-text" :class="layout.isWide ? 'pbadge-text-wide' : ''" :style="('color:' + badgeColor + ';') + qtFontDual(19, 11) + qtTvSongLineStyle(11)">{{ shortName(song.platform) }}</text></view
         >
       </view>
       <text
         class="meta" :class="layout.isWide ? 'meta-wide' : ''"
-        :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 14)"
+        :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 14) + qtTvSongLineStyle(14) + (layout.isTv ? 'margin-top:2px;' : '')"
         :max-lines="1"
         >{{ song.singer }} - {{ song.album }}</text
       >
     </view>
     <view v-if="!selecting" class="actions" :class="layout.isWide ? 'actions-wide' : ''">
-      <view class="act-hit act-hit-heart" :class="layout.isWide ? 'act-hit-wide act-hit-heart-wide' : ''" @click.stop="toggleLike">
+      <view class="act-hit act-hit-heart" :class="layout.isWide ? 'act-hit-wide act-hit-heart-wide' : ''" :data-qt-tv-id="rowTvId + ':pick'" :style="actionStyle" @click.stop="toggleLike">
         <QtIcon
           class="act-heart"
           :name="liked ? 'heart-fill' : 'heart'"
@@ -42,7 +43,7 @@
           :color="liked ? themeStore.skin.accent : themeStore.skin.iconMuted"
         />
       </view>
-      <view class="act-hit" :class="layout.isWide ? 'act-hit-wide' : ''" @click.stop="openSheet">
+      <view class="act-hit" :class="layout.isWide ? 'act-hit-wide' : ''" :data-qt-tv-id="rowTvId + ':more'" :style="actionStyle" @click.stop="openSheet">
         <QtIcon
           name="more"
           :size="36"
@@ -66,11 +67,14 @@ import { qtShowActionSheet } from "@/services/action-sheet";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtCheckbox from "@/uni_modules/qt-ui/components/qt-checkbox/qt-checkbox.uvue";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtTvSongRowStyle, qtTvSongLineStyle } from "@/uni_modules/qt-ui/composables/qt-song-row-metrics";
 
 const props = defineProps<{
   song: Song;
   showBadge?: boolean;
   inHistory?: boolean;
+  /** Stable list occurrence key, separate from the song's playback identity. */
+  tvId?: string;
   selected?: boolean;
   /** 宿主处于多选态：屏蔽长按/三点菜单，避免与勾选操作冲突 */
   selecting?: boolean;
@@ -84,6 +88,8 @@ const downloads = useDownloadsStore();
 const dislikes = useDislikesStore();
 const themeStore = useThemeStore();
 const layout = useQtLayout();
+const rowTvId = computed((): string => props.tvId != null ? props.tvId : props.song.platform + ":" + props.song.id);
+const actionStyle = computed((): string => layout.isTv ? "width:56px;height:56px;margin-left:8px;" : "");
 const liked = computed(() => player.isLiked(props.song));
 const downloaded = computed(() => downloads.has(props.song));
 // 不喜欢列表：命中任何规则（歌或歌手）→ 行置灰提示

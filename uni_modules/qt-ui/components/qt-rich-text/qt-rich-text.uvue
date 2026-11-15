@@ -12,20 +12,20 @@
       <image
         v-else-if="b.kind == 'img'"
         class="qrt-img"
-        :class="layout.isWide ? 'qrt-img-wide' : ''"
+        :class="[layout.isWide ? 'qrt-img-wide' : '', layout.isTv && b.href.length == 0 ? 'qt-tv-skip' : '']"
         :src="b.src"
         mode="widthFix"
         @click="onTap(b.href)"
       />
       <!-- 列表项 -->
-      <view v-else-if="b.kind == 'li'" class="qrt-li" :class="layout.isWide ? 'qrt-li-wide' : ''" @click="onTap(blockHref(b))">
+      <view v-else-if="b.kind == 'li'" class="qrt-li" :class="[layout.isWide ? 'qrt-li-wide' : '', layout.isTv && blockHref(b).length == 0 ? 'qt-tv-skip' : '']" @click="onTap(blockHref(b))">
         <view class="qrt-dot" :class="layout.isWide ? 'qrt-dot-wide' : ''" :style="dotStyle()"></view>
         <text class="qrt-li-text" :style="liStyle(b)">
           <text v-for="(r, ri) in b.runs" :key="ri" :style="runStyle(r, b)">{{ r.text }}</text>
         </text>
       </view>
       <!-- 段落 / 标题 -->
-      <text v-else :style="paraStyle(b)" @click="onTap(blockHref(b))">
+      <text v-else :class="layout.isTv && blockHref(b).length == 0 ? 'qt-tv-skip' : ''" :style="paraStyle(b)" @click="onTap(blockHref(b))">
         <text v-for="(r, ri) in b.runs" :key="ri" :style="runStyle(r, b)">{{ r.text }}</text>
       </text>
     </view>
@@ -38,7 +38,7 @@ import { parseRichText } from "@/services/richtext";
 import type { RichBlock, RichRun } from "@/services/richtext";
 import { openNoticeUrl } from "@/services/notice";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
-import { useFontScaleStore } from "@/uni_modules/qt-ui/stores/font-scale";
+import { useFontScaleStore, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const layout = useQtLayout();
 /** 全局字号倍率：富文本字号在 JS 侧算，模板无内联位置，只能在这里乘 */
@@ -90,6 +90,7 @@ function lineHeightRpx(size: number): number {
  * 都派生自本函数，跟着一起缩放，块高不会因放大而错位。
  */
 function scaledSize(size: number): number {
+  if (layout.isTv) return qtFontValuePx(size / 2);
   const scaled = layout.isWide ? Math.max(11, Math.round(size * 0.7)) : size;
   return Math.round(scaled * fontScale.scale * 100) / 100;
 }
@@ -228,7 +229,12 @@ function runStyle(r: RichRun, b: RichBlock): string {
   // 片段自带字号必须走 authorRpx + scaledSize：原样把作者的 px 上屏会盖掉
   // 段落容器算好的 rpx 字号（run 在容器内部，内联样式优先级更高），
   // 结果就是 h2/h3 的 20px/16px 压过正文 26rpx，层级翻过来。
-  if (r.fontSize.length > 0) {
+  if (layout.isTv) {
+    const runSize = authorRpx(r.fontSize, baseSize.value);
+    const blockSize = blockAuthorRpx(b, baseSize.value);
+    const size = runSize > 0 ? runSize : blockSize > 0 ? blockSize : baseSize.value + (b.kind == "h" ? headingDelta(b.level) : 0);
+    s += "font-size:" + scaledSize(size) + "px;line-height:" + scaledLine(size) + "px;";
+  } else if (r.fontSize.length > 0) {
     const authored = authorRpx(r.fontSize, baseSize.value);
     if (authored > 0) s += "font-size:" + scaledSize(authored) + (layout.isWide ? "px;" : "rpx;");
   }

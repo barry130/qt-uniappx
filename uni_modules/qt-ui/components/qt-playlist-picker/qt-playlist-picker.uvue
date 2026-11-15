@@ -1,18 +1,18 @@
 <template>
   <QtSheet :visible="visible" :title="title" :subtitle="subtitle" @update:visible="onVisibleChange">
-    <view class="picker-create" :class="layout.isWide ? 'picker-create-wide' : ''" :style="'border-bottom-color:' + theme.skin.divider + ';'">
+    <view class="picker-create" :class="layout.isWide ? 'picker-create-wide' : ''" :style="'border-bottom-color:' + theme.skin.divider + ';' + (layout.isTv ? 'padding-top:6px;padding-bottom:6px;' : '')">
       <view class="picker-create-row">
-        <input class="picker-new-input" :class="layout.isWide ? 'picker-new-input-wide' : ''" :style="'color:' + theme.skin.text + ';background-color:' + theme.skin.surfaceMuted + ';' + qtFontDual(28, 14)" type="text" :value="newName" @input="onNameInput" @confirm="submitCreate" confirm-type="done" placeholder="输入新歌单名称" :maxlength="20" />
-        <QtButton label="新建" icon="folder" variant="secondary" size="sm" :disabled="newName.trim().length == 0" @click="submitCreate" />
+        <input class="picker-new-input" :class="layout.isWide ? 'picker-new-input-wide' : ''" data-qt-tv-id="playlist-picker-name" :style="'color:' + theme.skin.text + ';background-color:' + theme.skin.surfaceMuted + ';' + qtFontDual(28, 14) + (layout.isTv ? 'height:56px;line-height:' + Math.ceil(qtFontValuePx(14) * 1.35) + 'px;' : '')" type="text" :value="newName" @input="onNameInput" @confirm="submitCreate" confirm-type="done" placeholder="输入新歌单名称" :maxlength="20" />
+        <QtButton data-qt-tv-id="playlist-picker-create" label="新建" icon="folder" variant="secondary" size="sm" :disabled="newName.trim().length == 0" @click="submitCreate" />
       </view>
       <text v-if="createError.length > 0" class="picker-error" :class="layout.isWide ? 'picker-error-wide' : ''" :style="'color:' + selectionColor + ';' + qtFontDual(23, 12)">{{ createError }}</text>
     </view>
     <view v-if="playlists.length == 0" class="picker-empty" :class="layout.isWide ? 'picker-empty-wide' : ''">
       <text :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(26, 14)">还没有歌单，在上方新建一个</text>
     </view>
-    <scroll-view v-else class="picker-list" direction="vertical" :style="listStyle" :scroll-into-view="revealAnchor" :show-scrollbar="false">
+    <scroll-view v-else class="picker-list" :class="layout.isTv ? 'qt-tv-scroll' : ''" data-qt-tv-id="playlist-picker-list" direction="vertical" :style="listStyle" :scroll-into-view="revealAnchor" :show-scrollbar="false">
       <view v-for="(playlist, index) in playlists" :key="playlist.id" :id="itemId(index)">
-        <QtOption :label="playlist.name" kind="row" :selected="isSelected(playlist.id)" @select="togglePlaylist(playlist)">
+        <QtOption :data-qt-tv-id="'playlist-picker-item:' + playlist.id" :label="playlist.name" kind="row" :selected="isSelected(playlist.id)" @select="togglePlaylist(playlist)">
           <template #leading>
             <image v-if="playlist.picUrl && !failedCovers.has(playlist.id)" class="picker-cover" :class="layout.isWide ? 'picker-cover-wide' : ''" :src="playlist.picUrl" mode="aspectFill" @error="onCoverError(playlist.id)" />
             <view v-else class="picker-cover picker-placeholder" :class="layout.isWide ? 'picker-cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'">
@@ -21,20 +21,20 @@
           </template>
           <template #trailing>
             <view class="picker-check" :class="layout.isWide ? 'picker-check-wide' : ''">
-              <QtCheckbox :checked="isSelected(playlist.id)" indicator="check" @change="togglePlaylist(playlist)" />
+              <QtCheckbox :data-qt-tv-id="'playlist-picker-check:' + playlist.id" :checked="isSelected(playlist.id)" indicator="check" @change="togglePlaylist(playlist)" />
             </view>
           </template>
         </QtOption>
       </view>
     </scroll-view>
     <template #footer>
-      <view class="picker-footer" :class="layout.isWide ? 'picker-footer-wide' : ''">
+      <view class="picker-footer" :class="layout.isWide ? 'picker-footer-wide' : ''" :style="layout.isTv ? 'padding-top:6px;padding-bottom:6px;' : ''">
         <template v-if="batchMode">
-          <QtButton label="完成" variant="primary" size="sm" @click="close" />
+          <QtButton data-qt-tv-id="playlist-picker-done" label="完成" variant="primary" size="sm" @click="close" />
         </template>
         <template v-else>
-          <view class="picker-button"><QtButton label="取消" variant="outline" size="sm" @click="close" /></view>
-          <QtButton label="确定" variant="primary" size="sm" @click="confirm" />
+          <view class="picker-button"><QtButton data-qt-tv-id="playlist-picker-cancel" label="取消" variant="outline" size="sm" @click="close" /></view>
+          <QtButton data-qt-tv-id="playlist-picker-confirm" label="确定" variant="primary" size="sm" @click="confirm" />
         </template>
       </view>
     </template>
@@ -48,10 +48,12 @@ import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import QtCheckbox from "@/uni_modules/qt-ui/components/qt-checkbox/qt-checkbox.uvue";
 import { qtSelectionColor } from "@/uni_modules/qt-ui/composables/selection";
 import type { Playlist } from "@/types/music";
-import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtSelectionReveal } from "@/uni_modules/qt-ui/composables/use-qt-selection-reveal";
+import { qtTvSheetBodyHeightPx, qtSheetTextLinesPx } from "@/uni_modules/qt-ui/composables/qt-sheet-metrics";
+import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 const props = withDefaults(defineProps<{
   visible: boolean;
   song: any;
@@ -109,9 +111,16 @@ const { anchor: revealAnchor, itemId } = useQtSelectionReveal(
 );
 const listStyle = computed((): string => {
   // 原生 scroll-view 使用有界高度；大字号下仍给 header/footer 留出空间。
+  if (layout.isTv) {
+    const error = createError.value.length > 0
+      ? qtSheetTextLinesPx(createError.value, qtFontValuePx(12), qtSheetWidth("drawer") - 40) * Math.ceil(qtFontValuePx(12) * 1.4) + 6 : 0;
+    const available = qtTvSheetBodyHeightPx({ title: props.title, subtitle: props.subtitle,
+      fixedBodyPx: 56 + 12 + 1 + error, footerPx: 56 + 12 });
+    return "height:" + Math.min(300, props.playlists.length * 77, available) + "px;";
+  }
   const rowHeight = (layout.isWide ? 64 : qtRpx(128)) * fontScale.scale;
   const preferred = Math.min(layout.isWide ? 300 : qtRpx(600), props.playlists.length * rowHeight);
-  const available = Math.max(0, layout.windowHeight * 0.86 - layout.safeBottomPx - (layout.isWide ? 240 : qtRpx(420)) * fontScale.scale);
+  const available = Math.max(0, layout.paneHeight * 0.86 - layout.safeBottomPx - (layout.isWide ? 240 : qtRpx(420)) * fontScale.scale);
   return "height:" + Math.min(preferred, available) + "px;";
 });
 function togglePlaylist(playlist: Playlist): void {

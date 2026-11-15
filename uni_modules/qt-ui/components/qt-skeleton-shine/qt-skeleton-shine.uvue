@@ -57,6 +57,8 @@ const wrapRef = ref<UniElement | null>(null);
 const trackRef = ref<UniElement | null>(null);
 let anim: UniAnimation | null = null;
 let retryTimer: number = 0;
+let disposed = false;
+let sweepGeneration = 0;
 // 宽度测量重试额度。本组件是 <script setup>，这里属于每实例作用域：
 // 每次挂载都是新的一份 4，不会跨实例耗尽（不要挪到模块级）。
 let retryLeft = 4;
@@ -101,7 +103,8 @@ const trackStyle = computed((): string => {
  * 所以这里按几何算出「完全离开左右边界」的精确位移，既不会提前露出，
  * 也不会在两端空转一段看不到光的时间。
  */
-function startSweep(): void {
+function startSweep(token: number): void {
+  if (disposed || !props.visible || token != sweepGeneration) return;
   const track = trackRef.value;
   const wrap = wrapRef.value;
   if (track == null || wrap == null || anim != null) return;
@@ -119,7 +122,9 @@ function startSweep(): void {
     if (retryLeft > 0) {
       retryLeft = retryLeft - 1;
       retryTimer = setTimeout(() => {
-        startSweep();
+        if (disposed || token != sweepGeneration) return;
+        retryTimer = 0;
+        startSweep(token);
       }, 120) as number;
     }
     return;
@@ -165,6 +170,7 @@ function startSweep(): void {
 }
 
 function stopSweep(): void {
+  sweepGeneration++;
   if (retryTimer != 0) {
     clearTimeout(retryTimer);
     retryTimer = 0;
@@ -179,34 +185,24 @@ function stopSweep(): void {
   anim = null;
 }
 
-onMounted(() => {
-  // 等元素挂载完成后启动原生扫光。挂载即隐藏（visible 为 false）时不启动：
-  // 看不见的光带也在原生动画线程上空转，等 visible 变 true 再起
-  if (props.visible) {
-    nextTick(() => {
-      startSweep();
-    });
-  }
-});
+function scheduleSweep(): void {
+  stopSweep();
+  if (disposed || !props.visible) return;
+  retryLeft = 4;
+  const token = sweepGeneration;
+  nextTick(() => startSweep(token));
+}
+
+onMounted(scheduleSweep);
 
 // visible 由父组件控制（骨架淡出淡入期间父组件往往只改 class 不卸载本节点），
 // 所以扫光的启停必须跟着 visible 走：隐藏时 cancel 原生动画，重新可见时再起。
 // 没有这个 watch 的话，iterations:Infinity 的动画只在卸载时才停，
 // 「加载完 → 骨架淡出但节点还在」的页面上光带会一直空转。
-watch(
-  () => props.visible,
-  (on) => {
-    if (on) {
-      nextTick(() => {
-        startSweep();
-      });
-    } else {
-      stopSweep();
-    }
-  }
-);
+watch(() => props.visible, scheduleSweep);
 
 onBeforeUnmount(() => {
+  disposed = true;
   stopSweep();
 });
 </script>

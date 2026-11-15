@@ -3,32 +3,33 @@
        对齐 qt-pc 的 embedded BatchBar：批量操作属于页头封面块，列表顶不另占行；
        操作要么全收进左栏、要么全留在列表顶，不混搭（m01246）。自然高度，宿主不必定高。 -->
   <view v-if="column" class="qt-batch-bar-col">
-    <view class="qt-batch-bar-col-head" @click="onToggle">
-      <QtCheckbox :checked="allSelected" size="md" @change="onToggle" />
+    <view class="qt-batch-bar-col-head" data-qt-tv-id="batch-toggle" :style="layout.isTv ? 'height:56px;' : ''" @click="onToggle">
+      <QtCheckbox :class="layout.isTv ? 'qt-tv-skip' : ''" :checked="allSelected" size="md" @change="onToggle" />
       <text class="qt-batch-bar-col-label" :style="colLabelStyle" :max-lines="1">{{ label }}</text>
     </view>
     <view class="qt-batch-bar-col-btns">
-      <view class="qt-batch-bar-col-btn" :class="enabled ? '' : 'qt-batch-bar-col-btn-off'" :style="colSoftStyle" @click="onDownload">
+      <view class="qt-batch-bar-col-btn" :class="enabled ? '' : 'qt-batch-bar-col-btn-off qt-tv-skip'" data-qt-tv-id="batch-download" :style="colSoftStyle" @click="onDownload">
         <text class="qt-batch-bar-col-btn-text" :style="colSoftTextStyle" :max-lines="1">下载</text>
       </view>
-      <view class="qt-batch-bar-col-btn qt-batch-bar-col-gap" :class="enabled ? '' : 'qt-batch-bar-col-btn-off'" :style="colSoftStyle" @click="onCollect">
+      <view class="qt-batch-bar-col-btn qt-batch-bar-col-gap" :class="enabled ? '' : 'qt-batch-bar-col-btn-off qt-tv-skip'" data-qt-tv-id="batch-collect" :style="colSoftStyle" @click="onCollect">
         <text class="qt-batch-bar-col-btn-text" :style="colSoftTextStyle" :max-lines="1">收藏</text>
       </view>
-      <view class="qt-batch-bar-col-btn qt-batch-bar-col-gap" :style="colGhostStyle" @click="onCancel">
+      <view class="qt-batch-bar-col-btn qt-batch-bar-col-gap" data-qt-tv-id="batch-cancel" :style="colGhostStyle" @click="onCancel">
         <text class="qt-batch-bar-col-btn-text" :style="colGhostTextStyle" :max-lines="1">取消</text>
       </view>
     </view>
   </view>
-  <view v-else class="qt-batch-bar" :class="sizeClass">
+  <view v-else class="qt-batch-bar" :class="sizeClass" :style="layout.isTv ? 'height:76px;' : ''">
     <!-- 勾选框与文案同属一个命中区：只点勾选框本体太窄（44rpx），
          宿主行高本来就有 96rpx，整块都能点才符合手指习惯。
          qt-checkbox 内部 `@click.stop`，所以它的点击不会冒到本层，
          两个处理器各自绑一次、不会双触发。 -->
-    <view class="qt-batch-bar-check" :class="checkClass" @click="onToggle">
-      <QtCheckbox :checked="allSelected" size="md" @change="onToggle" />
+    <view class="qt-batch-bar-check" :class="[checkClass, layout.isTv ? 'qt-tv-skip' : '']" @click="onToggle">
+      <QtCheckbox data-qt-tv-id="batch-toggle" :checked="allSelected" size="md" @change="onToggle" />
     </view>
     <text
       class="qt-batch-bar-count"
+      :class="layout.isTv ? 'qt-tv-skip' : ''"
       :style="countStyle"
       :max-lines="1"
       @click="onToggle"
@@ -36,7 +37,8 @@
     >
     <view
       class="qt-batch-bar-btn"
-      :class="[btnClass, gapClass, enabled ? '' : 'qt-batch-bar-btn-off']"
+      :class="[btnClass, gapClass, enabled ? '' : 'qt-batch-bar-btn-off qt-tv-skip']"
+      data-qt-tv-id="batch-download"
       :style="softStyle"
       @click="onDownload"
     >
@@ -44,13 +46,14 @@
     </view>
     <view
       class="qt-batch-bar-btn"
-      :class="[btnClass, gapClass, enabled ? '' : 'qt-batch-bar-btn-off']"
+      :class="[btnClass, gapClass, enabled ? '' : 'qt-batch-bar-btn-off qt-tv-skip']"
+      data-qt-tv-id="batch-collect"
       :style="softStyle"
       @click="onCollect"
     >
       <text class="qt-batch-bar-btn-text" :class="btnTextClass" :style="softTextStyle" :max-lines="1">收藏</text>
     </view>
-    <view class="qt-batch-bar-btn" :class="[btnClass, gapClass]" :style="ghostStyle" @click="onCancel">
+    <view class="qt-batch-bar-btn" :class="[btnClass, gapClass]" data-qt-tv-id="batch-cancel" :style="ghostStyle" @click="onCancel">
       <text class="qt-batch-bar-btn-text" :class="btnTextClass" :style="ghostTextStyle" :max-lines="1">取消</text>
     </view>
   </view>
@@ -61,7 +64,7 @@ import { computed } from "vue";
 import QtCheckbox from "@/uni_modules/qt-ui/components/qt-checkbox/qt-checkbox.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
-import { qtFontDual, qtFontPx } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontPx, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 
 /**
  * 列表批量管理条（批量下载 / 批量收藏 / 全选 / 退出选择）。
@@ -138,44 +141,44 @@ const label = computed((): string => (props.count > 0 ? "已选 " + props.count 
 const countStyle = computed((): string => {
   const fs = size.value == "lg" ? 28 : 26;
   const fsw = size.value == "lg" ? 16 : 15;
-  return "color:" + theme.skin.text + ";" + qtFontDual(fs, fsw);
+  return "color:" + theme.skin.text + ";" + qtFontDual(fs, fsw) + (layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(fsw) * 1.35) + "px;" : "");
 });
 /** 主操作按钮：强调色弱化底 + 强调色文字（与 qt-button 的 secondary 同色，但高度贴宿主行） */
 const softStyle = computed((): string => {
-  return "background-color:" + theme.skin.accentSoft + ";border-color:transparent;";
+  return "background-color:" + theme.skin.accentSoft + ";border-color:transparent;" + (layout.isTv ? "height:56px;min-width:56px;padding:0 22px;border-radius:12px;" : "");
 });
 const softTextStyle = computed((): string => {
   const fs = size.value == "lg" ? 26 : 24;
   const fsw = size.value == "lg" ? 15 : 14;
-  return "color:" + theme.skin.accent + ";" + qtFontDual(fs, fsw);
+  return "color:" + theme.skin.accent + ";" + qtFontDual(fs, fsw) + (layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(fsw) * 1.35) + "px;" : "");
 });
 /** 取消是退出，不是主操作：透明底 + 描边，视觉权重最低 */
 const ghostStyle = computed((): string => {
-  return "background-color:transparent;border-color:" + theme.skin.border + ";";
+  return "background-color:transparent;border-color:" + theme.skin.border + ";" + (layout.isTv ? "height:56px;min-width:56px;padding:0 22px;border-radius:12px;" : "");
 });
 const ghostTextStyle = computed((): string => {
   const fs = size.value == "lg" ? 26 : 24;
   const fsw = size.value == "lg" ? 15 : 14;
-  return "color:" + theme.skin.textMuted + ";" + qtFontDual(fs, fsw);
+  return "color:" + theme.skin.textMuted + ";" + qtFontDual(fs, fsw) + (layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(fsw) * 1.35) + "px;" : "");
 });
 
 /** column 档（宽屏详情页左栏封面块）：竖排两行、自然高度，宿主不用定高。
  *  固定 px 规格，与左栏操作钮（40px 高、20px 圆角）一致，size prop 不参与。 */
 const column = computed((): boolean => props.layout == "column");
 const colLabelStyle = computed((): string => {
-  return "color:" + theme.skin.text + ";" + qtFontPx(14);
+  return "color:" + theme.skin.text + ";" + qtFontPx(14) + (layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(14) * 1.35) + "px;" : "");
 });
 const colSoftStyle = computed((): string => {
-  return "background-color:" + theme.skin.accentSoft + ";border-color:transparent;";
+  return "background-color:" + theme.skin.accentSoft + ";border-color:transparent;" + (layout.isTv ? "height:56px;border-radius:12px;" : "");
 });
 const colSoftTextStyle = computed((): string => {
-  return "color:" + theme.skin.accent + ";" + qtFontPx(13);
+  return "color:" + theme.skin.accent + ";" + qtFontPx(13) + (layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(13) * 1.35) + "px;" : "");
 });
 const colGhostStyle = computed((): string => {
-  return "background-color:transparent;border-color:" + theme.skin.border + ";";
+  return "background-color:transparent;border-color:" + theme.skin.border + ";" + (layout.isTv ? "height:56px;border-radius:12px;" : "");
 });
 const colGhostTextStyle = computed((): string => {
-  return "color:" + theme.skin.textMuted + ";" + qtFontPx(13);
+  return "color:" + theme.skin.textMuted + ";" + qtFontPx(13) + (layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(13) * 1.35) + "px;" : "");
 });
 
 function onToggle(): void {

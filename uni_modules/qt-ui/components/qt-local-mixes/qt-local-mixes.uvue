@@ -5,48 +5,49 @@
         <!-- kicker 配色跟随宿主：竖屏其他区块用 accent（.section-kicker 的取色），
              宽屏其他面板用弱化灰（.wide-kicker 的取色），否则这一块会在白卡群里跳出来 -->
         <text v-if="!layout.isWide" class="local-mixes-kicker" :style="('color:' + theme.skin.accent + ';') + qtFontDual(19, 11)">Local picks</text>
-        <text class="local-mixes-title" :class="layout.isWide ? 'local-mixes-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(34, 20)">为你整理</text>
+        <text class="local-mixes-title" :class="layout.isWide ? 'local-mixes-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(34, 20) + tvLine(20)">为你整理</text>
       </view>
-      <text class="local-mixes-hint" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(21, 13)">根据本机收听记录</text>
+      <text class="local-mixes-hint" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(21, 13) + tvLine(13)">根据本机收听记录</text>
     </view>
     <!-- 横滑架与首页「推荐歌单」同构：方形封面（四张竖切片按 2x2 拼贴）+ 两行标题 + 一行副标题，
          卡宽/间距/架高全部由宿主按同一套计算值传入（cardWidth / contentWidth），
          因此换成白色卡片容器后不会比旁边的区块宽出 26rpx，卡面尺寸也完全对齐。 -->
-    <scroll-view class="local-mixes-rail" direction="horizontal" :show-scrollbar="false" :style="'width:' + railWidth + 'px;height:' + railHeight + 'px;'">
+    <scroll-view class="local-mixes-rail" :class="layout.isTv ? 'qt-tv-scroll' : ''" data-qt-tv-id="local-mixes:shelf" direction="horizontal" :show-scrollbar="false" :style="'width:' + railWidth + 'px;height:' + railHeight + 'px;'">
       <view class="local-mixes-row" :style="'width:' + railContentWidth + 'px;'">
-        <view v-for="(mix, mixIndex) in mixes" :key="mix.key" class="local-mix-card" :style="'width:' + cardWidth + 'px;margin-right:' + cardGap + 'px;'" :hover-class="layout.isWide ? 'local-mix-card-hover' : 'none'" @click="openMix(mixIndex)">
+        <view v-for="(mix, mixIndex) in mixes" :key="mix.key" class="local-mix-card" :data-qt-tv-id="layout.isTv ? 'local-mix:' + mix.key : ''" :style="'width:' + cardWidth + 'px;margin-right:' + cardGap + 'px;'" :hover-class="layout.isWide ? 'local-mix-card-hover' : 'none'" @click="openMix(mixIndex)">
           <view class="local-mix-covers" :class="layout.isWide ? 'local-mix-covers-wide' : ''" :style="'width:' + cardWidth + 'px;height:' + cardWidth + 'px;background-color:' + theme.skin.coverPlaceholder + ';'">
             <view v-for="coverIndex in coverSlots" :key="coverIndex" class="local-mix-cover-cell" :style="'width:' + ((coverIndex == 1 || coverIndex == 3) ? lastCellWidth : cellWidth) + 'px;height:' + ((coverIndex < 2) ? cellWidth : lastRowHeight) + 'px;margin-right:' + ((coverIndex == 0 || coverIndex == 2) ? coverGap : 0) + 'px;margin-top:' + ((coverIndex < 2) ? 0 : coverGap) + 'px;'">
               <image v-if="coverAt(mix, coverIndex) != ''" class="local-mix-cover" :src="coverAt(mix, coverIndex)" mode="aspectFill" @error="onCoverError(mix, coverIndex)" />
               <QtIcon v-else name="music" :size="layout.isWide ? 16 : 30" :color="theme.skin.iconMuted" />
             </view>
           </view>
-          <text class="local-mix-name" :class="layout.isWide ? 'local-mix-name-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(32, 14) + (layout.isWide ? 'line-height:' + 20 * fontScale.scale + 'px;' : '')" :max-lines="2">{{ mix.title }}</text>
-          <text class="local-mix-subtitle" :class="layout.isWide ? 'local-mix-subtitle-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(23, 12) + (layout.isWide ? 'line-height:' + 17 * fontScale.scale + 'px;' : '')" :max-lines="1">{{ mix.subtitle }}</text>
+          <text class="local-mix-name" :class="layout.isWide ? 'local-mix-name-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(32, 14) + (layout.isTv ? tvLine(14) : layout.isWide ? 'line-height:' + 20 * fontScale.scale + 'px;' : '')" :max-lines="2">{{ mix.title }}</text>
+          <text class="local-mix-subtitle" :class="layout.isWide ? 'local-mix-subtitle-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(23, 12) + (layout.isTv ? tvLine(12) : layout.isWide ? 'line-height:' + 17 * fontScale.scale + 'px;' : '')" :max-lines="1">{{ mix.subtitle }}</text>
         </view>
       </view>
     </scroll-view>
 
-    <view v-if="sheetVisible && selectedMix != null" class="local-mix-mask" :class="layout.isWide ? 'local-mix-mask-wide' : ''" :style="'background-color:' + theme.skin.scrim + ';'" @click="closeSheet">
-      <view class="local-mix-sheet" :class="layout.isWide ? 'local-mix-sheet-wide' : ''" :style="sheetStyle" @click.stop>
-        <view class="local-mix-sheet-head" :class="layout.isWide ? 'local-mix-sheet-head-wide' : ''" :style="'border-bottom-color:' + theme.skin.divider + ';'">
+    <view v-if="sheetVisible && selectedMix != null" class="local-mix-mask" :class="[layout.isWide ? 'local-mix-mask-wide' : '', layout.isTv ? 'qt-tv-skip' : '']" :style="qtFixedPaneStyle() + 'background-color:' + theme.skin.scrim + ';'" @click="closeSheet">
+      <view ref="panelRef" class="local-mix-sheet" :class="[layout.isWide ? 'local-mix-sheet-wide' : '', layout.isTv ? 'qt-tv-skip' : '']" :style="sheetStyle" @click.stop>
+        <view class="local-mix-sheet-head" :class="layout.isWide ? 'local-mix-sheet-head-wide' : ''" :style="'border-bottom-color:' + theme.skin.divider + ';' + (layout.isTv ? 'flex-shrink:0;' : '')">
           <view class="local-mix-sheet-title-wrap">
-            <text class="local-mix-sheet-title" :style="('color:' + theme.skin.text + ';') + qtFontDual(31, 17)" :max-lines="1">{{ selectedMix.title }}</text>
-            <text class="local-mix-sheet-subtitle" :class="layout.isWide ? 'local-mix-sheet-subtitle-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(21, 12)" :max-lines="1">{{ selectedMix.subtitle }}</text>
+            <text class="local-mix-sheet-title" :style="('color:' + theme.skin.text + ';') + qtFontDual(31, 17) + tvLine(17)" :max-lines="1">{{ selectedMix.title }}</text>
+            <text class="local-mix-sheet-subtitle" :class="layout.isWide ? 'local-mix-sheet-subtitle-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(21, 12) + tvLine(12)" :max-lines="1">{{ selectedMix.subtitle }}</text>
           </view>
-          <QtIcon name="close" :size="layout.isWide ? 20 : 30" :color="theme.skin.iconMuted" @click="closeSheet" />
+          <QtButton v-if="layout.isTv" label="" icon="close" variant="ghost" size="sm" data-qt-tv-id="local-mix:close" style="width:56px;height:56px;padding:0;flex-shrink:0;" @click="closeSheet" />
+          <QtIcon v-else name="close" :size="layout.isWide ? 20 : 30" :color="theme.skin.iconMuted" @click="closeSheet" />
         </view>
-        <view class="local-mix-play-all" :class="layout.isWide ? 'local-mix-play-all-wide' : ''" :style="'background-color:' + theme.skin.accentSoft + ';'" @click="playAll">
+        <view class="local-mix-play-all" :class="layout.isWide ? 'local-mix-play-all-wide' : ''" :data-qt-tv-id="layout.isTv ? 'local-mix:play-all' : ''" :style="'background-color:' + theme.skin.accentSoft + ';' + (layout.isTv ? 'height:56px;min-width:56px;flex-shrink:0;' : '')" @click="playAll">
           <QtIcon name="play" :size="layout.isWide ? 16 : 24" :color="theme.skin.accent" />
-          <text class="local-mix-play-all-text" :class="layout.isWide ? 'local-mix-play-all-text-wide' : ''" :style="('color:' + theme.skin.accent + ';') + qtFontDual(25, 14)">全部播放</text>
+          <text class="local-mix-play-all-text" :class="layout.isWide ? 'local-mix-play-all-text-wide' : ''" :style="('color:' + theme.skin.accent + ';') + qtFontDual(25, 14) + tvLine(14)">全部播放</text>
         </view>
-        <scroll-view class="local-mix-song-list" direction="vertical" :show-scrollbar="false">
-          <view v-for="(song, songIndex) in selectedMix.songs" :key="song.platform + ':' + song.id" class="local-mix-song-row" :class="layout.isWide ? 'local-mix-song-row-wide' : ''" :style="'border-bottom-color:' + theme.skin.divider + ';'" @click="playAt(songIndex)">
-            <text class="local-mix-song-index" :class="layout.isWide ? 'local-mix-song-index-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(22, 12)">{{ songIndex + 1 }}</text>
+        <scroll-view class="local-mix-song-list" :style="tvSongListStyle" :class="layout.isTv ? 'qt-tv-scroll' : ''" :data-qt-tv-id="layout.isTv ? 'local-mix:songs:' + selectedMix.key : ''" direction="vertical" :show-scrollbar="false">
+          <view v-for="(song, songIndex) in selectedMix.songs" :key="song.platform + ':' + song.id" class="local-mix-song-row" :data-qt-tv-id="layout.isTv ? 'local-mix-song:' + selectedMix.key + ':' + song.platform + ':' + song.id : ''" :class="layout.isWide ? 'local-mix-song-row-wide' : ''" :style="'border-bottom-color:' + theme.skin.divider + ';' + qtTvSongRowStyle()" @click="playAt(songIndex)">
+            <text class="local-mix-song-index" :class="layout.isWide ? 'local-mix-song-index-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(22, 12) + tvLine(12)">{{ songIndex + 1 }}</text>
             <image class="local-mix-song-cover" :class="layout.isWide ? 'local-mix-song-cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
             <view class="local-mix-song-info">
-              <text class="local-mix-song-name" :style="('color:' + theme.skin.text + ';') + qtFontDual(27, 14)" :max-lines="1">{{ song.name }}</text>
-              <text class="local-mix-song-singer" :class="layout.isWide ? 'local-mix-song-singer-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 11)" :max-lines="1">{{ song.singer }}</text>
+              <text class="local-mix-song-name" :style="('color:' + theme.skin.text + ';') + qtFontDual(27, 14) + tvLine(14)" :max-lines="1">{{ song.name }}</text>
+              <text class="local-mix-song-singer" :class="layout.isWide ? 'local-mix-song-singer-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 11) + tvLine(11)" :max-lines="1">{{ song.singer }}</text>
             </view>
             <QtIcon name="play" :size="layout.isWide ? 16 : 22" :color="theme.skin.iconMuted" />
           </view>
@@ -60,10 +61,13 @@
 import { qtShowToast } from "@/services/toast";
 import { computed, ref } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
-import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import { qtFixedPaneStyle, useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtTvModal } from "@/uni_modules/qt-ui/composables/use-qt-tv-modal";
+import { qtTvSongRowStyle } from "@/uni_modules/qt-ui/composables/qt-song-row-metrics";
 import { qtContentWidth, qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { usePlayerStore } from "@/stores/player";
 import type { LocalMix } from "@/services/local-mixes";
 import type { Song } from "@/types/music";
@@ -82,6 +86,8 @@ const failedCovers = ref<Set<string>>(new Set());
 const sheetVisible = ref(false);
 const selectedIndex = ref(-1);
 const selectedMix = computed<LocalMix | null>(() => selectedIndex.value >= 0 && selectedIndex.value < props.mixes.length ? props.mixes[selectedIndex.value] : null);
+const panelRef = ref<UniElement | null>(null);
+useQtTvModal(panelRef, (): boolean => sheetVisible.value && selectedMix.value != null, closeSheet);
 const railWidth = computed<number>(() => {
   if (props.contentWidth != null && props.contentWidth > 0) return props.contentWidth;
   // 没有外部传入内容宽时读统一令牌（含 rail 扣除），不再自己按 1360 反算
@@ -103,14 +109,14 @@ const lastCellWidth = computed<number>(() => Math.max(30, cardWidth.value - cell
 const lastRowHeight = computed<number>(() => Math.max(30, cardWidth.value - cellWidth.value - coverGap.value));
 /** 架高 = 封面方图 + 两行标题 + 一行副标题 + 间距：竖屏 12+2x42+6+30=132rpx 留到 140rpx；
     宽屏 7+2x17+3+16=60px 留到 64px。矮了会裁掉最后一行副标题 */
-const railHeight = computed<number>(() => cardWidth.value + (layout.isWide ? Math.ceil(18 + 57 * fontScale.scale) : qtRpx(140)));
+const railHeight = computed<number>(() => cardWidth.value + (layout.isTv ? 18 + Math.ceil(qtFontValuePx(14) * 1.5) * 2 + Math.ceil(qtFontValuePx(12) * 1.5) : layout.isWide ? Math.ceil(18 + 57 * fontScale.scale) : qtRpx(140)));
 /** 抽屉高度照 qt-listen-detail：竖屏吃满 0.88 窗口高（原来 0.82 只露四行半，用户反馈「下滑范围小了」），
     宽屏仍是 0.92。列表不再算死像素高，改由 flex:1 吃满头部/全部播放条之外的剩余空间。
     下限 520/420 只保证「正常窗口里别缩成一条」，必须再夹到窗口高以内 —— 否则横屏矮窗
     （如 780×360，会落进 isWide 分支）抽屉比窗口还高，顶到屏幕外、标题被裁掉。 */
 const sheetHeight = computed<number>(() => {
-  const prefer = Math.max(layout.isWide ? 520 : 420, Math.floor(layout.windowHeight * (layout.isWide ? 0.92 : 0.88)));
-  return Math.max(240, Math.min(prefer, layout.windowHeight));
+  const prefer = Math.max(layout.isWide ? 520 : 420, Math.floor(layout.paneHeight * (layout.isWide ? 0.92 : 0.88)));
+  return Math.max(240, Math.min(prefer, layout.paneHeight));
 });
 /** 抽屉尺寸一次算全：宽屏宽度走 QT_SHEET_WIDTH.drawer 契约并夹到窗口内 */
 const sheetStyle = computed((): string => {
@@ -119,7 +125,13 @@ const sheetStyle = computed((): string => {
   return style;
 });
 const railContentWidth = computed<number>(() => props.mixes.length * (cardWidth.value + cardGap.value));
+const tvSongListStyle = computed((): string => {
+  if (!layout.isTv) return "";
+  const header = 29 + Math.max(56, Math.ceil(qtFontValuePx(17) * 1.5) + 4 + Math.ceil(qtFontValuePx(12) * 1.5));
+  return "flex:0;height:" + Math.max(0, sheetHeight.value - header - 76) + "px;";
+});
 
+function tvLine(basePx: number): string { return layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(basePx) * 1.5) + "px;" : ""; }
 function coverAt(mix: LocalMix, index: number): string {
   const url = index < mix.coverUrls.length ? mix.coverUrls[index] : "";
   return failedCovers.value.has(mix.key + ":" + index) ? "" : url;

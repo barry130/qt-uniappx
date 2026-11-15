@@ -1,0 +1,157 @@
+<template>
+  <!-- Business trigger only: the ordinary selection sheet is rendered by the global frame host. -->
+  <view class="recommendation-source-control">
+    <QtOption kind="row" :label="sourceLabel" :description="sourceHint" :row-min-height-px="44" @select="open">
+      <template #trailing>
+        <QtIcon name="chevron-down" :size="layout.isWide ? 14 : 24" :color="theme.skin.iconMuted" />
+      </template>
+    </QtOption>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import { onUnload } from "@dcloudio/uni-app";
+import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
+import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { useSourceRegistryStore } from "@/stores/source-registry";
+import {
+  readRecommendationChoice,
+  writeRecommendationChoice,
+  recommendationChoiceRevision,
+  recommendationChoiceCurrent,
+  RECOMMENDATION_SOURCE_CHANGED_EVENT,
+} from "@/stores/recommendation-source";
+import type { RecommendationKind, RecommendationChoice } from "@/stores/recommendation-source";
+import { readSourceAuthEntries, readSourceAuthTogglesFor, SOURCE_AUTH_CHANGED_EVENT } from "@/services/source-auth";
+import { SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
+import { SOURCE_POLICY_CHANGED_EVENT } from "@/services/source-policy";
+import { platformLabel } from "@/services/platform";
+import { qtShowActionSheet, qtActionSheetCancel, qtActionSheetState } from "@/services/action-sheet";
+import { qtShowToast } from "@/services/toast";
+
+const props = defineProps({ kind: { type: String, default: "daily" } });
+const emit = defineEmits(["change"]);
+const registry = useSourceRegistryStore();
+const layout = useQtLayout();
+const theme = useThemeStore();
+const environmentRevision = ref(0);
+let alive = true;
+let openSeq = 0;
+let ownedSheetRequest = 0;
+
+function feature(): RecommendationKind { return props.kind == "fm" ? "fm" : "daily"; }
+function accountLabel(sourceId: string): string {
+  const entries = readSourceAuthEntries();
+  for (let i = 0; i < entries.length; i++) {
+    if (entries[i].source != sourceId) continue;
+    const user = entries[i].account.user;
+    return user.nickname.length > 0 ? user.nickname : user.id;
+  }
+  return "未登录";
+}
+const choice = computed(() => {
+  environmentRevision.value;
+  return readRecommendationChoice(feature());
+});
+const sourceLabel = computed((): string => {
+  const selected = choice.value;
+  return "推荐来源：" + (selected.origin == "app" ? "应用算法" : platformLabel(selected.sourceId) + " · " + accountLabel(selected.sourceId));
+});
+const sourceHint = computed((): string => {
+  const selected = choice.value;
+  if (selected.origin == "app") return feature() == "fm" ? "按应用画像持续选歌，保留原有私人 FM" : "按应用画像和推荐设置生成";
+  if (!registry.supportsAccountRecommendation(selected.sourceId, feature())) return "当前数据包不支持此账号推荐，请更新音源包或更改来源";
+  if (accountLabel(selected.sourceId) == "未登录") return "先登录这个音源的账号；未登录不会回退到公共推荐";
+  if (!readSourceAuthTogglesFor(selected.sourceId).useMeta) return "账号的数据授权已关闭，可在音源平台管理中开启";
+  return feature() == "fm" ? "官方账号供给；下一首只在本机切歌，不提交账号反馈" : "直接读取官方账号日推，不经过应用算法重排";
+});
+
+function cancelOwnedSheet(): void {
+  const state = qtActionSheetState();
+  if (ownedSheetRequest > 0 && state.requestId.value == ownedSheetRequest) qtActionSheetCancel();
+  ownedSheetRequest = 0;
+}
+function refresh(): void {
+  if (!alive) return;
+  environmentRevision.value++;
+  // Account/choice changes cancel an intent even while registry.ensure is still pending.
+  openSeq++;
+  cancelOwnedSheet();
+}
+function refreshRegistry(): void {
+  if (!alive) return;
+  environmentRevision.value++;
+  // The first registry load may finish during open(); only an already shown snapshot is stale.
+  if (ownedSheetRequest > 0) { openSeq++; cancelOwnedSheet(); }
+}
+async function open(): Promise<void> {
+  const seq = ++openSeq;
+  const kind = feature();
+  await registry.ensure();
+  if (!alive || seq != openSeq || kind != feature()) return;
+  const selected = readRecommendationChoice(kind);
+  const revision = recommendationChoiceRevision(kind);
+  const generation = registry.generation;
+  const environment = environmentRevision.value;
+  const all = registry.sourceIds();
+  const ids: string[] = [];
+  const names: string[] = ["应用算法"];
+  for (let i = 0; i < all.length; i++) {
+    if (!registry.supportsAccountRecommendation(all[i], kind)) continue;
+    ids.push(all[i]);
+    names.push(platformLabel(all[i]) + " · " + accountLabel(all[i]));
+  }
+  names.push("音源平台管理");
+  const accountIndex = ids.indexOf(selected.sourceId);
+  const selectedIndex = selected.origin == "app" ? 0 : accountIndex < 0 ? -1 : accountIndex + 1;
+  const pending = qtShowActionSheet({
+    title: kind == "fm" ? "私人 FM 推荐来源" : "每日推荐来源",
+    itemList: names,
+    selectedIndex,
+  });
+  ownedSheetRequest = qtActionSheetState().requestId.value;
+  const request = ownedSheetRequest;
+  const index = await pending;
+  if (!alive || seq != openSeq || kind != feature() || qtActionSheetState().requestId.value != request) return;
+  ownedSheetRequest = 0;
+  if (index < 0 || environment != environmentRevision.value || generation != registry.generation || !recommendationChoiceCurrent(kind, selected, revision)) return;
+  if (index == names.length - 1) { uni.navigateTo({ url: "/pages/source-auth/index" }); return; }
+  if (index > ids.length) return;
+  const next: RecommendationChoice = index == 0 ? { origin: "app", sourceId: "" } : { origin: "account", sourceId: ids[index - 1] };
+  if (next.origin == selected.origin && next.sourceId == selected.sourceId) return;
+  try {
+    writeRecommendationChoice(kind, next);
+    emit("change", kind);
+  } catch (_) {
+    qtShowToast({ title: "推荐来源未能保存，请重试", icon: "none" });
+  }
+}
+function dispose(): void {
+  if (!alive) return;
+  alive = false;
+  openSeq++;
+  cancelOwnedSheet();
+  uni.$off(SOURCE_AUTH_CHANGED_EVENT, refresh);
+  uni.$off(SOURCE_PACKS_CHANGED_EVENT, refresh);
+  uni.$off(SOURCE_POLICY_CHANGED_EVENT, refresh);
+  uni.$off(RECOMMENDATION_SOURCE_CHANGED_EVENT, refresh);
+}
+watch(() => registry.generation, refreshRegistry);
+watch(() => props.kind, refresh);
+onMounted(() => {
+  uni.$on(SOURCE_AUTH_CHANGED_EVENT, refresh);
+  uni.$on(SOURCE_PACKS_CHANGED_EVENT, refresh);
+  uni.$on(SOURCE_POLICY_CHANGED_EVENT, refresh);
+  uni.$on(RECOMMENDATION_SOURCE_CHANGED_EVENT, refresh);
+  void registry.ensure();
+});
+onBeforeUnmount(dispose);
+onUnload(dispose);
+</script>
+
+<style>
+.recommendation-source-control { flex-shrink: 0; flex-direction: column; }
+</style>

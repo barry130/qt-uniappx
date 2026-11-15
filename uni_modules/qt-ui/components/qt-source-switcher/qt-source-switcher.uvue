@@ -30,7 +30,16 @@ const layout = useQtLayout();
 const theme = useThemeStore();
 
 function label(): string {
-  return platformLabel(store.current);
+  // 启动瞬间 current 是默认 "wyy" 或上次持久化的源，但数据包注册表可能
+  // 还没拉到、拉失败、或当前源在新包里已经下线。platformLabel 此时按通用
+  // 兜底返回「未知」（其它列表角标要保留这个语义以避免冒充别的平台）；
+  // 对本组件而言那等于谎报 "有一个未知音源"——真实语义是「还没选 / 选不中
+  // 现在没有生效源」。给一个明确引导词，点开仍是 pickSourceFromSheet 的
+  // 既有未装包提示或第一个可用源纠正链路，不改业务。
+  if (store.current.length == 0) return "选择音源";
+  const text = platformLabel(store.current);
+  if (text != "未知") return text;
+  return "选择音源";
 }
 function open(): void {
   // 弹层与清单口径统一在 services/source-sheet（四个入口共用）：未装包提示、

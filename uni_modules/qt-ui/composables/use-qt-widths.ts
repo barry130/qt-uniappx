@@ -22,6 +22,7 @@
  */
 import { ref } from "vue";
 import { qtLayout, qtRailWidth } from "./use-qt-layout";
+import { QT_TV_TOKENS } from "./qt-tv-tokens";
 
 /**
  * 内容宽度上限（px，0 = 不限制）—— 给「一屏多栏」的外壳用。
@@ -124,7 +125,7 @@ export const QT_SPLIT_PANE_MIN = 460;
  * 数字必须同源，否则会出现「框架画了中栏、页面又铺了一份整页总览」的双份并存。
  */
 export function qtSplitActive(isWide: boolean): boolean {
-  if (!isWide) return false;
+  if (!isWide || qtLayout().isTv) return false;
   return qtContentWidthRaw("flow") >= QT_SPLIT_NAV_WIDTH + QT_SPLIT_NAV_GAP + QT_SPLIT_PANE_MIN;
 }
 
@@ -179,16 +180,17 @@ export function qtContentWidth(kind: string = "flow"): number {
 export function qtContentWidthRaw(kind: string = "flow"): number {
   const l = qtLayout();
   // 手机 frame 本身铺满窗口；宽屏 gutter / 旧三栏 cap 不能参与首帧宽度。
-  if (!l.isWide) return l.windowWidth;
+  if (!l.isWide) return l.paneWidth;
   const range = rangeOf(kind);
-  if (kind == "full") return l.windowWidth;
+  if (kind == "full") return l.paneWidth;
   const rail = qtRailWidth();
-  const avail = l.windowWidth - rail - QT_GUTTER_PX * 2;
+  const gutter = l.isTv ? QT_TV_TOKENS.gutterPx : QT_GUTTER_PX;
+  const avail = l.paneWidth - rail - gutter * 2;
   // 可用宽度不足档位下限时，**必须回落到真实可用宽度**。
   // 早前这里返回 range.min（flow 是 900），在 900dp 的 wide 档（900-208-48=644）
   // 和 240dp 的矮横窗里都会把内容列写成比窗口还宽，症状是右侧内容被挤出屏幕。
   // 档位区间只用来「限宽」，不能用来「撑宽」。
-  if (avail <= 0) return l.windowWidth > 0 ? l.windowWidth : range.min;
+  if (avail <= 0) return l.paneWidth > 0 ? l.paneWidth : range.min;
   if (avail < range.min) return avail;
   return avail < range.max ? avail : range.max;
 }
@@ -221,7 +223,7 @@ export function qtContentPadLeft(kind: string = "flow"): number {
   // 设置页族三栏外壳会用 qtPushContentWidthCap 把内容宽收窄成右栏宽（给页面内部
   // 排列用），框架这一层的位置不能跟着缩 —— 否则居中余量越来越大，内容列持续右移。
   const width = qtContentWidthRaw(kind);
-  const avail = l.windowWidth - rail;
+  const avail = l.paneWidth - rail;
   const slack = avail - width;
   return rail + (slack > 0 ? Math.floor(slack / 2) : 0);
 }
@@ -245,7 +247,8 @@ export function qtCanTwoColumn(kind: keyof typeof QT_MIN_COLUMN_WIDTH, avail: nu
  */
 export function qtColumnCount(avail: number, minCard: number = QT_MIN_COLUMN_WIDTH.card, gap: number = 12, maxColumns: number = 8): number {
   if (avail <= 0) return 1;
-  const n = Math.floor((avail + gap) / (minCard + gap));
+  const minimum = qtLayout().isTv ? Math.max(minCard, QT_TV_TOKENS.cardMinPx) : minCard;
+  const n = Math.floor((avail + gap) / (minimum + gap));
   if (n < 1) return 1;
   return n > maxColumns ? maxColumns : n;
 }
@@ -260,8 +263,9 @@ export const QT_SHEET_WIDTH = { modal: 560, dialog: 420, drawer: 420 } as const;
 
 export function qtSheetWidth(kind: keyof typeof QT_SHEET_WIDTH = "modal"): number {
   const l = qtLayout();
-  const want = QT_SHEET_WIDTH[kind];
-  const avail = l.windowWidth - QT_GUTTER_PX * 2;
+  const want = l.isTv ? (kind == "dialog" ? 560 : 680) : QT_SHEET_WIDTH[kind];
+  const gutter = l.isTv ? QT_TV_TOKENS.gutterPx : QT_GUTTER_PX;
+  const avail = l.paneWidth - gutter * 2;
   return avail < want ? avail : want;
 }
 

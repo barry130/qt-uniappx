@@ -53,6 +53,7 @@ const viewportRef = ref<UniElement | null>(null);
 const trackRef = ref<UniElement | null>(null);
 const copyRef = ref<UniElement | null>(null);
 let anim: UniAnimation | null = null;
+let disposed = false;
 
 /**
  * 是否启用跑马灯。
@@ -76,7 +77,7 @@ function onClose(): void {
 
 /** 启动跑马灯动画 */
 function startMarquee(): void {
-  if (!marquee.value) return;
+  if (disposed || !marquee.value || anim != null) return;
   const track = trackRef.value;
   const copy = copyRef.value;
   const viewport = viewportRef.value;
@@ -127,6 +128,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  disposed = true;
   stopMarquee();
 });
 
@@ -145,7 +147,7 @@ watch(
 // 动画的位移距离是按「挂载那一刻」的文本几何算出来的，窗口变宽后旧动画仍在跑，
 // 会把整条 track 平移到窗口外，真机症状是通告栏只剩最后一个字（旋转屏幕后必现）。
 watch(
-  [() => layout.isWide, () => layout.windowWidth],
+  [() => layout.isWide, () => layout.paneWidth],
   () => {
     stopMarquee();
     nextTick(() => {

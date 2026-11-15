@@ -4,11 +4,11 @@
        蒙层用自带透明度的 scrim 色、不用 opacity 动画（opacity 会连坐子树）。 -->
   <view
     v-if="st.visible.value"
-    class="qc-mask"
-    :style="'background-color:' + theme.skin.scrim + ';'"
+    class="qc-mask qt-tv-skip"
+    :style="'background-color:' + theme.skin.scrim + ';' + (layout.isTv ? 'z-index:3000;' : '')"
     @click="onCancel"
   >
-    <view class="qc-card" :class="layout.isWide ? 'qc-card-wide' : ''" :style="cardStyle" @click.stop>
+    <view ref="tvPanel" class="qc-card qt-tv-skip" :class="layout.isWide ? 'qc-card-wide' : ''" :style="cardStyle" @click.stop>
       <text class="qc-title" :class="layout.isWide ? 'qc-title-wide' : ''" :style="titleStyle" :max-lines="2">{{ st.title.value }}</text>
       <!-- 长内容（如「当前播放地址」的完整 URL）不截行：max-lines 会把换行后的
            地址腰斩（2026-10-25 真机反馈「展示不全」），改为内容区可滚动，
@@ -16,7 +16,8 @@
       <scroll-view
         v-if="st.content.value.length > 0"
         class="qc-content-scroll"
-        :class="layout.isWide ? 'qc-content-scroll-wide' : ''"
+        :class="[layout.isWide ? 'qc-content-scroll-wide' : '', layout.isTv ? 'qt-tv-scroll' : '']"
+        data-qt-tv-id="confirm-document"
         :style="contentScrollStyle"
         :show-scrollbar="false"
       >
@@ -27,12 +28,13 @@
           v-if="st.showCancel.value"
           class="qc-btn"
           :class="layout.isWide ? 'qc-btn-wide' : ''"
-          :style="'border-right-width:1px;border-right-style:solid;border-right-color:' + theme.skin.divider + ';'"
+          data-qt-tv-id="confirm-cancel"
+          :style="'border-right-width:1px;border-right-style:solid;border-right-color:' + theme.skin.divider + ';' + (layout.isTv ? 'height:56px;' : '')"
           @click="onCancel"
         >
           <text class="qc-btn-text" :style="cancelTextStyle">{{ st.cancelText.value }}</text>
         </view>
-        <view class="qc-btn" :class="layout.isWide ? 'qc-btn-wide' : ''" @click="onConfirm">
+        <view class="qc-btn" :class="layout.isWide ? 'qc-btn-wide' : ''" data-qt-tv-id="confirm-accept" :style="layout.isTv ? 'height:56px;' : ''" @click="onConfirm">
           <text class="qc-btn-text" :style="confirmTextStyle">{{ st.confirmText.value }}</text>
         </view>
       </view>
@@ -41,29 +43,41 @@
 </template>
 
 <script lang="ts" setup>
-import { computed } from "vue";
+import { computed, ref } from "vue";
+import { useQtTvModal } from "@/uni_modules/qt-ui/composables/use-qt-tv-modal";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { qtConfirmState, qtConfirmResolve } from "@/services/confirm";
 
 const st = qtConfirmState();
 const theme = useThemeStore();
 const layout = useQtLayout();
+const tvPanel = ref<UniElement | null>(null);
+useQtTvModal(tvPanel, (): boolean => st.visible.value, onCancel, 3000);
 
 const cardStyle = computed((): string => {
-  return "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.divider + ";";
+  const width = layout.isTv ? Math.max(1, qtSheetWidth("dialog")) : Math.max(1, Math.min(layout.paneWidth - 24, layout.isWide ? 320 : layout.windowWidth * 600 / 750));
+  return "width:" + width + "px;background-color:" + theme.skin.surface + ";border-color:" + theme.skin.divider + ";";
 });
 const titleStyle = computed((): string => {
-  return "color:" + theme.skin.text + ";" + qtFontDual(32, 18);
+  return "color:" + theme.skin.text + ";" + qtFontDual(32, 18) + (layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(18) * 1.35) + "px;" : "");
 });
 const contentStyle = computed((): string => {
   // 长内容（URL 一类）居中换行可读性差，改左对齐；短句保持居中
   const align = st.content.value.length > 60 ? "left" : "center";
-  return "color:" + theme.skin.textMuted + ";text-align:" + align + ";" + qtFontDual(28, 15);
+  return "color:" + theme.skin.textMuted + ";text-align:" + align + ";" + qtFontDual(28, 15) + (layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(15) * 1.4) + "px;" : "");
 });
 const contentScrollStyle = computed((): string => {
-  return "max-height:" + Math.round(layout.windowHeight * 0.5) + "px;";
+  let height = Math.round(layout.paneHeight * 0.5);
+  if (layout.isTv) {
+    // Keep both title lines and full remote buttons inside the usable short window.
+    const title = Math.ceil(qtFontValuePx(18) * 1.35) * 2;
+    const fixed = title + 22 + 11 + 20 + 20 + 56 + 2;
+    height = Math.max(0, Math.min(height, layout.paneHeight - layout.safeBottomPx - 32 - fixed));
+  }
+  return "max-height:" + height + "px;";
 });
 const cancelTextStyle = computed((): string => {
   return "color:" + theme.skin.textMuted + ";" + qtFontDual(30, 16);
@@ -83,8 +97,10 @@ function onCancel() {
 
 <style scoped>
 /* absolute 而不是 fixed：宽屏托管页里 fixed 会被提升到窗口层，被覆盖层压住、
-   关闭后泄漏（详见 qt-action-sheet 的 .as-mask 注释） */
-.qc-mask { position: absolute; left: 0; right: 0; top: 0; bottom: 0; align-items: center; justify-content: center; z-index: 980; }
+   关闭后泄漏（详见 qt-action-sheet 的 .as-mask 注释）。
+   用户 2026-11-13：压过 998 的迷你播放栏（此前 980 时红栏会画在确认弹窗上面）、
+   999 的各弹层与 1000 的宽屏托管层；触控保留 1200，TV 的视觉与焦点统一为 3000。 */
+.qc-mask { position: absolute; left: 0; right: 0; top: 0; bottom: 0; align-items: center; justify-content: center; z-index: 1200; }
 .qc-card { width: 600rpx; border-width: 1px; border-style: solid; border-radius: 24rpx; overflow: hidden; }
 .qc-card-wide { width: 320px; border-radius: 14px; }
 .qc-title { text-align: center; font-weight: 600; margin-top: 40rpx; padding: 0 32rpx; }

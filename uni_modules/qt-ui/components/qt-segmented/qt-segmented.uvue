@@ -1,13 +1,13 @@
 <template>
   <view ref="rootRef" class="seg" :class="layout.isWide ? 'seg-wide' : ''" :style="rootStyle">
     <view v-if="!scrollable" class="seg-flex">
-      <view v-for="(item, index) in list" :key="index" class="seg-item" :class="layout.isWide ? 'seg-item-wide' : ''" :style="itemStyle(index)" @click="select(index)">
+      <view v-for="(item, index) in list" :key="index" class="seg-item" :class="layout.isWide ? 'seg-item-wide' : ''" :data-qt-tv-id="segmentId + index" :style="itemStyle(index)" @click="select(index)">
         <text class="seg-text" :class="layout.isWide ? 'seg-text-wide' : ''" :style="textStyle(index)">{{ item }}</text>
       </view>
     </view>
     <scroll-view v-else class="seg-scrolllist" direction="horizontal" :show-scrollbar="false" :scroll-left="scrollLeftPx" :style="'height:' + rowHeightPx + 'px;'" @scroll="onScroll">
       <view class="seg-auto" :style="'width:' + autoRowWidth + 'px;'">
-        <view v-for="(item, index) in list" :key="index" class="seg-item seg-item-auto" :class="layout.isWide ? 'seg-item-wide seg-item-auto-wide' : ''" :style="itemStyle(index)" @click="select(index)">
+        <view v-for="(item, index) in list" :key="index" class="seg-item seg-item-auto" :class="layout.isWide ? 'seg-item-wide seg-item-auto-wide' : ''" :data-qt-tv-id="segmentId + index" :style="itemStyle(index)" @click="select(index)">
           <text class="seg-text" :class="layout.isWide ? 'seg-text-wide' : ''" :style="textStyle(index)">{{ item }}</text>
         </view>
       </view>
@@ -15,10 +15,10 @@
   </view>
 </template>
 <script setup lang="ts">
-import { computed, ref, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { computed, ref, watch, nextTick, onMounted, onUnmounted, getCurrentInstance } from "vue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtSelectionColor, qtSelectionIndex, qtSelectionScrollOffset } from "@/uni_modules/qt-ui/composables/selection";
 const props = defineProps<{
   list: string[];
@@ -32,13 +32,15 @@ const emit = defineEmits<{ "update:modelValue": [value: number]; change: [value:
 const layout = useQtLayout();
 const theme = useThemeStore();
 const rootRef = ref<UniElement | null>(null);
+const instance = getCurrentInstance();
+const segmentId = "segment:" + (instance != null ? instance.uid : 0) + ":";
 const selectedColor = computed((): string => qtSelectionColor(theme.dark));
 const selectedIndex = computed((): number => qtSelectionIndex(props.modelValue, props.list.length));
 const unit = computed((): number => layout.windowWidth / 750);
 const itemGap = computed((): number => Math.max(0, props.itemGap ?? 0));
 // The inline itemGap padding overrides CSS; never add both in the estimate.
 const autoPadPx = computed((): number => itemGap.value > 0 ? itemGap.value : layout.isWide ? 24 : 48 * unit.value);
-const rowHeightPx = computed((): number => layout.isWide ? 36 : Math.ceil(60 * unit.value));
+const rowHeightPx = computed((): number => layout.isTv ? 56 : layout.isWide ? 36 : Math.ceil(60 * unit.value));
 const viewportPx = ref(0);
 const boxStarts = ref<number[]>([]);
 const boxWidths = ref<number[]>([]);
@@ -49,7 +51,7 @@ let mounted = false;
 let generation = 0;
 let timer = 0;
 function labelWidthPx(text: string): number {
-  const fontPx = (layout.isWide ? 14 : 26 * unit.value) * fontScale.scale;
+  const fontPx = layout.isTv ? qtFontValuePx(14) : (layout.isWide ? 14 : 26 * unit.value) * fontScale.scale;
   let units = 0;
   for (let i = 0; i < text.length; i++) units += text.charCodeAt(i) > 127 ? 1.06 : 0.82;
   return Math.ceil(units * fontPx);
@@ -144,9 +146,10 @@ watch((): string => selectedIndex.value + ':' + selectedOffset.value + ':' + vie
 onMounted(() => { mounted = true; scheduleMeasure(); });
 onUnmounted(() => { mounted = false; cancelMeasure(); });
 function onScroll(e: any): void { if (e.detail != null) currentLeft = Number(e.detail.scrollLeft ?? 0); }
-function textStyle(index: number): string { return 'color:' + (selectedIndex.value == index ? selectedColor.value : theme.skin.textSubtle) + ';' + qtFontDual(26, 14); }
+function textStyle(index: number): string { return 'color:' + (selectedIndex.value == index ? selectedColor.value : theme.skin.textSubtle) + ';' + qtFontDual(26, 14) + (layout.isTv ? 'line-height:' + Math.ceil(qtFontValuePx(14) * 1.35) + 'px;' : ''); }
 function itemStyle(index: number): string {
   let style = selectedIndex.value == index ? 'background-color:' + theme.skin.surface + ';' : '';
+  if (layout.isTv) style += 'height:56px;min-width:56px;';
   if (itemGap.value > 0) style += 'padding-left:' + itemGap.value / 2 + 'px;padding-right:' + itemGap.value / 2 + 'px;';
   return style;
 }

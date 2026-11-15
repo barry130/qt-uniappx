@@ -1,0 +1,230 @@
+<template>
+  <view :id="rootId" class="qrl">
+    <view v-if="dragId.length > 0 && measured" class="qrl-preview" :style="previewStyle"></view>
+    <view v-for="(item, index) in items" :id="rowId(index)" :key="item.id" class="qrl-row" :style="item.id == dragId ? 'z-index:2;' : 'z-index:0;'">
+      <view class="qrl-body" :style="bodyStyle(index)">
+        <slot :item="item" :id="item.id" :index="index" :handle="handleFor(item.id)">
+          <view class="qrl-handle" :style="handleFor(item.id).style" @touchstart.stop="handleFor(item.id).start" @touchmove.stop="handleFor(item.id).move" @touchend.stop="handleFor(item.id).end" @touchcancel.stop="handleFor(item.id).cancel" @click.stop="handleFor(item.id).click">
+            <text :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(24, 13)">{{ item.id }}</text>
+          </view>
+        </slot>
+      </view>
+    </view>
+  </view>
+</template>
+<script setup lang="ts">
+import { computed, getCurrentInstance, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { onShow, onHide, onUnload } from "@dcloudio/uni-app";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
+import { fontScale, qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+
+type ReorderItem = { id: string; disabled?: boolean };
+type RowRect = { top: number; height: number; width: number };
+type ReorderHandle = {
+  start: (event: UniTouchEvent) => void;
+  move: (event: UniTouchEvent) => void;
+  end: (event: UniTouchEvent) => void;
+  cancel: () => void;
+  click: () => void;
+  style: string;
+};
+const props = withDefaults(defineProps<{ items: ReorderItem[]; disabled?: boolean }>(), { disabled: false });
+const emit = defineEmits<{ reorder: [ids: string[]]; active: [value: boolean] }>();
+const layout = useQtLayout();
+const theme = useThemeStore();
+const instance = getCurrentInstance();
+const rootId = "qt-reorder-" + (instance != null ? instance.uid : 0);
+const dragId = ref("");
+const measured = ref(false);
+const deltaY = ref(0);
+const targetIndex = ref(-1);
+const rects = ref<RowRect[]>([]);
+let generation = 0;
+let baseIds: string[] = [];
+let startY = 0;
+let latestY = 0;
+let sourceIndex = -1;
+let touchIdentifier = -1;
+let didMove = false;
+let alive = true;
+let visible = true;
+let measureTimer = 0;
+function stopMeasureTimer(): void {
+  if (measureTimer != 0) { clearTimeout(measureTimer); measureTimer = 0; }
+}
+
+function rowId(index: number): string { return rootId + "-row-" + index; }
+function clearGesture(): void {
+  stopMeasureTimer();
+  generation++;
+  dragId.value = "";
+  measured.value = false;
+  deltaY.value = 0;
+  targetIndex.value = -1;
+  rects.value = [];
+  baseIds = [];
+  sourceIndex = -1;
+  touchIdentifier = -1;
+  didMove = false;
+}
+function cancelGesture(): void {
+  const active = dragId.value.length > 0;
+  clearGesture();
+  if (active) emit("active", false);
+}
+function previewIds(): string[] {
+  const ids = baseIds.slice();
+  if (sourceIndex < 0 || targetIndex.value < 0) return ids;
+  const id = ids.splice(sourceIndex, 1)[0];
+  ids.splice(targetIndex.value, 0, id);
+  return ids;
+}
+/** The gaps and heights are native border boxes, not uniform row estimates. */
+function targetTops(): number[] {
+  const ids = previewIds();
+  const tops: number[] = [];
+  if (rects.value.length == 0) return tops;
+  let top = rects.value[0].top;
+  for (let index = 0; index < ids.length; index++) {
+    tops.push(top);
+    const originalIndex = baseIds.indexOf(ids[index]);
+    top += rects.value[originalIndex].height;
+    if (index + 1 < rects.value.length) {
+      top += rects.value[index + 1].top - rects.value[index].top - rects.value[index].height;
+    }
+  }
+  return tops;
+}
+function updateDrag(y: number): void {
+  if (!Number.isFinite(y)) { cancelGesture(); return; }
+  latestY = y;
+  if (!measured.value || sourceIndex < 0) return;
+  deltaY.value = latestY - startY;
+  const centre = rects.value[sourceIndex].top + rects.value[sourceIndex].height / 2 + deltaY.value;
+  let target = 0;
+  for (let index = 0; index < rects.value.length; index++) {
+    if (index == sourceIndex) continue;
+    if (centre > rects.value[index].top + rects.value[index].height / 2) target++;
+  }
+  // Disabled rows are fixed anchors; enabled=false belongs to the consumer,
+  // not this generic gesture contract. The drag stays in its movable segment.
+  let minimum = 0;
+  let maximum = baseIds.length - 1;
+  for (let index = 0; index < props.items.length; index++) {
+    if (props.items[index].disabled != true) continue;
+    if (index < sourceIndex) minimum = index + 1;
+    else if (index > sourceIndex) { maximum = index - 1; break; }
+  }
+  targetIndex.value = Math.max(minimum, Math.min(maximum, target));
+}
+const previewStyle = computed((): string => {
+  if (!measured.value || sourceIndex < 0 || targetIndex.value < 0) return "";
+  const top = targetTops()[targetIndex.value] - rects.value[0].top;
+  const radius = layout.isWide ? 12 : layout.windowWidth * 24 / 750;
+  return "top:" + top + "px;left:0;width:" + rects.value[sourceIndex].width + "px;height:" + rects.value[sourceIndex].height
+    + "px;border-radius:" + radius + "px;background-color:" + theme.skin.surfaceMuted + ";border-color:" + theme.skin.accent + ";";
+});
+function bodyStyle(index: number): string {
+  let offset = 0;
+  if (measured.value && sourceIndex >= 0) {
+    if (index == sourceIndex) offset = deltaY.value;
+    else offset = targetTops()[previewIds().indexOf(baseIds[index])] - rects.value[index].top;
+  }
+  return "transform:translateY(" + offset + "px);";
+}
+function startGesture(id: string, event: UniTouchEvent): void {
+  if (!alive || !visible || props.disabled || event.touches.length != 1 || !Number.isFinite(event.touches[0].clientY)) return;
+  const ids = props.items.map((item: ReorderItem): string => item.id);
+  for (let row = 0; row < ids.length; row++) {
+    if (ids[row].length == 0 || ids.indexOf(ids[row]) != row) return;
+  }
+  const index = props.items.findIndex((item: ReorderItem): boolean => item.id == id);
+  if (index < 0 || props.items[index].disabled == true) return;
+  cancelGesture();
+  sourceIndex = index;
+  baseIds = props.items.map((item: ReorderItem): string => item.id);
+  touchIdentifier = event.touches[0].identifier;
+  startY = event.touches[0].clientY;
+  latestY = startY;
+  targetIndex.value = index;
+  dragId.value = id;
+  const token = generation;
+  measureTimer = setTimeout((): void => {
+    measureTimer = 0;
+    if (token == generation && dragId.value == id) cancelGesture();
+  }, 500) as unknown as number;
+  // Lock the parent even while its native row measurements are still pending.
+  emit("active", true);
+  nextTick((): void => {
+    if (token != generation || dragId.value != id) return;
+    const pending: RowRect[] = baseIds.map((): RowRect => ({ top: 0, height: 0, width: 0 }));
+    let remaining = pending.length;
+    const query = uni.createSelectorQuery();
+    for (let row = 0; row < pending.length; row++) {
+      query.select("#" + rowId(row)).boundingClientRect((rect: UniNodeInfo): void => {
+        if (token != generation || dragId.value != id) return;
+        if (rect == null || !Number.isFinite(rect.height) || !Number.isFinite(rect.width) || !Number.isFinite(rect.top)
+          || rect.height <= 0 || rect.width <= 0) { cancelGesture(); return; }
+        pending[row] = { top: rect.top, height: rect.height, width: rect.width };
+        remaining--;
+        if (remaining == 0) {
+          for (let index = 1; index < pending.length; index++) {
+            if (pending[index].top < pending[index - 1].top + pending[index - 1].height) { cancelGesture(); return; }
+          }
+          stopMeasureTimer();
+          rects.value = pending;
+          measured.value = true;
+          updateDrag(latestY);
+        }
+      });
+    }
+    query.exec();
+  });
+}
+function moveGesture(id: string, event: UniTouchEvent): void {
+  if (dragId.value != id) return;
+  if (event.touches.length != 1) { cancelGesture(); return; }
+  if (event.touches[0].identifier != touchIdentifier) return;
+  if (Math.abs(event.touches[0].clientY - startY) >= 8) didMove = true;
+  updateDrag(event.touches[0].clientY);
+}
+function endGesture(id: string, event: UniTouchEvent): void {
+  if (dragId.value != id) return;
+  if (event.changedTouches.length != 1 || event.changedTouches[0].identifier != touchIdentifier) return;
+  if (didMove) updateDrag(event.changedTouches[0].clientY);
+  if (dragId.value != id) return;
+  const changed = didMove && measured.value && targetIndex.value != sourceIndex;
+  const ids = previewIds();
+  clearGesture();
+  if (changed) emit("reorder", ids);
+  emit("active", false);
+}
+onShow((): void => { if (alive) visible = true; });
+onHide((): void => { visible = false; cancelGesture(); });
+onUnload((): void => { alive = false; visible = false; cancelGesture(); });
+onBeforeUnmount((): void => { alive = false; visible = false; cancelGesture(); });
+watch((): string => JSON.stringify(props.items), cancelGesture, { flush: "sync" });
+watch((): boolean => props.disabled, cancelGesture, { flush: "sync" });
+watch((): number => fontScale.scale, cancelGesture, { flush: "sync" });
+watch((): string => layout.sizeEpoch + ":" + layout.windowWidth + ":" + layout.windowHeight + ":" + layout.paneWidth
+  + ":" + layout.paneHeight + ":" + layout.paneLeft + ":" + layout.paneTop, cancelGesture, { flush: "sync" });
+function noop(): void {}
+function handleFor(id: string): ReorderHandle {
+  return {
+    start: (event: UniTouchEvent): void => startGesture(id, event),
+    move: (event: UniTouchEvent): void => moveGesture(id, event),
+    end: (event: UniTouchEvent): void => endGesture(id, event),
+    cancel: cancelGesture,
+    click: noop,
+    style: "width:44px;height:44px;flex-shrink:0;align-items:center;justify-content:center;",
+  };
+}
+</script>
+<style>
+.qrl { position: relative; flex-shrink: 0; }
+.qrl-row { position: relative; flex-shrink: 0; }
+.qrl-body { position: relative; flex-shrink: 0; }
+.qrl-handle { flex-shrink: 0; }
+.qrl-preview { position: absolute; border-width: 1px; border-style: solid; opacity: 0.32; pointer-events: none; }
+</style>

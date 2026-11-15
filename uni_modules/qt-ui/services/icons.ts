@@ -91,6 +91,7 @@ const ICON_BODIES: Record<string, string> = {
   share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.6" x2="15.4" y2="6.4"/><line x1="8.6" y1="13.4" x2="15.4" y2="17.6"/>',
   gauge: '<path d="M12 14l4-4"/><path d="M3.3 19a10 10 0 1 1 17.4 0"/>',
   sliders: '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1.5" y1="14" x2="6.5" y2="14"/><line x1="9.5" y1="8" x2="14.5" y2="8"/><line x1="17.5" y1="16" x2="22.5" y2="16"/>',
+  tone: '<path d="M9.5 18.5V6.3l9-2.2"/><circle cx="6.5" cy="18.5" r="3"/><path d="M15 8.2l3-3"/><path d="M18 8.2v-3h-3"/>',
   // compass / music / user 同时被 tools/gen-tab-icons.mjs 用作 tabBar 图标的几何来源
   compass: '<circle cx="12" cy="12" r="9"/><polygon points="15.6 8.4 13.8 13.8 8.4 15.6 10.2 10.2" fill="' + COLOR_TOKEN + '" stroke="none"/>',
   calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="8" y1="3" x2="8" y2="7"/><line x1="16" y1="3" x2="16" y2="7"/><line x1="12" y1="14.5" x2="12" y2="17.5"/>',

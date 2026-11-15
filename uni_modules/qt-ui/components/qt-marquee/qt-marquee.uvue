@@ -30,6 +30,10 @@ const props = defineProps<{
   widthPx: number;
   /** Parent must disable this while its page is hidden. */
   active?: boolean;
+  /** Optional line height in logical px：落点已有固定行高契约（如 pt-title 的
+   *  metrics.titleLinePx、迷你条 38rpx 行）时用它锁定，避免组件默认 1.4×+4
+   *  行高把父容器（固定高度行/双行小列）顶爆。 */
+  lineHeightPx?: number;
 }>();
 
 const layout = useQtLayout();
@@ -46,7 +50,8 @@ let generation = 0;
 let mounted = false;
 let disposed = false;
 
-const lineHeightPx = computed((): number => {
+const resolvedLinePx = computed((): number => {
+  if (props.lineHeightPx != null && props.lineHeightPx > 0) return props.lineHeightPx;
   const base = layout.isWide ? props.sizePx : props.sizeRpx * Math.max(layout.windowWidth, 1) / 750;
   return Math.ceil(base * fontScale.scale * 1.4 + 4);
 });
@@ -54,13 +59,13 @@ const rootStyle = computed((): string => {
   // Native layout hugs short text from the first frame; siblings stay beside the text.
   // Cap long text without an async full-width -> measured-width layout change.
   const limit = Math.max(0, props.widthPx);
-  return "max-width:" + limit.toFixed(2) + "px;height:" + lineHeightPx.value + "px;";
+  return "max-width:" + limit.toFixed(2) + "px;height:" + resolvedLinePx.value + "px;";
 });
 /** 两份副本之间的间距（进入实测偏移，故平移一份宽度后衔接处即该间距，循环无缝）。 */
 const copyGapPx = computed((): number => layout.isWide ? 20 : 40 * Math.max(layout.windowWidth, 1) / 750);
 const textStyle = computed((): string =>
   "color:" + props.color + ";font-weight:" + (props.weight == null ? 600 : props.weight) + ";" +
-  qtFontDual(props.sizeRpx, props.sizePx) + "line-height:1.4;padding-right:" + copyGapPx.value.toFixed(2) + "px;"
+  qtFontDual(props.sizeRpx, props.sizePx) + "line-height:" + resolvedLinePx.value + "px;padding-right:" + copyGapPx.value.toFixed(2) + "px;"
 );
 
 function enabled(): boolean {
@@ -189,8 +194,8 @@ onBeforeUnmount(() => {
 });
 watch([
   () => props.text, () => props.widthPx, () => props.active,
-  () => props.sizeRpx, () => props.sizePx, () => props.weight,
-  () => layout.isWide, () => layout.windowWidth, () => fontScale.scale,
+  () => props.sizeRpx, () => props.sizePx, () => props.weight, () => props.lineHeightPx,
+  () => layout.isWide, () => layout.paneWidth, () => fontScale.scale,
 ], () => restart());
 </script>
 
