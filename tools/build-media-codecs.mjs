@@ -11,6 +11,9 @@ const require = createRequire(import.meta.url);
 const root = fileURLToPath(new URL("../", import.meta.url));
 const folder = new URL("../uni_modules/qt-ui/services/vendor/", import.meta.url);
 const checking = process.argv.includes("--check");
+// License tarballs mix LF and CRLF, and Windows checkouts may convert text
+// files. Pin artifact bytes to LF so the check is identical on every host.
+const lf = (text) => text.replace(/\r\n/g, "\n");
 const result = await build({
   absWorkingDir: root,
   stdin: {
@@ -41,18 +44,18 @@ const result = await build({
     },
   }],
 });
-const artifacts = new Map([["media-codecs.js", result.outputFiles[0].text]]);
+const artifacts = new Map([["media-codecs.js", lf(result.outputFiles[0].text)]]);
 for (const [name, version, levels] of [["jpeg-js", "0.4.4", 1], ["fast-png", "8.0.0", 2], ["iobuffer", "6.0.1", 2], ["fflate", "0.8.3", 2]]) {
   let directory = require.resolve(name);
   for (let index = 0; index < levels; index++) directory = dirname(directory);
   assert.equal(JSON.parse(readFileSync(join(directory, "package.json"), "utf8")).version, version);
-  artifacts.set(name + "-LICENSE.txt", readFileSync(join(directory, "LICENSE"), "utf8"));
+  artifacts.set(name + "-LICENSE.txt", lf(readFileSync(join(directory, "LICENSE"), "utf8")));
 }
-artifacts.set("Apache-2.0.txt", readFileSync(require.resolve("typescript/LICENSE.txt"), "utf8"));
+artifacts.set("Apache-2.0.txt", lf(readFileSync(require.resolve("typescript/LICENSE.txt"), "utf8")));
 if (!checking) mkdirSync(folder, { recursive: true });
 for (const [name, contents] of artifacts) {
   const path = new URL(name, folder);
-  if (checking) assert.equal(readFileSync(path, "utf8"), contents, name + " must match its pinned source; run npm run build:media-codecs");
+  if (checking) assert.equal(lf(readFileSync(path, "utf8")), contents, name + " must match its pinned source; run npm run build:media-codecs");
   else writeFileSync(path, contents);
 }
 console.log(checking ? "Media codecs match their pinned sources and runtime adapters." : "Generated the licensed media codecs for Vapor.");
