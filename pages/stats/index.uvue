@@ -1,7 +1,7 @@
 <template>
   <qt-page-frame width-kind="detail">
   <view class="page">
-    <scroll-view class="scroll" direction="vertical" :scroll-top="scrollTop" @scroll="onListScroll">
+    <scroll-view class="scroll" :class="layout.isTv ? 'qt-tv-scroll' : ''" :data-qt-tv-id="layout.isTv ? 'stats:scroll' : ''" direction="vertical" :scroll-top="scrollTop" @scroll="onListScroll">
       <!-- 紧凑报告封面，说明从右上角展开；底图显式绑定像素宽度。 -->
       <view id="stats-hero" class="hero" :class="layout.isWide ? 'hero-wide' : ''" :style="'background-color:' + heroBaseColor + ';'">
         <image
@@ -13,16 +13,16 @@
         <view v-if="heroCover != ''" class="hero-scrim" :style="'width:' + heroBgWidth + 'px;height:' + heroBgHeight + 'px;'"></view>
         <view class="hero-body">
           <view class="hero-toolbar">
-            <text :style="('color:' + heroMutedColor + ';') + qtFontDual(21, 12)">全部听歌记录</text>
-            <view class="report-help" @click="openDetail('info', '')">
-              <text :style="('color:' + heroMutedColor + ';') + qtFontDual(21, 12)">统计说明</text>
+            <text :style="('color:' + heroMutedColor + ';') + qtFontDual(21, 12) + qtTvSongLineStyle(12)">全部听歌记录</text>
+            <view class="report-help" :style="layout.isTv ? 'height:56px;min-width:56px;padding-top:0px;padding-bottom:0px;' : ''" :data-qt-tv-id="layout.isTv ? 'stats:help' : ''" @click="openDetail('info', '')">
+              <text :style="('color:' + heroMutedColor + ';') + qtFontDual(21, 12) + qtTvSongLineStyle(12)">统计说明</text>
               <QtIcon name="chevron-right" :size="layout.isWide ? 14 : 22" :color="heroMutedColor" />
             </view>
           </view>
-          <text class="hero-title" :style="('color:' + heroTitleColor + ';') + qtFontDual(58, 32)">听歌报告</text>
-          <text class="hero-sub" :style="('color:' + heroMutedColor + ';') + qtFontDual(24, 13)">{{ heroSub }}</text>
+          <text class="hero-title" :style="('color:' + heroTitleColor + ';') + qtFontDual(58, 32) + qtTvSongLineStyle(32)">听歌报告</text>
+          <text class="hero-sub" :style="('color:' + heroMutedColor + ';') + qtFontDual(24, 13) + qtTvSongLineStyle(13)">{{ heroSub }}</text>
           <view class="hero-tag" :style="'background-color:' + heroTagBg + ';'">
-            <text class="hero-tag-text" :style="('color:' + heroTitleColor + ';') + qtFontDual(21, 12)">{{ heroTag }}</text>
+            <text class="hero-tag-text" :style="('color:' + heroTitleColor + ';') + qtFontDual(21, 12) + qtTvSongLineStyle(12)">{{ heroTag }}</text>
           </view>
         </view>
       </view>
@@ -30,15 +30,15 @@
       <view class="duration-card" :class="layout.isWide ? 'duration-card-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
         <view class="duration-heading">
           <QtIcon name="clock" :size="layout.isWide ? 18 : 30" :color="themeStore.skin.accent" />
-          <text class="duration-label" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 14)">累计播放时长</text>
+          <text class="duration-label" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 14) + qtTvSongLineStyle(14)">累计播放时长</text>
         </view>
         <view class="duration-line">
-          <text class="duration-number" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(60, 34)">{{ durationValue(stats.totalSeconds) }}</text>
-          <text class="duration-unit" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 14)">{{ durationUnit(stats.totalSeconds) }}</text>
+          <text class="duration-number" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(60, 34) + qtTvSongLineStyle(34)">{{ durationValue(stats.totalSeconds) }}</text>
+          <text class="duration-unit" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 14) + qtTvSongLineStyle(14)">{{ durationUnit(stats.totalSeconds) }}</text>
         </view>
-        <text class="duration-note" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(20, 12)">按实际收听累计，未播完也计入</text>
-        <view class="storage-status" @click="openDetail('info', '')">
-          <text class="storage-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 12)">{{ storageLabel }}</text>
+        <text class="duration-note" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(20, 12) + qtTvSongLineStyle(12)">按实际收听累计，未播完也计入</text>
+        <view class="storage-status" :style="layout.isTv ? 'height:56px;min-width:56px;' : ''" :data-qt-tv-id="layout.isTv ? 'stats:storage' : ''" @click="openDetail('info', '')">
+          <text class="storage-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 12) + qtTvSongLineStyle(12)">{{ storageLabel }}</text>
           <QtIcon name="chevron-right" :size="layout.isWide ? 14 : 22" :color="themeStore.skin.textSubtle" />
         </view>
       </view>
@@ -51,34 +51,34 @@
         <view class="stat-cell stat-cell-r" :class="layout.isWide ? 'stat-cell-wide' : ''" :style="'border-color:' + themeStore.skin.divider + ';'">
           <view class="stat-top">
             <QtIcon name="play" :size="layout.isWide ? 14 : 22" :color="themeStore.skin.accent" />
-            <text class="stat-label" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 12)">累计播放</text>
+            <text class="stat-label" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 12) + qtTvSongLineStyle(12)">累计播放</text>
           </view>
-          <text class="stat-num" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(40, 22)">{{ formatCount(totalPlayed) }}</text>
-          <text class="stat-note" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(18, 11)">全部次数</text>
+          <text class="stat-num" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(40, 22) + qtTvSongLineStyle(22)">{{ formatCount(totalPlayed) }}</text>
+          <text class="stat-note" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(18, 11) + qtTvSongLineStyle(11)">全部次数</text>
         </view>
         <view class="stat-cell stat-cell-r" :class="layout.isWide ? 'stat-cell-wide' : ''" :style="'border-color:' + themeStore.skin.divider + ';'">
           <view class="stat-top">
             <QtIcon name="heart" :size="layout.isWide ? 14 : 22" :color="themeStore.skin.accent" />
-            <text class="stat-label" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 12)">收藏歌曲</text>
+            <text class="stat-label" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 12) + qtTvSongLineStyle(12)">收藏歌曲</text>
           </view>
-          <text class="stat-num" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(40, 22)">{{ formatCount(likedCount) }}</text>
-          <text class="stat-note" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(18, 11)">本地歌单</text>
+          <text class="stat-num" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(40, 22) + qtTvSongLineStyle(22)">{{ formatCount(likedCount) }}</text>
+          <text class="stat-note" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(18, 11) + qtTvSongLineStyle(11)">本地歌单</text>
         </view>
         <view class="stat-cell stat-cell-r" :class="layout.isWide ? 'stat-cell-wide' : ''" :style="'border-color:' + themeStore.skin.divider + ';'">
           <view class="stat-top">
             <QtIcon name="list" :size="layout.isWide ? 14 : 22" :color="themeStore.skin.accent" />
-            <text class="stat-label" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 12)">听过歌曲</text>
+            <text class="stat-label" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 12) + qtTvSongLineStyle(12)">听过歌曲</text>
           </view>
-          <text class="stat-num" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(40, 22)">{{ formatCount(historyCount) }}</text>
-          <text class="stat-note" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(18, 11)">去重统计</text>
+          <text class="stat-num" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(40, 22) + qtTvSongLineStyle(22)">{{ formatCount(historyCount) }}</text>
+          <text class="stat-note" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(18, 11) + qtTvSongLineStyle(11)">去重统计</text>
         </view>
         <view class="stat-cell" :class="layout.isWide ? 'stat-cell-wide' : ''">
           <view class="stat-top">
             <QtIcon name="mic" :size="layout.isWide ? 14 : 22" :color="themeStore.skin.accent" />
-            <text class="stat-label" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 12)">常听歌手</text>
+            <text class="stat-label" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 12) + qtTvSongLineStyle(12)">常听歌手</text>
           </view>
-          <text class="stat-num" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(40, 22)">{{ formatCount(artistTotal) }}</text>
-          <text class="stat-note" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(18, 11)">音乐宇宙</text>
+          <text class="stat-num" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(40, 22) + qtTvSongLineStyle(22)">{{ formatCount(artistTotal) }}</text>
+          <text class="stat-note" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(18, 11) + qtTvSongLineStyle(11)">音乐宇宙</text>
         </view>
       </view>
 
@@ -91,9 +91,9 @@
       >
         <view class="block-head">
           <QtIcon name="trending" :size="layout.isWide ? 15 : 24" :color="themeStore.skin.accent" />
-          <text class="block-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 15)">{{ dailyTitle }}</text>
+          <text class="block-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 15) + qtTvSongLineStyle(15)">{{ dailyTitle }}</text>
           <view class="block-fill"></view>
-          <text class="daily-note" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(19, 11)">历史自动归档</text>
+          <text class="daily-note" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(19, 11) + qtTvSongLineStyle(11)">历史自动归档</text>
         </view>
         <view class="daily-seg" :class="layout.isWide ? 'daily-seg-wide' : ''">
           <qt-segmented :list="dailyLabels" v-model="dailyIndex" />
@@ -101,15 +101,15 @@
         <view class="daily-kinds">
           <QtSegmented :list="dailyKindLabels" :model-value="dailyKindKeys.indexOf(dailyKind)" @change="pickDailyKind(dailyKindKeys[$event])" />
         </view>
-        <text class="daily-summary" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(21, 12)">{{ dailySummary }}</text>
+        <text class="daily-summary" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(21, 12) + qtTvSongLineStyle(12)">{{ dailySummary }}</text>
         <view v-if="dailyRows.length == 0" class="daily-empty">
-          <text :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">{{ dailyEmptyText }}</text>
+          <text :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12) + qtTvSongLineStyle(12)">{{ dailyEmptyText }}</text>
         </view>
         <view
           v-for="(item, index) in dailyRows"
           :key="item.id"
-          class="song-row" :class="layout.isWide ? 'song-row-wide' : ''" :hover-class="layout.isWide ? 'song-row-hover' : 'none'"
-          @click="openDailyRow(item)"
+          class="song-row" :class="layout.isWide ? 'song-row-wide' : ''" :style="qtTvSongRowStyle() + (layout.isTv ? 'padding-top:0px;padding-bottom:0px;' : '')" :hover-class="layout.isWide ? 'song-row-hover' : 'none'"
+          :data-qt-tv-id="layout.isTv ? 'stats:daily:' + dailyKind + ':' + item.id : ''" @click="openDailyRow(item)"
         >
           <text class="song-rank" :class="layout.isWide ? 'song-rank-wide' : ''" :style="rankStyle(index)">{{ index + 1 }}</text>
           <image
@@ -120,7 +120,7 @@
           />
           <view v-else-if="dailyKind == 'sources'" class="source-badge" :class="layout.isWide ? 'source-badge-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';'">
             <image v-if="sourceIcon(item.id) != ''" style="width:60%;height:60%;" :src="sourceIcon(item.id)" mode="aspectFit" />
-            <text v-else :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(22, 12)">{{ artistInitial(item.name) }}</text>
+            <text v-else :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(22, 12) + qtTvSongLineStyle(12)">{{ artistInitial(item.name) }}</text>
           </view>
           <image
             v-else-if="artistPic(item.name) != ''"
@@ -133,10 +133,10 @@
             <text class="artist-initial" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(26, 14)">{{ artistInitial(item.name) }}</text>
           </view>
           <view class="song-info" :class="layout.isWide ? 'song-info-wide' : ''">
-            <text class="song-name" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(25, 14)" :max-lines="1">{{ dailyDisplayName(item) }}</text>
-            <text class="song-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 11)" :max-lines="1">{{ dailyMeta(item) }}</text>
+            <text class="song-name" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(25, 14) + qtTvSongLineStyle(14)" :max-lines="1">{{ dailyDisplayName(item) }}</text>
+            <text class="song-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 11) + qtTvSongLineStyle(11)" :max-lines="1">{{ dailyMeta(item) }}</text>
           </view>
-          <text class="song-count" :class="layout.isWide ? 'song-count-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(20, 11)">{{ item.count }} 次</text>
+          <text class="song-count" :class="layout.isWide ? 'song-count-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(20, 11) + qtTvSongLineStyle(11)">{{ item.count }} 次</text>
         </view>
       </view>
 
@@ -147,8 +147,8 @@
         :style="('background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';')"
       >
         <QtIcon name="music" :size="layout.isWide ? 28 : 48" :color="themeStore.skin.textSubtle" />
-        <text class="empty-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 16)">还没有听歌记录</text>
-        <text class="empty-sub" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(22, 13)">去发现页随便点一首，报告就会慢慢长出来</text>
+        <text class="empty-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 16) + qtTvSongLineStyle(16)">还没有听歌记录</text>
+        <text class="empty-sub" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(22, 13) + qtTvSongLineStyle(13)">去发现页随便点一首，报告就会慢慢长出来</text>
       </view>
 
       <!-- 三张 Top 5 卡排成一排横向滑动：卡宽按窗口算（一屏露出一张多一点，
@@ -156,7 +156,7 @@
            横向 scroll-view 的内容行在原生端不会自动撑开，必须显式给 px 宽度。 -->
       <scroll-view
         v-if="historyCount > 0"
-        class="top-scroll" :class="layout.isWide ? 'top-scroll-wide' : ''"
+        class="top-scroll" :class="[layout.isWide ? 'top-scroll-wide' : '', layout.isTv ? 'qt-tv-scroll' : '']" :data-qt-tv-id="layout.isTv ? 'stats:top-scroll' : ''"
         direction="horizontal" :show-scrollbar="false"
         :style="'height:' + topRowHeightPx + 'px;'"
       >
@@ -167,17 +167,23 @@
             class="top-card" :class="layout.isWide ? 'top-card-wide' : ''"
             :style="('width:' + topCardWidth + 'px;background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';')"
           >
-          <view class="block-head">
-            <QtIcon name="trending" :size="layout.isWide ? 15 : 24" :color="themeStore.skin.accent" />
-            <text class="block-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 15)">Top 5 歌曲</text>
-            <view class="block-fill"></view>
-            <view class="report-link" @click="openDetail('songs', '')"><text :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(21, 12)">全部</text><QtIcon name="chevron-right" :size="layout.isWide ? 14 : 22" :color="themeStore.skin.accent" /></view>
+          <view class="block-head" :style="layout.isTv ? 'flex-direction:column;align-items:stretch;margin-bottom:8px;' : ''">
+            <view v-if="layout.isTv" class="stats-top-heading" style="min-height:56px;">
+              <QtIcon name="trending" :size="24" :color="themeStore.skin.accent" />
+              <text class="block-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 15) + qtTvSongLineStyle(15)">Top 5 歌曲</text>
+            </view>
+            <template v-else>
+              <QtIcon name="trending" :size="layout.isWide ? 15 : 24" :color="themeStore.skin.accent" />
+              <text class="block-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 15)">Top 5 歌曲</text>
+            </template>
+            <view v-if="!layout.isTv" class="block-fill"></view>
+            <view class="report-link" :style="layout.isTv ? 'height:56px;min-width:56px;align-self:flex-end;padding:0px;' : ''" :data-qt-tv-id="layout.isTv ? 'stats:all:songs' : ''" @click="openDetail('songs', '')"><text :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(21, 12) + qtTvSongLineStyle(12)">全部</text><QtIcon name="chevron-right" :size="layout.isWide ? 14 : 22" :color="themeStore.skin.accent" /></view>
           </view>
           <view
             v-for="(item, index) in topSongs"
             :key="item.song.id + item.song.platform"
-            class="song-row" :class="layout.isWide ? 'song-row-wide' : ''" :hover-class="layout.isWide ? 'song-row-hover' : 'none'"
-            @click="openDetail('songs', reportSongKey(item.song))"
+            class="song-row" :class="layout.isWide ? 'song-row-wide' : ''" :style="qtTvSongRowStyle() + (layout.isTv ? 'padding-top:0px;padding-bottom:0px;' : '')" :hover-class="layout.isWide ? 'song-row-hover' : 'none'"
+            :data-qt-tv-id="layout.isTv ? 'stats:song:' + reportSongKey(item.song) : ''" @click="openDetail('songs', reportSongKey(item.song))"
           >
             <text class="song-rank" :class="layout.isWide ? 'song-rank-wide' : ''" :style="rankStyle(index)">{{ index + 1 }}</text>
             <image
@@ -186,10 +192,10 @@
               :src="item.song.picUrl" mode="aspectFill"
             />
             <view class="song-info" :class="layout.isWide ? 'song-info-wide' : ''">
-              <text class="song-name" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(25, 14)" :max-lines="1">{{ item.song.name }}</text>
-              <text class="song-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 11)" :max-lines="1">{{ item.song.singer }} · {{ reportDuration(item.seconds) }}</text>
+              <text class="song-name" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(25, 14) + qtTvSongLineStyle(14)" :max-lines="1">{{ item.song.name }}</text>
+              <text class="song-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 11) + qtTvSongLineStyle(11)" :max-lines="1">{{ item.song.singer }} · {{ reportDuration(item.seconds) }}</text>
             </view>
-            <text class="song-count" :class="layout.isWide ? 'song-count-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(20, 11)">{{ item.count }} 次</text>
+            <text class="song-count" :class="layout.isWide ? 'song-count-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(20, 11) + qtTvSongLineStyle(11)">{{ item.count }} 次</text>
           </view>
         </view>
 
@@ -199,17 +205,23 @@
             class="top-card" :class="layout.isWide ? 'top-card-wide' : ''"
             :style="('width:' + topCardWidth + 'px;background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';')"
           >
-            <view class="block-head">
-              <QtIcon name="mic" :size="layout.isWide ? 15 : 24" :color="themeStore.skin.accent" />
-              <text class="block-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 15)">Top 5 歌手</text>
-              <view class="block-fill"></view>
-              <view class="report-link" @click="openDetail('artists', '')"><text :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(21, 12)">全部</text><QtIcon name="chevron-right" :size="layout.isWide ? 14 : 22" :color="themeStore.skin.accent" /></view>
+            <view class="block-head" :style="layout.isTv ? 'flex-direction:column;align-items:stretch;margin-bottom:8px;' : ''">
+              <view v-if="layout.isTv" class="stats-top-heading" style="min-height:56px;">
+                <QtIcon name="mic" :size="24" :color="themeStore.skin.accent" />
+                <text class="block-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 15) + qtTvSongLineStyle(15)">Top 5 歌手</text>
+              </view>
+              <template v-else>
+                <QtIcon name="mic" :size="layout.isWide ? 15 : 24" :color="themeStore.skin.accent" />
+                <text class="block-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 15)">Top 5 歌手</text>
+              </template>
+              <view v-if="!layout.isTv" class="block-fill"></view>
+              <view class="report-link" :style="layout.isTv ? 'height:56px;min-width:56px;align-self:flex-end;padding:0px;' : ''" :data-qt-tv-id="layout.isTv ? 'stats:all:artists' : ''" @click="openDetail('artists', '')"><text :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(21, 12) + qtTvSongLineStyle(12)">全部</text><QtIcon name="chevron-right" :size="layout.isWide ? 14 : 22" :color="themeStore.skin.accent" /></view>
           </view>
             <view
               v-for="(item, index) in topArtists"
               :key="item.name"
-              @click="openDetail('artists', item.name)"
-              class="song-row" :class="layout.isWide ? 'song-row-wide' : ''" :hover-class="layout.isWide ? 'song-row-hover' : 'none'"
+              :data-qt-tv-id="layout.isTv ? 'stats:artist:' + item.name : ''" @click="openDetail('artists', item.name)"
+              class="song-row" :class="layout.isWide ? 'song-row-wide' : ''" :style="qtTvSongRowStyle() + (layout.isTv ? 'padding-top:0px;padding-bottom:0px;' : '')" :hover-class="layout.isWide ? 'song-row-hover' : 'none'"
             >
               <text class="song-rank" :class="layout.isWide ? 'song-rank-wide' : ''" :style="rankStyle(index)">{{ index + 1 }}</text>
               <image v-if="artistPic(item.name) != ''" class="artist-avatar" :class="layout.isWide ? 'artist-avatar-wide' : ''" :src="artistPic(item.name)" mode="aspectFill" @error="artistImageError(item.name)" />
@@ -220,8 +232,8 @@
                 <text class="artist-initial" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(26, 14)">{{ artistInitial(item.name) }}</text>
               </view>
               <view class="song-info" :class="layout.isWide ? 'song-info-wide' : ''">
-                <text class="song-name" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(25, 14)" :max-lines="1">{{ item.name }}</text>
-                <text class="song-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 11)">{{ item.count }} 次 · {{ reportDuration(item.seconds) }}</text>
+                <text class="song-name" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(25, 14) + qtTvSongLineStyle(14)" :max-lines="1">{{ item.name }}</text>
+                <text class="song-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 11) + qtTvSongLineStyle(11)">{{ item.count }} 次 · {{ reportDuration(item.seconds) }}</text>
               </view>
             </view>
           </view>
@@ -232,17 +244,23 @@
             class="top-card" :class="layout.isWide ? 'top-card-wide' : ''"
             :style="('width:' + topCardWidth + 'px;background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';')"
           >
-            <view class="block-head">
-              <QtIcon name="disc" :size="layout.isWide ? 15 : 24" :color="themeStore.skin.accent" />
-              <text class="block-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 15)">Top 5 音源</text>
-              <view class="block-fill"></view>
-              <view class="report-link" @click="openDetail('sources', '')"><text :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(21, 12)">全部</text><QtIcon name="chevron-right" :size="layout.isWide ? 14 : 22" :color="themeStore.skin.accent" /></view>
+            <view class="block-head" :style="layout.isTv ? 'flex-direction:column;align-items:stretch;margin-bottom:8px;' : ''">
+              <view v-if="layout.isTv" class="stats-top-heading" style="min-height:56px;">
+                <QtIcon name="disc" :size="24" :color="themeStore.skin.accent" />
+                <text class="block-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 15) + qtTvSongLineStyle(15)">Top 5 音源</text>
+              </view>
+              <template v-else>
+                <QtIcon name="disc" :size="layout.isWide ? 15 : 24" :color="themeStore.skin.accent" />
+                <text class="block-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 15)">Top 5 音源</text>
+              </template>
+              <view v-if="!layout.isTv" class="block-fill"></view>
+              <view class="report-link" :style="layout.isTv ? 'height:56px;min-width:56px;align-self:flex-end;padding:0px;' : ''" :data-qt-tv-id="layout.isTv ? 'stats:all:sources' : ''" @click="openDetail('sources', '')"><text :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(21, 12) + qtTvSongLineStyle(12)">全部</text><QtIcon name="chevron-right" :size="layout.isWide ? 14 : 22" :color="themeStore.skin.accent" /></view>
           </view>
             <view
               v-for="(item, index) in topSources"
               :key="item.id"
-              @click="openDetail('sources', item.id)"
-              class="song-row" :class="layout.isWide ? 'song-row-wide' : ''" :hover-class="layout.isWide ? 'song-row-hover' : 'none'"
+              :data-qt-tv-id="layout.isTv ? 'stats:source:' + item.id : ''" @click="openDetail('sources', item.id)"
+              class="song-row" :class="layout.isWide ? 'song-row-wide' : ''" :style="qtTvSongRowStyle() + (layout.isTv ? 'padding-top:0px;padding-bottom:0px;' : '')" :hover-class="layout.isWide ? 'song-row-hover' : 'none'"
             >
               <text class="song-rank" :class="layout.isWide ? 'song-rank-wide' : ''" :style="rankStyle(index)">{{ index + 1 }}</text>
               <image v-if="sourceIcon(item.id) != ''" class="source-badge" :class="layout.isWide ? 'source-badge-wide' : ''" :src="sourceIcon(item.id)" mode="aspectFit" />
@@ -253,8 +271,8 @@
                 <QtIcon name="disc" :size="layout.isWide ? 14 : 22" color="#ffffff" />
               </view>
               <view class="song-info" :class="layout.isWide ? 'song-info-wide' : ''">
-                <text class="song-name" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(25, 14)" :max-lines="1">{{ item.name }}</text>
-                <text class="song-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 11)">{{ item.pct }}% · {{ item.count }} 次</text>
+                <text class="song-name" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(25, 14) + qtTvSongLineStyle(14)" :max-lines="1">{{ item.name }}</text>
+                <text class="song-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(20, 11) + qtTvSongLineStyle(11)">{{ item.pct }}% · {{ item.count }} 次</text>
               </view>
             </view>
           </view>
@@ -271,8 +289,8 @@
 <script setup lang="ts">
 import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
-import { computed, ref, watch } from "vue";
-import { onShow, onBackPress } from "@dcloudio/uni-app";
+import { computed, ref, watch, onBeforeUnmount } from "vue";
+import { onShow, onBackPress, onUnload } from "@dcloudio/uni-app";
 import { useListenStatsStore } from "@/stores/listen-stats";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import { usePlayerStore } from "@/stores/player";
@@ -289,6 +307,7 @@ import { reportEntries, reportDuration, reportSongKey, reportDayEntries, type Re
 import { listenDayKey, listenDayWindow } from "@/stores/listen-stats";
 import QtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtSongRowHeightPx, qtTvSongRowStyle, qtTvSongLineStyle } from "@/uni_modules/qt-ui/composables/qt-song-row-metrics";
 
 const player = usePlayerStore();
 const stats = useListenStatsStore();
@@ -364,7 +383,7 @@ function artistInitial(name: string): string {
 /** 名次配色：前三用主色，其余用弱化色 */
 function rankStyle(index: number): string {
   const color = index < 3 ? themeStore.skin.accent : themeStore.skin.textSubtle;
-  return "color:" + color + ";" + qtFontDual(30, 16);
+  return "color:" + color + ";" + qtFontDual(30, 16) + qtTvSongLineStyle(16);
 }
 
 // 收藏总数 = 收藏总表里带本地歌单 pid 的歌曲数
@@ -554,14 +573,14 @@ const topColumnWidth = computed((): number => {
   // 宽屏内容列由框架统一给出（改造前这里写死 min(windowWidth,1360)，与框架的宽度公式对不上，
   // 窗口一超过 1360 三张卡就开始偏左留白）
   if (layout.isWide) return qtContentWidth("detail");
-  return layout.windowWidth;
+  return layout.paneWidth;
 });
 const topCardWidth = computed((): number => {
   if (layout.isWide) {
     // 列宽 - 左右 padding 48 - 三张卡各 16 的间距 48
     return Math.max(300, Math.floor((topColumnWidth.value - 96) / 3));
   }
-  const win = layout.windowWidth;
+  const win = layout.paneWidth;
   const inner = win - win * (48 / 750);
   return Math.max(180, Math.round(inner - win * (52 / 750)));
 });
@@ -582,7 +601,9 @@ const topRowWidth = computed((): number => {
 // 横向 scroll-view 在原生端不会按内容撑高，高度必须显式给（同首页歌单架的做法）。
 // 竖屏按 CSS rpx 的换算（窗口宽 / 750）折算，宽屏走 -wide 的 px 覆盖值。
 const topRowHeightPx = computed((): number => {
-  const win = layout.windowWidth;
+  // TV: five actual-font rows, two 56px header lanes, 8px gap, 36px card padding and 2px border.
+  if (layout.isTv) return qtSongRowHeightPx() * 5 + 158;
+  const win = layout.paneWidth;
   if (layout.isWide) return 440;
   // 5 行 × (封面 84rpx + 上下 padding 28rpx) + 标题行 44rpx + 卡内 padding 48rpx + 余量
   return Math.max(Math.round(710 * (win / 750)), 340);
@@ -593,7 +614,7 @@ const heroCover = computed((): string => topSongs.value.length > 0 ? topSongs.va
 // 底图宽度必须自己算：hero 左右各留 24rpx（不能用 qtRpx，它按 375 基准折算会偏小）；
 // 宽屏左右各留 24px，内容列宽由框架统一给出。
 const heroBgWidth = computed((): number => {
-  const win = layout.windowWidth;
+  const win = layout.paneWidth;
   if (layout.isWide) return qtContentWidth("detail") - 48;
   return Math.round(win - win * (48 / 750));
 });
@@ -612,14 +633,21 @@ const heroTag = computed((): string => "已记录 " + formatCount(historyCount.v
 // （qt-batch-bar 命中区同款教训），只能给显式像素——宽度按窗口算，高度量一次卡片实高。
 const heroBgHeight = ref(0);
 let heroMeasureSeq = 0;
+let heroMeasureAlive = true;
+function disposeHeroMeasure(): void {
+  heroMeasureAlive = false;
+  heroMeasureSeq++;
+}
+onUnload(disposeHeroMeasure);
+onBeforeUnmount(disposeHeroMeasure);
 function measureHeroHeight(): void {
-  if (heroCover.value == "") return;
+  if (!heroMeasureAlive || heroCover.value == "") return;
   const seq = ++heroMeasureSeq;
   uni.createSelectorQuery()
     .select("#stats-hero")
     .boundingClientRect((rect: UniNodeInfo | null) => {
       // 只认最后一次测量：窗口宽度连续变化时，先回来的旧结果直接丢弃
-      if (seq != heroMeasureSeq) return;
+      if (!heroMeasureAlive || seq != heroMeasureSeq) return;
       if (rect != null && rect.height > 0) heroBgHeight.value = Math.round(rect.height);
     })
     .exec();
@@ -627,7 +655,7 @@ function measureHeroHeight(): void {
 // 卡片高度由内容行撑出，与封面无关；封面就位后才渲染底图，此刻量准。
 watch(heroCover, () => { measureHeroHeight(); });
 // 折叠/旋转/分屏改窗口 → hero 宽高都变；进页/回页（含改完字号回来）→ onShow 里量。
-watch(() => layout.windowWidth, () => { measureHeroHeight(); });
+watch(() => layout.paneWidth, () => { measureHeroHeight(); });
 
 async function playSong(song: Song): Promise<void> {
   if (loadingKey.value != "") return;
@@ -682,6 +710,8 @@ async function playSong(song: Song): Promise<void> {
 .block-head { flex-direction:row; align-items:center; margin-bottom:8rpx; }
 .block-title { margin-left:12rpx; font-weight:650; }
 .block-fill { flex:1; }
+
+.stats-top-heading { flex-direction:row; align-items:center; }
 
 /* 日榜：分段条 + 一行汇总 + 排行 */
 .daily-seg { margin-top:12rpx; }

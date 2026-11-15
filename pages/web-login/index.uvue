@@ -1,34 +1,42 @@
 <template>
   <qt-page-frame width-kind="flow" :max-width="720">
-    <view class="wl-shell">
-      <view class="wl-head">
-        <text class="wl-name" :style="('color:' + theme.skin.text + ';') + qtFontDual(34, 19)">{{ sourceName }}</text>
+    <view class="wl-shell" :style="tvShellStyle">
+      <scroll-view class="wl-head" :class="layout.isTv ? 'qt-tv-scroll' : ''" :direction="layout.isTv ? 'vertical' : 'none'" :show-scrollbar="false" data-qt-tv-id="web:status" :style="tvHeadStyle">
+        <text class="wl-name" :style="('color:' + theme.skin.text + ';') + qtFontDual(34, 19) + tvTextStyle(19)">{{ sourceName }}</text>
         <text
           class="wl-status"
           :max-lines="3"
-          :style="('color:' + statusColor + ';') + qtFontDual(23, 13)"
+          :style="('color:' + statusColor + ';') + qtFontDual(23, 13) + tvTextStyle(13)"
         >{{ statusText }}</text>
         <qt-button
           v-if="phase == 'timeout' || phase == 'cancelled'"
           class="wl-retry"
+          data-qt-tv-id="web:retry"
+          :wrap="layout.isTv"
+          :full-width="layout.isTv"
+          :style="tvActionStyle"
           label="重新加载"
           variant="outline"
           size="sm"
           @click="retry"
         />
-      </view>
-      <web-view v-if="useInnerWebView && webUrl.length > 0" class="wl-web" :src="webUrl" @error="onWebError" />
-      <view v-else-if="useNativeView" class="wl-native">
-        <text class="wl-native-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ nativeTip }}</text>
+      </scroll-view>
+      <web-view v-if="useInnerWebView && webUrl.length > 0" class="wl-web" :style="tvWebStyle" :src="webUrl" @error="onWebError" />
+      <scroll-view v-else-if="useNativeView" class="wl-native" :class="layout.isTv ? 'qt-tv-scroll' : ''" :direction="layout.isTv ? 'vertical' : 'none'" :show-scrollbar="false" data-qt-tv-id="web:native" :style="tvNativeStyle">
+        <text class="wl-native-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13) + tvTextStyle(13)">{{ nativeTip }}</text>
         <qt-button
           v-if="phase != 'done'"
           class="wl-reopen"
+          data-qt-tv-id="web:reopen"
+          :wrap="layout.isTv"
+          :full-width="layout.isTv"
+          :style="tvActionStyle"
           label="重新打开官方登录页"
           variant="outline"
           size="sm"
           @click="openNativeLogin"
         />
-      </view>
+      </scroll-view>
     </view>
   </qt-page-frame>
 </template>
@@ -38,18 +46,20 @@ import { onUnmounted } from "vue";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
+import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtContentWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { qtShowToast } from "@/services/toast";
 import { logErrV } from "@/services/logger";
 import { useSourceRegistryStore } from "@/stores/source-registry";
-import { isAndroidOs, getWebCookies, openAuthWebView, closeAuthWebView } from "@/services/app-native";
+import { supportsNativeAuthWebView, getWebCookies, openAuthWebView, closeAuthWebView } from "@/services/app-native";
 import { authImportCookie, saveSourceAuthAccount, sourceAuthRevision, readSourceAuthEntries, type SourceAuthUser } from "@/services/source-auth";
-import { mergeCookies, markerHit, captureUrlsOf, WEB_LOGIN_DONE_EVENT } from "@/services/source-web-login";
+import { mergeCookies, markerHit, captureUrlsOf, normalizeQqWebLoginCookie, qqWebLoginIsWeChatCookie, qqWebLoginAccountId, WEB_LOGIN_DONE_EVENT } from "@/services/source-web-login";
 import { claimSourceWebLogin, sourceWebLoginIsCurrent, sourceWebLoginIsAvailable, releaseSourceWebLogin } from "@/services/source-web-login-session";
 import type { RegistryWebLogin } from "@/services/music-api";
 
 /**
- * 音源账号网页登录（v17 契约 auth.webLogin，Android 先行；PC 对应实现
+ * 音源账号网页登录（v17 契约 auth.webLogin，Android / iOS 原生通道；PC 对应实现
  * qt-pc/src/lib/source-web-login.ts）：打开官方登录页（web-view），每 1.5s 读
  * 一次系统 WebView Cookie（原生 getWebCookies），命中「能证明已登录」的
  * 标记（qm_keyst / MUSIC_U / SESSDATA …）后走 authImportCookie 校验，成功
@@ -62,6 +72,22 @@ import type { RegistryWebLogin } from "@/services/music-api";
  */
 const theme = useThemeStore();
 const registry = useSourceRegistryStore();
+const layout = useQtLayout();
+const tvWidth = computed((): number => Math.min(720, qtContentWidth("flow")));
+const tvShellStyle = computed((): string => layout.isTv ? "width:" + tvWidth.value + "px;min-width:0px;" : "");
+const tvHeadStyle = computed((): string => {
+  if (!layout.isTv) return "";
+  const lines = Math.ceil(qtFontValuePx(19) * 1.35) + 3 * Math.ceil(qtFontValuePx(13) * 1.35) + 24;
+  const retryHeight = phase.value == "timeout" || phase.value == "cancelled" ? Math.max(56, Math.ceil(qtFontValuePx(14) * 1.35) + 16) + 12 : 0;
+  const height = Math.max(56, Math.min(lines + retryHeight, Math.floor(layout.paneHeight * 0.35)));
+  return "width:" + tvWidth.value + "px;height:" + height + "px;min-height:56px;flex-grow:0;flex-shrink:1;align-items:stretch;padding:8px 0px;";
+});
+const tvWebStyle = computed((): string => layout.isTv ? "width:" + tvWidth.value + "px;min-width:0px;min-height:56px;" : "");
+const tvNativeStyle = computed((): string => layout.isTv ? "width:" + tvWidth.value + "px;min-width:0px;padding:16px 0px 12px 0px;align-items:stretch;justify-content:flex-start;" : "");
+const tvActionStyle = computed((): string => layout.isTv ? "min-width:0px;flex-shrink:0;margin-top:12px;" : "");
+function tvTextStyle(base: number): string {
+  return layout.isTv ? "width:" + tvWidth.value + "px;min-width:0px;flex-shrink:0;line-height:" + Math.ceil(qtFontValuePx(base) * 1.35) + "px;" : "";
+}
 
 const sourceId = ref("");
 const sourceName = ref("");
@@ -121,21 +147,17 @@ function pollFlowIsCurrent(generation: number, source: string, revision: number)
 }
 
 /**
- * 安卓走原生「可控登录 WebView」（services/app-native 的 openAuthWebView）：
- * built-in <web-view> 不转发 mqqapi:// / intent:// 这类自定义 scheme，
- * QQ 登录页点「QQ登录」要拉起手机QQ 时毫无反应（2026-10-31 用户实测）。
- * 鸿蒙 / iOS 没有等价实现，继续用内置 web-view（按 isAndroidOs 显式判定：
- * 原先写 `!isHarmonyOs()` 会把 iOS 也算成「有原生实现」，页面停在
- * 「已用系统 WebView 打开」直到 180s 超时，2026-11-02 审阅实测）。
+ * 页面与账号入口共用原生 WebView + Cookie 捕获能力判定。
+ * Android/iOS 接管应用授权跳转，其他平台保留内置 web-view。
  */
-const useNativeView = isAndroidOs();
-const useInnerWebView = !isAndroidOs();
+const useNativeView = supportsNativeAuthWebView();
+const useInnerWebView = !useNativeView;
 /** 原生登录页是否已被用户关掉（仅影响提示文案；Cookie 轮询不受影响） */
 const nativeClosedByUser = ref(false);
 /** 原生登录 WebView 是否正开着（避免 beginPolling 重复打开/重开） */
 const nativeOpen = ref(false);
 
-/** 原生登录页的说明文案（安卓专用；鸿蒙走内置 web-view 不显示） */
+/** 原生登录页的说明文案；鸿蒙走内置 web-view 不显示。 */
 const nativeTip = computed((): string => {
   if (nativeClosedByUser.value) return "登录页已关闭。Cookie 捕获仍在继续，需要重新打开时点下面按钮。";
   return "登录页已在系统 WebView 中打开，返回键或右上角「关闭」可退出。QQ / 微信授权会跳到对应 App，确认后回到登录页继续即可，本页会自动完成登录。";
@@ -159,8 +181,13 @@ function onNativeClosed(message: string): void {
  * 桌面版没有 viewport meta，WebView 会按 overview 模式缩放到屏宽，插件另外开了缩放。
  */
 const DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-/** 需要桌面 UA 才能露出登录入口的音源 */
-const DESKTOP_WEB_LOGIN_SOURCES = ["kw"];
+/**
+ * 需要桌面 UA 才能露出登录入口的音源
+ * - kw：手机站 m.kuwo.cn 无登录入口，桌面 UA 才停在 www 桌面版。
+ * - qq：登录地址 y.qq.com/n/ryqq/profile/login 是 PC 路由；手机 UA 会走移动端「一键登录」弹层、
+ *   不显示二维码（2026-11-13 实测）。桌面 UA 才出「QQ登录」二维码，供手机扫码。
+ */
+const DESKTOP_WEB_LOGIN_SOURCES = ["kw", "qq"];
 
 /** 当前音源该用哪个 UA（空串 = 插件内置移动端 UA） */
 function webLoginUa(): string {
@@ -211,6 +238,28 @@ function errText(e: any | null): string {
   return message.length > 120 ? message.slice(0, 120) : message;
 }
 
+/** 追加一个 Cookie 读取 URL（去重）。 */
+function addCaptureUrl(url: string): void {
+  if (captureUrls.indexOf(url) >= 0) return;
+  captureUrls.push(url);
+}
+
+/** 微信扫码的账号展示名；老包离线态只认 uin 会显示「QQ · 尾号」且头像是 QQ 号，
+ * 这里按微信账号修正（新包已自处理时保持包侧结果）。 */
+function qqDisplayUserOf(source: string, cookie: string, user: SourceAuthUser): SourceAuthUser {
+  if (source != "qq" || !qqWebLoginIsWeChatCookie(cookie)) return user;
+  if (user.nickname.length > 0 && user.nickname.indexOf("QQ ") != 0) return user;
+  const id = qqWebLoginAccountId(cookie);
+  const nickname = id.length > 0 ? "微信 · " + id.substring(id.length - 4) : "微信账号";
+  return {
+    id: user.id.length > 0 ? user.id : id,
+    nickname: nickname,
+    avatar: "",
+    vip: user.vip,
+    vipLabel: user.vipLabel,
+  };
+}
+
 /** 从注册表找当前源的网页登录契约；找到即填充全部流程变量，返回 false=不可用 */
 function startFromRegistry(): boolean {
   const sources = registry.sources;
@@ -225,6 +274,14 @@ function startFromRegistry(): boolean {
     webUrl.value = wl.url;
     sourceName.value = s.name.length > 0 ? s.name : registry.label(s.id);
     captureUrls = captureUrlsOf(wl, auth.domains);
+    if (s.id == "qq") {
+      // 微信扫码的凭据由 u.y.qq.com / open.weixin.qq.com 的 XHR 写入；老契约只列
+      // 了登录页域，host-only 的 wxuin / qqmusic_key 读不到就永远判不出已登录。
+      addCaptureUrl("https://u.y.qq.com/");
+      addCaptureUrl("https://c.y.qq.com/");
+      addCaptureUrl("https://qq.com/");
+      addCaptureUrl("https://open.weixin.qq.com/");
+    }
     return true;
   }
   return false;
@@ -262,11 +319,13 @@ function beginPolling(): void {
   failNotified = false;
   deadlineAt = Date.now() + WEB_LOGIN_TIMEOUT_MS;
   stopPolling();
-  pollTimer = setInterval(tick, WEB_LOGIN_INTERVAL_MS);
-  tick();
   // 安卓：登录页由原生 Dialog 承载（内置 web-view 不转发 mqqapi:// 等 scheme）。
+  // 必须先开原生页（openAuthWebView 内部会先清空 WebView 的 Cookie 库），再开始轮询：
+  // 否则第一拍 tick() 会在清库前读到上次登录残留的 Cookie，直接把旧会话当成新登录。
   // retry 复用同一窗口，已开着就不再重开，避免用户填到一半被弹走。
   if (useNativeView && !nativeOpen.value) openNativeLogin();
+  pollTimer = setInterval(tick, WEB_LOGIN_INTERVAL_MS);
+  tick();
 }
 
 /** 一轮检测：读 Cookie → 拼「name=value; …」头 → 命中标记即导入校验 */
@@ -289,14 +348,22 @@ function tick(): void {
   pollRequestGeneration = generation;
   getWebCookies(captureUrls).then((chunks: string[]) => {
     if (!pollFlowIsCurrent(generation, source, revision)) return;
-    const cookie = mergeCookies(chunks);
+    let cookie = mergeCookies(chunks);
     if (cookie.length > 0) capturedSeen.value = true;
-    if (!markerHit(cookie, wl.cookieMarkers)) return;
+    if (source == "qq") cookie = normalizeQqWebLoginCookie(cookie);
+    // qq 微信扫码只保证 wxopenid / qqmusic_key 出现；在契约标记之外补上这两种。
+    let markers: string[] = wl.cookieMarkers;
+    if (source == "qq") {
+      if (markers.indexOf("qm_keyst") < 0) markers.push("qm_keyst");
+      if (markers.indexOf("qqmusic_key") < 0) markers.push("qqmusic_key");
+      if (markers.indexOf("wxopenid") < 0) markers.push("wxopenid");
+    }
+    if (!markerHit(cookie, markers)) return;
     return authImportCookie(source, cookie)
       .then((user: SourceAuthUser | null) => {
         if (!pollFlowIsCurrent(generation, source, revision)) return;
         if (user != null) {
-          finishLogin(generation, source, cookie, user);
+          finishLogin(generation, source, cookie, qqDisplayUserOf(source, cookie, user));
           return;
         }
         // 校验未过：继续轮询（PC 同语义），用户把账号状态弄对后下一轮自动重试

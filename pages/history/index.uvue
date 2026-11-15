@@ -9,27 +9,27 @@
           <text
             v-if="historySongs.length > 0"
             class="act-link" :class="layout.isWide ? 'act-link-wide' : ''"
-            :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(24, 13)" @click="clearHistory"
+            :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(24, 13) + tvHeaderActionStyle" @click="clearHistory"
           >清空记录</text>
           <text
             v-if="historySongs.length > 0"
             class="act-link" :class="layout.isWide ? 'act-link-wide' : ''"
-            :style="('color:' + theme.skin.accent + ';') + qtFontDual(24, 13)" @click="toggleSelect"
+            :style="('color:' + theme.skin.accent + ';') + qtFontDual(24, 13) + tvHeaderActionStyle" @click="toggleSelect"
           >管理</text>
         </template>
         <template v-else>
           <text
             class="act-link" :class="layout.isWide ? 'act-link-wide' : ''"
-            :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13)" @click="toggleSelectAll"
+            :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13) + tvHeaderActionStyle" @click="toggleSelectAll"
           >{{ allSel ? "取消全选" : "全选" }}</text>
           <text
             class="act-link" :class="layout.isWide ? 'act-link-wide' : ''"
-            :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(24, 13)" @click="toggleSelect"
+            :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(24, 13) + tvHeaderActionStyle" @click="toggleSelect"
           >取消</text>
           <view
             v-if="selectedKeys.length > 0"
             class="danger-btn" :class="layout.isWide ? 'danger-btn-wide' : ''"
-            :style="'background-color:' + theme.skin.danger + ';'"
+            :style="'background-color:' + theme.skin.danger + ';' + tvRemoveActionStyle"
             @click="confirmBatchRemove"
           ><text class="danger-btn-text" :class="layout.isWide ? 'danger-btn-text-wide' : ''" :style="('color:#ffffff;') + qtFontDual(23, 13)">移除（{{ selectedKeys.length }}）</text></view>
         </template>
@@ -41,17 +41,18 @@
         v-for="pair in pairs"
         :key="pair.key"
         class="row-item" :class="layout.isWide ? 'row-item-wide' : ''"
+        :style="qtTvSongRowStyle() + (layout.isTv ? 'padding:0;' : '')"
       >
         <!-- 一行最多两首：宽度全部由脚本算好内联下发（禁 max-width:100%）。 -->
         <view class="pair" :class="twoColumn ? 'pair-wide' : ''">
           <view class="cell" :style="cellStyle">
-            <SongRow :song="pair.left" :showBadge="true" :inHistory="true" :selecting="selecting" :selected="selecting && isSel(pair.left)" @play="onRowTap(pair.left)" />
+            <SongRow :song="pair.left" :tv-id="'history:' + pair.key + ':left'" :showBadge="true" :inHistory="true" :selecting="selecting" :selected="selecting && isSel(pair.left)" @play="onRowTap(pair.left)" />
           </view>
           <!-- 右格容器恒渲染（两列时），只有内容按 hasRight 决定：
                保持「一个 list-item = 两个格」的结构签名恒定，复用池不会错配。
                奇数条数时最后一行的右格是空白位，宽度仍占满，行宽不塌陷。 -->
           <view v-if="twoColumn" class="cell-right" :style="rightCellStyle">
-            <SongRow v-if="pair.hasRight" :song="pair.right" :showBadge="true" :inHistory="true" :selecting="selecting" :selected="selecting && isSel(pair.right)" @play="onRowTap(pair.right)" />
+            <SongRow v-if="pair.hasRight" :song="pair.right" :tv-id="'history:' + pair.key + ':right'" :showBadge="true" :inHistory="true" :selecting="selecting" :selected="selecting && isSel(pair.right)" @play="onRowTap(pair.right)" />
           </view>
         </view>
       </list-item>
@@ -86,10 +87,18 @@ import type { Song } from "@/types/music";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useQtSongColumns, qtSongPairs } from "@/uni_modules/qt-ui/composables/use-qt-song-columns";
 import { qtSwitchTab } from "@/uni_modules/qt-ui/composables/qt-nav";
+import { qtTvSongRowStyle } from "@/uni_modules/qt-ui/composables/qt-song-row-metrics";
+import { QT_TV_TOKENS } from "@/uni_modules/qt-ui/composables/qt-tv-tokens";
 
 const player = usePlayerStore();
 const layout = useQtLayout();
 const theme = useThemeStore();
+const tvHeaderActionStyle = computed((): string => layout.isTv
+  ? 'height:' + QT_TV_TOKENS.controlPx + 'px;min-width:' + QT_TV_TOKENS.controlPx + 'px;padding:0 12px;line-height:' + QT_TV_TOKENS.controlPx + 'px;text-align:center;'
+  : '');
+const tvRemoveActionStyle = computed((): string => layout.isTv
+  ? 'height:' + QT_TV_TOKENS.controlPx + 'px;min-width:' + QT_TV_TOKENS.controlPx + 'px;padding:0 18px;align-items:center;justify-content:center;'
+  : '');
 
 const cardStyle = computed<string>(() =>
   "background-color:" + theme.skin.surface +

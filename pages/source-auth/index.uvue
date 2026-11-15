@@ -1,35 +1,53 @@
 <template>
   <qt-page-frame width-kind="flow" :max-width="720">
-    <scroll-view class="auth-scroll" direction="vertical" :show-scrollbar="false">
+    <scroll-view class="auth-scroll" :direction="platformDragActive ? 'none' : 'vertical'" :show-scrollbar="false">
       <view class="auth-content" :class="layout.isWide ? 'auth-content-wide' : ''">
-        <!-- 页头：说明 + 全部折叠/展开（对齐 qt-pc 2026-10-27：每源一张卡、默认折叠） -->
+        <!-- 一套平台卡片；排序、聚合与账号设置不再拆为三个区域。 -->
+        <text v-if="policyMessage.length > 0" class="policy-note" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 12)">{{ policyMessage }}</text>
+        <text v-if="registry.ready && enabledMusicSources.length == 0" class="policy-note" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 12)">所有在线平台已关闭。本地与已下载音乐仍可使用，当前播放可继续，收藏与账号会保留。</text>
         <view class="page-head" :class="layout.isWide ? 'page-head-wide' : ''">
-          <text class="page-desc" :class="layout.isWide ? 'page-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 12)">每个音源一张卡片：登录、两面登录态开关与播放/下载音质全部按源独立。点标题行展开或收起，凭据只保存在本机。</text>
-          <text v-if="sourceCards.length > 0" class="head-toggle-all" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 12)" @click="toggleAllCards">{{ anyCardExpanded ? '全部折叠' : '全部展开' }}</text>
+          <text class="page-desc" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 12)">{{ tv.enabled ? '选择上移或下移调整平台顺序，越靠前越优先。按确定展开平台的账号、聚合搜索与音质设置。' : '拖动右侧手柄调整平台顺序，越靠前越优先。点平台名称可展开账号、启用平台、聚合搜索与音质设置。' }}</text>
+          <view v-if="sourceCards.length > 0" class="head-toggle-row">
+            <view class="head-toggle-all" :style="'background-color:' + theme.skin.accentSoft + ';border-radius:999px;'" @click="toggleAllCards">
+              <text class="head-toggle-label" :style="('color:' + theme.skin.accent + ';') + qtFontDual(23, 12)">{{ anyCardExpanded ? '全部折叠' : '全部展开' }}</text>
+            </view>
+          </view>
         </view>
 
         <view v-if="sourceCards.length == 0" class="empty auth-empty">
           <text class="empty-text" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13)">{{ authEmptyText }}</text>
         </view>
 
-        <qt-card
-          v-for="(row, idx) in sourceCards"
-          :key="'card-' + row.id"
-          class="src-card"
-          :class="idx == sourceCards.length - 1 ? 'src-card-last' : ''"
-          elevated
-        >
-          <!-- 标题行：chevron + 源名 + 状态标签，点它展开/收起 -->
-          <view class="src-head" @click="toggleCard(row.id)">
-            <qt-icon :name="isCardExpanded(row.id) ? 'chevron-down' : 'chevron-right'" :size="layout.isWide ? 16 : 26" :color="theme.skin.textMuted" />
-            <text class="src-name" :style="('color:' + theme.skin.text + ';') + qtFontDual(27, 15)">{{ row.name }}</text>
-            <text v-if="row.orphan" class="src-tag" :style="('color:' + theme.skin.danger + ';') + qtFontDual(21, 11)">{{ registry.ready ? '音源包已卸载' : '音源包未就绪' }}</text>
-            <text v-if="row.logged" class="src-tag" :style="('color:' + (row.stale ? theme.skin.danger : theme.skin.textMuted) + ';') + qtFontDual(21, 11)">{{ row.stale ? '凭据已过期' : '已登录' }}</text>
-            <text v-else class="src-tag" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 11)">未登录</text>
+        <qt-reorder-list :items="sourceCardOrderItems" :disabled="policySaving || tv.enabled" @reorder="reorderPlatformCards" @active="onPlatformDragActive">
+          <template #default="{ id, index, handle }">
+            <qt-card v-for="row in cardSlotRows(id)" :key="'card-' + row.id" class="src-card" :class="index == sourceCards.length - 1 ? 'src-card-last' : ''" elevated>
+          <!-- 标题点击与拖动手柄分离，拖动不展开卡片或触发账号动作。 -->
+          <view class="src-head" :class="layout.isWide ? 'src-head-wide' : ''">
+            <view class="src-title" @click="toggleCard(row.id)">
+              <text class="src-order" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 12)">{{ row.orphan ? '—' : String(index + 1) }}</text>
+              <view class="src-name-block">
+                <text class="src-name" :style="('color:' + theme.skin.text + ';') + qtFontDual(27, 15)">{{ row.name }}</text>
+                <view class="src-status">
+                  <text v-if="!row.orphan && !row.enabled" class="src-tag" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 11)">未启用</text>
+                  <text v-if="!row.orphan && row.enabled && !row.aggregate" class="src-tag" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 11)">不参与聚合</text>
+                  <text v-if="row.orphan" class="src-tag" :style="('color:' + theme.skin.danger + ';') + qtFontDual(21, 11)">{{ registry.ready ? '音源包已卸载' : '音源包未就绪' }}</text>
+                  <text v-if="row.logged" class="src-tag" :style="('color:' + (row.stale ? theme.skin.danger : theme.skin.textMuted) + ';') + qtFontDual(21, 11)">{{ row.stale ? '凭据已过期' : '已登录' }}</text>
+                  <text v-else class="src-tag" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 11)">未登录</text>
+                </view>
+              </view>
+              <qt-icon :name="isCardExpanded(row.id) ? 'chevron-down' : 'chevron-right'" :size="layout.isWide ? 16 : 26" :color="theme.skin.textMuted" />
+            </view>
+            <view v-if="tv.enabled && !row.orphan" class="src-tv-order">
+              <qt-button :data-qt-tv-id="'source-up:' + row.id" label="上移" icon="arrow-up" variant="outline" size="sm" :disabled="!canMovePlatformCard(row.id, -1)" @click="movePlatformCard(row.id, -1)" />
+              <qt-button class="src-tv-next" :data-qt-tv-id="'source-down:' + row.id" label="下移" icon="arrow-down" variant="outline" size="sm" :disabled="!canMovePlatformCard(row.id, 1)" @click="movePlatformCard(row.id, 1)" />
+            </view>
+            <view v-if="!tv.enabled && !row.orphan" class="src-drag-handle" :style="handle.style" @touchstart.stop="handle.start" @touchmove.stop="handle.move" @touchend.stop="handle.end" @touchcancel.stop="handle.cancel" @click.stop="handle.click">
+              <qt-icon name="list" :size="layout.isWide ? 20 : 34" :color="theme.skin.textMuted" />
+            </view>
           </view>
 
           <view v-if="isCardExpanded(row.id)" class="src-body">
-            <!-- 账号行：已登录给同步歌单+退出；未登录给包声明的登录方式 -->
+            <!-- 账号行置顶：先登录/账号，再启用平台与聚合搜索；用户 2026-11-13 指定顺序为登录、启用平台、聚合搜索、登录权限、音质。 -->
             <view v-if="row.logged" class="src-acc" :style="rowBorderStyle">
               <text class="src-nick" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.nickname }}</text>
               <qt-button class="acc-btn" label="同步歌单" variant="outline" size="sm" @click="openSync(row.id, row.name)" />
@@ -38,8 +56,8 @@
             <view v-else-if="row.qr || row.cookie || row.web || row.sms || row.pwd" class="src-acc" :style="rowBorderStyle">
               <!-- 未登录源最多 5 颗按钮，窄屏一行放不下；这里做「单行横向滚动」而不是换行
                    （用户 2026-10-31：「这个我要的是左右滚动，不是换行」） -->
-              <scroll-view class="acc-scroll" :class="layout.isWide ? 'acc-scroll-wide' : ''" direction="horizontal" :show-scrollbar="false">
-                <view class="acc-track" :class="layout.isWide ? 'acc-track-wide' : ''" :style="'width:' + accTrackWidth(row) + ';'">
+              <scroll-view class="acc-scroll" :class="layout.isWide ? 'acc-scroll-wide' : ''" :style="tv.enabled ? 'height:' + qtTvTokens().controlPx + 'px;' : ''" direction="horizontal" :show-scrollbar="false">
+                <view class="acc-track" :class="layout.isWide ? 'acc-track-wide' : ''" :style="'width:' + accTrackWidth(row) + ';' + (tv.enabled ? 'height:' + qtTvTokens().controlPx + 'px;' : '')">
                   <qt-button v-if="row.qr" class="acc-btn" label="扫码登录" variant="secondary" size="sm" :disabled="qrBusy" @click="startQr(row.id, row.name)" />
                   <qt-button v-if="row.cookie" class="acc-btn" label="导入 Cookie" variant="outline" size="sm" @click="openCookieSheet(row.id, row.name)" />
                   <qt-button v-if="row.sms" class="acc-btn" label="短信登录" variant="outline" size="sm" @click="openSmsSheet(row.id, row.name)" />
@@ -50,6 +68,21 @@
             </view>
             <view v-else class="src-acc" :style="rowBorderStyle">
               <text class="src-nick" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">该源当前数据包不支持账号登录</text>
+            </view>
+
+            <view class="scope-row platform-toggle-row" :style="rowBorderStyle">
+              <view class="scope-main">
+                <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">启用平台</text>
+                <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.orphan ? '重新安装音源包后可启用' : row.details }}</text>
+              </view>
+              <qt-switch :model-value="row.enabled" :disabled="row.orphan || policySaving || platformDragActive" @change="toggleMusicSource(row.id)" />
+            </view>
+            <view class="scope-row aggregate-toggle-row" :style="rowBorderStyle">
+              <view class="scope-main">
+                <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">参与聚合搜索</text>
+                <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.enabled ? '只影响聚合搜索，可关闭全部平台' : '启用平台后生效；原参与设置会保留' }}</text>
+              </view>
+              <qt-switch :model-value="row.aggregate" :disabled="!row.enabled || row.orphan || policySaving || platformDragActive" @change="agToggle(row.id)" />
             </view>
 
             <!-- 两面登录态开关（按源；未登录置灰） -->
@@ -68,20 +101,35 @@
               <qt-switch :model-value="row.usePlay" :disabled="!row.logged" @change="toggleCardScope(row, 'play')" />
             </view>
 
-            <!-- 音质行（orphan 残留卡没有档位清单，不渲染） -->
-            <view v-if="!row.orphan" class="scope-row" :style="rowBorderStyle" @click="showQualitySheet(row.id, row.name, 'play')">
+            <!-- 音质行（orphan 残留卡没有档位清单，不渲染）；2026-11-14 起按网络面别
+                 拆行：WIFI 与移动网络独立选档，播放/下载各一组，互不影响 -->
+            <view v-if="!row.orphan" class="scope-row" :style="rowBorderStyle" @click="showQualitySheet(row.id, row.name, 'play', 'wifi')">
               <view class="scope-main">
-                <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">播放音质</text>
-                <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">播放该源歌曲时的取址音质；播放页音质菜单会同步改这里</text>
+                <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">播放音质 · WIFI</text>
+                <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">WIFI 下播放该源歌曲的取址音质；播放页菜单按当前网络同步这里</text>
               </view>
-              <text class="scope-value" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.playQualityLabel }}</text>
+              <text class="scope-value" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.playQualityWifiLabel }}</text>
             </view>
-            <view v-if="!row.orphan" class="scope-row scope-row-last" @click="showQualitySheet(row.id, row.name, 'download')">
+            <view v-if="!row.orphan" class="scope-row" :style="rowBorderStyle" @click="showQualitySheet(row.id, row.name, 'play', 'cellular')">
               <view class="scope-main">
-                <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">下载音质</text>
-                <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">下载该源歌曲时的目标音质</text>
+                <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">播放音质 · 移动网络</text>
+                <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">移动网络下播放该源歌曲的取址音质，可与 WIFI 不同</text>
               </view>
-              <text class="scope-value" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.downloadQualityLabel }}</text>
+              <text class="scope-value" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.playQualityCellularLabel }}</text>
+            </view>
+            <view v-if="!row.orphan" class="scope-row" :style="rowBorderStyle" @click="showQualitySheet(row.id, row.name, 'download', 'wifi')">
+              <view class="scope-main">
+                <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">下载音质 · WIFI</text>
+                <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">WIFI 下下载该源歌曲的目标音质；未单独选播放档时也是 WIFI 播放的缺省</text>
+              </view>
+              <text class="scope-value" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.downloadQualityWifiLabel }}</text>
+            </view>
+            <view v-if="!row.orphan" class="scope-row scope-row-last" @click="showQualitySheet(row.id, row.name, 'download', 'cellular')">
+              <view class="scope-main">
+                <text class="scope-key" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">下载音质 · 移动网络</text>
+                <text class="scope-sub" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">移动网络下下载该源歌曲的目标音质，可与 WIFI 不同</text>
+              </view>
+              <text class="scope-value" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">{{ row.downloadQualityCellularLabel }}</text>
             </view>
             <view v-else class="scope-row scope-row-last">
               <view class="scope-main">
@@ -90,7 +138,10 @@
               </view>
             </view>
           </view>
-        </qt-card>
+            </qt-card>
+          </template>
+        </qt-reorder-list>
+        <text v-if="sourceCards.length > 0" class="policy-note" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">设置与凭据只保存在本机，更新音源包会保留。平台开关不会退出账号或改变登录权限。</text>
       </view>
     </scroll-view>
 
@@ -98,8 +149,8 @@
     <qt-sheet :visible="qrVisible" :title="qrName + ' 扫码登录'" @close="closeQrSheet">
       <scroll-view direction="vertical" :show-scrollbar="false" :style="sheetBodyStyle">
         <text class="sheet-desc" :class="layout.isWide ? 'sheet-desc-wide' : ''" :style="('color:' + qrStatusColor + ';') + qtFontDual(23, 13)">{{ qrStatusText }}</text>
-        <view class="qr-wrap" :class="layout.isWide ? 'qr-wrap-wide' : ''" :style="layout.isWide ? 'background-color:#ffffff;border-radius:10px;' : 'background-color:#ffffff;border-radius:16rpx;'">
-          <image v-if="qrSrc.length > 0 && !qrImageError" class="qr-img" :class="layout.isWide ? (qrStatus == 'expired' ? 'qr-img-wide qr-img-expired' : 'qr-img-wide') : (qrStatus == 'expired' ? 'qr-img-expired' : '')" :src="qrSrc" mode="aspectFit" @error="onQrImageError" />
+        <view class="qr-wrap" :class="layout.isWide ? 'qr-wrap-wide' : ''" :style="tv.enabled ? 'background-color:#ffffff;border-radius:10px;padding:20px;width:' + (qtTvTokens().qrPx + 40) + 'px;' : (layout.isWide ? 'background-color:#ffffff;border-radius:10px;' : 'background-color:#ffffff;border-radius:16rpx;')">
+          <image v-if="qrSrc.length > 0 && !qrImageError" class="qr-img" :class="layout.isWide ? (qrStatus == 'expired' ? 'qr-img-wide qr-img-expired' : 'qr-img-wide') : (qrStatus == 'expired' ? 'qr-img-expired' : '')" :style="tv.enabled ? 'width:' + qtTvTokens().qrPx + 'px;height:' + qtTvTokens().qrPx + 'px;' : ''" :src="qrSrc" mode="aspectFit" @error="onQrImageError" />
           <text v-if="qrImage.length > 0 && qrImageError" class="qr-fallback" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 12)">二维码加载失败，可点「保存二维码」后在相册里查看</text>
         </view>
         <text class="qr-hint" :class="layout.isWide ? 'qr-hint-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 12)">{{ qrHintText }}</text>
@@ -261,6 +312,7 @@ import { computed, ref, onUnmounted } from "vue";
 import { onLoad, onShow, onUnload } from "@dcloudio/uni-app";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtCard from "@/uni_modules/qt-ui/components/qt-card/qt-card.uvue";
+import QtReorderList from "@/uni_modules/qt-ui/components/qt-reorder-list/qt-reorder-list.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import QtCheckbox from "@/uni_modules/qt-ui/components/qt-checkbox/qt-checkbox.uvue";
 import QtSwitch from "@/uni_modules/qt-ui/components/qt-switch/qt-switch.uvue";
@@ -271,18 +323,26 @@ import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-act
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtTv } from "@/uni_modules/qt-ui/composables/use-qt-tv";
+import { qtTvTokens } from "@/uni_modules/qt-ui/composables/qt-tv-tokens";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtShowToast } from "@/services/toast";
+import { sourceEnabled, sourcePolicyRevision, orderedSourceIds, toggleSource, moveSource, reorderSources, SOURCE_POLICY_CHANGED_EVENT } from "@/services/source-policy";
+import { applyEngineSourcePolicy, sourcePolicyStatus } from "@/services/source-engine";
+import type { RegistrySource } from "@/services/music-api";
+import { platformLabel } from "@/services/platform";
+import { readAggregateSources, saveAggregateSources, AGGREGATE_SOURCES_CHANGED_EVENT } from "@/services/aggregate-sources";
 import { qtConfirm } from "@/services/confirm";
 import { useSourceRegistryStore } from "@/stores/source-registry";
 import { usePlayerStore } from "@/stores/player";
 import { useDownloadsStore } from "@/stores/downloads";
 import {
-  sourcePlayQualityOf,
-  sourceDownloadQualityOf,
-  setSourcePlayQuality,
-  setSourceDownloadQuality,
+  sourcePlayQualityForNetwork,
+  sourceDownloadQualityForNetwork,
+  setSourcePlayQualityForNetwork,
+  setSourceDownloadQualityForNetwork,
 } from "@/services/source-quality";
+import { NETWORK_KIND_WIFI, NETWORK_KIND_CELLULAR } from "@/services/network-kind";
 import {
   authQrCreate,
   authQrPoll,
@@ -311,22 +371,132 @@ import {
   autoSyncMissingAfterLogin,
   type AccountSyncRow,
 } from "@/services/source-playlist-sync";
-import { isAndroidOs, saveImageToGallery } from "@/services/app-native";
+import { supportsNativeAuthWebView, saveImageToGallery } from "@/services/app-native";
 import { WEB_LOGIN_DONE_EVENT } from "@/services/source-web-login";
 
 /**
- * 音源账号登录页（v9 数据包契约）：账号列表 + 数据/播放两面登录态开关 +
- * 扫码/Cookie 两种登录方式。状态在非响应式的 service（uni storage）里，
- * 用 refreshTick 触发重算（音源包管理页同一套路）；storage 变化经
- * SOURCE_AUTH_CHANGED_EVENT 广播对账。
+ * 音源平台管理页：音乐源启用/优先级 + 聚合搜索白名单 + 原按源账号/音质。
+ * 平台策略、聚合范围与账号授权分别使用原 service，不互相替代或清理凭据。
+ * 非响应式 storage 用 refreshTick 重算；平台/聚合事件和 onShow 负责对账。
  * v10：播放面登录态生效时官方档位清单生效（音质选择整体切官方档位，切换
  * 逻辑在 stores/source-registry），本页不再有「官方线路音质」配置卡。
  */
 const theme = useThemeStore();
 const layout = useQtLayout();
+const tv = useQtTv();
 const registry = useSourceRegistryStore();
 
 const refreshTick = ref(0);
+
+// ── 音乐源启用与优先级：沿用本机 source-policy 真源和引擎应用检查 ──
+const policySaving = ref(false);
+type MusicSourceRow = { id: string; name: string; details: string; rank: number; first: boolean; last: boolean; on: boolean };
+const musicSourceRows = computed((): MusicSourceRow[] => {
+  void refreshTick.value;
+  void registry.generation;
+  const catalog = registry.catalog;
+  const ids = orderedSourceIds(catalog.map((s: RegistrySource): string => s.id), false);
+  const enabled = ids.filter((id: string): boolean => sourceEnabled(id));
+  const out: MusicSourceRow[] = [];
+  for (let i = 0; i < ids.length; i++) {
+    const source = catalog.find((s: RegistrySource): boolean => s.id == ids[i]);
+    if (source == null) continue;
+    const details = ["单曲"];
+    if (source.playlists != false) details.push("歌单");
+    if (source.album != false) details.push("专辑");
+    if (source.artist != false) details.push("歌手");
+    if (source.charts != false) details.push("榜单");
+    const index = enabled.indexOf(source.id);
+    out.push({ id: source.id, name: source.name, details: details.join(" · "), rank: index + 1,
+      first: index == 0, last: index == enabled.length - 1, on: index >= 0 });
+  }
+  return out;
+});
+const enabledMusicSources = computed((): MusicSourceRow[] => musicSourceRows.value.filter((row: MusicSourceRow): boolean => row.on));
+const disabledMusicSources = computed((): MusicSourceRow[] => musicSourceRows.value.filter((row: MusicSourceRow): boolean => !row.on));
+const policyMessage = computed((): string => {
+  void refreshTick.value;
+  void registry.generation;
+  return sourcePolicyStatus().message;
+});
+async function changeMusicSource(id: string, direction: number): Promise<void> {
+  if (!qrPageAlive || policySaving.value) return;
+  policySaving.value = true;
+  try {
+    const ids = registry.catalog.map((s: RegistrySource): string => s.id);
+    if (direction == 0) toggleSource(id, ids); else moveSource(id, ids, direction);
+    if (qrPageAlive) refreshTick.value++;
+    await applyEngineSourcePolicy();
+  } catch (e) {
+    if (qrPageAlive) qtShowToast({ title: "保存失败：" + String(e), icon: "none" });
+  } finally {
+    // 页面卸载只撤回 UI 回执，不撤销已保存的全局平台策略。
+    if (qrPageAlive) { policySaving.value = false; refreshTick.value++; }
+  }
+}
+function toggleMusicSource(id: string): void { void changeMusicSource(id, 0); }
+function moveMusicSource(id: string, direction: number): void { void changeMusicSource(id, direction); }
+
+// ── 卡内聚合搜索开关：null 为默认全部，显式 [] 为全部关闭；授权独立 ──
+type AgRow = { id: string; name: string; on: boolean; last: boolean };
+const agRows = computed((): AgRow[] => {
+  void refreshTick.value;
+  void registry.generation;
+  const ids = registry.sourceIds();
+  const wl = readAggregateSources();
+  const out: AgRow[] = [];
+  for (let i = 0; i < ids.length; i++) {
+    out.push({ id: ids[i], name: platformLabel(ids[i]),
+      on: wl == null ? true : wl.indexOf(ids[i]) != -1, last: i == ids.length - 1 });
+  }
+  return out;
+});
+const agAllSelected = computed((): boolean => {
+  void refreshTick.value;
+  return readAggregateSources() == null;
+});
+const agSummary = computed((): string => {
+  const rows = agRows.value;
+  if (readAggregateSources()?.length == 0) return "聚合搜索已关闭";
+  if (rows.length == 0) return "没有已启用的平台";
+  if (agAllSelected.value) return "全部已启用平台";
+  let on = 0;
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].on) on++;
+  }
+  return on > 0 ? "已选 " + on + " / " + rows.length : "没有可参与聚合的平台";
+});
+function saveCardAggregate(sources: string[] | null): void {
+  if (!qrPageAlive || policySaving.value || platformDragActive.value) return;
+  try {
+    saveAggregateSources(sources);
+    refreshTick.value++;
+    uni.$emit(AGGREGATE_SOURCES_CHANGED_EVENT);
+  } catch (e) {
+    qtShowToast({ title: "保存失败：" + errText(e), icon: "none" });
+  }
+}
+function agUseAll(): void { saveCardAggregate(null); }
+function agToggle(id: string): void {
+  if (!qrPageAlive || !sourceEnabled(id) || !registry.catalog.some((row: RegistrySource): boolean => row.id == id)) return;
+  // 首次筛选按完整目录物化默认值，暂时关闭的平台仍保留重启后的选择。
+  const ids = registry.catalog.map((row: RegistrySource): string => row.id);
+  const current = readAggregateSources();
+  let next: string[] = [];
+  if (current == null) {
+    for (let i = 0; i < ids.length; i++) {
+      if (ids[i] != id) next.push(ids[i]);
+    }
+  } else {
+    next = current.slice(0);
+    const idx = next.indexOf(id);
+    if (idx != -1) next.splice(idx, 1);
+    else next.push(id);
+  }
+  // 已保存的暂不可用 ID 不裁掉；[] 为用户主动全部关闭。
+  saveCardAggregate(next);
+}
+
 /** 校验中判失效的源 id（authCheckUser 返回 null 时加入；重新登录后移除） */
 const staleIds = ref<string[]>([]);
 /** 进页只做一次凭据有效性校验（网络请求，不跟随 onShow 反复打） */
@@ -346,6 +516,9 @@ type SourceCardRow = {
   id: string;
   name: string;
   orphan: boolean;
+  enabled: boolean;
+  aggregate: boolean;
+  details: string;
   logged: boolean;
   stale: boolean;
   nickname: string;
@@ -356,8 +529,10 @@ type SourceCardRow = {
   pwd: boolean;
   useMeta: boolean;
   usePlay: boolean;
-  playQualityLabel: string;
-  downloadQualityLabel: string;
+  playQualityWifiLabel: string;
+  playQualityCellularLabel: string;
+  downloadQualityWifiLabel: string;
+  downloadQualityCellularLabel: string;
 };
 function findEntry(entries: SourceAuthEntry[], source: string): SourceAuthEntry | null {
   for (let i = 0; i < entries.length; i++) {
@@ -397,45 +572,66 @@ function qualityLabelOf(id: string, quality: string): string {
 const sourceCards = computed((): SourceCardRow[] => {
   void refreshTick.value;
   const entries = readSourceAuthEntries();
+  const aggregate = readAggregateSources();
   const out: SourceCardRow[] = [];
-  const sources = registry.sources;
+  void registry.generation;
+  const catalog = registry.catalog;
+  const ids = orderedSourceIds(catalog.map((source: RegistrySource): string => source.id), false);
+  const sources: RegistrySource[] = [];
+  for (let i = 0; i < ids.length; i++) {
+    const source = catalog.find((item: RegistrySource): boolean => item.id == ids[i]);
+    if (source != null) sources.push(source);
+  }
   for (let i = 0; i < sources.length; i++) {
     const s = sources[i];
     const entry = findEntry(entries, s.id);
     const tg = readSourceAuthTogglesFor(s.id);
     const auth = s.auth;
+    const policyRow = musicSourceRows.value.find((row: MusicSourceRow): boolean => row.id == s.id);
+    const enabled = sourceEnabled(s.id);
+    // 音质标签按网络面别独立取（2026-11-14）：播放缺省跟随该源同网络的下载音质
+    // （下载缺省 = 音源第二档），两处口径一致；下行四标签直接展示各自生效值
+    const downloadWifi = sourceDownloadQualityForNetwork(s.id, downloads.downloadQuality, NETWORK_KIND_WIFI);
+    const downloadCellular = sourceDownloadQualityForNetwork(s.id, downloads.downloadQuality, NETWORK_KIND_CELLULAR);
     out.push({
       id: s.id,
       name: s.name,
       orphan: false,
+      enabled,
+      aggregate: aggregate == null || aggregate.indexOf(s.id) >= 0,
+      details: policyRow != null ? policyRow.details : "搜索、推荐、换源与后台刷新共用",
       logged: entry != null,
       stale: staleIds.value.indexOf(s.id) >= 0,
       nickname: entry != null ? entry.account.user.nickname : "",
       qr: auth != null && auth.methods.indexOf("qrcode") >= 0,
       cookie: auth != null && auth.methods.indexOf("cookie") >= 0,
-      // R8：原生 WebView 取 cookie 只有安卓有实现（iOS 的 getWebCookies 恒空、
-      // 180s 超时死路；鸿蒙无实现）。按 isAndroidOs 显式判定（对齐 web-login:92），
-      // 不用排除法 —— 排除法会把 iOS 算成「有实现」给出一个必然超时的入口
-      web: auth != null && auth.webLogin != null && isAndroidOs(),
+      // Native capability is declared by app-native for Android/iOS; keep platform support at that boundary.
+      web: auth != null && auth.webLogin != null && supportsNativeAuthWebView(),
       // 短信/密码登录（v14 契约，目前只有酷我声明）：按 auth.methods 显隐
       sms: auth != null && auth.methods.indexOf("sms") >= 0,
       pwd: auth != null && auth.methods.indexOf("password") >= 0,
       // 数据面开关缺省常开（与是否登录无关）：登录与否只影响它能不能点，不影响展示值
       useMeta: tg.useMeta,
       usePlay: entry != null && tg.usePlay,
-      // 播放音质缺省跟随该源的下载音质（下载缺省 = 音源第二档），两者口径一致
-      playQualityLabel: qualityLabelOf(s.id, sourcePlayQualityOf(s.id, sourceDownloadQualityOf(s.id, downloads.downloadQuality))),
-      downloadQualityLabel: qualityLabelOf(s.id, sourceDownloadQualityOf(s.id, downloads.downloadQuality)),
+      // 播放音质缺省跟随该源下载音质（下载缺省 = 音源第二档），两者口径一致
+      playQualityWifiLabel: qualityLabelOf(s.id, sourcePlayQualityForNetwork(s.id, downloadWifi, NETWORK_KIND_WIFI)),
+      playQualityCellularLabel: qualityLabelOf(s.id, sourcePlayQualityForNetwork(s.id, downloadCellular, NETWORK_KIND_CELLULAR)),
+      downloadQualityWifiLabel: qualityLabelOf(s.id, downloadWifi),
+      downloadQualityCellularLabel: qualityLabelOf(s.id, downloadCellular),
     });
   }
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i];
-    if (registry.has(e.source)) continue;
+    // has() 只认已启用平台；关闭平台仍在完整 catalog 内，不应补成重复残留卡。
+    if (sources.some((source: RegistrySource): boolean => source.id == e.source)) continue;
     const tg = readSourceAuthTogglesFor(e.source);
     out.push({
       id: e.source,
       name: e.source,
       orphan: true,
+      enabled: false,
+      aggregate: false,
+      details: "音源包已卸载，账号凭据仍保留",
       logged: true,
       stale: staleIds.value.indexOf(e.source) >= 0,
       nickname: e.account.user.nickname,
@@ -446,8 +642,10 @@ const sourceCards = computed((): SourceCardRow[] => {
       pwd: false,
       useMeta: tg.useMeta,
       usePlay: tg.usePlay,
-      playQualityLabel: "",
-      downloadQualityLabel: "",
+      playQualityWifiLabel: "",
+      playQualityCellularLabel: "",
+      downloadQualityWifiLabel: "",
+      downloadQualityCellularLabel: "",
     });
   }
   return out;
@@ -457,6 +655,73 @@ const authEmptyText = computed((): string => {
   if (!registry.ready) return "注册表尚未就绪：请稍候或到「设置 → 音源包管理」确认已安装数据包。";
   return "当前数据包没有可用音源，安装数据包后这里会出现各音源的卡片。";
 });
+
+// ── 同一卡片清单的拖动接线；原生几何与临时预览由共享组件持有 ──
+type SourceCardOrderItem = { id: string; disabled: boolean };
+const sourceCardOrderItems = computed((): SourceCardOrderItem[] => sourceCards.value.map((row: SourceCardRow): SourceCardOrderItem => ({ id: row.id, disabled: row.orphan })));
+function cardSlotRows(id: string): SourceCardRow[] {
+  return sourceCards.value.filter((row: SourceCardRow): boolean => row.id == id);
+}
+const platformDragActive = ref(false);
+type PlatformOrderSnapshot = { revision: number; generation: number; ids: string[]; orphan: boolean[] };
+let platformDragOrder: PlatformOrderSnapshot | null = null;
+/** Gesture and remote actions share one full-card snapshot and one commit path. */
+function beginPlatformOrder(): PlatformOrderSnapshot | null {
+  if (!qrPageAlive || policySaving.value) return null;
+  const cards = sourceCards.value;
+  return { revision: sourcePolicyRevision(), generation: registry.generation,
+    ids: cards.map((row: SourceCardRow): string => row.id), orphan: cards.map((row: SourceCardRow): boolean => row.orphan) };
+}
+function onPlatformDragActive(active: boolean): void {
+  if (!qrPageAlive) return;
+  platformDragOrder = active && !tv.enabled ? beginPlatformOrder() : null;
+  platformDragActive.value = active && platformDragOrder != null;
+}
+async function reorderPlatformCards(ids: string[]): Promise<void> {
+  const snapshot = platformDragOrder;
+  if (!platformDragActive.value || snapshot == null) return;
+  await commitPlatformOrder(ids, snapshot);
+}
+function canMovePlatformCard(id: string, direction: number): boolean {
+  if (!tv.enabled || !qrPageAlive || policySaving.value || platformDragActive.value || (direction != -1 && direction != 1)) return false;
+  const cards = sourceCards.value;
+  const index = cards.findIndex((row: SourceCardRow): boolean => row.id == id);
+  const target = index + direction;
+  return index >= 0 && !cards[index].orphan && target >= 0 && target < cards.length && !cards[target].orphan;
+}
+async function movePlatformCard(id: string, direction: number): Promise<void> {
+  if (!canMovePlatformCard(id, direction)) return;
+  const snapshot = beginPlatformOrder();
+  if (snapshot == null) return;
+  const index = snapshot.ids.indexOf(id);
+  const target = index + direction;
+  if (index < 0 || target < 0 || target >= snapshot.ids.length || snapshot.orphan[index] || snapshot.orphan[target]) return;
+  const ids = snapshot.ids.slice(0);
+  ids[index] = snapshot.ids[target];
+  ids[target] = id;
+  await commitPlatformOrder(ids, snapshot);
+}
+async function commitPlatformOrder(ids: string[], snapshot: PlatformOrderSnapshot): Promise<void> {
+  if (!qrPageAlive || policySaving.value || snapshot.revision != sourcePolicyRevision() || snapshot.generation != registry.generation) return;
+  // Credentials live in storage; re-read them even if an external account event has not rendered yet.
+  refreshTick.value++;
+  const cards = sourceCards.value;
+  if (cards.length != snapshot.ids.length || cards.some((row: SourceCardRow, index: number): boolean => row.id != snapshot.ids[index] || row.orphan != snapshot.orphan[index])) return;
+  if (ids.length != cards.length || ids.some((id: string, index: number): boolean => ids.indexOf(id) != index || snapshot.ids.indexOf(id) < 0)) return;
+  if (snapshot.orphan.some((orphan: boolean, index: number): boolean => orphan && ids[index] != snapshot.ids[index])) return;
+  policySaving.value = true;
+  try {
+    const catalog = registry.catalog.map((source: RegistrySource): string => source.id);
+    const installed = ids.filter((id: string): boolean => catalog.indexOf(id) >= 0);
+    if (!reorderSources(installed, catalog)) return;
+    if (qrPageAlive) refreshTick.value++;
+    await applyEngineSourcePolicy();
+  } catch (e) {
+    if (qrPageAlive) qtShowToast({ title: "保存失败：" + errText(e), icon: "none" });
+  } finally {
+    if (qrPageAlive) { policySaving.value = false; refreshTick.value++; }
+  }
+}
 
 // ── 卡片展开/收起（内存态：重进页面回到默认全折叠，PC 同款）──
 const expandedIds = ref<string[]>([]);
@@ -498,7 +763,8 @@ function toggleCardScope(row: SourceCardRow, scope: "meta" | "play"): void {
     });
 }
 
-// ── 按源音质（v12）：下拉弹层，选项 = 该源生效档位清单（官方/包声明）──
+// ── 按源音质（v12）：下拉弹层，选项 = 该源生效档位清单（官方/包声明）；
+//    2026-11-14 起按网络面别（WIFI/移动网络）独立展示与落库 ──
 const qualitySheetVisible = ref(false);
 const qualitySheetTitle = ref("");
 const qualitySheetActions = ref<SheetAction[]>([]);
@@ -506,10 +772,12 @@ const qualitySheetIds = ref<string[]>([]);
 const qualitySheetSelectedIndex = ref(-1);
 const qualitySheetSource = ref("");
 const qualitySheetKind = ref("play");
-function showQualitySheet(id: string, name: string, kind: string): void {
+/** 当前弹层操作的网络面别（wifi/cellular），与 kind 一起唯一定位一张表 */
+const qualitySheetNetwork = ref("wifi");
+function showQualitySheet(id: string, name: string, kind: string, network: string = NETWORK_KIND_WIFI): void {
   const isPlay = kind == "play";
-  const downloadDefault = sourceDownloadQualityOf(id, downloads.downloadQuality);
-  const current = isPlay ? sourcePlayQualityOf(id, downloadDefault) : downloadDefault;
+  const downloadDefault = sourceDownloadQualityForNetwork(id, downloads.downloadQuality, network);
+  const current = isPlay ? sourcePlayQualityForNetwork(id, downloadDefault, network) : downloadDefault;
   const list = registry.sourceQualities(id);
   const actions: SheetAction[] = [];
   const ids: string[] = [];
@@ -529,12 +797,13 @@ function showQualitySheet(id: string, name: string, kind: string): void {
     qtShowToast({ title: "该源没有可用音质档位，请先安装/更新音源包", icon: "none" });
     return;
   }
-  qualitySheetTitle.value = name + " · " + (isPlay ? "播放音质" : "下载音质");
+  qualitySheetTitle.value = name + " · " + (isPlay ? "播放音质" : "下载音质") + " · " + (network == NETWORK_KIND_WIFI ? "WIFI" : "移动网络");
   qualitySheetActions.value = actions;
   qualitySheetIds.value = ids;
   qualitySheetSelectedIndex.value = ids.indexOf(current);
   qualitySheetSource.value = id;
   qualitySheetKind.value = kind;
+  qualitySheetNetwork.value = network;
   qualitySheetVisible.value = true;
 }
 function onQualitySheetSelect(_action: SheetAction, index: number): void {
@@ -543,7 +812,8 @@ function onQualitySheetSelect(_action: SheetAction, index: number): void {
   if (source.length == 0 || index < 0 || index >= ids.length) return;
   const q = ids[index];
   const isPlay = qualitySheetKind.value == "play";
-  const ok = isPlay ? setSourcePlayQuality(source, q) : setSourceDownloadQuality(source, q);
+  const network = qualitySheetNetwork.value;
+  const ok = isPlay ? setSourcePlayQualityForNetwork(source, q, network) : setSourceDownloadQualityForNetwork(source, q, network);
   if (!ok) {
     qtShowToast({ title: "非法的音质设置", icon: "none" });
     return;
@@ -606,12 +876,12 @@ const qrStatusColor = computed((): string => {
 const qrHint = ref("");
 const qrHintText = computed((): string => {
   const base = qrHint.value.length > 0 ? qrHint.value : "用官方 App 扫一扫";
-  return base + "；没有第二台设备时点「保存二维码」，再在该 App 的「扫一扫 → 相册」里选这张图确认";
+  return tv.enabled ? base + "；用手机扫描电视上的二维码，并在手机上确认登录" : base + "；没有第二台设备时点「保存二维码」，再在该 App 的「扫一扫 → 相册」里选这张图确认";
 });
 
 /** 找该源的 qrHint（数据包自述；找不到返回空串，按通用文案） */
 function qrHintOf(id: string): string {
-  const list = registry.sources;
+  const list = registry.catalog;
   for (let i = 0; i < list.length; i++) {
     if (list[i].id != id) continue;
     const caps = list[i].auth;
@@ -1236,6 +1506,10 @@ function maybeAutoSync(source: string, name: string): void {
 
 // ── 网页登录（v17 契约，Android 先行；鸿蒙原生 Cookie 通道未接，不显示入口）──
 function openWebLogin(source: string, name: string): void {
+  if (!sourceEnabled(source)) {
+    qtShowToast("该音乐源已关闭，可在音源平台管理中启用后登录");
+    return;
+  }
   void name;
   uni.navigateTo({ url: "/pages/web-login/index?source=" + source });
 }
@@ -1250,8 +1524,8 @@ function onWebLoginDone(payload: any): void {
 
 // ── 对账与校验 ──
 function refreshFromStorage(): void {
-  // v12 起没有全局开关：卡片里的开关/音质都在 sourceCards computed 里按源读取，
-  // 这里只需 bump 重算信号
+  if (!qrPageAlive) return;
+  // 平台、聚合和账号各读原 service；外部事件只触发本页重算，不更改设置。
   refreshTick.value++;
 }
 function removeFromStale(source: string): void {
@@ -1269,9 +1543,12 @@ function validateAccounts(): void {
   const entries = readSourceAuthEntries();
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i];
+    if (!sourceEnabled(e.source)) continue;
+    const policyToken = sourcePolicyRevision();
     const revision = sourceAuthRevision(e.source);
     authCheckUser(e.source, e.account.cookie, e.account.extrasJson)
       .then((r) => {
+        if (policyToken != sourcePolicyRevision() || !sourceEnabled(e.source)) return;
         if (!sourceAuthAccountMatches(e.source, e.account, revision)) return;
         // 包侧轮换出新凭据：连同副键合并落库（引擎内存副本随保存同步注入）
         if (r.ok && r.credential.length > 0) {
@@ -1310,11 +1587,15 @@ onShow(() => {
 });
 onLoad(() => {
   uni.$on(WEB_LOGIN_DONE_EVENT, onWebLoginDone);
+  uni.$on(SOURCE_POLICY_CHANGED_EVENT, refreshFromStorage);
+  uni.$on(AGGREGATE_SOURCES_CHANGED_EVENT, refreshFromStorage);
 });
 function disposeAuthPage(): void {
   qrPageAlive = false;
   closeQrSheet();
   uni.$off(WEB_LOGIN_DONE_EVENT, onWebLoginDone);
+  uni.$off(SOURCE_POLICY_CHANGED_EVENT, refreshFromStorage);
+  uni.$off(AGGREGATE_SOURCES_CHANGED_EVENT, refreshFromStorage);
 }
 onUnload(() => disposeAuthPage());
 // 宽屏设置内嵌页面不一定触发路由 onUnload，Vue 卸载同样必须作废扫码会话。
@@ -1323,13 +1604,14 @@ onUnmounted(() => disposeAuthPage());
 // ── 样式常量（对齐音源包管理页的弹层口径）──
 const rowBorderStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
 const gateBorderStyle = computed<string>(() => "border-color:" + theme.skin.divider + ";");
-const sheetBodyStyle = computed<string>(() => 'max-height:' + Math.max(120, Math.floor(layout.windowHeight * 0.86) - layout.safeBottomPx - (layout.isWide ? 110 : 132)) + 'px;');
-const syncListStyle = computed<string>(() => 'height:' + Math.max(80, Math.min(layout.isWide ? 320 : 240, Math.floor(layout.windowHeight * 0.86) - layout.safeBottomPx - (layout.isWide ? 220 : 260))) + 'px;');
+const sheetBodyStyle = computed<string>(() => 'max-height:' + Math.max(120, Math.floor(layout.paneHeight * 0.86) - layout.safeBottomPx - (layout.isWide ? 110 : 132)) + 'px;');
+const syncListStyle = computed<string>(() => 'height:' + Math.max(80, Math.min(layout.isWide ? 320 : 240, Math.floor(layout.paneHeight * 0.86) - layout.safeBottomPx - (layout.isWide ? 220 : 260))) + 'px;');
 const cookieInputStyle = computed<string>(() => "background-color:" + theme.skin.surfaceInset + ";color:" + theme.skin.text + ";border-radius:14rpx;");
 const cookieInputStyleWide = computed<string>(() => "background-color:" + theme.skin.surfaceInset + ";color:" + theme.skin.text + ";border-radius:8px;");
 </script>
 
 <style>
+.policy-note { margin-top: 18rpx; margin-bottom: 12rpx; line-height: 1.45; }
 .auth-scroll {
   flex: 1;
   min-height: 0;
@@ -1340,26 +1622,29 @@ const cookieInputStyleWide = computed<string>(() => "background-color:" + theme.
 .auth-content-wide {
   padding: 18px 24px 72px;
 }
-/* 页头说明 + 全部折叠/展开 */
+/* 页头说明整行铺满，「全部展开/折叠」单独一行右对齐，避免挤在正文里劈断句子 */
 .page-head {
   margin-bottom: 20rpx;
-  flex-direction: row;
-  align-items: flex-start;
+  flex-direction: column;
 }
 .page-head-wide {
   margin-bottom: 12px;
 }
 .page-desc {
-  flex: 1;
-  line-height: 1.5;
-  margin-right: 16rpx;
+  line-height: 1.55;
 }
-.page-desc-wide {
-  margin-right: 12px;
+.head-toggle-row {
+  flex-direction: row;
+  justify-content: flex-end;
+  margin-top: 12rpx;
 }
 .head-toggle-all {
-  font-size: 23rpx;
-  padding: 4rpx 10rpx;
+  padding: 8rpx 24rpx;
+  align-items: center;
+  justify-content: center;
+}
+.head-toggle-label {
+  font-weight: 500;
 }
 /* 每源卡片（qt-card 不带外边距，这里补卡片间距） */
 .src-card {
@@ -1371,23 +1656,26 @@ const cookieInputStyleWide = computed<string>(() => "background-color:" + theme.
 .src-head {
   flex-direction: row;
   align-items: center;
-  padding: 4rpx 0 18rpx;
+  padding: 4rpx 0 10rpx;
 }
-.src-name {
-  margin-left: 12rpx;
-  margin-right: 14rpx;
-  font-weight: 600;
-}
-.src-tag {
-  font-size: 21rpx;
-  margin-left: 12rpx;
-}
+.src-head-wide { padding: 2px 0 6px; }
+.src-title { flex: 1; min-width: 0; flex-direction: row; align-items: center; }
+.src-order { width: 34rpx; flex-shrink: 0; }
+.src-name-block { flex: 1; min-width: 0; margin-left: 12rpx; margin-right: 12rpx; }
+.src-name { font-weight: 600; }
+.src-status { flex-direction: row; flex-wrap: wrap; margin-top: 6rpx; }
+.src-tag { font-size: 21rpx; margin-right: 12rpx; }
+.src-tv-order { flex-shrink: 0; flex-direction: row; align-items: center; margin-left: 12px; }
+.src-tv-next { margin-left: 8px; }
+/* 44px 命中区由共享拖动组件提供，不接管标题与登录按钮的点击。 */
+.src-drag-handle { flex-shrink: 0; align-items: center; justify-content: center; margin-left: 6rpx; }
 .src-body {
   padding-top: 2rpx;
 }
 .src-acc {
   flex-direction: row;
   align-items: center;
+  padding-top: 12rpx;
   padding-bottom: 12rpx;
   border-bottom-width: 1px;
   border-bottom-style: solid;

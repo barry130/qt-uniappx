@@ -1,10 +1,11 @@
 <template>
   <qt-page-frame width-kind="form">
-  <view class="page" :class="layout.isWide ? 'page-wide' : ''">
+  <scroll-view class="form-scroll qt-tv-scroll" direction="vertical" :show-scrollbar="false" :style="'flex:1;'">
+  <view class="page" :class="layout.isWide ? 'page-wide' : ''" :style="layout.isTv ? 'padding-left:0px;padding-right:0px;justify-content:flex-start;' : ''">
     <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="cardStyle">
       <!-- 头像：点击图片放大预览（不展示文字）；放大视图左「保存图片」右「更换图片」 -->
       <view class="avatar-row" :class="layout.isWide ? 'avatar-row-wide' : ''">
-        <view class="avatar" :class="layout.isWide ? 'avatar-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @click="openPreview">
+        <view class="avatar" data-qt-tv-id="profile:avatar" :class="[layout.isWide ? 'avatar-wide' : '', avatarBusy ? 'qt-tv-skip' : '']" :style="'background-color:' + themeStore.skin.accent + ';'" @click="openPreview">
           <image
             :src="avatarSource"
             class="avatar-img" :class="layout.isWide ? 'avatar-img-wide' : ''"
@@ -17,6 +18,8 @@
       <!-- 昵称 -->
       <view class="field-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
+          data-qt-tv-id="profile:nickname"
+          :focus="false"
           :value="nickname"
           @input="onNicknameInput"
           class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
@@ -31,6 +34,8 @@
       <!-- 邮箱 -->
       <view class="field-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
+          data-qt-tv-id="profile:email"
+          :focus="false"
           :value="email"
           @input="onEmailInput"
           class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
@@ -45,6 +50,8 @@
       <!-- 新密码（可选） -->
       <view class="field-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
+          data-qt-tv-id="profile:password"
+          :focus="false"
           :value="password"
           @input="onPasswordInput"
           class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
@@ -55,7 +62,7 @@
           :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
           :maxlength="18"
         />
-        <view class="eye" :class="layout.isWide ? 'eye-wide' : ''" @click="pwVisible = !pwVisible">
+        <view class="eye" data-qt-tv-id="profile:password-eye" :class="layout.isWide ? 'eye-wide' : ''" :style="eyeStyle" @click="pwVisible = !pwVisible">
           <QtIcon :name="pwVisible ? 'eye' : 'eye-off'" :size="layout.isWide ? 22 : 40" :color="themeStore.skin.iconMuted" />
         </view>
       </view>
@@ -63,6 +70,7 @@
       <text v-if="tip.length > 0" class="tip" :class="layout.isWide ? 'tip-wide' : ''" :style="qtFontDual(23, 13)">{{ tip }}</text>
 
       <qt-button
+        data-qt-tv-id="profile:submit"
         class="action"
         :class="layout.isWide ? 'action-wide' : ''"
         label="保存修改"
@@ -72,20 +80,21 @@
       />
     </view>
   </view>
+  </scroll-view>
 
       <!-- 头像放大预览遮罩：点击图片放大；下方左「保存图片」右「更换图片」 -->
-      <view v-if="previewOpen" class="avatar-preview-mask" @click="closePreview">
-        <view class="avatar-preview-body" @click.stop>
-          <view class="avatar-preview-close" @click="closePreview">
+      <view v-if="previewOpen" class="avatar-preview-mask" :style="qtFixedPaneStyle()" @click="closePreview">
+        <view ref="previewPanel" class="avatar-preview-body" :style="previewBodyStyle" @click.stop>
+          <view class="avatar-preview-close" data-qt-tv-id="profile:preview-close" :style="layout.isTv ? 'position:relative;top:0px;right:0px;width:56px;height:56px;flex-shrink:0;align-self:flex-end;' : ''" @click="closePreview">
             <QtIcon name="close" :size="layout.isWide ? 22 : 44" color="#ffffff" />
           </view>
-          <image :src="avatarSource" class="avatar-preview-img" mode="aspectFit" @error="onAvatarError" />
-          <view class="avatar-preview-actions" :class="layout.isWide ? 'avatar-preview-actions-wide' : ''">
-            <view class="avatar-preview-btn avatar-preview-btn-save" :class="layout.isWide ? 'avatar-preview-btn-wide' : ''" @click="saveImage">
-              <text class="avatar-preview-btn-text avatar-preview-btn-text-save" :class="layout.isWide ? 'avatar-preview-btn-text-wide' : ''" :style="qtFontDual(30, 16)">保存图片</text>
+          <image :src="avatarSource" class="avatar-preview-img" :style="previewImageStyle" mode="aspectFit" @error="onAvatarError" />
+          <view class="avatar-preview-actions" :class="layout.isWide ? 'avatar-preview-actions-wide' : ''" :style="previewActionsStyle">
+            <view class="avatar-preview-btn avatar-preview-btn-save" data-qt-tv-id="profile:preview-save" :class="layout.isWide ? 'avatar-preview-btn-wide' : ''" :style="previewButtonStyle" @click="saveImage">
+              <text class="avatar-preview-btn-text avatar-preview-btn-text-save" :class="layout.isWide ? 'avatar-preview-btn-text-wide' : ''" :style="qtFontDual(30, 16) + tvLine(16)">保存图片</text>
             </view>
-            <view class="avatar-preview-btn avatar-preview-btn-change" :class="layout.isWide ? 'avatar-preview-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @click="onChangeImage">
-              <text class="avatar-preview-btn-text avatar-preview-btn-text-light" :class="layout.isWide ? 'avatar-preview-btn-text-wide' : ''" :style="qtFontDual(30, 16)">更换图片</text>
+            <view class="avatar-preview-btn avatar-preview-btn-change" data-qt-tv-id="profile:preview-change" :class="[layout.isWide ? 'avatar-preview-btn-wide' : '', avatarBusy ? 'qt-tv-skip' : '']" :style="'background-color:' + themeStore.skin.accent + ';' + previewButtonStyle" @click="onChangeImage">
+              <text class="avatar-preview-btn-text avatar-preview-btn-text-light" :class="layout.isWide ? 'avatar-preview-btn-text-wide' : ''" :style="qtFontDual(30, 16) + tvLine(16)">更换图片</text>
             </view>
           </view>
         </view>
@@ -96,10 +105,13 @@
 <script setup lang="ts">
 import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { onUnload } from "@dcloudio/uni-app";
 import { accountApi } from "@/services/music-api";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtFixedPaneStyle, useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtContentWidth, qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { useQtTvModal } from "@/uni_modules/qt-ui/composables/use-qt-tv-modal";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import { getAccessToken, clearTokens, getSessionEpoch, sessionIsCurrent } from "@/services/auth";
@@ -111,7 +123,7 @@ import {
 } from "@/services/media";
 import { useQtAvatar } from "@/uni_modules/qt-ui/composables/use-qt-avatar";
 import { downloadPublicCover } from "@/services/http";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 import { saveImageToGallery } from "@/services/app-native";
 
 const themeStore = useThemeStore();
@@ -119,9 +131,23 @@ const layout = useQtLayout();
 // 皮肤令牌：卡片底 / 输入行底与描边 / 输入文字。
 // 这些原先由手写的深色覆盖类写死成 graphite 色值，换 linen/aurora 等皮肤时不跟着变；
 // 本仓库没有 CSS 变量，只能内联输出 skin 令牌。
-const cardStyle = computed((): string => "background-color:" + themeStore.skin.surface + ";");
-const fieldStyle = computed((): string => "background-color:" + themeStore.skin.surfaceMuted + ";border-color:" + themeStore.skin.border + ";");
-const inputStyle = computed((): string => "color:" + themeStore.skin.text + ";");
+const cardStyle = computed((): string => "background-color:" + themeStore.skin.surface + ";" + (layout.isTv ? "width:" + qtContentWidth("form") + "px;" : ""));
+const tvFieldHeight = computed((): number => Math.max(56, Math.ceil(qtFontValuePx(16) * 1.35) + 16));
+const fieldStyle = computed((): string => "background-color:" + themeStore.skin.surfaceMuted + ";border-color:" + themeStore.skin.border + ";" + (layout.isTv ? "height:" + tvFieldHeight.value + "px;" : ""));
+const inputStyle = computed((): string => "color:" + themeStore.skin.text + ";" + (layout.isTv ? "height:" + tvFieldHeight.value + "px;min-width:0px;font-size:" + qtFontValuePx(16) + "px;line-height:" + Math.ceil(qtFontValuePx(16) * 1.35) + "px;" : ""));
+const eyeStyle = computed((): string => layout.isTv ? "width:56px;height:" + tvFieldHeight.value + "px;flex-shrink:0;" : "");
+function tvLine(base: number): string {
+  return layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(base) * 1.35) + "px;" : "";
+}
+const previewButtonWidth = computed((): number => Math.min(qtSheetWidth(), Math.ceil(4 * qtFontValuePx(16)) + 68));
+const previewButtonHeight = computed((): number => Math.max(56, Math.ceil(qtFontValuePx(16) * 1.35) + 16));
+const previewRows = computed((): number => previewButtonWidth.value * 2 + 12 <= qtSheetWidth() ? 1 : 2);
+const previewActionsHeight = computed((): number => previewRows.value * previewButtonHeight.value + (previewRows.value - 1) * 12);
+const previewImageSize = computed((): number => Math.max(56, Math.min(280, qtSheetWidth() - 56, layout.paneHeight - 88 - previewActionsHeight.value)));
+const previewBodyStyle = computed((): string => layout.isTv ? "width:" + qtSheetWidth() + "px;height:" + (previewImageSize.value + previewActionsHeight.value + 88) + "px;" : "");
+const previewImageStyle = computed((): string => layout.isTv ? "width:" + previewImageSize.value + "px;height:" + previewImageSize.value + "px;flex-shrink:0;margin-top:16px;" : "");
+const previewActionsStyle = computed((): string => layout.isTv ? "position:relative;bottom:0px;left:0px;right:0px;width:" + qtSheetWidth() + "px;height:" + previewActionsHeight.value + "px;flex-shrink:0;margin-top:16px;gap:12px;flex-direction:" + (previewRows.value == 1 ? "row" : "column") + ";" : "");
+const previewButtonStyle = computed((): string => layout.isTv ? "width:" + previewButtonWidth.value + "px;height:" + previewButtonHeight.value + "px;flex-shrink:0;flex-grow:0;margin-left:0px;margin-right:0px;padding-left:34px;padding-right:34px;" : "");
 const nickname = ref("");
 const email = ref("");
 const password = ref("");
@@ -130,6 +156,7 @@ const loading = ref(false);
 const tip = ref("");
 /** 保存成功后延迟跳转登录页的定时器：页面卸载时必须清掉，避免在已注销的实例上触发回调 */
 let editReloadTimer: number | null = null;
+let formAlive = true;
 // 提交资料保留远程地址；展示与预览独立读取本机头像。
 const DEFAULT_AVATAR = "/files/qt-upload/avatar/default.png";
 const avatar = ref("");
@@ -137,6 +164,8 @@ const { avatarSource, refreshAvatar, onAvatarError } = useQtAvatar();
 const avatarBusy = ref(false);
 // 头像放大预览遮罩
 const previewOpen = ref(false);
+const previewPanel = ref<UniElement | null>(null);
+useQtTvModal(previewPanel, (): boolean => previewOpen.value, (): void => closePreview(), 1600);
 function openPreview(): void {
   if (avatarBusy.value) return;
   previewOpen.value = true;
@@ -290,22 +319,27 @@ async function submit(): Promise<void> {
     uni.removeStorageSync("qt-nickname");
     uni.removeStorageSync("qt-email");
     uni.removeStorageSync("qt-avatar");
+    if (!formAlive) return;
     qtShowToast({ title: "资料已更新，请重新登录", icon: "success" });
     editReloadTimer = setTimeout(() => {
-      uni.reLaunch({ url: "/pages/login/index" });
+      editReloadTimer = null;
+      if (formAlive) uni.reLaunch({ url: "/pages/login/index" });
     }, 800) as number;
   } catch (error) {
-    qtShowToast({ title: (error as Error).message || "保存失败", icon: "none" });
+    if (formAlive) qtShowToast({ title: (error as Error).message || "保存失败", icon: "none" });
   } finally {
-    loading.value = false;
+    if (formAlive) loading.value = false;
   }
 }
-onUnmounted(() => {
+function disposeForm(): void {
+  formAlive = false;
   if (editReloadTimer != null) {
     clearTimeout(editReloadTimer);
     editReloadTimer = null;
   }
-});
+}
+onBeforeUnmount(disposeForm);
+onUnload(disposeForm);
 </script>
 
 <style>

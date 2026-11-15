@@ -3,34 +3,34 @@
   <!-- 无权限拒绝态：不读日志、不给任何操作；设置页入口也按同一权限隐藏，这里是第二道守卫 -->
   <view v-if="!allowed" class="denied" :class="layout.isWide ? 'denied-wide' : ''">
     <QtIcon name="lock" :size="72" :color="theme.skin.iconMuted" />
-    <text class="denied-text" :class="layout.isWide ? 'denied-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(26, 15)">当前账号没有查看运行日志的权限</text>
+    <text class="denied-text" :class="layout.isWide ? 'denied-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(26, 15) + qtTvSongLineStyle(15)">当前账号没有查看运行日志的权限</text>
   </view>
   <view v-else class="page">
     <view class="head" :class="layout.isWide ? 'head-wide' : ''">
-      <text class="head-value" :class="layout.isWide ? 'head-value-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(56, 32)">{{ sizeText }}</text>
-      <text class="head-label" :class="layout.isWide ? 'head-label-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13)">日志占用</text>
-      <text class="head-path" :class="layout.isWide ? 'head-path-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(20, 12)">{{ pathText }}</text>
+      <text class="head-value" :class="layout.isWide ? 'head-value-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(56, 32) + qtTvSongLineStyle(32)">{{ sizeText }}</text>
+      <text class="head-label" :class="layout.isWide ? 'head-label-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13) + qtTvSongLineStyle(13)">日志占用</text>
+      <text class="head-path" :class="layout.isWide ? 'head-path-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(20, 12) + qtTvSongLineStyle(12)">{{ pathText }}</text>
     </view>
 
     <view class="actions" :class="layout.isWide ? 'actions-wide' : ''">
-      <qt-button class="act" label="复制日志" variant="secondary" size="sm" @click="copyLogs" />
-      <qt-button class="act" label="复制路径" variant="outline" size="sm" @click="copyPath" />
-      <qt-button class="act" label="清除日志" variant="outline" size="sm" @click="clearAll" />
+      <qt-button class="act" label="复制日志" variant="secondary" size="sm" :data-qt-tv-id="layout.isTv ? 'logs:copy' : ''" @click="copyLogs" />
+      <qt-button class="act" label="复制路径" variant="outline" size="sm" :data-qt-tv-id="layout.isTv ? 'logs:path' : ''" @click="copyPath" />
+      <qt-button class="act" label="清除日志" variant="outline" size="sm" :data-qt-tv-id="layout.isTv ? 'logs:clear' : ''" @click="clearAll" />
     </view>
 
     <!-- 调试日志状态复用共享红色选择框，权限与日志写入逻辑不变。 -->
-    <view class="switch-row" :class="layout.isWide ? 'switch-row-wide' : ''" :style="groupStyle" @click="toggleDebug" :hover-class="layout.isWide ? 'switch-row-hover' : 'none'">
+    <view class="switch-row" :class="layout.isWide ? 'switch-row-wide' : ''" :style="groupStyle + (layout.isTv ? 'height:auto;min-height:76px;' : '')" :data-qt-tv-id="layout.isTv ? 'logs:debug' : ''" @click="toggleDebug" :hover-class="layout.isWide ? 'switch-row-hover' : 'none'">
       <QtIcon class="switch-icon" :class="[layout.isWide ? 'switch-icon-wide' : '']" name="sliders" :size="36" :color="theme.skin.iconMuted" />
       <view class="switch-main">
-        <text class="switch-title" :class="layout.isWide ? 'switch-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">调试日志</text>
-        <text class="switch-desc" :class="layout.isWide ? 'switch-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">记录更细的排查信息，平时可关闭</text>
+        <text class="switch-title" :class="layout.isWide ? 'switch-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17) + qtTvSongLineStyle(17)">调试日志</text>
+        <text class="switch-desc" :class="layout.isWide ? 'switch-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13) + qtTvSongLineStyle(13)">记录更细的排查信息，平时可关闭</text>
       </view>
       <QtCheckbox :checked="debugOn" @change="toggleDebug" />
     </view>
 
     <view class="log-wrap" :class="layout.isWide ? 'log-wrap-wide' : ''" :style="groupStyle">
-      <text v-if="logLines.length == 0" class="log-empty" :class="layout.isWide ? 'log-empty-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ emptyText }}</text>
-      <scroll-view v-else class="log" direction="vertical" :show-scrollbar="true">
+      <text v-if="logLines.length == 0" class="log-empty" :class="layout.isWide ? 'log-empty-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14) + qtTvSongLineStyle(14)">{{ emptyText }}</text>
+      <scroll-view v-else class="log" :class="layout.isTv ? 'qt-tv-scroll' : ''" :data-qt-tv-id="layout.isTv ? 'logs:document' : ''" direction="vertical" :show-scrollbar="true">
         <!-- 逐行渲染而不是把整份日志塞进一个 <text>：几十万字符的单节点排版会明显卡顿，
              而且按行拆开后行与行之间才有正常行距 -->
         <text
@@ -44,7 +44,7 @@
     </view>
 
     <view class="hint">
-      <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">日志写在应用私有目录，只保留最近约 4MB（1MB 一份，最多 4 份，超过就覆盖最旧的）。遇到问题时把日志复制出来发给开发者即可定位。这里只显示末尾部分，文件里有完整内容。</text>
+      <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12) + qtTvSongLineStyle(12)">日志写在应用私有目录，只保留最近约 4MB（1MB 一份，最多 4 份，超过就覆盖最旧的）。遇到问题时把日志复制出来发给开发者即可定位。这里只显示末尾部分，文件里有完整内容。</text>
     </view>
   </view>
   </qt-page-frame>
@@ -73,6 +73,7 @@ import {
   setLogDebug,
 } from "@/services/logger";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtTvSongLineStyle } from "@/uni_modules/qt-ui/composables/qt-song-row-metrics";
 
 const layout = useQtLayout();
 const theme = useThemeStore();
@@ -100,7 +101,7 @@ function lineStyle(line: string): string {
   if (level == "E") color = theme.skin.danger;
   else if (level == "W") color = theme.skin.warning;
   else if (level == "D") color = theme.skin.textSubtle;
-  return "color:" + color + ";" + qtFontDual(20, 12);
+  return "color:" + color + ";" + qtFontDual(20, 12) + qtTvSongLineStyle(12);
 }
 
 /** 重新读取占用与日志正文（进页面、清除后都要重读） */

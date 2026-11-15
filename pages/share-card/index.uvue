@@ -2,14 +2,14 @@
   <qt-page-frame width-kind="form" :max-width="720">
     <view class="page" :class="layout.isWide ? 'page-wide' : ''">
       <view v-if="song == null" class="empty" :class="layout.isWide ? 'empty-wide' : ''">
-        <text class="empty-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(14)">没有可分享的歌曲</text>
+        <text class="empty-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(14) + qtTvSongLineStyle(14)">没有可分享的歌曲</text>
       </view>
 
       <template v-else>
         <!-- 内容整体可滚：卡片（尤其歌词卡）在小屏上高过可视区，旧版是普通 view
              直接裁底，两个操作按钮根本点不到（m21618）。参照公告详情页的
              scroll(direction=vertical)+flex:1 模式。 -->
-        <scroll-view class="scroll" direction="vertical" :show-scrollbar="false" :scroll-into-view="scrollInto">
+        <scroll-view class="scroll" :class="layout.isTv ? 'qt-tv-scroll' : ''" :data-qt-tv-id="layout.isTv ? 'share-card:scroll' : ''" direction="vertical" :show-scrollbar="false" :scroll-into-view="scrollInto">
           <view class="scroll-body">
         <!-- 卡片模式切换 -->
         <view class="mode-row" :class="layout.isWide ? 'mode-row-wide' : ''">
@@ -28,8 +28,8 @@
               @error="onCoverLoad"
             />
             <view class="info" :style="'width:' + cardPx + 'px;'">
-              <text class="song-name" max-lines="2" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(18)">{{ song.name }}</text>
-              <text class="song-singer" max-lines="1" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(13)">{{ song.singer }}</text>
+              <text class="song-name" max-lines="2" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(18) + qtTvSongLineStyle(18)">{{ song.name }}</text>
+              <text class="song-singer" max-lines="1" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(13) + qtTvSongLineStyle(13)">{{ song.singer }}</text>
               <view v-if="mode == 1" class="lyric-block">
                 <view v-if="lyricLines.length > 0">
                   <text
@@ -37,39 +37,39 @@
                     :key="idx"
                     class="lyric-line"
                     max-lines="1"
-                    :style="('color:' + (idx == 0 ? themeStore.skin.accent : themeStore.skin.textSubtle) + ';') + qtFontPx(14)"
+                    :style="('color:' + (idx == 0 ? themeStore.skin.accent : themeStore.skin.textSubtle) + ';') + qtFontPx(14) + qtTvSongLineStyle(14)"
                   >{{ line }}</text>
                 </view>
                 <!-- 歌词未回来：铺三行文字骨架；这块会被截图导出，所以关掉扫光 -->
                 <view v-else-if="lyricLoading" class="lyric-sk">
                   <QtSkeletonList kind="text" :rows="3" :shining="false" />
                 </view>
-                <text v-else class="lyric-line" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(14)">暂无歌词</text>
+                <text v-else class="lyric-line" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(14) + qtTvSongLineStyle(14)">暂无歌词</text>
               </view>
             </view>
             <view class="footer" :style="'width:' + cardPx + 'px;'">
-              <view class="footer-left">
-                <text class="footer-brand" :style="('color:' + themeStore.skin.accent + ';') + qtFontPx(13)">轻听音乐</text>
-                <text class="footer-tip" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(10)">扫码下载客户端</text>
-                <text class="footer-sub" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(10)">QuietMusic</text>
+              <view class="footer-left" :style="layout.isTv ? 'width:' + (cardPx - 112) + 'px;flex-shrink:0;' : ''">
+                <text class="footer-brand" :style="('color:' + themeStore.skin.accent + ';') + qtFontPx(13) + qtTvSongLineStyle(13)">轻听音乐</text>
+                <text class="footer-tip" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(10) + qtTvSongLineStyle(10)">扫码下载客户端</text>
+                <text class="footer-sub" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(10) + qtTvSongLineStyle(10)">QuietMusic</text>
               </view>
               <!-- 下载二维码：静态 PNG（黑白固定，不跟主题），随卡片一起被 takeSnapshot 截进去 -->
-              <image class="footer-qr" src="/static/share/share-qr.png" mode="aspectFit" />
+              <image class="footer-qr" :style="layout.isTv ? 'flex-shrink:0;' : ''" src="/static/share/share-qr.png" mode="aspectFit" />
             </view>
           </view>
         </view>
 
         <!-- 操作区 -->
         <view class="actions" :class="layout.isWide ? 'actions-wide' : ''">
-          <view class="act-btn act-primary" :style="'background-color:' + themeStore.skin.accent + ';'" @click="doShare">
-            <text class="act-text" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontPx(14)">{{ working ? "处理中..." : "分享图片" }}</text>
+          <view class="act-btn act-primary" :style="'background-color:' + themeStore.skin.accent + ';' + (layout.isTv ? 'height:56px;min-width:56px;' : '')" :data-qt-tv-id="layout.isTv ? 'share-card:share' : ''" @click="doShare">
+            <text class="act-text" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontPx(14) + qtTvSongLineStyle(14)">{{ working ? "处理中..." : "分享图片" }}</text>
           </view>
-          <view class="act-btn act-ghost" :style="'background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';'" @click="doSave">
-            <text class="act-text" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(14)">{{ working ? "处理中..." : "保存到相册" }}</text>
+          <view class="act-btn act-ghost" :style="'background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';' + (layout.isTv ? 'height:56px;min-width:56px;' : '')" :data-qt-tv-id="layout.isTv ? 'share-card:save' : ''" @click="doSave">
+            <text class="act-text" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(14) + qtTvSongLineStyle(14)">{{ working ? "处理中..." : "保存到相册" }}</text>
           </view>
         </view>
         <view class="tip-row" :class="layout.isWide ? 'tip-row-wide' : ''">
-          <text class="tip-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(12)">生成图片后可分享到微信、QQ 等应用</text>
+          <text class="tip-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(12) + qtTvSongLineStyle(12)">生成图片后可分享到微信、QQ 等应用</text>
         </view>
           </view>
         </scroll-view>
@@ -80,7 +80,7 @@
 <script setup lang="ts">
 import { qtShowToast } from "@/services/toast";
 import { onLoad, onUnload } from "@dcloudio/uni-app";
-import { computed, ref } from "vue";
+import { computed, ref, onBeforeUnmount } from "vue";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
 import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
@@ -93,6 +93,7 @@ import { useShareCardStore } from "@/stores/share-card";
 import { DEFAULT_PLAYLIST_COVER_ASSET } from "@/services/media";
 import { beginLoading, finishLoading } from "@/services/ui-loading";
 import { qtFontPx } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtTvSongLineStyle } from "@/uni_modules/qt-ui/composables/qt-song-row-metrics";
 import { saveImageToGallery } from "@/services/app-native";
 import { logError } from "@/services/logger";
 
@@ -120,7 +121,7 @@ const coverUrl = computed(() => {
  *  下限 220 保住封面观感，宽屏维持 340 上限。封面保持正方形，与卡片同宽。 */
 const cardPx = computed((): number => {
   const cap = layout.isWide ? 340 : 300;
-  const fit = Math.floor(Math.max(layout.windowWidth, 1) - 96);
+  const fit = Math.floor(Math.max(layout.paneWidth, 1) - 96);
   return Math.min(cap, Math.max(220, fit));
 });
 /** 截图前把卡片滚回可视区：歌词卡会超出视口，takeSnapshot 对视口外节点不可靠。 */
@@ -137,14 +138,17 @@ onLoad(() => {
   loadLyrics();
 });
 
-onUnload(() => {
+function disposeShareCard(): void {
+  if (disposed) return;
   disposed = true;
   // 离开页面即清目标，避免返回后再进残留上一首
   shareCard.song = null;
   if (cancelSnapshot != null) cancelSnapshot();
   clearExportLoading();
   working.value = false;
-});
+}
+onUnload(disposeShareCard);
+onBeforeUnmount(disposeShareCard);
 
 function loadLyrics(): void {
   const s = song.value;
@@ -175,6 +179,7 @@ function clearExportLoading(): void {
 
 /** 截图及其完成回调保持在同一作用域，避免拆函数后丢失 onDone/onFail。 */
 function snapshotCard(): Promise<string | null> {
+  if (disposed) return Promise.resolve(null);
   if (!coverReady.value) {
     qtShowToast({ title: "封面还在加载，稍候再试", icon: "none", duration: 2500 });
     return Promise.resolve(null);
@@ -205,6 +210,7 @@ function snapshotCard(): Promise<string | null> {
     loadingToken = beginLoading("生成图片中...");
     snapTimeout = setTimeout(() => settle(null, "生成图片超时，请重试"), 12000) as unknown as number;
     snapDelay = setTimeout(() => {
+      if (settled || disposed) return;
       snapDelay = 0;
       try {
         el.takeSnapshot({

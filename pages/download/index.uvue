@@ -17,20 +17,20 @@
          每个可点动作都包一层 .hit（撑满行高 + 左右内边距），@click 挂在 .hit 上：
          直接点裸 <text> 时命中区只有文字本身那 ~25px，行高 48px 里上下都点不中，
          真机上就是「按了没反应」。 -->
-    <view class="ops-line" :class="layout.isWide ? 'ops-line-wide' : ''">
+    <view class="ops-line" :class="layout.isWide ? 'ops-line-wide' : ''" :style="tvOpsStyle">
       <template v-if="!isItemsView">
         <text class="ops-count" :class="layout.isWide ? 'ops-count-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 15)">{{ visibleCount }} 个任务</text>
         <view class="line-right">
-          <view v-if="pausedCount > 0" class="hit" :class="layout.isWide ? 'hit-wide' : ''" @click="resumeAll">
+          <view v-if="pausedCount > 0" class="hit" :class="layout.isWide ? 'hit-wide' : ''" :style="tvHeaderActionStyle" @click="resumeAll">
             <text class="ops-link" :class="layout.isWide ? 'ops-link-wide' : ''" :style="('color:' + theme.skin.accent + ';') + qtFontDual(24, 13)">全部继续</text>
           </view>
-          <view v-if="failedCount > 0" class="hit" :class="layout.isWide ? 'hit-wide' : ''" @click="retryAll">
+          <view v-if="failedCount > 0" class="hit" :class="layout.isWide ? 'hit-wide' : ''" :style="tvHeaderActionStyle" @click="retryAll">
             <text class="ops-link" :class="layout.isWide ? 'ops-link-wide' : ''" :style="('color:' + theme.skin.accent + ';') + qtFontDual(24, 13)">全部重试</text>
           </view>
-          <view v-if="pausableCount > 0" class="hit" :class="layout.isWide ? 'hit-wide' : ''" @click="pauseAll">
+          <view v-if="pausableCount > 0" class="hit" :class="layout.isWide ? 'hit-wide' : ''" :style="tvHeaderActionStyle" @click="pauseAll">
             <text class="ops-link" :class="layout.isWide ? 'ops-link-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(24, 13)">全部暂停</text>
           </view>
-          <view v-if="taskCount > 0" class="hit" :class="layout.isWide ? 'hit-wide' : ''" @click="cancelAll">
+          <view v-if="taskCount > 0" class="hit" :class="layout.isWide ? 'hit-wide' : ''" :style="tvHeaderActionStyle" @click="cancelAll">
             <text class="ops-link" :class="layout.isWide ? 'ops-link-wide' : ''" :style="('color:' + theme.skin.danger + ';') + qtFontDual(24, 13)">全部取消</text>
           </view>
         </view>
@@ -39,24 +39,24 @@
         <text class="ops-count" :class="layout.isWide ? 'ops-count-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 15)">{{ selecting ? '已选 ' + selected.length + ' 首' : '共 ' + itemsCount + ' 首' }}</text>
         <view class="line-right">
           <template v-if="!selecting">
-            <view v-if="itemsCount > 0" class="hit" :class="layout.isWide ? 'hit-wide' : ''" @click="toggleSelect">
+            <view v-if="itemsCount > 0" class="hit" :class="layout.isWide ? 'hit-wide' : ''" :style="tvHeaderActionStyle" @click="toggleSelect">
               <text class="ops-link" :class="layout.isWide ? 'ops-link-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(24, 13)">管理</text>
             </view>
           </template>
           <template v-else>
-            <view class="hit" :class="layout.isWide ? 'hit-wide' : ''" @click="toggleSelectAll">
+            <view class="hit" :class="layout.isWide ? 'hit-wide' : ''" :style="tvHeaderActionStyle" @click="toggleSelectAll">
               <text class="ops-link" :class="layout.isWide ? 'ops-link-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(24, 13)">{{ allSel ? '取消全选' : '全选' }}</text>
             </view>
             <view
               class="manage-btn"
               :class="layout.isWide ? (selected.length == 0 ? 'manage-btn-wide manage-btn-off' : 'manage-btn-wide') : (selected.length == 0 ? 'manage-btn-off' : '')"
-              :style="'background-color:' + theme.skin.danger + ';border-color:' + theme.skin.danger + ';'"
+              :style="'background-color:' + theme.skin.danger + ';border-color:' + theme.skin.danger + ';' + tvBatchActionStyle"
               @click="confirmBatchDelete"
             >
               <QtIcon name="trash" :size="layout.isWide ? 14 : 24" :color="theme.skin.onAccent" />
               <text class="manage-btn-text" :class="layout.isWide ? 'manage-btn-text-wide' : ''" :style="('color:' + theme.skin.onAccent + ';') + qtFontDual(24, 13)">删除({{ selected.length }})</text>
             </view>
-            <view class="hit" :class="layout.isWide ? 'hit-wide' : ''" @click="toggleSelect">
+            <view class="hit" :class="layout.isWide ? 'hit-wide' : ''" :style="tvHeaderActionStyle" @click="toggleSelect">
               <text class="ops-link" :class="layout.isWide ? 'ops-link-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(24, 13)">完成</text>
             </view>
           </template>
@@ -71,37 +71,41 @@
         v-for="entry in allItems"
         :key="entry.key"
         class="row" :class="layout.isWide ? 'row-wide' : ''"
+        :style="entry.type == 'task' ? tvDownloadTaskHostStyle : tvDownloadHostStyle"
       >
         <!-- 任务（下载中/等待/暂停/失败）：封面 + 歌名 + 进度条 + 大小/速度/剩余 -->
         <template v-if="entry.type == 'task'">
-          <view class="row-card" :class="layout.isWide ? 'row-card-wide' : ''" :hover-class="layout.isWide ? 'row-card-hover' : 'none'" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';'">
+          <view class="row-card" :class="layout.isWide ? 'row-card-wide' : ''" :hover-class="layout.isWide ? 'row-card-hover' : 'none'" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';' + tvDownloadTaskCardStyle">
             <image class="cover" :class="layout.isWide ? 'cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="entry.data.song.picUrl" mode="aspectFill" />
-            <view class="info" :class="layout.isWide ? 'info-wide' : ''">
-              <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 16)" :max-lines="1">{{ entry.data.song.name }}</text>
+            <view class="info" :class="layout.isWide ? 'info-wide' : ''" :data-qt-tv-id="layout.isTv ? 'download:' + entry.key : ''" @longpress="openTaskActions(entry.data)">
+              <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 16) + qtTvSongLineStyle(16)" :max-lines="1">{{ entry.data.song.name }}</text>
               <!-- 有进度就画（暂停/失败保留断点位置，暂停用弱色区分） -->
               <view v-if="taskHasBar(entry.data)" class="progress-wrap" :class="layout.isWide ? 'progress-wrap-wide' : ''" :style="'background-color:' + theme.skin.surfaceInset + ';'">
                 <view class="progress-bar" :class="layout.isWide ? 'progress-bar-wide' : ''" :style="'width:' + entry.data.progress + '%;background-color:' + taskBarColor(entry.data) + ';'"></view>
               </view>
-              <text class="meta" :class="layout.isWide ? 'meta-wide' : ''" :style="('color:' + (entry.data.status == 'failed' ? theme.skin.danger : theme.skin.textMuted) + ';') + qtFontDual(23, 14)" :max-lines="1">{{ taskMeta(entry.data) }}</text>
+              <text class="meta" :class="layout.isWide ? 'meta-wide' : ''" :style="('color:' + (entry.data.status == 'failed' ? theme.skin.danger : theme.skin.textMuted) + ';') + qtFontDual(23, 14) + qtTvSongLineStyle(14)" :max-lines="1">{{ taskMeta(entry.data) }}</text>
+            </view>
+            <view v-if="layout.isTv" class="row-hit download-tv-task-more" :style="tvRowActionStyle" @click.stop="openTaskActions(entry.data)">
+              <QtIcon name="more" :size="QT_TV_TOKENS.iconPx" :color="theme.skin.iconMuted" />
             </view>
             <!-- 行尾操作：圆形底座 + 图标。图标本身只有 36rpx（约 18px），
                  远低于可点面积下限，所以外面再包一层 .row-hit（撑满行高 + 左右内边距） -->
-            <view v-if="entry.data.status == 'failed'" class="row-hit" :class="layout.isWide ? 'row-hit-wide' : ''" @click="retry(entry.data.song)">
+            <view v-if="entry.data.status == 'failed'" class="row-hit" :class="layout.isWide ? 'row-hit-wide' : ''" :style="tvRowActionStyle" @click="retry(entry.data.song)">
               <view class="row-act" :class="layout.isWide ? 'row-act-wide' : ''" :style="'background-color:' + theme.skin.dangerSoft + ';'">
                 <QtIcon name="refresh" :size="layout.isWide ? 15 : 34" :color="theme.skin.danger" />
               </view>
             </view>
-            <view v-if="entry.data.status == 'downloading'" class="row-hit" :class="layout.isWide ? 'row-hit-wide' : ''" @click="pauseOne(entry.data.song)">
+            <view v-if="entry.data.status == 'downloading'" class="row-hit" :class="layout.isWide ? 'row-hit-wide' : ''" :style="tvRowActionStyle" @click="pauseOne(entry.data.song)">
               <view class="row-act" :class="layout.isWide ? 'row-act-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'">
                 <QtIcon name="pause" :size="layout.isWide ? 15 : 34" :color="theme.skin.iconMuted" />
               </view>
             </view>
-            <view v-if="entry.data.status == 'paused'" class="row-hit" :class="layout.isWide ? 'row-hit-wide' : ''" @click="resumeOne(entry.data.song)">
+            <view v-if="entry.data.status == 'paused'" class="row-hit" :class="layout.isWide ? 'row-hit-wide' : ''" :style="tvRowActionStyle" @click="resumeOne(entry.data.song)">
               <view class="row-act" :class="layout.isWide ? 'row-act-wide' : ''" :style="'background-color:' + theme.skin.accentSoft + ';'">
                 <QtIcon name="play" :size="layout.isWide ? 15 : 34" :color="theme.skin.accent" />
               </view>
             </view>
-            <view class="row-hit" :class="layout.isWide ? 'row-hit-wide' : ''" @click="removeTask(entry.data.song)">
+            <view class="row-hit" :class="layout.isWide ? 'row-hit-wide' : ''" :style="tvRowActionStyle" @click="removeTask(entry.data.song)">
               <view class="row-act" :class="layout.isWide ? 'row-act-wide' : ''" :style="'background-color:' + theme.skin.surfaceMuted + ';'">
                 <QtIcon name="close" :size="layout.isWide ? 15 : 34" :color="theme.skin.iconMuted" />
               </view>
@@ -110,16 +114,19 @@
         </template>
         <!-- 已下载项：选择态显示复选框、整行点选；非选择态点行播放、右侧删除 -->
         <template v-else>
-          <view class="row-card" :class="layout.isWide ? 'row-card-wide' : ''" :hover-class="layout.isWide ? 'row-card-hover' : 'none'" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';'">
-            <view class="main" @click="onItemTap(entry.data)">
+          <view class="row-card" :class="layout.isWide ? 'row-card-wide' : ''" :hover-class="layout.isWide ? 'row-card-hover' : 'none'" :style="'background-color:' + theme.skin.surface + ';border-color:' + theme.skin.border + ';' + tvDownloadCardStyle">
+            <view class="main" @click="onItemTap(entry.data)" @longpress="openItemActions(entry.data)">
               <QtCheckbox v-if="selecting" class="checkbox-gap" :class="layout.isWide ? 'checkbox-gap-wide' : ''" :checked="isItemSelected(entry.data)" @change="onItemTap(entry.data)" />
               <image class="cover" :class="layout.isWide ? 'cover-wide' : ''" :style="'background-color:' + theme.skin.coverPlaceholder + ';'" :src="entry.data.song.picUrl" mode="aspectFill" />
               <view class="info" :class="layout.isWide ? 'info-wide' : ''">
-                <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 16)" :max-lines="1">{{ entry.data.song.name }}</text>
-                <text class="meta" :class="layout.isWide ? 'meta-wide' : ''" :style="('color:' + (missingFiles.indexOf(entry.data.path) >= 0 ? theme.skin.danger : theme.skin.textMuted) + ';') + qtFontDual(23, 14)" :max-lines="1">{{ itemMeta(entry.data) }}</text>
+                <text class="name" :class="layout.isWide ? 'name-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 16) + qtTvSongLineStyle(16)" :max-lines="1">{{ entry.data.song.name }}</text>
+                <text class="meta" :class="layout.isWide ? 'meta-wide' : ''" :style="('color:' + (missingFiles.indexOf(entry.data.path) >= 0 ? theme.skin.danger : theme.skin.textMuted) + ';') + qtFontDual(23, 14) + qtTvSongLineStyle(14)" :max-lines="1">{{ itemMeta(entry.data) }}</text>
               </view>
             </view>
-            <view v-if="!selecting" class="row-hit" :class="layout.isWide ? 'row-hit-wide' : ''" @click="removeSingle(entry.data)">
+            <view v-if="layout.isTv && !selecting" class="row-hit download-tv-more" :style="tvRowActionStyle" @click.stop="openItemActions(entry.data)">
+              <QtIcon name="more" :size="QT_TV_TOKENS.iconPx" :color="theme.skin.iconMuted" />
+            </view>
+            <view v-if="!selecting" class="row-hit" :class="layout.isWide ? 'row-hit-wide' : ''" :style="tvRowActionStyle" @click="removeSingle(entry.data)">
               <view class="row-act" :class="layout.isWide ? 'row-act-wide' : ''" :style="'background-color:' + theme.skin.dangerSoft + ';'">
                 <QtIcon name="trash" :size="layout.isWide ? 15 : 34" :color="theme.skin.danger" />
               </view>
@@ -151,6 +158,7 @@
 <script setup lang="ts">
 import { qtShowToast } from "@/services/toast";
 import { qtConfirm } from "@/services/confirm";
+import { qtShowActionSheet } from "@/services/action-sheet";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { onShow } from "@dcloudio/uni-app";
 import { computed, ref } from "vue";
@@ -164,14 +172,40 @@ import { usePlayerStore } from "@/stores/player";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import type { Song } from "@/types/music";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 import { platformShort } from "@/services/platform";
 import { statLocalFile } from "@/uni_modules/qt-app-native";
+import { qtSongRowHeightPx, qtTvSongRowStyle, qtTvSongLineStyle } from "@/uni_modules/qt-ui/composables/qt-song-row-metrics";
+import { QT_TV_TOKENS } from "@/uni_modules/qt-ui/composables/qt-tv-tokens";
 
 const downloads = useDownloadsStore();
 const player = usePlayerStore();
 const layout = useQtLayout();
 const theme = useThemeStore();
+const tvDownloadHostStyle = computed((): string => layout.isTv
+  ? 'height:' + (qtSongRowHeightPx() + 16) + 'px;'
+  : '');
+const tvDownloadCardStyle = computed((): string => qtTvSongRowStyle());
+const tvDownloadTaskHeight = computed((): number => Math.max(96,
+  Math.ceil(qtFontValuePx(16) * 1.3) + Math.ceil(qtFontValuePx(14) * 1.3) + 38));
+const tvDownloadTaskCardStyle = computed((): string => layout.isTv
+  ? 'height:' + tvDownloadTaskHeight.value + 'px;'
+  : '');
+const tvDownloadTaskHostStyle = computed((): string => layout.isTv
+  ? 'height:' + (tvDownloadTaskHeight.value + 16) + 'px;'
+  : '');
+const tvRowActionStyle = computed((): string => layout.isTv
+  ? 'height:' + QT_TV_TOKENS.controlPx + 'px;width:' + QT_TV_TOKENS.controlPx + 'px;padding:0;'
+  : '');
+const tvOpsStyle = computed((): string => layout.isTv
+  ? 'height:' + QT_TV_TOKENS.controlPx + 'px;'
+  : '');
+const tvHeaderActionStyle = computed((): string => layout.isTv
+  ? 'height:' + QT_TV_TOKENS.controlPx + 'px;min-width:' + QT_TV_TOKENS.controlPx + 'px;'
+  : '');
+const tvBatchActionStyle = computed((): string => layout.isTv
+  ? 'height:' + QT_TV_TOKENS.controlPx + 'px;min-width:' + QT_TV_TOKENS.controlPx + 'px;padding:0 18px;'
+  : '');
 
 // 回到顶部
 const scrollTop = ref(0);
@@ -578,6 +612,26 @@ function play(item: DownloadItem): void {
     duration: song.duration,
   };
   player.playSingle(local);
+}
+
+async function openItemActions(item: DownloadItem): Promise<void> {
+  if (!layout.isTv || selecting.value) return;
+  const action = await qtShowActionSheet({ title: item.song.name, itemList: ['播放', '删除下载'] });
+  if (action == 0) play(item);
+  if (action == 1) removeSingle(item);
+}
+
+async function openTaskActions(task: DownloadTask): Promise<void> {
+  if (!layout.isTv) return;
+  const operation = task.status == 'failed' ? 'retry' : task.status == 'paused' ? 'resume' : 'pause';
+  const label = operation == 'retry' ? '重试下载' : operation == 'resume' ? '继续下载' : '暂停下载';
+  const action = await qtShowActionSheet({ title: task.song.name, itemList: [label, '取消任务'] });
+  if (action == 0) {
+    if (operation == 'retry') retry(task.song);
+    else if (operation == 'resume') resumeOne(task.song);
+    else pauseOne(task.song);
+  }
+  if (action == 1) removeTask(task.song);
 }
 
 function retry(song: Song): void {

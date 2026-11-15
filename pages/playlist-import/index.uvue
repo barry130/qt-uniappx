@@ -1,9 +1,10 @@
 <template>
   <qt-page-frame width-kind="form" :max-width="760">
-    <view class="page" :class="layout.isWide ? 'page-wide' : ''">
+    <scroll-view class="form-scroll qt-tv-scroll" direction="vertical" :show-scrollbar="false" style="flex:1;min-height:0px;">
+    <view class="page" :class="layout.isWide ? 'page-wide' : ''" :style="layout.isTv ? 'padding-left:0px;padding-right:0px;' : ''">
       <!-- 顶部说明（随 tag 切换） -->
       <view class="hint" :class="layout.isWide ? 'hint-wide' : ''">
-        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 14)">{{ hintText }}</text>
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 14) + tvLine(14)">{{ hintText }}</text>
       </view>
 
       <!-- 两类导入：拷贝歌曲 / 收藏歌单 -->
@@ -13,30 +14,31 @@
 
       <!-- 第一步：输入链接 + 选平台 -->
       <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="cardSkin">
-        <text class="step-title" :class="layout.isWide ? 'step-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 16)">1 · 歌单链接</text>
-        <view class="input-row" :class="layout.isWide ? 'input-row-wide' : ''">
+        <text class="step-title" :class="layout.isWide ? 'step-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 16) + tvLine(16)">1 · 歌单链接</text>
+        <view class="input-row" :class="layout.isWide ? 'input-row-wide' : ''" :style="layout.isTv ? 'flex-direction:column;align-items:stretch;gap:12px;' : ''">
           <input
             v-model="rawInput"
+            data-qt-tv-id="playlist:link" :focus="false"
             class="link-input" :class="layout.isWide ? 'link-input-wide' : ''"
-            :style="'color:' + themeStore.skin.text + ';background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';'"
+            :style="'color:' + themeStore.skin.text + ';background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';' + tvFieldStyle"
             :placeholder-style="'color:' + themeStore.skin.placeholder + ';'"
             :placeholder="platIndex == 0 ? '例：https://music.163.com/#/playlist?id=123456 或直接输入歌单 ID' : '输入歌单 ID 或分享链接'"
             confirm-type="done"
           />
-          <view class="parse-btn" :class="layout.isWide ? 'parse-btn-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'" @click="onParse">
-            <text class="parse-btn-text" :class="layout.isWide ? 'parse-btn-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(26, 14)">{{ parsing ? "解析中" : "解析" }}</text>
+          <view data-qt-tv-id="playlist:parse" class="parse-btn" :class="[layout.isWide ? 'parse-btn-wide' : '', parsing || importing ? 'qt-tv-skip' : '']" :style="'background-color:' + themeStore.skin.accent + ';' + tvActionStyle" @click="onParse">
+            <text class="parse-btn-text" :class="layout.isWide ? 'parse-btn-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(26, 14) + tvLine(14)">{{ parsing ? "解析中" : "解析" }}</text>
           </view>
         </view>
 
         <!-- 平台选择：走全站统一的操作表弹层（services/source-sheet），不再内联下拉 -->
-        <view class="plat-row" :class="layout.isWide ? 'plat-row-wide' : ''">
-          <text class="plat-label" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 14)">平台</text>
-          <view class="plat-select" :class="layout.isWide ? 'plat-select-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';' " @click="openPlatformSheet">
-            <text class="plat-select-text" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 14)">{{ platLabelText }}</text>
+        <view class="plat-row" :class="layout.isWide ? 'plat-row-wide' : ''" :style="layout.isTv ? 'flex-direction:column;align-items:stretch;gap:8px;' : ''">
+          <text class="plat-label" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 14) + tvLine(14)">平台</text>
+          <view data-qt-tv-id="playlist:platform" class="plat-select" :class="layout.isWide ? 'plat-select-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';' + tvSelectStyle" @click="openPlatformSheet">
+            <text class="plat-select-text" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 14) + tvLine(14)">{{ platLabelText }}</text>
             <QtIcon name="chevron-down" :size="24" :color="themeStore.skin.textMuted" />
           </view>
         </view>
-        <text class="plat-hint" :class="layout.isWide ? 'plat-hint-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)">{{ platFormatHint }}</text>
+        <text class="plat-hint" :class="layout.isWide ? 'plat-hint-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12) + tvLine(12)">{{ platFormatHint }}</text>
       </view>
 
       <!-- 第二步（导入歌曲）：预览 + 歌单名 + 导入 -->
@@ -45,67 +47,74 @@
            解析完成后只切可见性，不再有首挂/重挂动作（:key 重挂会触发 bytecode
            运行时的「UTS instance is not registered」，2026-09-30 实测） -->
       <view v-show="modeTag == 1 && detail != null" class="card" :class="layout.isWide ? 'card-wide' : ''" :style="cardSkin">
-        <text class="step-title" :class="layout.isWide ? 'step-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 16)">2 · 确认导入</text>
-        <text v-if="platNote.length > 0" class="plat-note" :class="layout.isWide ? 'plat-note-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)">{{ platNote }}</text>
+        <text class="step-title" :class="layout.isWide ? 'step-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 16) + tvLine(16)">2 · 确认导入</text>
+        <text v-if="platNote.length > 0" class="plat-note" :class="layout.isWide ? 'plat-note-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12) + tvLine(12)">{{ platNote }}</text>
         <view class="preview" :class="layout.isWide ? 'preview-wide' : ''">
           <image class="preview-cover" :class="layout.isWide ? 'preview-cover-wide' : ''" :src="detailPicUrl" mode="aspectFill" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';' " />
           <view class="preview-info">
-            <text class="preview-name" max-lines="2" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 17)">{{ detailName }}</text>
-            <text class="preview-sub" max-lines="1" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)">{{ detailPlatformLabel }} · {{ detailTrackCount }} 首</text>
+            <text class="preview-name" max-lines="2" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 17) + tvLine(17)">{{ detailName }}</text>
+            <text class="preview-sub" max-lines="1" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12) + tvLine(12)">{{ detailPlatformLabel }} · {{ detailTrackCount }} 首</text>
           </view>
         </view>
-        <text class="field-label" :class="layout.isWide ? 'field-label-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13)">导入到</text>
+        <text class="field-label" :class="layout.isWide ? 'field-label-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13) + tvLine(13)">导入到</text>
         <view class="plat-row target-row" :class="layout.isWide ? 'plat-row-wide target-row-wide' : ''">
-          <view class="plat-select" :class="layout.isWide ? 'plat-select-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';'" @click="toggleTargetMenu">
-            <text class="plat-select-text" max-lines="1" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 14)">{{ targetChoiceText }}</text>
+          <view data-qt-tv-id="playlist:target" class="plat-select" :class="layout.isWide ? 'plat-select-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';' + tvSelectStyle" @click="toggleTargetMenu">
+            <text class="plat-select-text" max-lines="1" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(26, 14) + tvLine(14)">{{ targetChoiceText }}</text>
             <QtIcon name="chevron-right" :size="24" :color="themeStore.skin.textMuted" />
           </view>
         </view>
-        <scroll-view v-if="targetOpen" class="plat-menu" direction="vertical" :scroll-into-view="targetReveal.anchor.value" :style="'height:' + (layout.isWide ? 260 : 220) + 'px;background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
-          <QtOption :id="targetReveal.itemId(0)" kind="row" label="新建歌单" :selected="targetChoice == 0" @select="pickTarget(0)" />
-          <QtOption v-for="(pl, i) in existingList" :id="targetReveal.itemId(i + 1)" :key="pl.id" kind="row" :label="pl.name" :selected="targetChoice == i + 1" @select="pickTarget(i + 1)" />
+        <scroll-view v-if="targetOpen" ref="targetPanel" class="plat-menu qt-tv-scroll" direction="vertical" :scroll-into-view="targetReveal.anchor.value" :style="'height:' + (layout.isTv ? tvTargetHeight : layout.isWide ? 260 : 220) + 'px;background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';' + (layout.isTv ? 'width:' + Math.max(0, qtContentWidth('form') - 34) + 'px;flex-shrink:0;' : '')">
+          <QtOption data-qt-tv-id="playlist:target:new" :id="targetReveal.itemId(0)" kind="row" label="新建歌单" :selected="targetChoice == 0" @select="pickTarget(0)" />
+          <QtOption v-for="(pl, i) in existingList" :data-qt-tv-id="'playlist:target:' + pl.id" :id="targetReveal.itemId(i + 1)" :key="pl.id" kind="row" :label="pl.name" :selected="targetChoice == i + 1" @select="pickTarget(i + 1)" />
         </scroll-view>
-        <text v-if="targetChoice == 0" class="field-label" :class="layout.isWide ? 'field-label-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13)">歌单名称（留空默认同名）</text>
+        <text v-if="targetChoice == 0" class="field-label" :class="layout.isWide ? 'field-label-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13) + tvLine(13)">歌单名称（留空默认同名）</text>
         <input
           v-if="targetChoice == 0"
           v-model="targetName"
+          data-qt-tv-id="playlist:name" :focus="false"
           class="name-input" :class="layout.isWide ? 'name-input-wide' : ''"
-          :style="'color:' + themeStore.skin.text + ';background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';'"
+          :style="'color:' + themeStore.skin.text + ';background-color:' + themeStore.skin.surfaceInset + ';border-color:' + themeStore.skin.border + ';' + tvFieldStyle"
           :placeholder-style="'color:' + themeStore.skin.placeholder + ';'"
           :placeholder="detailPlaceholder"
           confirm-type="done"
         />
-        <view class="main-btn" :class="layout.isWide ? 'main-btn-wide' : ''" :style="importing || importDone ? 'background-color:' + themeStore.skin.surfaceMuted + ';' : 'background-color:' + themeStore.skin.accent + ';' " @click="onImport">
-          <text class="main-btn-text" :style="('color:' + (importing || importDone ? themeStore.skin.textMuted : themeStore.skin.onAccent) + ';') + qtFontDual(28, 17)">{{ importBtnText }}</text>
+        <view class="plat-row" :class="layout.isWide ? 'plat-row-wide' : ''" :style="layout.isTv ? 'flex-direction:column;align-items:stretch;gap:12px;' : ''">
+          <text class="preview-info" :style="'color:' + themeStore.skin.text + ';' + qtFontDual(26, 14) + tvLine(14) + (layout.isTv ? 'margin-left:0px;flex-grow:0;min-width:0px;' : '')">跟随原歌单更新</text>
+          <QtSwitch data-qt-tv-id="playlist:follow" v-model="followSource" :disabled="!followAvailable || importing || importDone" />
         </view>
-        <text v-if="importProgress.length > 0" class="progress-text" :class="layout.isWide ? 'progress-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13)">{{ importProgress }}</text>
+        <text class="plat-hint" :style="'color:' + themeStore.skin.textMuted + ';' + qtFontDual(22, 12) + tvLine(12)">{{ followAvailable ? '本设备每天检查，保留你手动添加和删除的歌曲。' : '来源未确认列表完整，更新数据包后可开启。' }}</text>
+        <view data-qt-tv-id="playlist:import" class="main-btn" :class="[layout.isWide ? 'main-btn-wide' : '', importing || importDone ? 'qt-tv-skip' : '']" :style="(importing || importDone ? 'background-color:' + themeStore.skin.surfaceMuted + ';' : 'background-color:' + themeStore.skin.accent + ';') + tvMainStyle" @click="onImport">
+          <text class="main-btn-text" :style="('color:' + (importing || importDone ? themeStore.skin.textMuted : themeStore.skin.onAccent) + ';') + qtFontDual(28, 17) + tvLine(17)">{{ importBtnText }}</text>
+        </view>
+        <text v-if="importProgress.length > 0" class="progress-text" :class="layout.isWide ? 'progress-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13) + tvLine(13)">{{ importProgress }}</text>
       </view>
 
       <!-- 第二步（收藏歌单）：预览 + 收藏按钮 -->
       <view v-if="modeTag == 0 && detail != null" class="card" :class="layout.isWide ? 'card-wide' : ''" :style="cardSkin">
-        <text class="step-title" :class="layout.isWide ? 'step-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 16)">2 · 确认收藏</text>
-        <text v-if="platNote.length > 0" class="plat-note" :class="layout.isWide ? 'plat-note-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)">{{ platNote }}</text>
+        <text class="step-title" :class="layout.isWide ? 'step-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 16) + tvLine(16)">2 · 确认收藏</text>
+        <text v-if="platNote.length > 0" class="plat-note" :class="layout.isWide ? 'plat-note-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12) + tvLine(12)">{{ platNote }}</text>
         <view class="preview" :class="layout.isWide ? 'preview-wide' : ''">
           <image class="preview-cover" :class="layout.isWide ? 'preview-cover-wide' : ''" :src="detail.picUrl" mode="aspectFill" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';' " />
           <view class="preview-info">
-            <text class="preview-name" max-lines="2" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 17)">{{ detail.name }}</text>
-            <text class="preview-sub" max-lines="1" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)">{{ platLabel(detail.platform) }} · {{ detail.tracks != null ? detail.tracks.length : 0 }} 首</text>
+            <text class="preview-name" max-lines="2" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 17) + tvLine(17)">{{ detail.name }}</text>
+            <text class="preview-sub" max-lines="1" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12) + tvLine(12)">{{ platLabel(detail.platform) }} · {{ detail.tracks != null ? detail.tracks.length : 0 }} 首</text>
           </view>
         </view>
-        <view class="main-btn" :class="layout.isWide ? 'main-btn-wide' : ''" :style="importDone ? 'background-color:' + themeStore.skin.surfaceMuted + ';' : 'background-color:' + themeStore.skin.accent + ';' " @click="onCollect">
-          <text class="main-btn-text" :style="('color:' + (importDone ? themeStore.skin.textMuted : themeStore.skin.onAccent) + ';') + qtFontDual(28, 17)">{{ importDone ? "已在收藏中" : "收藏到收藏夹" }}</text>
+        <view data-qt-tv-id="playlist:collect" class="main-btn" :class="[layout.isWide ? 'main-btn-wide' : '', parsing || importDone ? 'qt-tv-skip' : '']" :style="(importDone ? 'background-color:' + themeStore.skin.surfaceMuted + ';' : 'background-color:' + themeStore.skin.accent + ';') + tvMainStyle" @click="onCollect">
+          <text class="main-btn-text" :style="('color:' + (importDone ? themeStore.skin.textMuted : themeStore.skin.onAccent) + ';') + qtFontDual(28, 17) + tvLine(17)">{{ importDone ? "已在收藏中" : "收藏到收藏夹" }}</text>
         </view>
       </view>
 
       <!-- 全屏锁定层：拉取/导入进行中挡住整页并禁系统返回，防止中途离开留下半截状态 -->
-      <view v-if="parsing || importing" class="lock-mask">
-        <view class="lock-card" :class="layout.isWide ? 'lock-card-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
+      <view v-if="parsing || importing" class="lock-mask" :style="qtFixedPaneStyle()">
+        <scroll-view ref="lockPanel" class="lock-card qt-tv-scroll" :class="layout.isWide ? 'lock-card-wide' : ''" direction="vertical" :show-scrollbar="false" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';' + tvLockStyle">
           <QtLoading :visible="true" :size="44" :color="themeStore.skin.accent" />
-          <text class="lock-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 17)">{{ importing ? "正在导入" : "正在拉取歌单" }}</text>
-          <text class="lock-sub" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)">{{ importing ? "共 " + importTotal + " 首歌曲" : "歌单较大时需要几秒，请稍候" }}</text>
-        </view>
+          <text class="lock-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 17) + tvLine(17)">{{ importing ? "正在导入" : "正在拉取歌单" }}</text>
+          <text class="lock-sub" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12) + tvLine(12)">{{ importing ? "共 " + importTotal + " 首歌曲" : "歌单较大时需要几秒，请稍候" }}</text>
+        </scroll-view>
       </view>
     </view>
+    </scroll-view>
   </qt-page-frame>
 </template>
 <script setup lang="ts">
@@ -115,11 +124,14 @@ import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue
 import QtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
+import QtSwitch from "@/uni_modules/qt-ui/components/qt-switch/qt-switch.uvue";
+import { getSessionEpoch } from "@/services/auth";
+import { importWithPlaylistFollow } from "@/services/playlist-follow";
 import { useQtSelectionReveal } from "@/uni_modules/qt-ui/composables/use-qt-selection-reveal";
 import { ref, computed, watch } from "vue";
 import { onLoad, onBackPress } from "@dcloudio/uni-app";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtFixedPaneStyle, useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { musicApi } from "@/services/music-api";
 import { usePlayerStore } from "@/stores/player";
 import { useSourceRegistryStore } from "@/stores/source-registry";
@@ -127,10 +139,20 @@ import { showPlatformSheet, PLATFORM_SHEET_AUTO_LABEL } from "@/services/source-
 import { qtTrackPage } from "@/uni_modules/qt-stat";
 import type { Playlist } from "@/types/music";
 import type { Source } from "@/services/music-api";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtContentWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { useQtTvModal } from "@/uni_modules/qt-ui/composables/use-qt-tv-modal";
 
 const themeStore = useThemeStore();
 const layout = useQtLayout();
+function tvLine(base: number): string {
+  return layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(base) * 1.35) + "px;" : "";
+}
+const tvFieldHeight = computed((): number => Math.max(56, Math.ceil(qtFontValuePx(14) * 1.35) + 16));
+const tvFieldStyle = computed((): string => layout.isTv ? "width:" + Math.max(0, qtContentWidth("form") - 34) + "px;height:" + tvFieldHeight.value + "px;min-width:0px;flex-grow:0;flex-shrink:0;font-size:" + qtFontValuePx(14) + "px;" + tvLine(14) : "");
+const tvActionStyle = computed((): string => layout.isTv ? "width:" + Math.max(0, qtContentWidth("form") - 34) + "px;height:" + tvFieldHeight.value + "px;margin-left:0px;flex-shrink:0;" : "");
+const tvSelectStyle = computed((): string => layout.isTv ? "width:" + Math.max(0, qtContentWidth("form") - 34) + "px;height:" + tvFieldHeight.value + "px;min-width:0px;flex-grow:0;flex-shrink:0;" : "");
+const tvMainStyle = computed((): string => layout.isTv ? "width:" + Math.max(0, qtContentWidth("form") - 34) + "px;height:auto;min-height:" + Math.max(56, Math.ceil(qtFontValuePx(17) * 1.35) + 16) + "px;padding-top:8px;padding-bottom:8px;min-width:0px;flex-shrink:0;" : "");
 const player = usePlayerStore();
 const registry = useSourceRegistryStore();
 
@@ -139,8 +161,13 @@ const modeTag = ref(0);
 const rawInput = ref("");
 const parsing = ref(false);
 const detail = ref<Playlist | null>(null);
+const followSource = ref(false);
+const followAvailable = computed((): boolean => detail.value != null && detail.value.complete == true);
 const targetName = ref("");
 const importing = ref(false);
+const lockPanel = ref<UniElement | null>(null);
+const tvLockStyle = computed((): string => layout.isTv ? "width:" + Math.min(360, Math.max(56, layout.paneWidth - 56)) + "px;height:" + Math.min(240, Math.max(56, layout.paneHeight - 24)) + "px;padding-top:12px;padding-bottom:12px;padding-left:20px;padding-right:20px;flex-shrink:0;" : "");
+useQtTvModal(lockPanel, () => parsing.value || importing.value, () => {}, 1800);
 const importDone = ref(false);
 const importProgress = ref("");
 /** 本次导入的总歌数（锁定层文案用） */
@@ -195,6 +222,9 @@ const detailPlaceholder = computed((): string =>
 /** 导入目标下拉：0 新建歌单；i>=1 对应 existingList[i-1]（打开时快照自建歌单列表） */
 const targetChoice = ref(0);
 const targetOpen = ref(false);
+const targetPanel = ref<UniElement | null>(null);
+const tvTargetHeight = computed((): number => Math.max(76, Math.min(260, layout.paneHeight - 112)));
+useQtTvModal(targetPanel, () => targetOpen.value, () => { targetOpen.value = false; }, 1700);
 const existingList = ref<Playlist[]>([]);
 const targetReveal = useQtSelectionReveal(() => targetOpen.value, () => targetChoice.value >= 0 && targetChoice.value <= existingList.value.length ? targetChoice.value : -1, () => existingList.value.map((item) => item.id).join('|'));
 const targetChoiceText = computed((): string => {
@@ -321,6 +351,7 @@ async function onParse(): Promise<void> {
   try {
     const remote = await musicApi.playlist(parsed.id, parsed.platform);
     detail.value = remote;
+    followSource.value = false;
   } catch (e) {
     qtShowToast({ title: (e as Error).message || "歌单获取失败", icon: "none", duration: 3000 });
   } finally {
@@ -332,6 +363,8 @@ async function onParse(): Promise<void> {
 async function onImport(): Promise<void> {
   if (importing.value || importDone.value) return;
   if (detail.value == null) return;
+  const epoch = getSessionEpoch();
+  const remote = detail.value;
   const tracks = detail.value.tracks != null ? detail.value.tracks! : [];
   if (tracks.length == 0) {
     qtShowToast({ title: "该歌单没有可导入的歌曲", icon: "none", duration: 3000 });
@@ -364,11 +397,18 @@ async function onImport(): Promise<void> {
   importTotal.value = tracks.length;
   // 先让锁定层上屏一帧，再做同步的批量登记（大歌单落库期间 UI 不再响应点击）
   await new Promise<void>((r) => setTimeout(r, 50) as number);
-  const added = player.importSongsToPlaylist(tracks, targetId);
+  try {
+  if (epoch != getSessionEpoch()) throw new Error("账号已变化，请重试");
+  const target = player.localPlaylists.concat(player.savedPlaylists).find((p: Playlist): boolean => p.id == targetId && p.platform == "local");
+  if (target == null) throw new Error("目标歌单已删除");
+  const added = followSource.value ? importWithPlaylistFollow(target, remote, epoch) : player.importSongsToPlaylist(tracks, targetId);
   importProgress.value = "已导入 " + added + " / " + tracks.length + " 首到「" + targetNameShow + "」";
   importing.value = false;
   importDone.value = true;
   qtShowToast({ title: "已导入 " + added + " 首歌曲", icon: "success" });
+  } catch (e) {
+    qtShowToast({ title: (e as Error).message, icon: "none" });
+  } finally { importing.value = false; }
 }
 
 /** 收藏远程歌单（引用式）：已收藏过只提示；成功后跳歌单详情 */

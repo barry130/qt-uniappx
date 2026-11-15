@@ -1,10 +1,10 @@
 <template>
   <qt-page-frame width-kind="form">
-  <scroll-view class="login-scroll" direction="vertical" :show-scrollbar="false">
-  <view class="page" :style="'min-height:' + pageMinHeight + 'px;'" :class="layout.isWide ? 'page-wide' : ''">
+  <scroll-view class="login-scroll qt-tv-scroll" direction="vertical" :show-scrollbar="false">
+  <view class="page" :style="'min-height:' + pageMinHeight + 'px;' + (layout.isTv ? 'padding-left:0px;padding-right:0px;justify-content:flex-start;' : '')" :class="layout.isWide ? 'page-wide' : ''">
     <view class="logo" :class="layout.isWide ? 'logo-wide' : ''">
       <image class="logo-img" :class="layout.isWide ? 'logo-img-wide' : ''" src="/static/icon/xxxhdpi.png" mode="aspectFill" />
-      <text class="logo-sub" :class="layout.isWide ? 'logo-sub-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(26, 14)">用音乐连接每一刻</text>
+      <text class="logo-sub" :class="layout.isWide ? 'logo-sub-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(26, 14) + tvLine(14)">用音乐连接每一刻</text>
     </view>
 
     <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="cardStyle">
@@ -13,6 +13,8 @@
       <!-- 注册：用户名 -->
       <view v-if="mode == 'register'" class="field-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
+          data-qt-tv-id="login:username"
+          :focus="false"
           :value="regUsername"
           @input="onRegUsernameInput"
           class="field-input" :class="[[layout.isWide ? 'field-input-wide' : ''], layout.isWide ? 'field-input-wide' : '']"
@@ -27,6 +29,8 @@
       <!-- 登录：邮箱/用户名；注册：邮箱 -->
       <view class="field-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
+          data-qt-tv-id="login:account"
+          :focus="false"
           :value="mode == 'register' ? regEmail : account"
           @input="onAccountInput"
           class="field-input" :class="[[layout.isWide ? 'field-input-wide' : ''], layout.isWide ? 'field-input-wide' : '']"
@@ -41,6 +45,8 @@
       <!-- 密码 -->
       <view class="field-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
+          data-qt-tv-id="login:password"
+          :focus="false"
           :value="password"
           @input="onPasswordInput"
           class="field-input" :class="[[layout.isWide ? 'field-input-wide' : ''], layout.isWide ? 'field-input-wide' : '']"
@@ -51,7 +57,7 @@
           :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
           :maxlength="18"
         />
-        <view class="eye" :class="layout.isWide ? 'eye-wide' : ''" @click="pwVisible = !pwVisible">
+        <view class="eye" data-qt-tv-id="login:password-eye" :class="layout.isWide ? 'eye-wide' : ''" :style="eyeStyle" @click="pwVisible = !pwVisible">
           <QtIcon :name="pwVisible ? 'eye' : 'eye-off'" :size="layout.isWide ? 22 : 40" :color="themeStore.skin.iconMuted" />
         </view>
       </view>
@@ -59,6 +65,8 @@
       <!-- 注册：确认密码 -->
       <view v-if="mode == 'register'" class="field-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
+          data-qt-tv-id="login:confirm"
+          :focus="false"
           :value="confirmPw"
           @input="onConfirmInput"
           class="field-input" :class="[[layout.isWide ? 'field-input-wide' : ''], layout.isWide ? 'field-input-wide' : '']"
@@ -69,16 +77,17 @@
           :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
           :maxlength="18"
         />
-        <view class="eye" :class="layout.isWide ? 'eye-wide' : ''" @click="confirmVisible = !confirmVisible">
+        <view class="eye" data-qt-tv-id="login:confirm-eye" :class="layout.isWide ? 'eye-wide' : ''" :style="eyeStyle" @click="confirmVisible = !confirmVisible">
           <QtIcon :name="confirmVisible ? 'eye' : 'eye-off'" :size="layout.isWide ? 22 : 40" :color="themeStore.skin.iconMuted" />
         </view>
       </view>
 
       <view v-if="mode == 'login'" class="forget-row" :class="layout.isWide ? 'forget-row-wide' : ''">
-        <view class="forget-link" :class="layout.isWide ? 'forget-link-wide' : ''" @click="goForget"><text class="forget-text" :class="layout.isWide ? 'forget-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13)">忘记密码？</text></view>
+        <view class="forget-link" data-qt-tv-id="login:forget" :class="layout.isWide ? 'forget-link-wide' : ''" :style="layout.isTv ? 'min-height:56px;justify-content:center;' : ''" @click="goForget"><text class="forget-text" :class="layout.isWide ? 'forget-text-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13) + tvLine(13)">忘记密码？</text></view>
       </view>
 
       <qt-button
+        data-qt-tv-id="login:submit"
         class="action"
         :class="layout.isWide ? 'action-wide' : ''"
         :label="mode == 'login' ? '登 录' : '注册并登录'"
@@ -95,29 +104,38 @@
 import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
-import { ref, computed, onUnmounted } from "vue";
+import { qtContentWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { ref, computed, onBeforeUnmount } from "vue";
+import { onUnload } from "@dcloudio/uni-app";
 import { accountApi, persistUserRoles } from "@/services/music-api";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import qtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import { saveTokens, parseTokenResponse, clearTokens, getUserId, saveUserId } from "@/services/auth";
+import { prepareCollectionStorage, adoptGuestCollections } from "@/services/collection-storage";
+import { recoverPlaylistFollow } from "@/services/playlist-follow";
 import { refreshMe } from "@/services/user-cache";
 import { cacheUserAvatar } from "@/services/avatar-cache";
 import { usePlayerStore } from "@/stores/player";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const themeStore = useThemeStore();
 const layout = useQtLayout();
 // 皮肤令牌：卡片底 / 输入行底与描边 / 输入文字。
 // 这些原先由手写的深色覆盖类写死成 graphite 色值，换 linen/aurora 等皮肤时不跟着变；
 // 本仓库没有 CSS 变量，只能内联输出 skin 令牌。
-const cardStyle = computed((): string => "background-color:" + themeStore.skin.surface + ";");
-const fieldStyle = computed((): string => "background-color:" + themeStore.skin.surfaceMuted + ";border-color:" + themeStore.skin.border + ";");
-const inputStyle = computed((): string => "color:" + themeStore.skin.text + ";");
+const cardStyle = computed((): string => "background-color:" + themeStore.skin.surface + ";" + (layout.isTv ? "width:" + qtContentWidth("form") + "px;" : ""));
+function tvLine(base: number): string {
+  return layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(base) * 1.35) + "px;" : "";
+}
+const tvFieldHeight = computed((): number => Math.max(56, Math.ceil(qtFontValuePx(16) * 1.35) + 16));
+const fieldStyle = computed((): string => "background-color:" + themeStore.skin.surfaceMuted + ";border-color:" + themeStore.skin.border + ";" + (layout.isTv ? "height:" + tvFieldHeight.value + "px;" : ""));
+const inputStyle = computed((): string => "color:" + themeStore.skin.text + ";" + (layout.isTv ? "height:" + tvFieldHeight.value + "px;min-width:0px;font-size:" + qtFontValuePx(16) + "px;line-height:" + Math.ceil(qtFontValuePx(16) * 1.35) + "px;" : ""));
+const eyeStyle = computed((): string => layout.isTv ? "width:56px;height:" + tvFieldHeight.value + "px;flex-shrink:0;" : "");
 // 页面撑满视口的高度（px）：Vapor 的 min-height 不支持 %，只能注入实像素。
 // 内容高（1:1/短屏）时会超过它、由外层 scroll-view 滚动，按钮才点得到。
-const pageMinHeight = computed<number>(() => layout.windowHeight);
+const pageMinHeight = computed<number>(() => layout.paneHeight);
 const mode = ref<string>("login");
 const modeIndex = ref<number>(0);
 // 登录账号（邮箱或用户名）
@@ -133,13 +151,17 @@ const confirmVisible = ref(false);
 const loading = ref(false);
 // 登录成功后延迟跳转定时器：页面卸载时必须清掉，避免在已注销的实例上触发回调
 let loginNavTimer: number | null = null;
+let formAlive = true;
 
-onUnmounted(() => {
+function disposeForm(): void {
+  formAlive = false;
   if (loginNavTimer != null) {
     clearTimeout(loginNavTimer);
     loginNavTimer = null;
   }
-});
+}
+onBeforeUnmount(disposeForm);
+onUnload(disposeForm);
 
 function switchMode(index: number): void {
   mode.value = index == 0 ? "login" : "register";
@@ -252,17 +274,23 @@ async function submit(): Promise<void> {
       throw new Error("登录响应缺少 token");
     }
     const user = data.get("user") as UTSJSONObject | null;
-    // 收藏缓存按账号隔离：检测到换账号登录就清空本地收藏
-    //（服务器是数据源，A 的数据留在 A 的服务器账号里，随后全量拉取恢复 B 的数据）
+    // 先完成旧账号的本地事务，再恢复目标账号收藏及未提交操作。
     const uidRaw = user != null ? user.get("id") : null;
     const uid = uidRaw != null ? uidRaw.toString() : "";
     const prevUid = getUserId();
+    if (uid.length == 0) throw new Error("登录响应缺少账号标识");
+    recoverPlaylistFollow();
+    usePlayerStore().persistNow();
+    prepareCollectionStorage();
+    adoptGuestCollections(uid);
+    if (prevUid != uid) clearTokens();
     // 先把 UID 和该 UID 的分区状态准备好，再提交新 token。这样即使进程在两次
     // 同步存储写入之间退出，也不会让 B 的 token 在下次启动时读到 A 的游标/队列。
     if (uid.length > 0) saveUserId(uid);
-    if (prevUid.length > 0 && uid.length > 0 && prevUid != uid) {
+    if (prevUid != uid) {
       usePlayerStore().clearLocalLikeData();
     }
+    recoverPlaylistFollow();
     saveTokens(tokenInfo);
     if (user != null) cacheUserAvatar((user.get("avatar") as string | null) ?? "");
     // 兼容旧存储
@@ -285,8 +313,11 @@ async function submit(): Promise<void> {
     // 登录成功后从服务器同步收藏：不 await（全量拉取可能好几秒，卡在登录页体感差），
     // 后台跑 + 慢时单独弹全局加载框提示（见 player.syncLikedFromServerInBackground）
     usePlayerStore().syncLikedFromServerInBackground();
+    if (!formAlive) return;
     qtShowToast({ title: "登录成功" });
     loginNavTimer = setTimeout(() => {
+      loginNavTimer = null;
+      if (!formAlive) return;
       // 若当前页面栈只有登录页（例如保存资料后被 reLaunch 到登录页），
       // navigateBack 会无效果导致停在登录页，此时直接回到首页
       const pages = getCurrentPages();
@@ -297,9 +328,9 @@ async function submit(): Promise<void> {
       }
     }, 500) as number;
   } catch (error) {
-    qtShowToast({ title: (error as Error).message, icon: "none" });
+    if (formAlive) qtShowToast({ title: (error as Error).message, icon: "none" });
   } finally {
-    loading.value = false;
+    if (formAlive) loading.value = false;
   }
 }
 </script>

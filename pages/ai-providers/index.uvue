@@ -1,6 +1,6 @@
 <template>
   <qt-page-frame width-kind="list" title="AI 与模型">
-    <scroll-view class="page" :class="layout.isWide ? 'page-wide' : ''" :show-scrollbar="false">
+    <scroll-view class="page qt-tv-scroll" :class="layout.isWide ? 'page-wide' : ''" :style="layout.isTv ? 'padding-left:0px;padding-right:0px;' : ''" :show-scrollbar="false">
       <!-- 第 1 步：引擎。原先设置里「AI 模式」与「接口配置」是两行并列入口，
            用户看不出「模型配置」只服务于其中一种模式，故合并成一页两步（2026-10-30）。 -->
       <qt-card
@@ -15,8 +15,8 @@
       <!-- 第 2 步：模型配置。只在「本地模型精选」下展开；其余模式收起并说明理由，
            省得用户以为是自己没配好。 -->
       <view v-if="isLocal" class="step-head" :class="layout.isWide ? 'step-head-wide' : ''">
-        <text class="step-title" :style="'color:' + theme.skin.text + ';' + qtFontDual(28, 15)">第 2 步 · 模型配置</text>
-        <text class="step-sub" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(21, 12)">填一个 OpenAI / Anthropic / Gemini 兼容网关即可。密钥只保存在本机（明文存储），列表里仅显示掩码；请求直连你填的地址，不经过任何中转。</text>
+        <text class="step-title" :style="'color:' + theme.skin.text + ';' + qtFontDual(28, 15) + tvLine(15)">第 2 步 · 模型配置</text>
+        <text class="step-sub" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(21, 12) + tvLine(12)">填一个 OpenAI / Anthropic / Gemini 兼容网关即可。密钥只保存在本机（明文存储），列表里仅显示掩码；请求直连你填的地址，不经过任何中转。</text>
       </view>
 
       <view v-if="!isLocal" class="intro-card" :class="layout.isWide ? 'intro-card-wide' : ''">
@@ -25,7 +25,7 @@
           :description="offHint"
         >
           <view class="add-row" :class="layout.isWide ? 'add-row-wide' : ''">
-            <qt-button class="add-btn" :class="layout.isWide ? 'add-btn-wide' : ''" label="改用本地模型精选" variant="secondary" size="md" @click="pickEngine('local')" />
+            <qt-button data-qt-tv-id="ai:local" :wrap="layout.isTv" :full-width="layout.isTv" class="add-btn" :class="layout.isWide ? 'add-btn-wide' : ''" :style="tvProfileActionStyle" label="改用本地模型精选" variant="secondary" size="md" @click="pickEngine('local')" />
           </view>
         </qt-card>
       </view>
@@ -39,31 +39,31 @@
         :class="layout.isWide ? 'profile-card-wide' : ''"
         :style="profileStyle(p)"
       >
-        <view class="profile-head" @click="openEdit(p)">
+        <view :data-qt-tv-id="'ai:' + p.id + ':head'" class="profile-head" :style="layout.isTv ? 'min-height:56px;' : ''" @click="openEdit(p)">
           <view class="profile-main">
             <view class="profile-title-row">
-              <text class="profile-name" :style="'color:' + theme.skin.text + ';' + qtFontDual(30, 16)">{{ p.name.length > 0 ? p.name : "未命名供应商" }}</text>
+              <text class="profile-name" :style="'color:' + theme.skin.text + ';' + qtFontDual(30, 16) + tvLine(16)">{{ p.name.length > 0 ? p.name : "未命名供应商" }}</text>
 
             </view>
-            <text class="profile-url" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)">{{ p.baseUrl }}</text>
-            <text class="profile-meta" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)">{{ protocolLabel(p.protocol) }} · {{ activeModelOf(p) }} · 密钥 {{ keyMaskText(p) }}</text>
+            <text class="profile-url" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12) + tvLine(12)">{{ p.baseUrl }}</text>
+            <text class="profile-meta" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12) + tvLine(12)">{{ protocolLabel(p.protocol) }} · {{ activeModelOf(p) }} · 密钥 {{ keyMaskText(p) }}</text>
           </view>
           <QtIcon name="chevron-right" :size="layout.isWide ? 18 : 28" :color="theme.skin.iconMuted" />
         </view>
-        <view class="profile-btn-row" :class="layout.isWide ? 'profile-btn-row-wide' : ''">
-          <qt-button class="profile-btn" label="编辑" variant="ghost" size="sm" @click="openEdit(p)" />
-          <qt-option class="profile-btn" :label="activeId == p.id ? '当前生效' : '设为生效'" kind="chip" :selected="activeId == p.id" @select="setActive(p.id)" />
-          <qt-button class="profile-btn" label="删除" variant="outline" size="sm" @click="removeProfile(p)" />
+        <view class="profile-btn-row" :class="layout.isWide ? 'profile-btn-row-wide' : ''" :style="tvActionRowStyle">
+          <qt-button :data-qt-tv-id="'ai:' + p.id + ':edit'" class="profile-btn" :style="tvProfileActionStyle" label="编辑" variant="ghost" size="sm" @click="openEdit(p)" />
+          <qt-option :data-qt-tv-id="'ai:' + p.id + ':active'" class="profile-btn" :style="tvProfileActionStyle" :label="activeId == p.id ? '当前生效' : '设为生效'" kind="chip" :selected="activeId == p.id" @select="setActive(p.id)" />
+          <qt-button :data-qt-tv-id="'ai:' + p.id + ':delete'" class="profile-btn" :style="tvProfileActionStyle" label="删除" variant="outline" size="sm" @click="removeProfile(p)" />
         </view>
       </view>
 
       <view v-if="profiles.length == 0" class="empty-card" :class="layout.isWide ? 'empty-card-wide' : ''" :style="emptyStyle">
-        <text class="empty-title" :style="'color:' + theme.skin.text + ';' + qtFontDual(28, 15)">还没有供应商</text>
-        <text class="empty-sub" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12)">点下面「新增供应商」，填一个 OpenAI 兼容地址即可开始。</text>
+        <text class="empty-title" :style="'color:' + theme.skin.text + ';' + qtFontDual(28, 15) + tvLine(15)">还没有供应商</text>
+        <text class="empty-sub" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(22, 12) + tvLine(12)">点下面「新增供应商」，填一个 OpenAI 兼容地址即可开始。</text>
       </view>
 
       <view v-if="isLocal" class="add-row" :class="layout.isWide ? 'add-row-wide' : ''">
-        <qt-button class="add-btn" :class="layout.isWide ? 'add-btn-wide' : ''" label="新增供应商" variant="secondary" size="md" @click="openNew" />
+        <qt-button data-qt-tv-id="ai:add" class="add-btn" :class="layout.isWide ? 'add-btn-wide' : ''" :style="layout.isTv ? 'width:' + qtContentWidth('list') + 'px;' : ''" label="新增供应商" variant="secondary" size="md" @click="openNew" />
       </view>
       </view>
       <view class="pad"></view>
@@ -71,40 +71,40 @@
 
     <!-- 编辑弹层：列表页进入单档编辑（qt-pc 的 AiProvidersDialog 移动端形态） -->
     <qt-sheet :visible="editVisible" :title="isNew ? '新增供应商' : '编辑供应商'" @close="closeEdit">
-        <scroll-view class="edit-scroll" direction="vertical" :style="editPanelStyle" :show-scrollbar="false">
+        <scroll-view class="edit-scroll qt-tv-scroll" direction="vertical" :style="editPanelStyle" :show-scrollbar="false">
 
-          <view class="field-row">
-            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13)">名称</text>
-            <input class="field-input" :class="layout.isWide ? 'field-input-wide' : ''" :style="fieldInputStyle" :value="nameT" @input="onNameInput" placeholder="如 深度求索" :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'" :maxlength="24" />
+          <view class="field-row" :style="tvFieldRowStyle">
+            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13) + tvLabelStyle">名称</text>
+            <input data-qt-tv-id="ai:name" :focus="false" class="field-input" :class="layout.isWide ? 'field-input-wide' : ''" :style="fieldInputStyle" :value="nameT" @input="onNameInput" placeholder="如 深度求索" :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'" :maxlength="24" />
           </view>
-          <view class="field-row">
-            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13)">接口地址</text>
-            <input class="field-input" :class="layout.isWide ? 'field-input-wide' : ''" :style="fieldInputStyle" :value="baseT" @input="onBaseInput" placeholder="https://api.example.com（不带 /v1）" :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'" :maxlength="256" />
+          <view class="field-row" :style="tvFieldRowStyle">
+            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13) + tvLabelStyle">接口地址</text>
+            <input data-qt-tv-id="ai:base" :focus="false" class="field-input" :class="layout.isWide ? 'field-input-wide' : ''" :style="fieldInputStyle" :value="baseT" @input="onBaseInput" placeholder="https://api.example.com（不带 /v1）" :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'" :maxlength="256" />
           </view>
-          <view class="field-row" @click="openProtoSheet">
-            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13)">协议</text>
-            <view class="field-value-row"><text class="field-value" :style="'color:' + theme.skin.text + ';' + qtFontDual(25, 14)">{{ protocolLabel(proto) }}</text><QtIcon name="chevron-right" :size="layout.isWide ? 16 : 26" :color="theme.skin.iconMuted" /></view>
+          <view data-qt-tv-id="ai:protocol" class="field-row" :style="tvFieldRowStyle" @click="openProtoSheet">
+            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13) + tvLabelStyle">协议</text>
+            <view class="field-value-row" :style="layout.isTv ? 'flex-grow:0;min-height:56px;' : ''"><text class="field-value" :style="'color:' + theme.skin.text + ';' + qtFontDual(25, 14) + tvLine(14)">{{ protocolLabel(proto) }}</text><QtIcon name="chevron-right" :size="layout.isWide ? 16 : 26" :color="theme.skin.iconMuted" /></view>
           </view>
-          <view class="field-row">
-            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13)">模型</text>
-            <input class="field-input" :class="layout.isWide ? 'field-input-wide' : ''" :style="fieldInputStyle" :value="modelT" @input="onModelInput" placeholder="模型 ID" :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'" :maxlength="64" />
-            <qt-button class="field-btn" label="拉取列表" variant="outline" size="sm" :disabled="loadingModels" @click="fetchModels" />
+          <view class="field-row" :style="tvFieldRowStyle">
+            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13) + tvLabelStyle">模型</text>
+            <input data-qt-tv-id="ai:model" :focus="false" class="field-input" :class="layout.isWide ? 'field-input-wide' : ''" :style="fieldInputStyle" :value="modelT" @input="onModelInput" placeholder="模型 ID" :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'" :maxlength="64" />
+            <qt-button data-qt-tv-id="ai:models" class="field-btn" :style="layout.isTv ? 'margin-left:0px;margin-top:12px;align-self:flex-start;' : ''" label="拉取列表" variant="outline" size="sm" :disabled="loadingModels" @click="fetchModels" />
           </view>
-          <view class="field-row">
-            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13)">密钥</text>
-            <input class="field-input" :class="layout.isWide ? 'field-input-wide' : ''" :style="fieldInputStyle" :value="keyT" @input="onKeyInput" :placeholder="isNew ? 'API Key（只存本机）' : keyPlaceholder" :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'" :maxlength="256" />
+          <view class="field-row" :style="tvFieldRowStyle">
+            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13) + tvLabelStyle">密钥</text>
+            <input data-qt-tv-id="ai:key" :focus="false" class="field-input" :class="layout.isWide ? 'field-input-wide' : ''" :style="fieldInputStyle" :value="keyT" @input="onKeyInput" :placeholder="isNew ? 'API Key（只存本机）' : keyPlaceholder" :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'" :maxlength="256" />
           </view>
-          <view class="field-row" @click="toggleCert">
-            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13)">证书校验</text>
-            <text class="field-value" :style="'color:' + theme.skin.text + ';' + qtFontDual(25, 14)">{{ skipCert ? "已跳过（自签证书网关用）" : "严格校验（默认）" }}</text>
-            <qt-switch :model-value="!skipCert" @change="toggleCert" />
+          <view data-qt-tv-id="ai:cert-row" class="field-row" :class="layout.isTv ? 'qt-tv-skip' : ''" :style="tvFieldRowStyle" @click="toggleCert">
+            <text class="field-label" :style="'color:' + theme.skin.textMuted + ';' + qtFontDual(23, 13) + tvLabelStyle">证书校验</text>
+            <text class="field-value" :style="'color:' + theme.skin.text + ';' + qtFontDual(25, 14) + tvLine(14)">{{ skipCert ? "已跳过（自签证书网关用）" : "严格校验（默认）" }}</text>
+            <qt-switch data-qt-tv-id="ai:certificate" :model-value="!skipCert" @change="toggleCert" />
           </view>
 
-          <text v-if="testText.length > 0" class="test-text" :style="'color:' + (testOk ? theme.skin.success : theme.skin.danger) + ';' + qtFontDual(22, 12)">{{ testText }}</text>
+          <text v-if="testText.length > 0" class="test-text" :style="'color:' + (testOk ? theme.skin.success : theme.skin.danger) + ';' + qtFontDual(22, 12) + tvLine(12)">{{ testText }}</text>
 
-          <view class="edit-btn-row" :class="layout.isWide ? 'edit-btn-row-wide' : ''">
-            <qt-button class="edit-btn" label="测试连接" variant="outline" size="sm" :disabled="testing" @click="testNow" />
-            <qt-button class="edit-btn" label="保存" variant="secondary" size="sm" @click="save" />
+          <view class="edit-btn-row" :class="layout.isWide ? 'edit-btn-row-wide' : ''" :style="tvActionRowStyle">
+            <qt-button data-qt-tv-id="ai:test" class="edit-btn" :style="tvEditActionStyle" label="测试连接" variant="outline" size="sm" :disabled="testing" @click="testNow" />
+            <qt-button data-qt-tv-id="ai:save" class="edit-btn" :style="tvEditActionStyle" label="保存" variant="secondary" size="sm" @click="save" />
           </view>
           <view class="edit-pad"></view>
         </scroll-view>
@@ -126,7 +126,8 @@ import QtCard from "@/uni_modules/qt-ui/components/qt-card/qt-card.uvue";
 import { qtConfirm } from "@/services/confirm";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtContentWidth, qtSheetWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { qtShowToast } from "@/services/toast";
 import {
   readProviders,
@@ -405,14 +406,28 @@ const emptyStyle = computed((): string => {
   return "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";";
 });
 
+const tvActionRowStyle = computed((): string => layout.isTv ? "flex-direction:column;align-items:stretch;gap:12px;" : "");
+const tvProfileActionStyle = computed((): string => layout.isTv ? "width:" + Math.max(0, qtContentWidth("list") - 30) + "px;margin-left:0px;" : "");
+const tvEditActionStyle = computed((): string => layout.isTv ? "width:" + Math.max(0, qtSheetWidth("drawer") - 40) + "px;margin-left:0px;" : "");
+function tvLine(base: number): string {
+  return layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(base) * 1.35) + "px;" : "";
+}
+const tvFieldHeight = computed((): number => Math.max(56, Math.ceil(qtFontValuePx(14) * 1.35) + 16));
+const tvFieldRowStyle = computed((): string => layout.isTv ? "flex-direction:column;align-items:stretch;min-height:56px;padding:12px 0px;" : "");
+const tvLabelStyle = computed((): string => layout.isTv ? "width:" + Math.max(0, qtSheetWidth("drawer") - 40) + "px;margin-bottom:8px;" + tvLine(13) : "");
 const editPanelStyle = computed((): string => {
   // QtSheet 负责壳与安全区；内部滚动区为标题和底部留足空间。
-  const maxH = Math.max(160, Math.floor(layout.windowHeight * 0.86) - layout.safeBottomPx - (layout.isWide ? 110 : 132));
+  if (layout.isTv) {
+    const header = Math.max(56, Math.ceil(qtFontValuePx(16) * 1.35)) + 29;
+    const body = Math.max(0, Math.floor(layout.paneHeight * 0.86) - layout.safeBottomPx - header - 12);
+    return "height:" + body + "px;max-height:" + body + "px;min-height:0px;padding:12px 20px 0px;";
+  }
+  const maxH = Math.max(160, Math.floor(layout.paneHeight * 0.86) - layout.safeBottomPx - (layout.isWide ? 110 : 132));
   return "max-height:" + maxH + "px;";
 });
 
 const fieldInputStyle = computed((): string => {
-  return "color:" + theme.skin.text + ";border-bottom-color:" + theme.skin.divider + ";";
+  return "color:" + theme.skin.text + ";border-bottom-color:" + theme.skin.divider + ";" + (layout.isTv ? "height:" + tvFieldHeight.value + "px;width:" + Math.max(0, qtSheetWidth("drawer") - 40) + "px;min-width:0px;flex-grow:0;flex-shrink:0;font-size:" + qtFontValuePx(14) + "px;" + tvLine(14) : "");
 });
 </script>
 <style scoped>

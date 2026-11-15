@@ -1,64 +1,78 @@
 <template>
   <qt-page-frame width-kind="form">
-    <view class="page" :class="layout.isWide ? 'page-wide' : ''">
-      <!-- 均衡器开关 -->
-      <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';'">
-        <view class="head-row">
-          <view class="head-info">
-            <text class="head-title" :class="layout.isWide ? 'head-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(32, 16)">均衡器</text>
-            <text class="head-sub" :class="layout.isWide ? 'head-sub-wide' : ''" max-lines="2" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 12)">{{ effectsSupported ? "五段音效调节，对所有播放声音即时生效" : "当前平台暂不支持均衡器" }}</text>
+    <!-- 五段滑杆 + 预设一行放不下整屏，必须给纵向 scroll-view：
+         框架的 pane 是 flex column 且 min-height:0，页面根不撑开、又没有滚动容器时，
+         超出视口的下半屏会被直接裁掉（真机表现为「这一页滑不动」）。
+         结构与其他设置页一致：.page 只负责吃掉 pane 剩余高度，滚动交给 .list。 -->
+    <view class="page">
+      <scroll-view class="list" :class="layout.isWide ? 'list-wide' : ''" direction="vertical" :show-scrollbar="false">
+        <!-- 均衡器开关 -->
+        <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';'">
+          <view class="head-row">
+            <view class="head-info">
+              <text class="head-title" :class="layout.isWide ? 'head-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(32, 16)">均衡器</text>
+              <text class="head-sub" :class="layout.isWide ? 'head-sub-wide' : ''" max-lines="2" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 12)">{{ effectsSupported ? "五段音效调节，对本机播放的歌曲即时生效" : "当前播放方式不支持均衡器" }}</text>
+            </view>
+            <QtSwitch :disabled="!effectsSupported" :model-value="effectsSupported && enabled" @change="toggleEnabled" />
           </view>
-          <QtSwitch :disabled="!effectsSupported" :model-value="effectsSupported && enabled" @change="toggleEnabled" />
         </view>
-      </view>
 
-      <!-- 预设 -->
-      <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';'">
-        <text class="section-title" :class="layout.isWide ? 'section-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 14)">预设</text>
-        <view class="chips">
-          <QtOption v-for="(name, idx) in presets" :key="idx" class="chip" :class="layout.isWide ? 'chip-wide' : ''" kind="chip" :label="name" :selected="presetIndex == idx" @select="applyPreset(idx)" />
+        <!-- 预设 -->
+        <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';'">
+          <text class="section-title" :class="layout.isWide ? 'section-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 14)">预设</text>
+          <view class="chips">
+            <QtOption v-for="(name, idx) in presets" :key="idx" class="chip" :class="layout.isWide ? 'chip-wide' : ''" kind="chip" :label="name" :selected="presetIndex == idx" @select="applyPreset(idx)" />
+          </view>
         </view>
-      </view>
 
-      <!-- 五段调节 -->
-      <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';'">
-        <text class="section-title" :class="layout.isWide ? 'section-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 14)">{{ presetIndex >= 0 ? presets[presetIndex] : "自定义" }}</text>
-        <view v-for="(label, i) in bandLabels" :key="i" class="band-row" :class="layout.isWide ? 'band-row-wide' : ''">
-          <text class="band-label" :class="layout.isWide ? 'band-label-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 12)">{{ label }}</text>
-          <slider
-            class="band-slider"
-            :class="layout.isWide ? 'band-slider-wide' : ''"
-            :min="-12"
-            :max="12"
-            :step="1"
-            :value="bands[i]"
-            :disabled="!effectsSupported"
-            :block-size="layout.isWide ? 22 : qtRpx(44)"
-            track-class="eq-track"
-            track-active-class="eq-track-active"
-            thumb-class="eq-thumb"
-            @change="onBandChange(i, $event)"
-          />
-          <text class="band-value" :class="layout.isWide ? 'band-value-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(24, 12)">{{ dbText(bands[i]) }}</text>
+        <!-- 五段调节 -->
+        <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';'">
+          <text class="section-title" :class="layout.isWide ? 'section-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(28, 14)">{{ presetIndex >= 0 ? presets[presetIndex] : "自定义" }}</text>
+          <view v-for="(label, i) in bandLabels" :key="i" class="band-row" :class="[layout.isWide ? 'band-row-wide' : '', tv.enabled ? 'band-row-tv' : '']" :style="tv.enabled ? 'min-height:' + qtTvTokens().rowPx + 'px;' : ''">
+            <text class="band-label" :class="[layout.isWide ? 'band-label-wide' : '', tv.enabled ? 'band-label-tv' : '']" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 12)">{{ label }}</text>
+            <slider v-if="!tv.enabled"
+              class="band-slider"
+              :class="layout.isWide ? 'band-slider-wide' : ''"
+              :min="-12"
+              :max="12"
+              :step="1"
+              :value="bands[i]"
+              :disabled="!effectsSupported"
+              :block-size="layout.isWide ? 22 : qtRpx(44)"
+              track-class="eq-track"
+              track-active-class="eq-track-active"
+              thumb-class="eq-thumb"
+              @change="onBandChange(i, $event)"
+            />
+            <view v-if="tv.enabled" class="eq-tv-controls">
+              <QtButton label="减少" variant="outline" size="sm" :disabled="!effectsSupported || bands[i] <= -12" @click="adjustBand(i, -1)" />
+              <text class="band-value band-value-tv" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(24, 12)">{{ dbText(bands[i]) }}</text>
+              <QtButton label="增加" variant="outline" size="sm" :disabled="!effectsSupported || bands[i] >= 12" @click="adjustBand(i, 1)" />
+            </view>
+            <text v-else class="band-value" :class="layout.isWide ? 'band-value-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(24, 12)">{{ dbText(bands[i]) }}</text>
+          </view>
         </view>
-      </view>
+      </scroll-view>
     </view>
   </qt-page-frame>
 </template>
 <script setup lang="ts">
-import { onLoad } from "@dcloudio/uni-app";
-import { computed, ref } from "vue";
+import { onLoad, onShow, onUnload } from "@dcloudio/uni-app";
+import { computed, ref, onUnmounted } from "vue";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtSwitch from "@/uni_modules/qt-ui/components/qt-switch/qt-switch.uvue";
 import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import { useQtTv, qtTvTokens } from "@/uni_modules/qt-ui/composables/use-qt-tv";
 import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
-import { audioPlayer, audioCapabilities } from "@/services/audio-player.uts";
+import { audioPlayer, audioCapabilities, PLAYER_CAPABILITIES_CHANGED_EVENT } from "@/services/audio-player.uts";
 
-const effectsSupported = audioCapabilities().equalizer;
+const effectsSupported = ref(audioCapabilities().equalizer);
 const layout = useQtLayout();
+const tv = useQtTv();
 const themeStore = useThemeStore();
 
 const bandLabels: string[] = ["60Hz", "230Hz", "910Hz", "3.6kHz", "14kHz"];
@@ -77,6 +91,12 @@ const presetBands: number[][] = [
 const enabled = ref(audioPlayer.eqEnabled);
 const bands = ref<number[]>(audioPlayer.eqBands.slice());
 const presetIndex = ref(-1);
+function refreshAudioCapabilities(): void { effectsSupported.value = audioCapabilities().equalizer; }
+uni.$on(PLAYER_CAPABILITIES_CHANGED_EVENT, refreshAudioCapabilities);
+function stopCapabilityListener(): void { uni.$off(PLAYER_CAPABILITIES_CHANGED_EVENT, refreshAudioCapabilities); }
+onUnload(stopCapabilityListener);
+onUnmounted(stopCapabilityListener);
+onShow(refreshAudioCapabilities);
 
 onLoad(() => {
   qtTrackPage("pages/equalizer/index");
@@ -111,7 +131,8 @@ function commit(): void {
 }
 
 function applyPreset(idx: number): void {
-  if (!effectsSupported) return;
+  refreshAudioCapabilities();
+  if (!effectsSupported.value) return;
   const pb = presetBands[idx];
   const next: number[] = [pb[0], pb[1], pb[2], pb[3], pb[4]];
   bands.value = next;
@@ -119,16 +140,26 @@ function applyPreset(idx: number): void {
   commit();
 }
 
-function onBandChange(i: number, e: UniSliderChangeEvent): void {
+/** 手机原生 change 与电视按钮共用能力校验、曲线匹配和一次提交。 */
+function applyBandValue(i: number, raw: number): void {
+  refreshAudioCapabilities();
+  if (!effectsSupported.value) return;
   const next = bands.value.slice();
-  next[i] = Math.round(e.detail.value);
+  next[i] = Math.max(-12, Math.min(12, Math.round(raw)));
   bands.value = next;
   presetIndex.value = matchPreset(next);
   commit();
 }
+function onBandChange(i: number, e: UniSliderChangeEvent): void {
+  applyBandValue(i, e.detail.value);
+}
+function adjustBand(i: number, delta: number): void {
+  applyBandValue(i, bands.value[i] + delta);
+}
 
 function toggleEnabled(): void {
-  if (!effectsSupported) return;
+  refreshAudioCapabilities();
+  if (!effectsSupported.value) return;
   const on = !enabled.value;
   enabled.value = on;
   audioPlayer.setEqualizerEnabled(on);
@@ -143,11 +174,18 @@ function toggleEnabled(): void {
  * 宽屏档继续用固定 px，因为宽屏下 rpx 会膨胀数倍（design.md §6.6）。
  * 每个尺寸都成对写：base 是 rpx（= 375dp 手机上原来那个 px 值 ×2），-wide 是原 px。
  */
+/* .page 只吃满 pane 剩余高度；滚动与上下留白交给 .list。
+   不能把 padding 留在 .page 上：滚动容器必须拿到确定高度才滚得动（同 about/play-settings）。 */
 .page {
-  padding: 32rpx;
+  flex: 1;
+  min-height: 0;
 }
-.page-wide {
-  padding: 20px;
+.list {
+  flex: 1;
+  padding: 32rpx 32rpx 48rpx;
+}
+.list-wide {
+  padding: 20px 20px 28px;
 }
 .card {
   border-radius: 32rpx;
@@ -241,6 +279,10 @@ function toggleEnabled(): void {
   width: 58px;
   font-size: 12px;
 }
+.band-row-tv { flex-direction: column; align-items: stretch; margin-bottom: 16px; }
+.band-label-tv { width: auto; margin-bottom: 8px; }
+.eq-tv-controls { flex-direction: row; align-items: center; }
+.band-value-tv { width: auto; flex: 1; margin: 0 12px; text-align: center; }
 .eq-track {
   background-color: rgba(128, 128, 128, 0.35);
 }

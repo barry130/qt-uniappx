@@ -16,20 +16,21 @@
                 <QtIcon name="music" :size="layout.isWide ? 34 : 72" :color="theme.skin.onAccent" />
               </view>
             </view>
-            <text class="hero-title" :class="layout.isWide ? 'hero-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(38, 22)">一键扫描手机内歌曲文件</text>
+            <text class="hero-title" :class="layout.isWide ? 'hero-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(38, 22)">{{ audioImportSupported ? "导入本地歌曲" : "一键扫描手机内歌曲文件" }}</text>
             <text class="hero-sub" :class="layout.isWide ? 'hero-sub-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 13)">扫描结果会保存到本地，下次进入直接展示，随时可以重新扫描</text>
 
-            <view class="scan-primary" :class="layout.isWide ? 'scan-primary-wide' : ''" :style="'background-color:' + theme.skin.accent + ';'" @click="startScan('all')">
+            <QtButton v-if="audioImportSupported" label="从文件导入音频" icon="folder" size="lg" @click="importFiles" />
+            <view v-else class="scan-primary" :class="layout.isWide ? 'scan-primary-wide' : ''" :style="'background-color:' + theme.skin.accent + ';'" @click="startScan('all')">
               <QtIcon name="search" :size="layout.isWide ? 16 : 30" :color="theme.skin.onAccent" />
               <text class="scan-primary-text" :class="layout.isWide ? 'scan-primary-text-wide' : ''" :style="('color:' + theme.skin.onAccent + ';') + qtFontDual(30, 16)">全盘扫描</text>
             </view>
             <view class="scan-ghost" :class="layout.isWide ? 'scan-ghost-wide' : ''" :style="'border-color:' + theme.skin.border + ';background-color:' + theme.skin.surface + ';'">
               <view class="scan-ghost-btn" @click="startScan('folder')">
                 <QtIcon name="folder" :size="layout.isWide ? 14 : 26" :color="theme.skin.text" />
-                <text class="scan-ghost-text" :class="layout.isWide ? 'scan-ghost-text-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 15)">文件夹扫描</text>
+                <text class="scan-ghost-text" :class="layout.isWide ? 'scan-ghost-text-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 15)">{{ audioImportSupported ? "扫描已导入与下载的歌曲" : "文件夹扫描" }}</text>
               </view>
             </view>
-            <text class="perm-hint" :class="layout.isWide ? 'perm-hint-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(22, 12)">扫描会申请“音乐和音频”文件访问权限，仅用于读取本地歌曲</text>
+            <text class="perm-hint" :class="layout.isWide ? 'perm-hint-wide' : ''" :style="('color:' + theme.skin.textSubtle + ';') + qtFontDual(22, 12)">{{ audioImportSupported ? "可从「文件」应用选择歌曲。应用只读取您导入、下载及授权目录里的音频。" : "扫描会申请“音乐和音频”文件访问权限，仅用于读取本地歌曲" }}</text>
           </view>
         </view>
       </scroll-view>
@@ -157,11 +158,12 @@
           <list-item
             v-for="pair in pairs"
             :key="pair.key"
-            class="litem" :class="layout.isWide ? 'litem-wide' : ''"
+            class="litem" :class="layout.isWide ? 'litem-wide' : ''" :style="qtTvSongRowStyle()"
           >
             <view class="pair" :class="twoColumn ? 'pair-wide' : ''">
               <view class="cell" :style="cellStyle">
                 <LocalRow
+                  :tv-id="'local:' + pair.left.id"
                   :title="pair.left.title" :meta="rowMeta(pair.left)" :durationText="formatDuration(pair.left.duration)"
                   :selecting="selecting" :selected="isSel(pair.left.id)" :current="currentId == pair.left.id"
                   @tap="onRowTap(pair.left)" @more="onRowMore(pair.left)"
@@ -172,6 +174,7 @@
               <view v-if="twoColumn" class="cell-right" :style="rightCellStyle">
                 <LocalRow
                   v-if="pair.hasRight"
+                  :tv-id="'local:' + pair.right.id"
                   :title="pair.right.title" :meta="rowMeta(pair.right)" :durationText="formatDuration(pair.right.duration)"
                   :selecting="selecting" :selected="isSel(pair.right.id)" :current="currentId == pair.right.id"
                   @tap="onRowTap(pair.right)" @more="onRowMore(pair.right)"
@@ -191,8 +194,9 @@
           </view>
           <view v-for="group in groups" :key="group.name">
             <view class="group-head" :class="layout.isWide ? 'group-head-wide' : ''" :style="'color:' + theme.skin.textMuted + ';'">{{ group.name }} · {{ group.list.length }} 首</view>
-            <view v-for="item in group.list" :key="item.id">
+            <view v-for="item in group.list" :key="item.id" :style="qtTvSongRowStyle()">
               <LocalRow
+                :tv-id="'local:' + item.id"
                 :title="item.title" :meta="rowMeta(item)" :durationText="formatDuration(item.duration)"
                 :selecting="selecting" :selected="isSel(item.id)" :current="currentId == item.id"
                 @tap="onRowTap(item)" @more="onRowMore(item)"
@@ -205,6 +209,9 @@
         <!-- 三点下拉菜单：浮层盖住整页点空白处收起，面板锚在标题行下方右侧 -->
         <view v-if="menuOpen" class="menu-mask" @click="menuOpen = false" />
         <view v-if="menuOpen" class="menu-panel" :class="layout.isWide ? 'menu-panel-wide' : ''" :style="cardStyle">
+          <view v-if="audioImportSupported" class="menu-item" :class="layout.isWide ? 'menu-item-wide' : ''">
+            <QtButton label="从文件导入音频" icon="folder" variant="ghost" size="sm" @click="importFiles" />
+          </view>
           <view class="menu-item" :class="layout.isWide ? 'menu-item-wide' : ''" @click="onMenuItem('rescan')">
             <QtIcon name="refresh" :size="layout.isWide ? 14 : 26" :color="theme.skin.text" />
             <text class="menu-item-text" :class="layout.isWide ? 'menu-item-text-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(26, 14)">重新扫描</text>
@@ -241,25 +248,53 @@ import { qtConfirm } from "@/services/confirm";
 import { qtShowActionSheet } from "@/services/action-sheet";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
+import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
 import QtCheckbox from "@/uni_modules/qt-ui/components/qt-checkbox/qt-checkbox.uvue";
 import QtSegmented from "@/uni_modules/qt-ui/components/qt-segmented/qt-segmented.uvue";
 import LocalRow from "@/uni_modules/qt-ui/components/qt-local-row/qt-local-row.uvue";
+import { qtTvSongRowStyle } from "@/uni_modules/qt-ui/composables/qt-song-row-metrics";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
-import { ref, computed } from "vue";
+import { ref, computed, onUnmounted } from "vue";
 import { scanLocalAudio, deleteLocalMedia } from "@/uni_modules/qt-app-native";
+import { supportsLocalAudioImport, importLocalAudio } from "@/services/app-native";
 import type { LocalAudioItem } from "@/uni_modules/qt-app-native";
 import { usePlayerStore } from "@/stores/player";
 import type { Song } from "@/types/music";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
-import { onShow } from "@dcloudio/uni-app";
+import { onShow, onUnload } from "@dcloudio/uni-app";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useQtSongColumns } from "@/uni_modules/qt-ui/composables/use-qt-song-columns";
 
 const theme = useThemeStore();
 const layout = useQtLayout();
 const player = usePlayerStore();
+const audioImportSupported = supportsLocalAudioImport();
+let pageDeparted = false;
+let scanGeneration = 0;
+
+async function importFiles(): Promise<void> {
+  if (pageDeparted || scanning.value) return;
+  const generation = ++scanGeneration;
+  menuOpen.value = false;
+  scanning.value = true;
+  try {
+    const result = await importLocalAudio();
+    if (pageDeparted || generation != scanGeneration) return;
+    scanning.value = false;
+    if (result.count > 0) {
+      qtShowToast({ title: "已导入 " + result.count + " 首" + (result.message.length > 0 ? "，" + result.message : ""), icon: "none" });
+      startScan("all");
+    } else if (result.message.length > 0 && result.message != "已取消选择") {
+      qtShowToast({ title: result.message, icon: "none" });
+    }
+  } catch (e) {
+    if (pageDeparted || generation != scanGeneration) return;
+    scanning.value = false;
+    qtShowToast({ title: "导入失败，请重新选择文件", icon: "none" });
+  }
+}
 
 // 扫描结果持久化：第二次进入直接展示，不再自动扫描
 const STORE_KEY = "qt-local-audio-v1";
@@ -778,9 +813,11 @@ function saveItems(items: LocalAudioItem[]): void {
  * 权限申请在 scanLocalAudio 内部处理（拒绝时回调空列表）。
  */
 function startScan(kind: string): void {
-  if (scanning.value) return;
+  if (pageDeparted || scanning.value) return;
+  const generation = ++scanGeneration;
   scanning.value = true;
   scanLocalAudio((items: LocalAudioItem[]) => {
+    if (pageDeparted || generation != scanGeneration) return;
     scanning.value = false;
     if (items.length == 0) {
       qtShowToast({ title: "未在手机上找到音频文件", icon: "none" });
@@ -874,6 +911,7 @@ async function playAll(): Promise<void> {
 }
 
 onShow(() => {
+  if (pageDeparted) return;
   qtTrackPage("pages/local/index");
   // 扫描中 / 勾选目录时不要打断当前流程
   if (scanning.value || viewMode.value == "folderPick") return;
@@ -883,6 +921,12 @@ onShow(() => {
   loadSaved();
   viewMode.value = allItems.value.length > 0 ? "list" : "onboard";
 });
+function retirePage(): void {
+  pageDeparted = true;
+  scanGeneration++;
+}
+onUnload(retirePage);
+onUnmounted(retirePage);
 </script>
 <style>
 .page {

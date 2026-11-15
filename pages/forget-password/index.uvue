@@ -1,16 +1,19 @@
 <template>
   <qt-page-frame width-kind="form">
-  <view class="page" :class="layout.isWide ? 'page-wide' : ''">
+  <scroll-view class="form-scroll qt-tv-scroll" direction="vertical" :show-scrollbar="false" :style="'flex:1;'">
+  <view class="page" :class="layout.isWide ? 'page-wide' : ''" :style="layout.isTv ? 'min-height:' + layout.paneHeight + 'px;padding-left:0px;padding-right:0px;justify-content:flex-start;' : ''">
     <view class="head" :class="layout.isWide ? 'head-wide' : ''">
       <image class="logo-img" :class="layout.isWide ? 'logo-img-wide' : ''" src="/static/icon/xxxhdpi.png" mode="aspectFill" />
-      <text class="head-title" :class="layout.isWide ? 'head-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(34, 20)">重置密码</text>
-      <text class="head-sub" :class="layout.isWide ? 'head-sub-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13)">通过邮箱验证码找回您的账号密码</text>
+      <text class="head-title" :class="layout.isWide ? 'head-title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(34, 20) + tvLine(20)">重置密码</text>
+      <text class="head-sub" :class="layout.isWide ? 'head-sub-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 13) + tvLine(13)">通过邮箱验证码找回您的账号密码</text>
     </view>
 
     <view class="card" :class="layout.isWide ? 'card-wide' : ''" :style="cardStyle">
       <!-- 邮箱 -->
       <view class="field-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
+          data-qt-tv-id="forget:email"
+          :focus="false"
           :value="email"
           @input="onEmailInput"
           class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
@@ -25,6 +28,8 @@
       <!-- 验证码 + 获取验证码按钮 -->
       <view class="field-row code-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
+          data-qt-tv-id="forget:code"
+          :focus="false"
           :value="code"
           @input="onCodeInput"
           class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
@@ -34,14 +39,16 @@
           :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
           :maxlength="6"
         />
-        <view class="code-btn" :class="layout.isWide ? 'code-btn-wide' : ''" :style="'border-left-color:' + themeStore.skin.border + ';' + (sending || countdown > 0 ? 'background-color:' + themeStore.skin.surfaceMuted + ';' : 'background-color:' + themeStore.skin.accentSoft + ';')" @click="sendCode">
-          <text class="code-btn-text" :class="layout.isWide ? 'code-btn-text-wide' : ''" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(25, 13)">{{ countdown > 0 ? countdown + 's' : '获取验证码' }}</text>
+        <view class="code-btn" data-qt-tv-id="forget:send-code" :class="[layout.isWide ? 'code-btn-wide' : '', sending || countdown > 0 ? 'qt-tv-skip' : '']" :style="'border-left-color:' + themeStore.skin.border + ';' + (sending || countdown > 0 ? 'background-color:' + themeStore.skin.surfaceMuted + ';' : 'background-color:' + themeStore.skin.accentSoft + ';') + codeButtonStyle" @click="sendCode">
+          <text class="code-btn-text" :class="layout.isWide ? 'code-btn-text-wide' : ''" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(25, 13) + tvLine(13)">{{ countdown > 0 ? countdown + 's' : '获取验证码' }}</text>
         </view>
       </view>
 
       <!-- 新密码 -->
       <view class="field-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
+          data-qt-tv-id="forget:password"
+          :focus="false"
           :value="password"
           @input="onPasswordInput"
           class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
@@ -52,7 +59,7 @@
           :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
           :maxlength="18"
         />
-        <view class="eye" :class="layout.isWide ? 'eye-wide' : ''" @click="pwVisible = !pwVisible">
+        <view class="eye" data-qt-tv-id="forget:password-eye" :class="layout.isWide ? 'eye-wide' : ''" :style="eyeStyle" @click="pwVisible = !pwVisible">
           <QtIcon :name="pwVisible ? 'eye' : 'eye-off'" :size="layout.isWide ? 22 : 40" :color="themeStore.skin.iconMuted" />
         </view>
       </view>
@@ -60,6 +67,8 @@
       <!-- 确认新密码 -->
       <view class="field-row" :class="layout.isWide ? 'field-row-wide' : ''" :style="fieldStyle">
         <input
+          data-qt-tv-id="forget:confirm"
+          :focus="false"
           :value="confirmPw"
           @input="onConfirmInput"
           class="field-input" :class="layout.isWide ? 'field-input-wide' : ''"
@@ -70,12 +79,13 @@
           :placeholder-class="layout.isWide ? 'field-ph-wide' : 'field-ph'"
           :maxlength="18"
         />
-        <view class="eye" :class="layout.isWide ? 'eye-wide' : ''" @click="confirmVisible = !confirmVisible">
+        <view class="eye" data-qt-tv-id="forget:confirm-eye" :class="layout.isWide ? 'eye-wide' : ''" :style="eyeStyle" @click="confirmVisible = !confirmVisible">
           <QtIcon :name="confirmVisible ? 'eye' : 'eye-off'" :size="layout.isWide ? 22 : 40" :color="themeStore.skin.iconMuted" />
         </view>
       </view>
 
       <qt-button
+        data-qt-tv-id="forget:submit"
         class="action"
         :class="layout.isWide ? 'action-wide' : ''"
         label="确认重置"
@@ -85,27 +95,36 @@
       />
     </view>
   </view>
+  </scroll-view>
   </qt-page-frame>
 </template>
 <script setup lang="ts">
 import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { ref, computed, onBeforeUnmount } from "vue";
+import { onUnload } from "@dcloudio/uni-app";
 import { accountApi } from "@/services/music-api";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtContentWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 
 const themeStore = useThemeStore();
 const layout = useQtLayout();
 // 皮肤令牌：卡片底 / 输入行底与描边 / 输入文字。
 // 这些原先由手写的深色覆盖类写死成 graphite 色值，换 linen/aurora 等皮肤时不跟着变；
 // 本仓库没有 CSS 变量，只能内联输出 skin 令牌。
-const cardStyle = computed((): string => "background-color:" + themeStore.skin.surface + ";");
-const fieldStyle = computed((): string => "background-color:" + themeStore.skin.surfaceMuted + ";border-color:" + themeStore.skin.border + ";");
-const inputStyle = computed((): string => "color:" + themeStore.skin.text + ";");
+const cardStyle = computed((): string => "background-color:" + themeStore.skin.surface + ";" + (layout.isTv ? "width:" + qtContentWidth("form") + "px;" : ""));
+const tvFieldHeight = computed((): number => Math.max(56, Math.ceil(qtFontValuePx(16) * 1.35) + 16));
+const fieldStyle = computed((): string => "background-color:" + themeStore.skin.surfaceMuted + ";border-color:" + themeStore.skin.border + ";" + (layout.isTv ? "height:" + tvFieldHeight.value + "px;" : ""));
+const inputStyle = computed((): string => "color:" + themeStore.skin.text + ";" + (layout.isTv ? "height:" + tvFieldHeight.value + "px;min-width:0px;font-size:" + qtFontValuePx(16) + "px;line-height:" + Math.ceil(qtFontValuePx(16) * 1.35) + "px;" : ""));
+const eyeStyle = computed((): string => layout.isTv ? "width:56px;height:" + tvFieldHeight.value + "px;flex-shrink:0;" : "");
+const codeButtonStyle = computed((): string => layout.isTv ? "height:" + tvFieldHeight.value + "px;min-width:56px;width:" + (Math.ceil(5 * qtFontValuePx(13)) + 32) + "px;flex-shrink:0;" : "");
+function tvLine(base: number): string {
+  return layout.isTv ? "line-height:" + Math.ceil(qtFontValuePx(base) * 1.35) + "px;" : "";
+}
 const email = ref("");
 const code = ref("");
 const password = ref("");
@@ -118,6 +137,7 @@ const countdown = ref(0);
 let timer: number | null = null;
 // 重置成功后延迟返回的定时器：页面卸载时必须清掉，避免在已注销的实例上触发回调
 let navBackTimer: number | null = null;
+let formAlive = true;
 
 function onEmailInput(e: InputEvent): void {
   const raw = String((e.detail as any).value ?? "");
@@ -154,9 +174,11 @@ function sendCode(): void {
   accountApi
     .sendEmail(mail, "changePasswordByEmail")
     .then(() => {
+      if (!formAlive) return;
       qtShowToast({ title: "验证码已发送", icon: "success" });
       countdown.value = 60;
       timer = setInterval(() => {
+        if (!formAlive) return;
         countdown.value--;
         if (countdown.value <= 0 && timer != null) {
           clearInterval(timer);
@@ -165,10 +187,10 @@ function sendCode(): void {
       }, 1000) as unknown as number;
     })
     .catch((error) => {
-      qtShowToast({ title: (error as Error).message || "发送失败", icon: "none" });
+      if (formAlive) qtShowToast({ title: (error as Error).message || "发送失败", icon: "none" });
     })
     .finally(() => {
-      sending.value = false;
+      if (formAlive) sending.value = false;
     });
 }
 
@@ -207,18 +229,21 @@ async function submit(): Promise<void> {
   loading.value = true;
   try {
     await accountApi.changePassword(mail, pw, code.value.trim());
+    if (!formAlive) return;
     qtShowToast({ title: "密码重置成功", icon: "success" });
     navBackTimer = setTimeout(() => {
-      uni.navigateBack();
+      navBackTimer = null;
+      if (formAlive) uni.navigateBack();
     }, 600) as number;
   } catch (error) {
-    qtShowToast({ title: (error as Error).message || "重置失败", icon: "none" });
+    if (formAlive) qtShowToast({ title: (error as Error).message || "重置失败", icon: "none" });
   } finally {
-    loading.value = false;
+    if (formAlive) loading.value = false;
   }
 }
 
-onBeforeUnmount(() => {
+function disposeForm(): void {
+  formAlive = false;
   if (timer != null) {
     clearInterval(timer);
     timer = null;
@@ -227,7 +252,9 @@ onBeforeUnmount(() => {
     clearTimeout(navBackTimer);
     navBackTimer = null;
   }
-});
+}
+onBeforeUnmount(disposeForm);
+onUnload(disposeForm);
 </script>
 
 <style>

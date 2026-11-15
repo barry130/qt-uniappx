@@ -1,14 +1,14 @@
 <template>
   <qt-page-frame width-kind="flow">
   <view class="page">
-    <scroll-view class="list" :class="layout.isWide ? 'list-wide' : ''" direction="vertical" :show-scrollbar="false">
+    <scroll-view class="list" :class="[layout.isWide ? 'list-wide' : '', layout.isTv ? 'qt-tv-scroll' : '']" :data-qt-tv-id="layout.isTv ? 'player-bar:scroll' : ''" direction="vertical" :show-scrollbar="false">
       <!-- 宽屏两列（≥1280）：左列是按钮开关组，右列是「恢复默认」+ 说明。
            单列时这 7 行在 1920 下拉成 1312px 宽、每行右侧空 600px。 -->
       <view v-if="twoColumn" class="cols">
         <view class="col" :style="colStyle">
           <view class="group group-wide group-col" :style="groupStyle">
             <view class="cell cell-wide" :style="cellStyle">
-              <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">已展示 {{ barToolCounted }}/{{ maxVisible }} 个，关掉的按钮播放页最下面那一行不再显示</text>
+              <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14) + qtTvSongLineStyle(14)">已展示 {{ barToolCounted }}/{{ maxVisible }} 个，关掉的按钮播放页最下面那一行不再显示</text>
             </view>
             <view
               v-for="(tool, index) in barTools"
@@ -16,10 +16,10 @@
               class="cell cell-wide"
               :class="index == barTools.length - 1 ? 'cell-no-border' : ''"
               :style="cellStyle"
-              @click="toggleBarTool(tool.id)"
+              :data-qt-tv-id="layout.isTv ? 'player-bar:tool:' + tool.id : ''" @click="toggleBarTool(tool.id)"
             >
               <QtIcon class="cell-icon cell-icon-wide" :name="tool.icon" :size="36" :color="toolColor(index)" />
-              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ tool.label }}</text>
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17) + qtTvSongLineStyle(17)">{{ tool.label }}</text>
               <view class="cell-right">
                 <QtSwitch :model-value="playerBar.isVisible(tool.id)" @change="toggleBarTool(tool.id)" />
               </view>
@@ -28,16 +28,16 @@
         </view>
         <view class="col col-right" :style="colStyle">
           <view class="group group-wide group-col" :style="groupStyle">
-            <view class="cell cell-no-border cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="resetDefault">
+            <view class="cell cell-no-border cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" :data-qt-tv-id="layout.isTv ? 'player-bar:reset' : ''" @click="resetDefault">
               <QtIcon class="cell-icon cell-icon-wide" name="refresh" :size="36" color="#7c6cf2" />
-              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">恢复默认展示</text>
+              <text class="cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17) + qtTvSongLineStyle(17)">恢复默认展示</text>
               <view class="cell-right">
                 <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
               </view>
             </view>
           </view>
           <view class="hint hint-col">
-            <text class="hint-text hint-text-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">手机播放页最下面那一行（以及横屏控制行右侧那一组）按这里的开关渲染，最多同时展示 {{ maxVisible }} 个。收藏 / 分享 / 歌手是固定常驻项（入口分别是曲名行、右上角、歌手行），不在这个额度里；播放链接仅管理员可见。</text>
+            <text class="hint-text hint-text-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12) + qtTvSongLineStyle(12)">手机播放页最下面那一行（以及横屏控制行右侧那一组）按这里的开关渲染，最多同时展示 {{ maxVisible }} 个。收藏 / 分享 / 歌手是固定常驻项（入口分别是曲名行、右上角、歌手行），不在这个额度里；播放链接仅管理员可见。</text>
           </view>
         </view>
       </view>
@@ -46,7 +46,7 @@
       <view v-else>
       <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
         <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle">
-          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">已展示 {{ barToolCounted }}/{{ maxVisible }} 个，关掉的按钮播放页最下面那一行不再显示</text>
+          <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14) + qtTvSongLineStyle(14)">已展示 {{ barToolCounted }}/{{ maxVisible }} 个，关掉的按钮播放页最下面那一行不再显示</text>
         </view>
         <view
           v-for="(tool, index) in barTools"
@@ -54,10 +54,10 @@
           class="cell"
           :class="[layout.isWide ? 'cell-wide' : '', index == barTools.length - 1 ? 'cell-no-border' : '']"
           :style="cellStyle"
-          @click="toggleBarTool(tool.id)"
+          :data-qt-tv-id="layout.isTv ? 'player-bar:tool:' + tool.id : ''" @click="toggleBarTool(tool.id)"
         >
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" :name="tool.icon" :size="36" :color="toolColor(index)" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">{{ tool.label }}</text>
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17) + qtTvSongLineStyle(17)">{{ tool.label }}</text>
           <view class="cell-right">
             <QtSwitch :model-value="playerBar.isVisible(tool.id)" @change="toggleBarTool(tool.id)" />
           </view>
@@ -65,9 +65,9 @@
       </view>
 
       <view class="group" :class="layout.isWide ? 'group-wide' : ''" :style="groupStyle">
-        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="resetDefault">
+        <view class="cell cell-no-border" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" :data-qt-tv-id="layout.isTv ? 'player-bar:reset' : ''" @click="resetDefault">
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="refresh" :size="36" color="#7c6cf2" />
-          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17)">恢复默认展示</text>
+          <text class="cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 17) + qtTvSongLineStyle(17)">恢复默认展示</text>
           <view class="cell-right">
             <QtIcon name="chevron-right" :size="28" :color="theme.skin.iconMuted" />
           </view>
@@ -75,7 +75,7 @@
       </view>
 
       <view class="hint">
-        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">手机播放页最下面那一行（以及横屏控制行右侧那一组）按这里的开关渲染，最多同时展示 {{ maxVisible }} 个。收藏 / 分享 / 歌手是固定常驻项（入口分别是曲名行、右上角、歌手行），不在这个额度里；播放链接仅管理员可见。</text>
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12) + qtTvSongLineStyle(12)">手机播放页最下面那一行（以及横屏控制行右侧那一组）按这里的开关渲染，最多同时展示 {{ maxVisible }} 个。收藏 / 分享 / 歌手是固定常驻项（入口分别是曲名行、右上角、歌手行），不在这个额度里；播放链接仅管理员可见。</text>
       </view>
       </view>
     </scroll-view>
@@ -102,6 +102,7 @@ import {
 } from "@/stores/player-bar";
 import { isQtAdmin } from "@/services/music-api";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtTvSongLineStyle } from "@/uni_modules/qt-ui/composables/qt-song-row-metrics";
 
 const playerBar = usePlayerBarStore();
 /** playUrl 开关只对 qt_admin 展示（与播放页的入口可见性同一权限来源） */
@@ -109,7 +110,7 @@ const qtAdmin = ref(isQtAdmin());
 const layout = useQtLayout();
 const theme = useThemeStore();
 const groupStyle = computed<string>(() => "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";");
-const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
+const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";" + (layout.isTv ? "height:auto;min-height:76px;" : ""));
 
 const maxVisible = PLAYER_BAR_MAX_VISIBLE;
 /** 当前行清单：固定常驻项（收藏/分享/歌手）在本页不出现；非管理员的 playUrl（adminOnly）也不出现 */

@@ -148,14 +148,15 @@
         </view>
       </sticky-header>
       <list-item
-        v-for="song in visibleSongs"
-        :key="song.platform + ':' + song.id"
+        v-for="(song, index) in visibleSongs"
+        :key="layout.isTv ? tvSongOccurrenceId(song, index) : song.platform + ':' + song.id"
         class="song-item" :class="layout.isWide ? 'song-item-wide' : ''"
+        :style="qtTvSongRowStyle()"
       >
         <!-- 行点击完全交给组件自己（@play / @select），宿主不在这层 list-item 上再绑 @click：
              歌单详情页那样双层处理会让一次点击把 play 触发两遍（组件发一次、冒泡到
              list-item 再来一次），这里只留组件一条通路，选择态也不会「勾上又播放」 -->
-        <qt-song-row-lite :song="song" :use-picker="true" :selecting="selecting" :selected="isSelected(qtSongKey(song))" @play="play(song)" @more="openSheet" @pick="onPick" @select="onRowSelect(song)" />
+        <qt-song-row-lite :song="song" :tv-id="tvSongOccurrenceId(song, index)" :use-picker="true" :selecting="selecting" :selected="isSelected(qtSongKey(song))" @play="play(song)" @more="openSheet" @pick="onPick" @select="onRowSelect(song)" />
       </list-item>
       </sticky-section>
       <!-- 空态必须留在 sticky-section 外：鸿蒙端约束 section 只能有「一个 sticky-header +
@@ -226,8 +227,8 @@
 <script setup lang="ts">
 import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
-import { ref, computed, onMounted, onUnmounted, watch } from "vue";
-import { onShow } from "@dcloudio/uni-app";
+import { ref, computed, onMounted, onBeforeUnmount, onUnmounted, watch } from "vue";
+import { onShow, onUnload } from "@dcloudio/uni-app";
 import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
 import QtSkeleton from "@/uni_modules/qt-ui/components/qt-skeleton/qt-skeleton.uvue";
 import QtSongRowLite from "@/uni_modules/qt-ui/components/qt-song-row-lite/qt-song-row-lite.uvue";
@@ -246,10 +247,12 @@ import { useSongSheet } from "@/composables/use-song-sheet";
 import { useTrackSearch } from "@/composables/use-track-search";
 import { musicApi } from "@/services/music-api";
 import { packsFingerprint, SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
+import { sourcePolicyFingerprint, SOURCE_POLICY_CHANGED_EVENT } from "@/services/source-policy";
 import { usePlayerStore } from "@/stores/player";
 import { useSourceStore } from "@/stores/source";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { qtTvSongRowStyle } from "@/uni_modules/qt-ui/composables/qt-song-row-metrics";
 import { detailLayoutMetrics } from "@/uni_modules/qt-ui/composables/detail-layout";
 import { qtContentWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import type { Playlist, Song } from "@/types/music";
@@ -372,6 +375,15 @@ const visibleSongs = computed<Song[]>(() => {
   return out;
 });
 
+/** TV身份取原始出现项，过滤/排序不把焦点交给同业务key的另一行。 */
+function tvSongOccurrenceId(song: Song, index: number): string {
+  if (!layout.isTv) return "";
+  let occurrence = 0;
+  const visible = visibleSongs.value;
+  for (let i = 0; i < index; i++) if (visible[i] === song) occurrence++;
+  return "daily:" + song.platform + ":" + song.id + ":" + songs.value.indexOf(song) + ":" + occurrence;
+}
+
 /**
  * 标题栏右侧动作：搜索 + 三点。
  * 数据没加载完不渲染任何按钮 —— 与歌单详情页「只有所有数据全部加载完成才能操作」同口径。
@@ -398,6 +410,12 @@ function clearHeadTimers(): void {
   for (let i = 0; i < headTimers.length; i++) clearTimeout(headTimers[i]);
   headTimers = [];
 }
+function disposeHeadMeasure(): void {
+  headAlive = false;
+  clearHeadTimers();
+}
+onBeforeUnmount(disposeHeadMeasure);
+onUnload(disposeHeadMeasure);
 function retryMeasureHead(attempt: number): void {
   if (!headAlive || attempt >= 5) return;
   headTimers.push(
@@ -410,11 +428,13 @@ function measureHeadOffset(attempt: number): void {
   uni.createSelectorQuery()
     .select("#daily-scroll")
     .boundingClientRect((listRect: UniNodeInfo) => {
+      if (!headAlive || layout.isWide) return;
       const listTop = listRect != null ? listRect.top : 0;
       // 嵌套一次新查询拿操作条位置：不链式 select，避免 Vapor 下多节点链的未知行为
       uni.createSelectorQuery()
         .select("#pl-head")
         .boundingClientRect((headRect: UniNodeInfo) => {
+          if (!headAlive || layout.isWide) return;
           if (headRect != null && headRect.height > 0) {
             headOffset.value = Math.max(0, Math.round(headRect.top - listTop));
             return;
@@ -558,7 +578,7 @@ async function load(): Promise<void> {
 }
 
 function ensureLoad(): void {
-  const fp = packsFingerprint();
+  const fp = packsFingerprint() + sourcePolicyFingerprint();
   if (loadedSource == sourceStore.current && loadedPackFp == fp) return;
   loadedSource = sourceStore.current;
   loadedPackFp = fp;
@@ -680,6 +700,7 @@ onMounted(() => {
   sourceStore.restore();
   ensureLoad();
   uni.$on(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
+  uni.$on(SOURCE_POLICY_CHANGED_EVENT, onPacksChanged);
   // 数据到位后量一次「操作条距列表顶多少」，作为标题栏露出标题的阈值。
   // 直接量不到（首帧还没渲染出 #pl-head）时由 measureHeadOffset 自己重试。
   measureHeadOffset(0);
@@ -690,6 +711,7 @@ onShow(() => {
 });
 onUnmounted(() => {
   uni.$off(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
+  uni.$off(SOURCE_POLICY_CHANGED_EVENT, onPacksChanged);
   // 量吸顶阈值用 createSelectorQuery：页面原生 UniPage 反注册后再 .exec()
   // 会抛 "UTS instance N is not registered"，必须停掉重试并置存活标志
   headAlive = false;

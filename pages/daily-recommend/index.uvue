@@ -21,6 +21,7 @@
     <!-- 宽屏左栏：封面 + 元信息 + 口味/模式操作（与歌单详情 / 每日新歌同一套主从双栏） -->
     <scroll-view v-if="detailSplit" class="wide-left" :style="wideAsideStyle" direction="vertical" :show-scrollbar="false">
       <view class="whero" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
+        <view class="whero-source"><QtRecommendationSourceControl kind="daily" /></view>
         <view class="whero-art">
           <QtSkeleton v-if="loading" tone="cover" :width="wideCoverPx" :height="wideCoverPx" radius="12px" />
           <image v-else class="whero-cover" :style="wideCoverStyle" :src="displayPicUrl" mode="aspectFill" />
@@ -36,7 +37,7 @@
           <text class="whero-title" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(18)" :max-lines="2">{{ resultTitle }}</text>
           <text v-if="resultSummary.length > 0" class="whero-desc" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(13)" :max-lines="2">{{ resultSummary }}</text>
           <!-- 口味切换：与模式正交，切换即重新生成（force） -->
-          <view class="whero-tastes">
+          <view v-if="!accountMode" class="whero-tastes">
             <QtOption v-for="(t, ti) in DAILY_TASTE_ORDER" :key="'wt-' + ti" kind="chip" :label="DAILY_TASTE_LABEL[t]" :selected="taste == t" @select="pickTaste(t)" />
           </view>
           <view class="whero-actions">
@@ -54,7 +55,7 @@
               <QtButton label="播放全部" icon="play" size="sm" @click="playAll" />
               <view class="whero-secondary" :class="wideSecondaryStacked ? 'whero-secondary-stacked' : ''">
                 <QtButton label="换一批" icon="refresh" size="sm" variant="ghost" @click="regenerate" />
-                <QtButton label="推荐设置" icon="settings" size="sm" variant="ghost" @click="openModeSheet" />
+                <QtButton v-if="!accountMode" label="推荐设置" icon="settings" size="sm" variant="ghost" @click="openModeSheet" />
               </view>
             </template>
           </view>
@@ -68,6 +69,10 @@
       </view>
     </scroll-view>
     <list-view id="rc-scroll" class="scroll" direction="vertical" :scroll-top="scrollTop" @scroll="onListScroll">
+      <!-- 来源入口在骨架、失败与空态之外，随时可改回应用算法。 -->
+      <list-item v-if="!detailSplit" class="source-item" :class="layout.isWide ? 'source-item-wide' : ''">
+        <QtRecommendationSourceControl kind="daily" />
+      </list-item>
       <!-- 竖屏 hero：同 .hero 外框，内部骨架/成品切换 -->
       <list-item v-if="!detailSplit" class="hero-item">
         <view class="hero" :class="layout.isWide ? 'hero-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
@@ -84,7 +89,7 @@
               <text class="title" :class="layout.isWide ? 'title-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(35, 20)" :max-lines="2">{{ resultTitle }}</text>
               <text class="desc" :class="layout.isWide ? 'desc-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 14)" :max-lines="2">{{ resultSummary.length > 0 ? resultSummary : metaLine }}</text>
               <text class="playcount" :class="layout.isWide ? 'playcount-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 13)">{{ metaLine }}</text>
-              <view class="hero-tastes" :class="layout.isWide ? 'hero-tastes-wide' : ''">
+              <view v-if="!accountMode" class="hero-tastes" :class="layout.isWide ? 'hero-tastes-wide' : ''">
                 <QtOption v-for="(t, ti) in DAILY_TASTE_ORDER" :key="'ht-' + ti" kind="chip" :label="DAILY_TASTE_LABEL[t]" :selected="taste == t" @select="pickTaste(t)" />
               </view>
             </template>
@@ -146,7 +151,7 @@
             <template v-else>
               <text :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(24, 14)">{{ countText }}</text>
               <view class="head-actions" :class="layout.isWide ? 'head-actions-wide' : ''">
-                <view class="head-btn" :class="layout.isWide ? 'head-btn-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="openModeSheet">
+                <view v-if="!accountMode" class="head-btn" :class="layout.isWide ? 'head-btn-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="openModeSheet">
                   <QtIcon name="settings" :size="layout.isWide ? 16 : 28" :color="themeStore.skin.iconMuted" /><text class="head-btn-text" :class="layout.isWide ? 'head-btn-text-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(24, 14)">{{ modeLabel }}</text>
                 </view>
                 <view class="head-btn" :class="layout.isWide ? 'head-btn-wide' : ''" :style="'background-color:' + themeStore.skin.surfaceMuted + ';border-color:' + themeStore.skin.border + ';'" @click="regenerate">
@@ -162,29 +167,22 @@
             </template>
           </view>
         </sticky-header>
-        <!-- 推荐行：序号 + 歌名 + 「歌手 · 推荐理由」；默认推荐顺序，可搜索/前端排序 -->
-        <list-item v-for="(song, i) in visibleSongs" :key="song.platform + ':' + song.id" class="rc-item" :class="layout.isWide ? 'rc-item-wide' : ''">
-          <view class="rc-row" :class="layout.isWide ? 'rc-row-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';border-top-color:' + themeStore.skin.divider + ';'" @click="onRowClick(song)">
-            <QtCheckbox v-if="selecting" class="rc-check-gap" :class="layout.isWide ? 'rc-check-gap-wide' : ''" :checked="isSelected(qtSongKey(song))" @change="toggleSelect(qtSongKey(song))" />
-            <text v-else class="rc-idx" :class="layout.isWide ? 'rc-idx-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(24, 13)">{{ i + 1 }}</text>
-            <image class="rc-cover" :class="layout.isWide ? 'rc-cover-wide' : ''" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
-            <view class="rc-info" :class="layout.isWide ? 'rc-info-wide' : ''">
-              <!-- 平台小签跟在歌名后（与歌单详情 qt-song-row-lite 同款） -->
-              <view class="rc-name-row">
-                <text class="rc-name" :class="layout.isWide ? 'rc-name-wide' : ''" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(29, 17)" :max-lines="1">{{ song.name }}</text>
-                <text
-                  class="rc-tag" :class="layout.isWide ? 'rc-tag-wide' : ''"
-                  :style="('color:' + platformColor(song.platform) + ';border-color:' + platformColor(song.platform) + ';') + qtFontDual(19, 11)"
-                  :max-lines="1"
-                  >{{ platformShort(song.platform) }}</text
-                >
-              </view>
-              <text class="rc-sub" :class="layout.isWide ? 'rc-sub-wide' : ''" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 14)" :max-lines="1">{{ reasonOf(song).length > 0 ? song.singer + " · " + reasonOf(song) : song.singer }}</text>
-            </view>
-            <view class="rc-more" :class="layout.isWide ? 'rc-more-wide' : ''" @click.stop="openSheet(song)">
-              <QtIcon name="more" :size="layout.isWide ? 24 : 40" :color="themeStore.skin.iconMuted" />
-            </view>
-          </view>
+        <!-- 推荐行：直接复用歌单详情/每日新歌同一个 qt-song-row-lite（2026-11-14 用户裁定：
+             本列表与这两处保持完全一致——行高 128rpx、红心+三点、平台小签、歌手-专辑副标题都由组件负责，
+             页面不再手搓 rc-row，避免三处各自维护导致行高/命中区再次跑偏）。
+             行点击/选择态也交给组件（@play / @select），宿主不在这层再生根 click，避免一次点击触发两遍。 -->
+        <list-item v-for="(song, i) in visibleSongs" :key="song.platform + ':' + song.id + ':' + i" class="rc-item" :class="layout.isWide ? 'rc-item-wide' : ''" :style="qtTvSongRowStyle()">
+          <qt-song-row-lite
+            :song="song"
+            :tv-id="tvSongOccurrenceId(song, i)"
+            :use-picker="true"
+            :selecting="selecting"
+            :selected="isSelected(qtSongKey(song))"
+            @play="playSong(song)"
+            @more="openSheet"
+            @pick="onPick"
+            @select="toggleSelect(qtSongKey(song))"
+          />
         </list-item>
       </sticky-section>
       <!-- 空态 / 失败态留在 sticky-section 外（鸿蒙约束：section 只能 header + v-for） -->
@@ -202,7 +200,7 @@
       </list-item>
       <!-- 底部口径说明（qt-pc 页脚同款文案） -->
       <list-item v-if="!loading && songs.length > 0" class="foot-item" :class="layout.isWide ? 'foot-item-wide' : ''">
-        <text class="foot-text" :class="layout.isWide ? 'foot-text-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">候选来自全部已装音源；心动优先收藏（含收藏歌单）；近 {{ DAILY_HISTORY_DAYS }} 天推过的歌会排到后面，同一歌手不会连着排</text>
+        <text class="foot-text" :class="layout.isWide ? 'foot-text-wide' : ''" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontDual(21, 12)">{{ accountMode ? '曲目直接来自所选音源账号的官方日推，保留原顺序和数量；播放仍遵循原播放授权设置' : '候选来自全部已装音源；心动优先收藏（含收藏歌单）；近 ' + DAILY_HISTORY_DAYS + ' 天推过的歌会排到后面，同一歌手不会连着排' }}</text>
       </list-item>
     </list-view>
     <QtBackToTop :visible="showBackToTop" @tap="backToTop" />
@@ -230,6 +228,17 @@
       :selected-index="modeSelectedIndex"
       @select="onModeSelect"
     />
+    <!-- 单曲收藏面板：与每日新歌/歌单详情同一个组件、同一套交互（点红心弹面板，勾选即提交） -->
+    <QtPlaylistPicker
+      v-model:visible="showPicker"
+      :song="currentSong"
+      :playlists="player.pickerPlaylists()"
+      :selected-ids="getSelectedPlaylistIds(currentSong)"
+      :anchor-top="pickerAnchorTop"
+      title="加入 / 移出歌单"
+      :create-playlist="createPickerPlaylist"
+      @confirm="handlePickerConfirm"
+    />
     <!-- 批量收藏面板：选中歌单的预勾选用「已全量收藏」判定（与每日新歌页同口径） -->
     <QtPlaylistPicker
       v-model:visible="batchPickerVisible"
@@ -247,13 +256,13 @@
 </template>
 <script setup lang="ts">
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
-import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount, onUnmounted, watch } from "vue";
+import { onUnload } from "@dcloudio/uni-app";
 import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
 import QtSkeleton from "@/uni_modules/qt-ui/components/qt-skeleton/qt-skeleton.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
-import QtCheckbox from "@/uni_modules/qt-ui/components/qt-checkbox/qt-checkbox.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtSortPanel from "@/uni_modules/qt-ui/components/qt-sort-panel/qt-sort-panel.uvue";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
@@ -261,6 +270,7 @@ import { useTrackSearch } from "@/composables/use-track-search";
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import QtBatchBar from "@/uni_modules/qt-ui/components/qt-batch-bar/qt-batch-bar.uvue";
 import QtPlaylistPicker from "@/uni_modules/qt-ui/components/qt-playlist-picker/qt-playlist-picker.uvue";
+import QtSongRowLite from "@/uni_modules/qt-ui/components/qt-song-row-lite/qt-song-row-lite.uvue";
 import { qtSongKey, useBatchSelect } from "@/uni_modules/qt-ui/composables/use-batch-select";
 import { useBatchActions } from "@/composables/use-batch-actions";
 import { useSongSheet } from "@/composables/use-song-sheet";
@@ -269,12 +279,13 @@ import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { detailLayoutMetrics } from "@/uni_modules/qt-ui/composables/detail-layout";
 import { qtContentWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { qtTvSongRowStyle } from "@/uni_modules/qt-ui/composables/qt-song-row-metrics";
 import type { Playlist, Song } from "@/types/music";
 import { qtFontPx, qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtShowToast } from "@/services/toast";
 import { isQtAdmin } from "@/services/music-api";
 import { readAiMode as readMode, saveAiMode as saveMode } from "@/services/ai-mode";
-import { platformShort, platformColor } from "@/services/platform";
+import { platformShort } from "@/services/platform";
 import type { AiEngineMode } from "@/services/ai-mode";
 import {
   DAILY_HISTORY_DAYS,
@@ -291,6 +302,15 @@ import {
 } from "@/services/daily-recommend";
 import type { DailyRecommendResult } from "@/services/daily-recommend";
 import type { DailyTaste } from "@/services/recommend-types";
+import { SOURCE_POLICY_CHANGED_EVENT } from "@/services/source-policy";
+import { SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
+import { SOURCE_AUTH_CHANGED_EVENT, readSourceMetaAuthIdentity, sourceMetaAuthCurrent } from "@/services/source-auth";
+import type { SourceMetaAuthIdentity } from "@/services/source-auth";
+import { readRecommendationChoice, recommendationChoiceRevision, recommendationChoiceCurrent, RECOMMENDATION_SOURCE_CHANGED_EVENT } from "@/stores/recommendation-source";
+import type { RecommendationChoice } from "@/stores/recommendation-source";
+import { prepareAccountRecommendationContext, accountRecommendationContextCurrent, accountRecommendationErrorMessage } from "@/services/account-recommendation";
+import type { AccountRecommendationContext } from "@/services/account-recommendation";
+import QtRecommendationSourceControl from "@/uni_modules/qt-ui/components/qt-recommendation-source-control/qt-recommendation-source-control.uvue";
 
 const player = usePlayerStore();
 const themeStore = useThemeStore();
@@ -337,6 +357,12 @@ function clearHeadTimers(): void {
   for (let i = 0; i < headTimers.length; i++) clearTimeout(headTimers[i]);
   headTimers = [];
 }
+function disposeHeadMeasure(): void {
+  headAlive = false;
+  clearHeadTimers();
+}
+onBeforeUnmount(disposeHeadMeasure);
+onUnload(disposeHeadMeasure);
 function retryMeasureHead(attempt: number): void {
   if (!headAlive || attempt >= 5) return;
   headTimers.push(setTimeout(() => { measureHeadOffset(attempt + 1); }, 300) as number);
@@ -347,11 +373,13 @@ function measureHeadOffset(attempt: number): void {
   uni.createSelectorQuery()
     .select("#rc-scroll")
     .boundingClientRect((listRect: UniNodeInfo) => {
+      if (!headAlive || layout.isWide) return;
       const listTop = listRect != null ? listRect.top : 0;
       // 嵌套一次新查询拿操作条位置：不链式 select，避免 Vapor 下多节点链的未知行为
       uni.createSelectorQuery()
         .select("#rc-head")
         .boundingClientRect((headRect: UniNodeInfo) => {
+          if (!headAlive || layout.isWide) return;
           if (headRect != null && headRect.height > 0) {
             headOffset.value = Math.max(0, Math.round(headRect.top - listTop));
             return;
@@ -373,6 +401,15 @@ const progressText = ref("");
 const errorText = ref("");
 const taste = ref<DailyTaste>(readTaste());
 const stylePicked = ref<string[]>([]);
+const recommendationEpoch = ref(0);
+const accountMode = computed((): boolean => {
+  recommendationEpoch.value;
+  return readRecommendationChoice("daily").origin == "account";
+});
+let displayContext: AccountRecommendationContext | null = null;
+let displayIdentity: SourceMetaAuthIdentity | null = null;
+let observedChoice = readRecommendationChoice("daily");
+let observedChoiceRevision = recommendationChoiceRevision("daily");
 
 const songs = computed<Song[]>((): Song[] => {
   // 生成中列表清空（只显示骨架），避免「规则结果 + 骨架」叠在一起
@@ -383,16 +420,6 @@ const songs = computed<Song[]>((): Song[] => {
   for (let i = 0; i < r.items.length; i++) out.push(r.items[i].song);
   return out;
 });
-/** 推荐理由：按 platform+id 找回 items 里的 reason */
-function reasonOf(song: Song): string {
-  const r = result.value;
-  if (r == null) return "";
-  for (let i = 0; i < r.items.length; i++) {
-    const it = r.items[i];
-    if (it.song.platform == song.platform && it.song.id == song.id) return it.reason;
-  }
-  return "";
-}
 const displayPicUrl = computed((): string => (songs.value.length > 0 ? songs.value[0].picUrl : ""));
 
 // ==================== 列表内搜索 + 前端排序（同 pages/daily） ====================
@@ -467,6 +494,15 @@ const visibleSongs = computed<Song[]>(() => {
   return out;
 });
 
+/** TV身份取原始出现项，过滤/排序不把焦点交给同业务key的另一行。 */
+function tvSongOccurrenceId(song: Song, index: number): string {
+  if (!layout.isTv) return "";
+  let occurrence = 0;
+  const visible = visibleSongs.value;
+  for (let i = 0; i < index; i++) if (visible[i] === song) occurrence++;
+  return "daily-recommend:" + song.platform + ":" + song.id + ":" + songs.value.indexOf(song) + ":" + occurrence;
+}
+
 /** 操作条计数：过滤态显示「显示 M / N 首」 */
 const countText = computed(() =>
   filtering.value
@@ -512,7 +548,7 @@ const resultProfileText = computed((): string => {
 });
 const coldStart = computed((): boolean => {
   const r = result.value;
-  return r != null && r.coldStart === true;
+  return !accountMode.value && r != null && r.coldStart === true;
 });
 const styleOptions = computed<string[]>((): string[] => {
   const r = result.value;
@@ -534,92 +570,190 @@ const laneChips = computed<string[]>((): string[] => {
   }
   return out;
 });
-const modeLabel = computed((): string => DAILY_MODE_LABEL[readMode()]);
-/** 元信息行：日期 · 模式[ · 模型] · 口味 · 共 N 首 */
+const modeLabel = computed((): string => accountMode.value ? "官方账号" : DAILY_MODE_LABEL[readMode()]);
+/** 账号供给不显示应用画像/AI 模式，数量和顺序直接来自官方批次。 */
 const metaLine = computed((): string => {
   const r = result.value;
-  if (loading.value) return "生成中…";
-  const mode = DAILY_MODE_LABEL[r != null ? r.mode : readMode()];
-  const model = r != null && r.model != null && r.model.length > 0 ? " · " + r.model : "";
-  const t = DAILY_TASTE_LABEL[taste.value];
+  if (loading.value) return accountMode.value ? "正在读取官方日推…" : "生成中…";
   const date = r != null && r.date.length > 0 ? r.date : "";
   const count = songs.value.length > 0 ? " · 共 " + songs.value.length + " 首" : "";
-  return date + " · " + mode + model + " · " + t + count;
+  if (accountMode.value) {
+    const source = r != null && r.sourceId != null ? r.sourceId : readRecommendationChoice("daily").sourceId;
+    const nickname = r != null && r.accountNickname != null && r.accountNickname.length > 0 ? " · " + r.accountNickname : "";
+    return date + " · " + platformShort(source) + "官方日推" + nickname + count;
+  }
+  const mode = DAILY_MODE_LABEL[r != null ? r.mode : readMode()];
+  const model = r != null && r.model != null && r.model.length > 0 ? " · " + r.model : "";
+  return date + " · " + mode + model + " · " + DAILY_TASTE_LABEL[taste.value] + count;
 });
 
 // ==================== 生成 / 加载 ====================
 let running = false;
 let alive = true;
+let loadSeq = 0;
+function pageIdentityCurrent(seq: number, choice: RecommendationChoice, revision: number): boolean {
+  return alive && seq == loadSeq && recommendationChoiceCurrent("daily", choice, revision);
+}
+function pageRequestCurrent(seq: number, choice: RecommendationChoice, revision: number, context: AccountRecommendationContext | null): boolean {
+  return pageIdentityCurrent(seq, choice, revision) && (context == null || accountRecommendationContextCurrent(context));
+}
+function pageResultCurrent(seq: number, choice: RecommendationChoice, revision: number, context: AccountRecommendationContext | null): boolean {
+  if (pageRequestCurrent(seq, choice, revision, context)) return true;
+  if (pageIdentityCurrent(seq, choice, revision)) {
+    result.value = null;
+    errorText.value = "账号授权或推荐来源已变化，请重新获取";
+    displayContext = null;
+  }
+  return false;
+}
+async function preparePageContext(choice: RecommendationChoice): Promise<AccountRecommendationContext | null> {
+  displayContext = null;
+  displayIdentity = choice.origin == "account" ? readSourceMetaAuthIdentity(choice.sourceId) : null;
+  return choice.origin == "account" ? await prepareAccountRecommendationContext(choice.sourceId, "daily") : null;
+}
+function pageError(error: any, choice: RecommendationChoice): string {
+  return choice.origin == "account" ? "读取失败：" + accountRecommendationErrorMessage(error)
+    : "生成失败：" + (error instanceof Error ? error.message : String(error));
+}
 async function generate(force: boolean, tasteOverride: DailyTaste | null): Promise<void> {
-  if (running) return;
+  if (running || !alive) return;
+  const seq = ++loadSeq;
+  const choice = readRecommendationChoice("daily");
+  const revision = recommendationChoiceRevision("daily");
   running = true;
-  // 列表要整组换血（旧结果清空再填充新结果）：先回顶再动数据（§437 配方）
+  // 列表换血前回顶，旧搜索与排序跟随新结果复位。
   scrollTop.value = scrollTop.value == 0 ? 1 : 0;
   showBackToTop.value = false;
-  // 新结果换血后旧搜索词/排序口径一并复位（理由文案也随 items 全换）
   closeSearch();
   sortKey.value = "none";
   sortDesc.value = false;
   loading.value = true;
   progressText.value = "";
   errorText.value = "";
+  if (choice.origin == "account") result.value = null;
+  let context: AccountRecommendationContext | null = null;
   try {
+    context = await preparePageContext(choice);
+    if (!pageResultCurrent(seq, choice, revision, context)) return;
+    displayContext = context;
     const r = await generateDailyRecommend({
       force,
       taste: tasteOverride != null ? tasteOverride : taste.value,
       onProgress: (msg: string): void => {
-        if (alive) progressText.value = msg;
+        if (pageRequestCurrent(seq, choice, revision, context)) progressText.value = msg;
       },
     });
-    if (!alive) return;
+    if (!pageResultCurrent(seq, choice, revision, context)) return;
     result.value = r;
-    if (tasteOverride != null) taste.value = tasteOverride;
+    if (tasteOverride != null && choice.origin == "app") taste.value = tasteOverride;
     exitSelect();
     if (r.notice != null && r.notice.length > 0) qtShowToast(r.notice);
-  } catch (e) {
-    if (alive) errorText.value = "生成失败：" + (e instanceof Error ? e.message : String(e));
+  } catch (error) {
+    if (pageIdentityCurrent(seq, choice, revision)) {
+      if (choice.origin == "account") result.value = null;
+      errorText.value = pageError(error, choice);
+    }
   } finally {
-    running = false;
-    if (alive) {
+    if (pageIdentityCurrent(seq, choice, revision)) {
+      running = false;
       loading.value = false;
       progressText.value = "";
     }
   }
 }
-/** 首次进入：先吃当日缓存，没有再生成 */
+/** 缓存也必须在当前账号/授权 ACK 之后返回；错误是账号错误，不回退应用算法。 */
 async function load(force: boolean): Promise<void> {
-  if (!force) {
-    const cached = await loadTodayResult(readMode(), taste.value);
-    if (cached != null) {
-      result.value = cached;
+  if (!alive || running) return;
+  const seq = ++loadSeq;
+  const choice = readRecommendationChoice("daily");
+  const revision = recommendationChoiceRevision("daily");
+  loading.value = true;
+  errorText.value = "";
+  if (choice.origin == "account") result.value = null;
+  let context: AccountRecommendationContext | null = null;
+  try {
+    context = await preparePageContext(choice);
+    if (!pageResultCurrent(seq, choice, revision, context)) return;
+    displayContext = context;
+    if (!force) {
+      const cached = await loadTodayResult(readMode(), taste.value);
+      if (!pageResultCurrent(seq, choice, revision, context)) return;
+      if (cached != null) { result.value = cached; return; }
+    }
+    if (pageIdentityCurrent(seq, choice, revision)) await generate(force, null);
+  } catch (error) {
+    if (pageIdentityCurrent(seq, choice, revision)) {
+      result.value = null;
+      errorText.value = pageError(error, choice);
+    }
+  } finally {
+    if (pageIdentityCurrent(seq, choice, revision)) {
       loading.value = false;
-      return;
+      running = false;
+      progressText.value = "";
     }
   }
-  generate(force, null);
 }
-/** 换一批（强制重新生成，换 variant 种子） */
+function onSourcePolicyChanged(): void {
+  if (!alive) return;
+  loadSeq++;
+  recommendationEpoch.value++;
+  running = false;
+  displayContext = null;
+  displayIdentity = null;
+  result.value = null;
+  errorText.value = "";
+  progressText.value = "";
+  closeSearch();
+  sortKey.value = "none";
+  sortDesc.value = false;
+  loading.value = true;
+  sheetVisible.value = false;
+  modeSheetVisible.value = false;
+  moreMenuVisible.value = false;
+  sortSheetVisible.value = false;
+  batchPickerVisible.value = false;
+  exitSelect();
+  void load(false);
+}
+function onRecommendationSourceChanged(): void {
+  if (!alive || recommendationChoiceCurrent("daily", observedChoice, observedChoiceRevision)) return;
+  observedChoice = readRecommendationChoice("daily");
+  observedChoiceRevision = recommendationChoiceRevision("daily");
+  onSourcePolicyChanged();
+}
+function onSourceAuthChanged(): void {
+  if (!alive || !accountMode.value) return;
+  // Play-only and unrelated account changes must not clear an unchanged meta result.
+  if (displayContext != null && accountRecommendationContextCurrent(displayContext)) return;
+  if (displayContext == null && displayIdentity != null && sourceMetaAuthCurrent(displayIdentity)) return;
+  onSourcePolicyChanged();
+}
+/** 用户明确刷新官方日推；不做应用算法补歌或重排。 */
 function regenerate(): void {
   if (loading.value) return;
-  generate(true, null);
+  void generate(true, null);
 }
-/** 切口味：保存后强制重生成 */
 function pickTaste(next: DailyTaste): void {
-  if (loading.value || next == taste.value) return;
+  if (accountMode.value || loading.value || next == taste.value) return;
   saveTaste(next);
-  generate(true, next);
+  void generate(true, next);
 }
-/** 冷启动按所选风格生成：必须先清当日缓存（loadTodayResult 会直接命中冷启动旧结果） */
 async function applyStyleSeeds(): Promise<void> {
-  if (stylePicked.value.length == 0) {
-    qtShowToast("先选几个风格");
+  if (!alive || accountMode.value) return;
+  if (stylePicked.value.length == 0) { qtShowToast("先选几个风格"); return; }
+  const choice = readRecommendationChoice("daily");
+  const revision = recommendationChoiceRevision("daily");
+  saveStyleSeeds(stylePicked.value);
+  try { await clearTodayResult(); }
+  catch (_) {
+    if (alive && recommendationChoiceCurrent("daily", choice, revision)) qtShowToast("推荐设置未能刷新，请重试");
     return;
   }
-  saveStyleSeeds(stylePicked.value);
-  await clearTodayResult();
-  generate(true, null);
+  if (alive && recommendationChoiceCurrent("daily", choice, revision)) void generate(true, null);
 }
 function toggleStyle(name: string): void {
+  if (accountMode.value) return;
   const i = stylePicked.value.indexOf(name);
   if (i >= 0) stylePicked.value.splice(i, 1);
   else if (stylePicked.value.length < DAILY_STYLE_SEED_MAX) stylePicked.value.push(name);
@@ -642,15 +776,24 @@ const modeSelectedIndex = computed((): number => {
   return m == "rule" ? 0 : -1;
 });
 function openModeSheet(): void {
+  if (!alive || accountMode.value) return;
   modeSheetVisible.value = true;
 }
 async function onModeSelect(_action: SheetAction, index: number): Promise<void> {
+  if (!alive || accountMode.value) return;
   const order: AiEngineMode[] = isQtAdmin() ? ["rule", "local", "server"] : ["rule", "local"];
+  if (index < 0 || index >= order.length) return;
+  const choice = readRecommendationChoice("daily");
+  const revision = recommendationChoiceRevision("daily");
   const next = order[index];
   if (next != readMode()) {
     saveMode(next);
-    await clearTodayResult();
-    generate(true, null);
+    try { await clearTodayResult(); }
+    catch (_) {
+      if (alive && recommendationChoiceCurrent("daily", choice, revision)) qtShowToast("推荐设置未能刷新，请重试");
+      return;
+    }
+    if (alive && recommendationChoiceCurrent("daily", choice, revision)) void generate(true, null);
   }
 }
 
@@ -660,9 +803,9 @@ function playAll(): void {
   if (visibleSongs.value.length == 0) return;
   player.play(visibleSongs.value[0], visibleSongs.value);
 }
-function onRowClick(song: Song): void {
-  if (selecting.value) toggleSelect(qtSongKey(song));
-  else player.playSingle(song);
+/** 行点击播放：选择态由 qt-song-row-lite 自己走 @select，这里只负责普通态播放 */
+function playSong(song: Song): void {
+  player.playSingle(song);
 }
 const {
   selecting,
@@ -676,6 +819,35 @@ const {
 } = useBatchSelect();
 const batch = useBatchActions();
 const batchPickerVisible = ref(false);
+// 单曲收藏面板：与每日新歌/歌单详情同款状态机（点红心 → 面板预勾选 → 确认提交）
+const showPicker = ref(false);
+const currentSong = ref<Song | null>(null);
+const pickerAnchorTop = ref(-1);
+function onPick(song: Song, event: any): void {
+  currentSong.value = song;
+  // 取点击坐标作为下拉面板展开锚点
+  if (event != null && event.detail != null) {
+    pickerAnchorTop.value = event.detail.y;
+  } else if (event != null && event.touches != null && event.touches.length > 0) {
+    pickerAnchorTop.value = event.touches[0].clientY;
+  } else {
+    pickerAnchorTop.value = -1;
+  }
+  showPicker.value = true;
+}
+function createPickerPlaylist(name: string): Playlist | null {
+  return player.createLocalPlaylist(name);
+}
+function getSelectedPlaylistIds(song: Song | null): string[] {
+  if (song == null) return [];
+  return player.pickerSelectedIds(song);
+}
+async function handlePickerConfirm(selectedIds: string[]): Promise<void> {
+  const song = currentSong.value;
+  if (song == null) return;
+  const changed = await player.applyPickerSelectionWithChoices(song, selectedIds);
+  qtShowToast({ title: changed ? "已更新收藏" : "未做更改", icon: "none" });
+}
 /** 已整单收藏的 Playlist id（面板预勾选） */
 const batchCheckedIds = computed<string[]>((): string[] => {
   const selected = selectedKeysOf();
@@ -743,19 +915,38 @@ watch(visibleSongs, (list: Song[]) => {
 });
 
 onMounted((): void => {
-  load(false);
+  uni.$on(SOURCE_POLICY_CHANGED_EVENT, onSourcePolicyChanged);
+  uni.$on(SOURCE_PACKS_CHANGED_EVENT, onSourcePolicyChanged);
+  uni.$on(SOURCE_AUTH_CHANGED_EVENT, onSourceAuthChanged);
+  uni.$on(RECOMMENDATION_SOURCE_CHANGED_EVENT, onRecommendationSourceChanged);
+  void load(false);
 });
-onUnmounted((): void => {
+function disposeRecommendationPage(): void {
+  if (!alive) return;
+  uni.$off(SOURCE_POLICY_CHANGED_EVENT, onSourcePolicyChanged);
+  uni.$off(SOURCE_PACKS_CHANGED_EVENT, onSourcePolicyChanged);
+  uni.$off(SOURCE_AUTH_CHANGED_EVENT, onSourceAuthChanged);
+  uni.$off(RECOMMENDATION_SOURCE_CHANGED_EVENT, onRecommendationSourceChanged);
+  loadSeq++;
   alive = false;
+  running = false;
+  displayContext = null;
+  displayIdentity = null;
   headAlive = false;
   clearHeadTimers();
-});
+}
+onBeforeUnmount(disposeRecommendationPage);
+onUnload(disposeRecommendationPage);
+onUnmounted(disposeRecommendationPage);
 </script>
 <style>
 .page { flex: 1; min-height: 0; }
 .page-wide { align-items: stretch; padding: 16px 20px 0; }
 .wide-left { flex-shrink: 0; margin-right: 16px; padding-bottom: 16px; }
 .whero { padding: 16px; flex-direction: column; border-width: 1px; border-style: solid; border-radius: 16px; }
+.whero-source { margin-bottom: 12px; }
+.source-item { padding-bottom: 12rpx; }
+.source-item-wide { padding-bottom: 8px; }
 .whero-cover { border-radius: 12px; background-color: rgba(255,255,255,0.2); }
 .wsk-l1 { margin-top: 14px; }
 .wsk-l2 { margin-top: 10px; }
@@ -808,29 +999,9 @@ onUnmounted((): void => {
 .play-all { margin-left: 14rpx; height: 60rpx; padding: 0 26rpx; border-radius: 30rpx; flex-direction: row; align-items: center; }
 .play-all-text { margin-left: 6rpx; }
 .head-batch { margin-left: 14rpx; width: 60rpx; height: 60rpx; border-width: 1px; border-style: solid; border-radius: 30rpx; align-items: center; justify-content: center; }
-.rc-item { padding: 0; }
-.rc-item-wide { padding: 0; }
-.rc-row { flex-direction: row; align-items: center; min-height: 128rpx; padding: 12rpx 32rpx; border-top-width: 1px; border-top-style: solid; }
-.rc-row-wide { min-height: 82px; padding: 10px 24px; }
-.rc-check-gap { margin-right: 16rpx; }
-.rc-check-gap-wide { margin-right: 8px; }
-.rc-idx { width: 48rpx; text-align: center; }
-.rc-idx-wide { width: 24px; }
-.rc-cover { width: 88rpx; height: 88rpx; border-radius: 12rpx; margin-left: 12rpx; flex-shrink: 0; }
-.rc-cover-wide { width: 58px; height: 58px; border-radius: 10px; margin-left: 6px; }
-.rc-info { flex: 1; min-width: 0; margin-left: 22rpx; flex-direction: column; }
-.rc-info-wide { margin-left: 16px; }
-/* 歌名与平台小签同行（与歌单详情 lite-tag 同款布局） */
-.rc-name-row { flex-direction: row; align-items: center; }
-.rc-name { flex-shrink: 1; min-width: 0; overflow: hidden; font-weight: 500; }
-.rc-name-wide { }
-/* 平台简写描边小签：不被歌名挤成 0 宽 */
-.rc-tag { flex-shrink: 0; margin-left: 12rpx; padding: 0 8rpx; border-width: 1px; border-style: solid; border-radius: 6rpx; }
-.rc-tag-wide { margin-left: 8px; padding: 0 5px; border-radius: 4px; }
-.rc-sub { margin-top: 10rpx; }
-.rc-sub-wide { margin-top: 6px; }
-.rc-more { width: 68rpx; height: 68rpx; align-items: center; justify-content: center; flex-shrink: 0; }
-.rc-more-wide { width: 40px; height: 40px; }
+/* 与每日新歌/歌单详情 .song-item 同口径：行容器高度显式锁死，列表回收时不会按内容重算。 */
+.rc-item { height: 128rpx; padding: 0; }
+.rc-item-wide { height: 82px; padding: 0; }
 .empty-item { padding: 80rpx 48rpx; flex-direction: column; align-items: center; }
 .empty-item-wide { padding: 40px 24px; }
 .empty-text { text-align: center; }

@@ -93,10 +93,11 @@ import QtOption from "@/uni_modules/qt-ui/components/qt-option/qt-option.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtEmpty from "@/uni_modules/qt-ui/components/qt-empty/qt-empty.uvue";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { fontScale, qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { fontScale, qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtContentWidth, qtColumnCount } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { qtOptionChipMinHeightPx, qtOptionChipWidthPx } from "@/uni_modules/qt-ui/composables/qt-option-metrics";
+import { QT_TV_TOKENS } from "@/uni_modules/qt-ui/composables/qt-tv-tokens";
 import { useQtSelectionReveal } from "@/uni_modules/qt-ui/composables/use-qt-selection-reveal";
 import { qtSelectionScrollOffset } from "@/uni_modules/qt-ui/composables/selection";
 import { musicApi, type Chart } from "@/services/music-api";
@@ -182,19 +183,19 @@ const gridWidth = computed((): number => measuredWidth.value > 0 ? measuredWidth
 const innerWidth = computed((): number => Math.max(1, gridWidth.value - padX.value * 2));
 const columns = computed((): number => layout.isWide ? qtColumnCount(innerWidth.value, 380, gapPx.value, 3) : 1);
 const cardWidth = computed((): number => Math.floor((innerWidth.value - (columns.value - 1) * gapPx.value) / columns.value));
-const headPx = computed((): number => Math.ceil((layout.isWide ? 17 : qtRpx(32)) * fontScale.scale * 1.4));
-const linePx = computed((): number => Math.max(layout.isWide ? 28 : qtRpx(50), Math.ceil((layout.isWide ? 13 : qtRpx(26)) * fontScale.scale * 1.4 + 4)));
+const headPx = computed((): number => layout.isTv ? Math.max(QT_TV_TOKENS.controlPx, Math.round(qtFontValuePx(17) * 1.4)) : Math.ceil((layout.isWide ? 17 : qtRpx(32)) * fontScale.scale * 1.4));
+const linePx = computed((): number => Math.max(layout.isTv ? QT_TV_TOKENS.controlPx : 0, layout.isWide ? 28 : qtRpx(50), Math.ceil((layout.isWide ? 13 : qtRpx(26)) * fontScale.scale * 1.4 + 4)));
 const coverPx = computed((): number => layout.isWide ? 84 : qtRpx(148));
 const bodyPx = computed((): number => Math.max(coverPx.value, linePx.value * 3));
 const bodyGap = computed((): number => layout.isWide ? 10 : qtRpx(20));
 const cardPad = computed((): number => layout.isWide ? 12 : qtRpx(24));
 const cardHeight = computed((): number => 2 + cardPad.value * 2 + headPx.value + bodyGap.value + bodyPx.value);
 const cardStride = computed((): number => cardHeight.value + gapPx.value);
-const viewportHeight = computed((): number => measuredHeight.value > 0 ? measuredHeight.value : Math.max(120, layout.windowHeight - (layout.isWide ? 156 : qtRpx(270))));
+const viewportHeight = computed((): number => measuredHeight.value > 0 ? measuredHeight.value : Math.max(120, layout.paneHeight - (layout.isWide ? 156 : qtRpx(270))));
 const skeletonCount = computed((): number => Math.min(8, chartDemandWindow(0, viewportHeight.value, cardStride.value, columns.value, 8).end));
-const sourceStripWidth = computed((): number => Math.max(1, gridWidth.value - (layout.isWide ? 68 : 0)));
+const sourceStripWidth = computed((): number => Math.max(1, gridWidth.value - (layout.isTv ? QT_TV_TOKENS.controlPx + 24 : layout.isWide ? 68 : 0)));
 const sourceStripStyle = computed((): string => "width:" + sourceStripWidth.value + "px;height:" + (qtOptionChipMinHeightPx() + 12) + "px;");
-const refreshStyle = computed((): string => "opacity:" + (loading.value || sources.value.length == 0 ? "0.45" : "1") + ";");
+const refreshStyle = computed((): string => "opacity:" + (loading.value || sources.value.length == 0 ? "0.45" : "1") + ";" + (layout.isTv ? "width:" + QT_TV_TOKENS.controlPx + "px;height:" + QT_TV_TOKENS.controlPx + "px;" : ""));
 const sourceGapPx = computed((): number => layout.isWide ? 8 : qtRpx(16));
 const sourceChipWidths = computed((): number[] => sources.value.map((id: string): number => qtOptionChipWidthPx(sourceRegistry.label(id), true)));
 const sourceRowWidth = computed((): number => {
@@ -223,24 +224,27 @@ function sourceOptionStyle(index: number): string {
 function sourceChipStyle(index: number): string {
   return "width:" + sourceChipWidths.value[index] + "px;height:" + qtOptionChipMinHeightPx() + "px;min-height:0;";
 }
-const smallMutedStyle = computed((): string => "color:" + theme.skin.textSubtle + ";" + qtFontDual(21, 11));
+const smallMutedStyle = computed((): string => "color:" + theme.skin.textSubtle + ";" + chartFont(21, 11));
 const gridStyle = computed((): string => "width:" + gridWidth.value + "px;padding:" + padY.value + "px " + padX.value + "px 0px;");
 function rankCardStyle(index: number): string {
   const right = index % columns.value < columns.value - 1 ? gapPx.value : 0;
   return "width:" + cardWidth.value + "px;height:" + cardHeight.value + "px;padding:" + cardPad.value + "px;margin-right:" + right + "px;margin-bottom:" + gapPx.value + "px;background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";";
 }
 const rankHeadingStyle = computed((): string => "height:" + headPx.value + "px;");
-const rankNameStyle = computed((): string => "color:" + theme.skin.text + ";" + qtFontDual(32, 17));
+function chartFont(baseRpx: number, widePx: number): string {
+  return qtFontDual(baseRpx, widePx) + (layout.isTv ? "line-height:" + Math.round(qtFontValuePx(widePx) * 1.4) + "px;" : "");
+}
+const rankNameStyle = computed((): string => "color:" + theme.skin.text + ";" + chartFont(32, 17));
 const rankBodyStyle = computed((): string => "height:" + bodyPx.value + "px;margin-top:" + bodyGap.value + "px;");
 const coverBoxStyle = computed((): string => "width:" + coverPx.value + "px;height:" + coverPx.value + "px;margin-right:" + (layout.isWide ? 12 : qtRpx(24)) + "px;");
 const coverStyle = computed((): string => "width:" + coverPx.value + "px;height:" + coverPx.value + "px;background-color:" + theme.skin.divider + ";");
 const coverTextStyle = computed((): string => "color:" + theme.skin.textSubtle + ";" + qtFontDual(46, 26));
 const previewLineStyle = computed((): string => "height:" + linePx.value + "px;");
-const previewNameStyle = computed((): string => "color:" + theme.skin.textMuted + ";" + qtFontDual(26, 13));
-const previewNumberStyle = computed((): string => "width:" + (layout.isWide ? 16 : qtRpx(28)) + "px;color:" + theme.skin.textSubtle + ";" + qtFontDual(22, 11));
+const previewNameStyle = computed((): string => "color:" + theme.skin.textMuted + ";" + chartFont(26, 13));
+const previewNumberStyle = computed((): string => "width:" + (layout.isWide ? 16 : qtRpx(28)) + "px;color:" + theme.skin.textSubtle + ";" + chartFont(22, 11));
 const skeletonHeadingStyle = computed((): string => "height:" + headPx.value + "px;background-color:" + theme.skin.divider + ";");
 const skeletonLineStyle = computed((): string => "height:" + Math.max(8, linePx.value - 10) + "px;margin-bottom:10px;background-color:" + theme.skin.divider + ";");
-const backTopStyle = computed((): string => "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";" + (layout.isWide ? "width:44px;height:44px;right:20px;bottom:20px;" : ""));
+const backTopStyle = computed((): string => "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";" + (layout.isTv ? "width:" + QT_TV_TOKENS.controlPx + "px;height:" + QT_TV_TOKENS.controlPx + "px;border-radius:" + (QT_TV_TOKENS.controlPx / 2) + "px;right:20px;bottom:20px;" : layout.isWide ? "width:44px;height:44px;right:20px;bottom:20px;" : ""));
 
 function current(seq: number): boolean { return pageAlive && pageVisible.value && seq == intent; }
 function cancelTop(): void {

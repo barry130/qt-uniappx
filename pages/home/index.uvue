@@ -9,20 +9,20 @@
           <SourceSwitcher class="home-source" @change="ensureLoad" />
           <view class="home-search" :class="[layout.isWide ? 'home-search-wide' : '']" :style="homeSearchStyle" @click="goSearch">
             <QtIcon name="search" :size="layout.isWide ? 16 : 24" :color="themeStore.skin.iconMuted" />
-            <text class="home-search-text" :class="[layout.isWide ? 'home-search-text-wide' : '']" :style="('color:' + themeStore.skin.placeholder + ';') + qtFontDual(23, 13)" :max-lines="1">{{ layout.isWide ? '搜索歌曲、歌手、专辑、歌单' : '搜索' }}</text>
+            <text class="home-search-text" :class="[layout.isWide ? 'home-search-text-wide' : '']" :style="('color:' + themeStore.skin.placeholder + ';') + qtFontDual(23, 13) + (layout.isTv ? 'line-height:' + Math.round(qtFontValuePx(13) * 1.4) + 'px;' : '')" :max-lines="1">{{ layout.isWide ? '搜索歌曲、歌手、专辑、歌单' : '搜索' }}</text>
           </view>
-          <view class="home-bell" :class="[layout.isWide ? 'home-bell-wide' : '']" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'" @click="goNoticeCenter">
+          <view class="home-bell" :class="[layout.isWide ? 'home-bell-wide' : '']" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';' + (layout.isTv ? 'width:' + QT_TV_TOKENS.controlPx + 'px;height:' + QT_TV_TOKENS.controlPx + 'px;' : '')" @click="goNoticeCenter">
             <QtIcon name="bell" :size="layout.isWide ? 18 : 26" :color="themeStore.skin.icon" />
-            <view v-if="noticeStore.unreadCount > 0" class="home-bell-dot" :class="layout.isWide ? 'home-bell-dot-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';'"><text class="home-bell-dot-text" :class="layout.isWide ? 'home-bell-dot-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(16, 9)">{{ noticeStore.unreadCount > 99 ? "99+" : noticeStore.unreadCount }}</text></view>
+            <view v-if="noticeStore.unreadCount > 0" class="home-bell-dot" :class="layout.isWide ? 'home-bell-dot-wide' : ''" :style="'background-color:' + themeStore.skin.accent + ';' + (layout.isTv ? 'min-width:' + Math.round(qtFontValuePx(9) * 1.4) + 'px;height:' + Math.round(qtFontValuePx(9) * 1.4) + 'px;' : '')"><text class="home-bell-dot-text" :class="layout.isWide ? 'home-bell-dot-text-wide' : ''" :style="('color:' + themeStore.skin.onAccent + ';') + qtFontDual(16, 9) + (layout.isTv ? 'line-height:' + Math.round(qtFontValuePx(9) * 1.4) + 'px;' : '')">{{ noticeStore.unreadCount > 99 ? "99+" : noticeStore.unreadCount }}</text></view>
           </view>
         </view>
         <qt-notice-bar :notice="barNotice" @closed="barNotice = null" />
         <!-- 失败横条：非模态、不挡操作，点右侧重试整轮 -->
         <view v-if="loadFailed" class="home-fail" :class="layout.isWide ? 'home-fail-wide' : ''" :style="'background-color:' + themeStore.skin.surface + ';border-color:' + themeStore.skin.border + ';'">
           <QtIcon name="alert" :size="26" :color="themeStore.skin.warning" />
-          <text class="home-fail-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 13)" :max-lines="2">部分内容没加载出来，可能是网络或音源包的问题</text>
-          <view class="home-fail-btn" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="retryLoad">
-            <text class="home-fail-btn-text" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(22, 12)">重试</text>
+          <text class="home-fail-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(23, 13) + (layout.isTv ? 'line-height:' + Math.round(qtFontValuePx(13) * 1.4) + 'px;' : '')" :max-lines="2">部分内容没加载出来，可能是网络或音源包的问题</text>
+          <view class="home-fail-btn" :style="'background-color:' + themeStore.skin.accentSoft + ';' + (layout.isTv ? 'height:' + QT_TV_TOKENS.controlPx + 'px;min-width:' + QT_TV_TOKENS.controlPx + 'px;' : '')" @click="retryLoad">
+            <text class="home-fail-btn-text" :style="('color:' + themeStore.skin.accent + ';') + qtFontDual(22, 12) + (layout.isTv ? 'line-height:' + Math.round(qtFontValuePx(12) * 1.4) + 'px;' : '')">重试</text>
           </view>
         </view>
         <!-- 两种音源包都不内置：播放包（版权风险）与数据包（在线搜索/歌单/歌词）都由用户
@@ -31,11 +31,11 @@
              退回跳管理页，见 openPackSheetFromBanner），文案同步为「点此直接安装官方包」，
              避免「说去管理页、实际弹半屏」的文不对题；数据包引导仍只指路「音源包管理」页；
              本地音乐照常播放 -->
-        <view v-if="sourceUpdateStore.sourceMissing" class="source-tip" :class="layout.isWide ? 'source-tip-wide' : ''" :style="'background-color:' + themeStore.skin.accentSoft + ';'" @click="openPackSheetFromBanner">
+        <view v-if="sourceUpdateStore.sourceMissing" class="source-tip" :class="layout.isWide ? 'source-tip-wide' : ''" :style="'background-color:' + themeStore.skin.accentSoft + ';' + (layout.isTv ? 'min-height:' + QT_TV_TOKENS.controlPx + 'px;' : '')" @click="openPackSheetFromBanner">
           <QtIcon name="music" :size="26" :color="themeStore.skin.accent" />
           <view class="source-tip-copy" :class="layout.isWide ? 'source-tip-copy-wide' : ''">
-            <text class="source-tip-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(27, 15)" :max-lines="1">未安装播放音源包</text>
-            <text class="source-tip-desc" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12)" :max-lines="2">在线播放需要先安装播放音源包，点此直接安装官方包；本地音乐播放不受影响</text>
+            <text class="source-tip-title" :style="('color:' + themeStore.skin.text + ';') + qtFontDual(27, 15) + (layout.isTv ? 'line-height:' + Math.round(qtFontValuePx(15) * 1.4) + 'px;' : '')" :max-lines="1">未安装播放音源包</text>
+            <text class="source-tip-desc" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontDual(22, 12) + (layout.isTv ? 'line-height:' + Math.round(qtFontValuePx(12) * 1.4) + 'px;' : '')" :max-lines="2">在线播放需要先安装播放音源包，点此直接安装官方包；本地音乐播放不受影响</text>
           </view>
           <QtIcon name="chevron-right" :size="24" :color="themeStore.skin.iconMuted" />
         </view>
@@ -148,19 +148,19 @@
               <view class="wide-feature-scrim" :style="'background-color:' + themeStore.skin.mediaScrim + ';'" />
               <image v-if="featuredPicUrl != ''" class="wide-feature-cover" :style="wideFeatureCoverStyle" :src="featuredPicUrl" mode="aspectFill" />
               <view class="wide-feature-copy">
-                <text class="wide-feature-kicker" :style="qtFontPx(12)">今日精选</text>
-                <text class="wide-feature-title" :style="qtFontPx(23)" :max-lines="2">{{ featuredName }}</text>
-                <text class="wide-feature-desc" :style="qtFontPx(13)" :max-lines="1">{{ playlists.length > 0 ? '从一张好歌单，开始今天的音乐' : '正在寻找好音乐' }}</text>
+                <text class="wide-feature-kicker" :style="homeFontPx(12)">今日精选</text>
+                <text class="wide-feature-title" :style="homeFontPx(23)" :max-lines="2">{{ featuredName }}</text>
+                <text class="wide-feature-desc" :style="homeFontPx(13)" :max-lines="1">{{ playlists.length > 0 ? '从一张好歌单，开始今天的音乐' : '正在寻找好音乐' }}</text>
                 <view class="wide-feature-actions">
-                  <view class="wide-primary" @click="playFeatured"><QtIcon name="disc" :size="16" :color="themeStore.skin.accent" /><text class="wide-primary-text" :style="('color:' + themeStore.skin.accent + ';') + qtFontPx(13)">打开歌单</text></view>
-                  <view class="wide-secondary" @click="goPlaylists"><text class="wide-secondary-text" :style="qtFontPx(13)">更多歌单</text><QtIcon name="chevron-right" :size="14" color="#ffffff" /></view>
+                  <view class="wide-primary" :style="layout.isTv ? 'height:' + QT_TV_TOKENS.controlPx + 'px;' : ''" @click="playFeatured"><QtIcon name="disc" :size="16" :color="themeStore.skin.accent" /><text class="wide-primary-text" :style="('color:' + themeStore.skin.accent + ';') + homeFontPx(13)">打开歌单</text></view>
+                  <view class="wide-secondary" :style="layout.isTv ? 'height:' + QT_TV_TOKENS.controlPx + 'px;' : ''" @click="goPlaylists"><text class="wide-secondary-text" :style="homeFontPx(13)">更多歌单</text><QtIcon name="chevron-right" :size="14" color="#ffffff" /></view>
                 </view>
               </view>
             </view>
             <view class="wide-shortcuts" :class="hdHome.featureSplit && showPlaylists ? 'wide-shortcuts-split' : ''" :style="wideShortcutGroupStyle">
               <view v-for="(entry, index) in wideEntries" :key="entry.route" class="wide-shortcut" :class="!hdHome.featureSplit || !showPlaylists ? 'wide-shortcut-inline' : ''" :style="wideShortcutStyle(index)" hover-class="wide-row-hover" @click="openWideEntry(entry.route)">
                 <view class="wide-shortcut-icon" :style="'background-color:' + themeStore.skin.accentSoft + ';'"><QtIcon :name="entry.icon" :size="20" :color="themeStore.skin.accent" /></view>
-                <view class="wide-shortcut-copy" :class="!hdHome.featureSplit || !showPlaylists ? 'wide-shortcut-copy-inline' : ''"><text class="wide-shortcut-title" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(14)" :max-lines="1">{{ entry.title }}</text><text v-if="hdHome.featureSplit && showPlaylists" class="wide-shortcut-desc" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(12)" :max-lines="1">{{ entry.subtitle }}</text></view>
+                <view class="wide-shortcut-copy" :class="!hdHome.featureSplit || !showPlaylists ? 'wide-shortcut-copy-inline' : ''"><text class="wide-shortcut-title" :style="('color:' + themeStore.skin.text + ';') + homeFontPx(14)" :max-lines="1">{{ entry.title }}</text><text v-if="hdHome.featureSplit && showPlaylists" class="wide-shortcut-desc" :style="('color:' + themeStore.skin.textMuted + ';') + homeFontPx(12)" :max-lines="1">{{ entry.subtitle }}</text></view>
                 <QtIcon v-if="hdHome.featureSplit && showPlaylists" name="chevron-right" :size="14" :color="themeStore.skin.iconMuted" />
               </view>
             </view>
@@ -169,42 +169,42 @@
             <QtLocalMixes :mixes="localMixes" :embedded="true" :content-width="hdHome.innerPx" :card-width="hdHome.cardPx" />
           </view>
           <view v-if="showPlaylists" class="wide-panel">
-            <view class="wide-panel-head"><text class="wide-panel-title" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(20)">推荐歌单</text><view class="section-more" @click="goPlaylists"><text class="wide-more-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(13)">全部歌单</text><QtIcon name="chevron-right" :size="14" :color="themeStore.skin.iconMuted" /></view></view>
+            <view class="wide-panel-head"><text class="wide-panel-title" :style="('color:' + themeStore.skin.text + ';') + homeFontPx(20)">推荐歌单</text><view class="section-more" :style="layout.isTv ? 'height:' + QT_TV_TOKENS.controlPx + 'px;' : ''" @click="goPlaylists"><text class="wide-more-text" :style="('color:' + themeStore.skin.textMuted + ';') + homeFontPx(13)">全部歌单</text><QtIcon name="chevron-right" :size="14" :color="themeStore.skin.iconMuted" /></view></view>
             <scroll-view class="wide-playlist-scroll" direction="horizontal" :show-scrollbar="false" :style="wideShelfStyle">
               <view class="wide-playlist-row" :style="wideShelfRowStyle">
                 <QtSkeletonList v-if="loading && playlists.length == 0" kind="tile" :nowrap="true" :rows="8" :card-width="hdHome.cardPx" :gap="hdHome.cardGapPx" />
                 <view v-for="list in homePlaylists" :key="list.id + list.platform" class="wide-playlist-card" :style="'width:' + hdHome.cardPx + 'px;'" hover-class="shelf-card-hover" @click="openPlaylist(list)">
                   <image class="wide-playlist-cover" :style="'width:' + hdHome.cardPx + 'px;height:' + hdHome.cardPx + 'px;background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="list.picUrl" mode="aspectFill" />
-                  <text class="wide-playlist-name" :style="('color:' + themeStore.skin.text + ';line-height:' + 20 * fontScale.scale + 'px;') + qtFontPx(14)" :max-lines="2">{{ list.name }}</text>
-                  <text class="wide-playlist-count" :style="('color:' + themeStore.skin.textMuted + ';line-height:' + 17 * fontScale.scale + 'px;') + qtFontPx(12)" :max-lines="1">{{ formatCount(list.playCount) }} 次播放</text>
+                  <text class="wide-playlist-name" :style="('color:' + themeStore.skin.text + ';line-height:' + 20 * fontScale.scale + 'px;') + homeFontPx(14)" :max-lines="2">{{ list.name }}</text>
+                  <text class="wide-playlist-count" :style="('color:' + themeStore.skin.textMuted + ';line-height:' + 17 * fontScale.scale + 'px;') + homeFontPx(12)" :max-lines="1">{{ formatCount(list.playCount) }} 次播放</text>
                 </view>
-                <view v-if="!loading && playlists.length == 0" class="wide-empty"><text class="wide-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(12)">暂无推荐内容</text></view>
+                <view v-if="!loading && playlists.length == 0" class="wide-empty"><text class="wide-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + homeFontPx(12)">暂无推荐内容</text></view>
               </view>
             </scroll-view>
           </view>
           <view v-if="showLatest" class="wide-panel">
-            <view class="wide-panel-head"><text class="wide-panel-title" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(20)">新歌速递</text><view class="section-more" @click="showDaily"><text class="wide-more-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(13)">更多新歌</text><QtIcon name="chevron-right" :size="14" :color="themeStore.skin.iconMuted" /></view></view>
+            <view class="wide-panel-head"><text class="wide-panel-title" :style="('color:' + themeStore.skin.text + ';') + homeFontPx(20)">新歌速递</text><view class="section-more" :style="layout.isTv ? 'height:' + QT_TV_TOKENS.controlPx + 'px;' : ''" @click="showDaily"><text class="wide-more-text" :style="('color:' + themeStore.skin.textMuted + ';') + homeFontPx(13)">更多新歌</text><QtIcon name="chevron-right" :size="14" :color="themeStore.skin.iconMuted" /></view></view>
             <QtSkeletonList v-if="loading && songs.length == 0" kind="row" :rows="6" :columns="hdHome.songColumns" />
             <view v-for="(row, rowIndex) in wideSongRows" :key="'song-row-' + rowIndex" class="wide-song-grid">
               <view v-for="(song, columnIndex) in row" :key="song.id + song.platform" class="wide-song-row" :style="wideMusicCellStyle(columnIndex)" hover-class="wide-row-hover" @click="play(song)">
                 <image class="wide-song-cover" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="song.picUrl" mode="aspectFill" />
-                <view class="wide-song-info"><text class="wide-song-name" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(14)" :max-lines="1">{{ song.name }}</text><text class="wide-song-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(12)" :max-lines="1">{{ song.singer }}</text></view>
+                <view class="wide-song-info"><text class="wide-song-name" :style="('color:' + themeStore.skin.text + ';') + homeFontPx(14)" :max-lines="1">{{ song.name }}</text><text class="wide-song-meta" :style="('color:' + themeStore.skin.textMuted + ';') + homeFontPx(12)" :max-lines="1">{{ song.singer }}</text></view>
                 <view class="wide-song-play"><QtIcon name="play" :size="16" :color="themeStore.skin.iconMuted" /></view>
               </view>
             </view>
-            <view v-if="!loading && songs.length == 0" class="wide-empty"><text class="wide-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(12)">暂无新歌</text></view>
+            <view v-if="!loading && songs.length == 0" class="wide-empty"><text class="wide-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + homeFontPx(12)">暂无新歌</text></view>
           </view>
           <view v-if="showCharts" class="wide-panel">
-            <view class="wide-panel-head"><text class="wide-panel-title" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(20)">热门榜单</text><view class="section-more" @click="showChart"><text class="wide-more-text" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(13)">全部榜单</text><QtIcon name="chevron-right" :size="14" :color="themeStore.skin.iconMuted" /></view></view>
+            <view class="wide-panel-head"><text class="wide-panel-title" :style="('color:' + themeStore.skin.text + ';') + homeFontPx(20)">热门榜单</text><view class="section-more" :style="layout.isTv ? 'height:' + QT_TV_TOKENS.controlPx + 'px;' : ''" @click="showChart"><text class="wide-more-text" :style="('color:' + themeStore.skin.textMuted + ';') + homeFontPx(13)">全部榜单</text><QtIcon name="chevron-right" :size="14" :color="themeStore.skin.iconMuted" /></view></view>
             <QtSkeletonList v-if="loading && charts.length == 0" kind="row" :rows="6" :columns="hdHome.songColumns" />
             <view v-for="(row, rowIndex) in wideChartRows" :key="'chart-row-' + rowIndex" class="wide-song-grid">
               <view v-for="(chart, columnIndex) in row" :key="chart.id + chart.platform" class="wide-chart-row" :style="wideMusicCellStyle(columnIndex) + 'border-bottom-color:' + themeStore.skin.divider + ';'" hover-class="wide-row-hover" @click="openChart(chart)">
                 <image class="wide-chart-cover" :style="'background-color:' + themeStore.skin.coverPlaceholder + ';'" :src="chart.picUrl" mode="aspectFill" />
-                <view class="wide-chart-info"><text class="wide-chart-name" :style="('color:' + themeStore.skin.text + ';') + qtFontPx(14)" :max-lines="1">{{ chart.name }}</text><text class="wide-chart-meta" :style="('color:' + themeStore.skin.textMuted + ';') + qtFontPx(12)" :max-lines="1">{{ chart.description || '热门榜单' }}</text></view>
+                <view class="wide-chart-info"><text class="wide-chart-name" :style="('color:' + themeStore.skin.text + ';') + homeFontPx(14)" :max-lines="1">{{ chart.name }}</text><text class="wide-chart-meta" :style="('color:' + themeStore.skin.textMuted + ';') + homeFontPx(12)" :max-lines="1">{{ chart.description || '热门榜单' }}</text></view>
                 <QtIcon name="chevron-right" :size="16" :color="themeStore.skin.iconMuted" />
               </view>
             </view>
-            <view v-if="!loading && charts.length == 0" class="wide-empty"><text class="wide-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + qtFontPx(12)">暂无榜单</text></view>
+            <view v-if="!loading && charts.length == 0" class="wide-empty"><text class="wide-empty-text" :style="('color:' + themeStore.skin.textSubtle + ';') + homeFontPx(12)">暂无榜单</text></view>
           </view>
         </view>
       </scroll-view>
@@ -237,6 +237,7 @@
   </qt-page-frame>
 </template>
 <script setup lang="ts">
+import { sourcePolicyFingerprint, SOURCE_POLICY_CHANGED_EVENT } from "@/services/source-policy";
 import { qtShowToast } from "@/services/toast";
 import { formatBigCount } from "@/services/format";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
@@ -251,7 +252,8 @@ import ChartPage from "@/pages/chart/index.uvue";
 import SettingsPage from "@/pages/settings/index.uvue";
 import QtTabBar from "@/uni_modules/qt-ui/components/qt-tab-bar/qt-tab-bar.uvue";
 import { useQtTabBarSync } from "@/uni_modules/qt-ui/composables/use-qt-tab-bar";
-import { qtContentWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { qtContentWidth, qtColumnCount } from "@/uni_modules/qt-ui/composables/use-qt-widths";
+import { QT_TV_TOKENS } from "@/uni_modules/qt-ui/composables/qt-tv-tokens";
 import { qtHdHomeMetrics } from "@/uni_modules/qt-ui/composables/hd-layout";
 import { qtRailNavigate } from "@/uni_modules/qt-ui/composables/qt-nav";
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
@@ -286,7 +288,7 @@ import { qtTrackPage } from "@/uni_modules/qt-stat";
 import type { Notice } from "@/types/notice";
 import type { Playlist, Song } from "@/types/music";
 import type { Chart, Source } from "@/services/music-api";
-import { qtFontDual, qtFont, qtFontPx, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFont, qtFontPx, qtFontValuePx, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { logMsgErr } from "@/services/logger";
 import { buildLocalMixes, shouldShowLocalMixes, type LocalMix } from "@/services/local-mixes";
 import { useListenStatsStore } from "@/stores/listen-stats";
@@ -310,6 +312,9 @@ const updateDotPaths = computed<string[]>(() => sourceUpdateStore.updatePending 
 const themeStore = useThemeStore();
 const noticeStore = useNoticeStore();
 const layout = useQtLayout();
+function homeFontPx(basePx: number): string {
+  return qtFontPx(basePx) + (layout.isTv ? "line-height:" + Math.round(qtFontValuePx(basePx) * 1.4) + "px;" : "");
+}
 // 首页全屏弹窗占用态镜像的写入端（读取方是启动弹窗队列），见下方 watch(activePopup)
 const homePopupStore = useHomePopupStore();
 const statsStore = useListenStatsStore();
@@ -322,7 +327,7 @@ const showLocalMixes = computed<boolean>(() => shouldShowLocalMixes(statsStore.r
  * 和「推荐歌单」的卡架左右两端必然对齐。
  */
 const portraitSectionInner = computed<number>(() => {
-  const win = layout.windowWidth;
+  const win = layout.paneWidth;
   return Math.max(1, Math.round(win - win * (100 / 750)));
 });
 function refreshLocalMixes(): void {
@@ -446,6 +451,7 @@ onUnmounted(() => {
     upgradeTimer = null;
   }
   uni.$off(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
+  uni.$off(SOURCE_POLICY_CHANGED_EVENT, onPacksChanged);
   // 占用态放掉：首页销毁（tab 页常驻，这里是防御性收口）时不能让启动弹窗队列
   // 永远等一个不存在的弹窗
   homePopupStore.busy = false;
@@ -622,7 +628,7 @@ function ensureLoad(): void {
     });
 }
 function ensureLoadNow(): void {
-  const fp = packsFingerprint();
+  const fp = packsFingerprint() + sourcePolicyFingerprint();
   if (loadedSource == sourceStore.current && loadedPackFp == fp) return;
   loadedSource = sourceStore.current;
   loadedPackFp = fp;
@@ -698,6 +704,7 @@ onMounted(() => {
   refreshSourcePackState();
   applyNoticeBar();
   uni.$on(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
+  uni.$on(SOURCE_POLICY_CHANGED_EVENT, onPacksChanged);
 });
 onShow(() => {
   resetHomeBack();
@@ -839,17 +846,27 @@ function playFeatured(): void {
 const wideHomeWidth = computed<number>(() => qtContentWidth("grid"));
 const homeSearchStyle = computed((): string => {
   const base = "background-color:" + themeStore.skin.surface + ";border-color:" + themeStore.skin.border + ";";
-  return base + (layout.isWide ? "flex:none;width:" + Math.max(100, Math.min(480, wideHomeWidth.value - 230)) + "px;" : "");
+  return base + (layout.isWide ? "flex:none;width:" + Math.max(100, Math.min(480, wideHomeWidth.value - 230)) + "px;" : "") + (layout.isTv ? "height:" + QT_TV_TOKENS.controlPx + "px;" : "");
 });
-const hdHome = computed(() => qtHdHomeMetrics(wideHomeWidth.value, fontScale.scale));
+const hdHome = computed(() => {
+  const metrics = qtHdHomeMetrics(wideHomeWidth.value, fontScale.scale);
+  if (layout.isTv) {
+    const columns = qtColumnCount(metrics.innerPx, QT_TV_TOKENS.cardMinPx, metrics.cardGapPx, 8);
+    metrics.cardPx = Math.floor((metrics.innerPx - (columns - 1) * metrics.cardGapPx) / columns);
+  }
+  return metrics;
+});
 const wideHomeStyle = computed((): string => "width:" + wideHomeWidth.value + "px;");
-const wideFeatureStyle = computed((): string => "width:" + hdHome.value.featurePx + "px;min-height:" + Math.round(196 * Math.max(1, fontScale.scale)) + "px;background-color:" + themeStore.skin.accent + ";");
+const wideFeatureStyle = computed((): string => {
+  const minHeight = layout.isTv ? 82 + Math.round(qtFontValuePx(12) * 1.4) + Math.round(qtFontValuePx(23) * 1.4) * 2 + Math.round(qtFontValuePx(13) * 1.4) + QT_TV_TOKENS.controlPx * 2 : Math.round(196 * Math.max(1, fontScale.scale));
+  return "width:" + hdHome.value.featurePx + "px;min-height:" + minHeight + "px;background-color:" + themeStore.skin.accent + ";";
+});
 const wideFeatureCoverStyle = computed((): string => {
   const size = Math.min(136, Math.round(hdHome.value.featurePx * 0.24));
   return "width:" + size + "px;height:" + size + "px;";
 });
 const wideShortcutGroupStyle = computed((): string => "width:" + (hdHome.value.featureSplit && showPlaylists.value ? hdHome.value.shortcutPx : hdHome.value.innerPx) + "px;");
-const wideShelfStyle = computed((): string => "width:" + hdHome.value.innerPx + "px;height:" + Math.ceil(hdHome.value.cardPx + 18 + 57 * fontScale.scale) + "px;");
+const wideShelfStyle = computed((): string => "width:" + hdHome.value.innerPx + "px;height:" + Math.ceil(hdHome.value.cardPx + 18 + (layout.isTv ? Math.round(qtFontValuePx(14) * 1.4) * 2 + Math.round(qtFontValuePx(12) * 1.4) : 57 * fontScale.scale)) + "px;");
 const wideShelfRowStyle = computed((): string => "width:" + Math.max(hdHome.value.innerPx, (hdHome.value.cardPx + 12) * (loading.value && playlists.value.length == 0 ? 8 : Math.min(10, playlists.value.length))) + "px;");
 const wideEntries = [
   { title: "每日推荐", subtitle: "按你的口味发现音乐", icon: "sparkles", route: "/pages/daily-recommend/index" },
@@ -860,7 +877,8 @@ function openWideEntry(route: string): void { qtRailNavigate(route); }
 function wideShortcutStyle(index: number): string {
   const stacked = hdHome.value.featureSplit && showPlaylists.value;
   const width = stacked ? hdHome.value.shortcutPx : Math.floor((hdHome.value.innerPx - 24) / 3);
-  return "width:" + width + "px;min-height:" + Math.round(60 * Math.max(1, fontScale.scale)) + "px;margin-right:" + (!stacked && index < 2 ? 12 : 0) + "px;background-color:" + themeStore.skin.surface + ";";
+  const minHeight = layout.isTv ? Math.max(QT_TV_TOKENS.controlPx, 20 + (stacked ? Math.round(qtFontValuePx(14) * 1.4) + 4 + Math.round(qtFontValuePx(12) * 1.4) : 36 + 8 + Math.round(qtFontValuePx(14) * 1.4))) : Math.round(60 * Math.max(1, fontScale.scale));
+  return "width:" + width + "px;min-height:" + minHeight + "px;margin-right:" + (!stacked && index < 2 ? 12 : 0) + "px;background-color:" + themeStore.skin.surface + ";";
 }
 const wideSongRows = computed<Song[][]>(() => {
   const rows: Song[][] = [];
@@ -875,11 +893,12 @@ const wideChartRows = computed<Chart[][]>(() => {
   return rows;
 });
 function wideMusicCellStyle(column: number): string {
-  return "width:" + hdHome.value.songPx + "px;min-height:" + Math.ceil(64 * Math.max(1, fontScale.scale)) + "px;margin-right:" + (column < hdHome.value.songColumns - 1 ? 24 : 0) + "px;";
+  const minHeight = layout.isTv ? Math.max(QT_TV_TOKENS.rowPx, 22 + Math.round(qtFontValuePx(14) * 1.4) + Math.round(qtFontValuePx(12) * 1.4)) : Math.ceil(64 * Math.max(1, fontScale.scale));
+  return "width:" + hdHome.value.songPx + "px;min-height:" + minHeight + "px;margin-right:" + (column < hdHome.value.songColumns - 1 ? 24 : 0) + "px;";
 }
 /** 横滑架卡间距：与歌单网格同宽 14rpx，卡宽用 px 时它也必须换算成 px 才能对齐。
     换算规则与 qtRpx 一致（1rpx = windowWidth / 750，uni-app x 没有任何封顶），
-    但必须显式读 layout.windowWidth，否则这个 computed 没有响应式依赖，
+    但必须显式读 layout.paneWidth，否则这个 computed 没有响应式依赖，
     窗口变化后会被 Vue 缓存住不再重算 */
 const shelfGapPx = computed<number>(() => {
   return Math.round(14 * (layout.windowWidth / 750));
@@ -893,7 +912,7 @@ const shelfGapPx = computed<number>(() => {
  * 在宽窗口按 375 基准折算），所以卡宽会跟着窗口一起长。
  */
 const shelfCardWidth = computed<number>(() => {
-  const win = layout.windowWidth;
+  const win = layout.paneWidth;
   const inner = win - win * (100 / 750);
   const gap = win * (14 / 750);
   return Math.min(Math.round(qtRpx(340)), Math.max(112, Math.floor((inner - gap * 2) / 2.5)));
@@ -914,7 +933,7 @@ const heroStyle = computed<string>(() => "background-color:" + themeStore.skin.a
  *  磁贴带 margin-right 14rpx（含行尾），因此每行减 2 份间距；flex-wrap 按 2 枚换行
  *  （2026-11-04 起磁贴共 6 枚常显时排 3 行：原四枚在前，私人 FM / 播客 随后换行）。 */
 const quickPillWidth = computed<number>(() => {
-  const win = layout.windowWidth;
+  const win = layout.paneWidth;
   const pad = win * (24 / 750);
   const gap = win * (14 / 750);
   return Math.floor((win - pad * 2 - gap * 2) / 2);

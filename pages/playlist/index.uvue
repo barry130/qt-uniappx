@@ -172,14 +172,14 @@
       </sticky-header>
       <list-item
         v-for="(song, index) in visibleTracks"
-        :key="song.platform + ':' + song.id"
+        :key="layout.isTv ? tvSongOccurrenceId(song, index) : song.platform + ':' + song.id"
         :id="'s-' + index"
-        class="song-item" :class="layout.isWide ? 'song-item-wide' : ''"
+        class="song-item" :class="layout.isWide ? 'song-item-wide' : ''" :style="qtTvSongRowStyle()"
       >
         <!-- 行点击完全交给组件自己（@play / @select），宿主不在这层 list-item 上
              再绑 @click：双层处理一次点击会把 play 触发两遍（组件发一次、冒泡到
              list-item 再来一次，pushTimeline/统计翻倍），daily 页同款口径 -->
-        <qt-song-row-lite :song="song" :use-picker="true" :selecting="selecting" :selected="isSelected(qtSongKey(song))" @play="play(song)" @more="openSheet" @pick="onPick" @select="onRowSelect(song)" />
+        <qt-song-row-lite :song="song" :tv-id="tvSongOccurrenceId(song, index)" :use-picker="true" :selecting="selecting" :selected="isSelected(qtSongKey(song))" @play="play(song)" @more="openSheet" @pick="onPick" @select="onRowSelect(song)" />
       </list-item>
       </sticky-section>
       <!-- 搜索无结果：必须留在 sticky-section 外（鸿蒙端 section 只允许
@@ -197,7 +197,18 @@
       :actions="sheetActions"
       @select="onSheetSelect"
     />
-    <!-- 三点菜单：单项「更改歌曲排序方式」，点击后打开排序面板 -->
+    <QtSheet v-model:visible="followSheetVisible" title="跟随原歌单更新" :subtitle="followSummary" :dismissible="!followBusy">
+      <view class="follow-controls">
+        <text :style="'color:' + themeStore.skin.text + ';' + qtFontDual(26, 14)">本设备每天检查</text>
+        <QtSwitch :model-value="followEnabled" :disabled="followBusy" @change="toggleFollow" />
+        <QtButton label="检查变化" size="sm" :disabled="followBusy" @click="checkFollow" />
+      </view>
+      <scroll-view direction="vertical" :style="'height:' + Math.min(320, layout.paneHeight * 0.35) + 'px;'">
+        <text v-for="(line, index) in followLines" :key="index" class="follow-line" :style="'color:' + themeStore.skin.text + ';' + qtFontDual(25, 14)">{{ line }}</text>
+      </scroll-view>
+      <template #footer><view class="follow-controls"><QtButton v-if="followPreview != null" label="应用变化" :disabled="followBusy" @click="applyFollow" /></view></template>
+    </QtSheet>
+    <!-- 歌单菜单 -->
     <QtActionSheet
       v-model:visible="moreMenuVisible"
       title="歌单操作"
@@ -239,7 +250,11 @@
 import { qtShowToast } from "@/services/toast";
 import { qtConfirm } from "@/services/confirm";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
-import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import QtSheet from "@/uni_modules/qt-ui/components/qt-sheet/qt-sheet.uvue";
+import QtSwitch from "@/uni_modules/qt-ui/components/qt-switch/qt-switch.uvue";
+import { PLAYLIST_FOLLOW_CHANGED, playlistFollow, togglePlaylistFollow, previewPlaylistFollow, applyPlaylistFollow } from "@/services/playlist-follow";
+import type { FollowPreview } from "@/services/playlist-follow";
+import { ref, computed, onMounted, onBeforeUnmount, onUnmounted, watch } from "vue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
 import QtSkeleton from "@/uni_modules/qt-ui/components/qt-skeleton/qt-skeleton.uvue";
@@ -255,13 +270,14 @@ import { qtSongKey, useBatchSelect } from "@/uni_modules/qt-ui/composables/use-b
 import { useBatchActions } from "@/composables/use-batch-actions";
 import { useSongSheet } from "@/composables/use-song-sheet";
 import { useTrackSearch } from "@/composables/use-track-search";
+import { qtTvSongRowStyle } from "@/uni_modules/qt-ui/composables/qt-song-row-metrics";
 import { musicApi } from "@/services/music-api";
 import { usePlayerStore } from "@/stores/player";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { useQtLayout, qtRpx } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtContentWidth } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { detailLayoutMetrics } from "@/uni_modules/qt-ui/composables/detail-layout";
-import { onLoad, onShow } from "@dcloudio/uni-app";
+import { onLoad, onShow, onHide, onUnload, onBackPress } from "@dcloudio/uni-app";
 import { qtSetPageTitle } from "@/uni_modules/qt-ui/composables/qt-page-chrome";
 import { qtTrackPage } from "@/uni_modules/qt-stat";
 import type { Playlist, Song } from "@/types/music";
@@ -382,6 +398,15 @@ const visibleTracks = computed<Song[]>(() => {
   return out;
 });
 
+/** TV身份取原始出现项，过滤/排序不把焦点交给同业务key的另一行。 */
+function tvSongOccurrenceId(song: Song, index: number): string {
+  if (!layout.isTv) return "";
+  let occurrence = 0;
+  const visible = visibleTracks.value;
+  for (let i = 0; i < index; i++) if (visible[i] === song) occurrence++;
+  return "playlist:" + song.platform + ":" + song.id + ":" + tracks.value.indexOf(song) + ":" + occurrence;
+}
+
 /** 标题栏文案：歌单名（宽屏左栏有自己的标题，窄屏只在吸顶后展示） */
 const pageTitle = computed<string>(() => playlist.value?.name ?? "歌单");
 
@@ -411,6 +436,12 @@ function clearHeadTimers(): void {
   for (let i = 0; i < headTimers.length; i++) clearTimeout(headTimers[i]);
   headTimers = [];
 }
+function disposeHeadMeasure(): void {
+  headAlive = false;
+  clearHeadTimers();
+}
+onBeforeUnmount(disposeHeadMeasure);
+onUnload(disposeHeadMeasure);
 function retryMeasureHead(attempt: number): void {
   if (!headAlive || attempt >= 5) return;
   headTimers.push(
@@ -423,11 +454,13 @@ function measureHeadOffset(attempt: number): void {
   uni.createSelectorQuery()
     .select("#playlist-scroll")
     .boundingClientRect((listRect: UniNodeInfo) => {
+      if (!headAlive || layout.isWide) return;
       const listTop = listRect != null ? listRect.top : 0;
       // 嵌套一次新查询拿操作条位置：不链式 select，避免 Vapor 下多节点链的未知行为
       uni.createSelectorQuery()
         .select("#pl-head")
         .boundingClientRect((headRect: UniNodeInfo) => {
+          if (!headAlive || layout.isWide) return;
           if (headRect != null && headRect.height > 0) {
             headOffset.value = Math.max(0, Math.round(headRect.top - listTop));
             return;
@@ -470,14 +503,63 @@ function onHeaderAction(name: string): void {
 
 // ==================== 三点弹单项菜单，再进排序面板 ====================
 const moreMenuVisible = ref(false);
-const moreMenuActions = computed((): SheetAction[] => [{ name: "更改歌曲排序方式" }]);
+const moreMenuActions = computed((): SheetAction[] => {
+  const actions: SheetAction[] = [{ name: "更改歌曲排序方式" }];
+  if (playlist.value != null && playlist.value.platform == "local") actions.push({ name: "跟随原歌单更新" });
+  return actions;
+});
 function openMoreMenu(): void {
-  if (loading.value || tracks.value.length == 0) return;
+  if (loading.value) return;
   moreMenuVisible.value = true;
 }
 function onMoreMenuSelect(_action: SheetAction, _index: number): void {
   moreMenuVisible.value = false;
+  if (_index == 1) { openFollow(); return; }
   sortSheetVisible.value = true;
+}
+
+const followSheetVisible = ref(false);
+const followEnabled = ref(false);
+const followBusy = ref(false);
+const followSummary = ref("");
+const followLines = ref<string[]>([]);
+const followPreview = ref<FollowPreview | null>(null);
+function followPid(): string { const p = playlist.value; return p != null ? (p.pid ?? p.id) : ""; }
+function refreshFollowStatus(): void {
+  const record = playlistFollow(followPid());
+  if (record == null) throw new Error("该歌单未关联来源；导入歌曲时可开启跟随");
+  followEnabled.value = record.enabled;
+  followSummary.value = (record.enabled ? "本设备每天检查" : "已暂停") + " · " + (record.checkedAt > 0 ? new Date(record.checkedAt).toLocaleString() : "尚未检查") + (record.error.length > 0 ? " · " + record.error : "");
+}
+function openFollow(): void {
+  try { refreshFollowStatus(); followPreview.value = null; followLines.value = ["保留手动增删，仅应用完整来源列表。"]; followSheetVisible.value = true; }
+  catch (e) { qtShowToast({ title: (e as Error).message, icon: "none" }); }
+}
+function toggleFollow(_enabled: boolean): void {
+  try { togglePlaylistFollow(followPid()); followPreview.value = null; refreshFollowStatus(); }
+  catch (e) { qtShowToast({ title: (e as Error).message, icon: "none" }); }
+}
+async function checkFollow(): Promise<void> {
+  if (followBusy.value) return;
+  followBusy.value = true;
+  try {
+    const preview = await previewPlaylistFollow(followPid());
+    if (!headAlive || !followSheetVisible.value) return;
+    followPreview.value = preview;
+    followSummary.value = "新增 " + preview.added.length + " 首，移除 " + preview.removed.length + " 首";
+    followLines.value = preview.added.map((s: Song): string => "＋ " + s.name + " · " + s.singer).concat(preview.removed.map((s: Song): string => "－ " + s.name + " · " + s.singer));
+    if (followLines.value.length == 0) followLines.value = ["没有曲目变化，应用后更新检查时间。"];
+  } catch (e) { followSummary.value = (e as Error).message; }
+  finally { followBusy.value = false; }
+}
+function applyFollow(): void {
+  const preview = followPreview.value;
+  if (preview == null || followBusy.value) return;
+  try {
+    applyPlaylistFollow(preview); followPreview.value = null;
+    tracks.value = player.songsOfPid(followPid()); refreshFollowStatus();
+    followLines.value = ["已应用变化"];
+  } catch (e) { followSummary.value = (e as Error).message; }
 }
 
 const sortSheetVisible = ref(false);
@@ -637,7 +719,19 @@ onLoad((query) => {
   }
 });
 
+function onFollowChanged(): void {
+  if (platform == "local" && playlist.value != null) tracks.value = player.songsOfPid(followPid());
+  followPreview.value = null;
+  if (followSheetVisible.value) refreshFollowStatus();
+}
+uni.$on(PLAYLIST_FOLLOW_CHANGED, onFollowChanged);
+onHide(() => { followSheetVisible.value = false; followPreview.value = null; });
+onBackPress((): boolean => {
+  if (!followSheetVisible.value) return false;
+  followSheetVisible.value = false; followPreview.value = null; return true;
+});
 onShow(() => {
+  onFollowChanged();
   qtTrackPage("pages/playlist/index");
 });
 
@@ -722,6 +816,8 @@ onMounted(() => {
   });
 });
 onUnmounted(() => {
+  uni.$off(PLAYLIST_FOLLOW_CHANGED, onFollowChanged);
+  followSheetVisible.value = false;
   // 量吸顶阈值用 createSelectorQuery：页面原生 UniPage 反注册后再 .exec()
   // 会抛 "UTS instance N is not registered"，必须停掉重试并置存活标志
   headAlive = false;
@@ -864,6 +960,8 @@ async function handlePickerConfirm(selectedIds: string[]): Promise<void> {
 }
 </script>
 <style>
+.follow-controls { flex-direction: row; align-items: center; justify-content: space-between; padding: 16px; }
+.follow-line { padding: 10px 16px; }
 .page { flex:1; }
 .scroll { flex:1; min-height:0; min-width:0; }
 /* list-item 不支持 margin，用 padding */

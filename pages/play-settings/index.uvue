@@ -45,6 +45,14 @@
                 <QtIcon name="chevron-right" :size="layout.isWide ? 18 : 28" :color="theme.skin.iconMuted" />
               </view>
             </view>
+            <view class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showPitchControls">
+              <QtIcon class="cell-icon cell-icon-wide" name="chart" :size="layout.isWide ? 22 : 36" color="#b485ce" />
+              <text class="cell-label cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 16)">升降调</text>
+              <view class="cell-right" :class="layout.isWide ? 'cell-right-wide' : ''">
+                <text class="cell-value cell-value-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ pitchLabel() }}</text>
+                <QtIcon v-if="capabilities.pitch" name="chevron-right" :size="layout.isWide ? 18 : 28" :color="theme.skin.iconMuted" />
+              </view>
+            </view>
             <view class="cell cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showConcurrent">
               <QtIcon class="cell-icon cell-icon-wide" name="sliders" :size="layout.isWide ? 22 : 36" color="#4fb186" />
               <text class="cell-label cell-title cell-title-wide" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 16)">同时播放</text>
@@ -76,7 +84,7 @@
                 <text class="cell-desc cell-desc-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">以 32bit 浮点混音输出，省掉 16bit 量化；出现爆音/无声请关回。</text>
               </view>
               <view class="cell-right" :class="layout.isWide ? 'cell-right-wide' : ''">
-                <qt-switch :disabled="!effectsSupported" :model-value="floatOutput" @change="toggleFloatOutput" />
+                <qt-switch :disabled="!capabilities.floatOutput" :model-value="floatOutput" @change="toggleFloatOutput" />
               </view>
             </view>
             <view class="cell cell-wide gapless-cell gapless-cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="togglePreferSw">
@@ -86,7 +94,7 @@
                 <text class="cell-desc cell-desc-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">改用软件解码器，换兼容性与稳定性；默认硬件解码更省电。</text>
               </view>
               <view class="cell-right" :class="layout.isWide ? 'cell-right-wide' : ''">
-                <qt-switch :disabled="!effectsSupported" :model-value="preferSw" @change="togglePreferSw" />
+                <qt-switch :disabled="!capabilities.softwareDecoder" :model-value="preferSw" @change="togglePreferSw" />
               </view>
             </view>
             <view class="cell cell-no-border cell-wide gapless-cell gapless-cell-wide" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleEnhance">
@@ -96,7 +104,7 @@
                 <text class="cell-desc cell-desc-wide" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">整体响度 +3dB；母带本就很响的曲子可能削波，默认关闭。</text>
               </view>
               <view class="cell-right" :class="layout.isWide ? 'cell-right-wide' : ''">
-                <qt-switch :disabled="!effectsSupported" :model-value="enhanceOn" @change="toggleEnhance" />
+                <qt-switch :disabled="!capabilities.volumeEnhancement" :model-value="enhanceOn" @change="toggleEnhance" />
               </view>
             </view>
           </view>
@@ -140,6 +148,14 @@
             <QtIcon name="chevron-right" :size="layout.isWide ? 18 : 28" :color="theme.skin.iconMuted" />
           </view>
         </view>
+        <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showPitchControls">
+          <QtIcon class="cell-icon" :class="layout.isWide ? 'cell-icon-wide' : ''" name="chart" :size="layout.isWide ? 22 : 36" color="#b485ce" />
+          <text class="cell-label cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 16)">升降调</text>
+          <view class="cell-right" :class="layout.isWide ? 'cell-right-wide' : ''">
+            <text class="cell-value" :class="layout.isWide ? 'cell-value-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 14)">{{ pitchLabel() }}</text>
+            <QtIcon v-if="capabilities.pitch" name="chevron-right" :size="layout.isWide ? 18 : 28" :color="theme.skin.iconMuted" />
+          </view>
+        </view>
         <view class="cell" :class="layout.isWide ? 'cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="showConcurrent">
           <QtIcon class="cell-icon" :class="[layout.isWide ? 'cell-icon-wide' : '']" name="sliders" :size="layout.isWide ? 22 : 36" color="#4fb186" />
           <text class="cell-label cell-title" :class="layout.isWide ? 'cell-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(28, 16)">同时播放</text>
@@ -170,7 +186,7 @@
             <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">以 32bit 浮点混音输出，省掉 16bit 量化；出现爆音/无声请关回。</text>
           </view>
           <view class="cell-right" :class="layout.isWide ? 'cell-right-wide' : ''">
-            <qt-switch :disabled="!effectsSupported" :model-value="floatOutput" @change="toggleFloatOutput" />
+            <qt-switch :disabled="!capabilities.floatOutput" :model-value="floatOutput" @change="toggleFloatOutput" />
           </view>
         </view>
         <view class="cell gapless-cell" :class="layout.isWide ? 'cell-wide gapless-cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="togglePreferSw">
@@ -180,7 +196,7 @@
             <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">改用软件解码器，换兼容性与稳定性；默认硬件解码更省电。</text>
           </view>
           <view class="cell-right" :class="layout.isWide ? 'cell-right-wide' : ''">
-            <qt-switch :disabled="!effectsSupported" :model-value="preferSw" @change="togglePreferSw" />
+            <qt-switch :disabled="!capabilities.softwareDecoder" :model-value="preferSw" @change="togglePreferSw" />
           </view>
         </view>
         <view class="cell cell-no-border gapless-cell" :class="layout.isWide ? 'cell-wide gapless-cell-wide' : ''" :style="cellStyle" :hover-class="layout.isWide ? 'cell-hover' : 'none'" @click="toggleEnhance">
@@ -190,7 +206,7 @@
             <text class="cell-desc" :class="layout.isWide ? 'cell-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 13)">整体响度 +3dB；母带本就很响的曲子可能削波，默认关闭。</text>
           </view>
           <view class="cell-right" :class="layout.isWide ? 'cell-right-wide' : ''">
-            <qt-switch :disabled="!effectsSupported" :model-value="enhanceOn" @change="toggleEnhance" />
+            <qt-switch :disabled="!capabilities.volumeEnhancement" :model-value="enhanceOn" @change="toggleEnhance" />
           </view>
         </view>
       </view>
@@ -235,25 +251,30 @@
         <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">音乐缓存上限是播放过的歌曲在本地保留的音频总量，超出后按最早播放的依次清理。改小上限会在下次播放时重建缓存。</text>
       </view>
       <view class="hint">
-        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">{{ effectsSupported ? "浮点输出、软解优先、音量增强的改动在下一首或停止后重播生效，不会打断当前曲目。" : "当前平台暂不支持浮点输出、解码器选择和音量增强。" }}</text>
+        <text class="hint-text" :class="layout.isWide ? 'hint-text-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(22, 12)">{{ capabilities.floatOutput || capabilities.softwareDecoder ? "浮点输出和解码方式的改动在下一首或停止后重播生效，不会打断当前曲目。" : capabilities.volumeEnhancement ? "当前播放方式支持音量增强，暂不支持浮点输出和解码器选择。" : "当前播放方式暂不支持浮点输出、解码器选择和音量增强。" }}</text>
       </view>
     </scroll-view>
+
+    <QtPitchControls :visible="pitchSheetVisible" :value="sheetPitch" :supported="capabilities.pitch" @update:visible="pitchSheetVisible = $event" @change="changePitch" />
 
     <!-- 自定义缓存上限：页内输入弹层（uni.showModal 的 editable 输入框在 App 端不渲染） -->
     <qt-sheet :visible="cacheSheetVisible" title="自定义缓存上限" @close="closeCacheSheet">
       <view>
         <text class="cache-desc" :class="layout.isWide ? 'cache-desc-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">输入缓存大小（MB，≥ {{ cacheLimitMinMb }}，不设上限）</text>
+        <QtButton v-if="tv.enabled" label="输入数值" variant="outline" size="sm" @click="activateCacheInput" />
         <input
           class="cache-input"
-          :class="layout.isWide ? 'cache-input-wide' : ''"
-          :style="layout.isWide ? cacheInputStyleWide : cacheInputStyle"
+          :class="[layout.isWide ? 'cache-input-wide' : '', tv.enabled ? 'qt-tv-skip' : '']"
+          :style="tv.enabled ? cacheInputStyleTv : layout.isWide ? cacheInputStyleWide : cacheInputStyle"
           type="number"
           :value="cacheSheetValue"
           @input="onCacheSheetInput"
           placeholder="1024"
           :placeholder-class="layout.isWide ? 'cache-ph-wide' : 'cache-ph'"
           :maxlength="6"
-          :focus="cacheSheetVisible"
+          :focus="cacheSheetVisible && (!tv.enabled || cacheInputActive)"
+          @click="activateCacheInput"
+          @blur="onCacheInputBlur"
         />
         <text v-if="cacheSheetError.length > 0" class="cache-error" :class="layout.isWide ? 'cache-error-wide' : ''" :style="('color:' + theme.skin.danger + ';') + qtFontDual(22, 12)">{{ cacheSheetError }}</text>
         <view class="cache-btn-row" :class="layout.isWide ? 'cache-btn-row-wide' : ''">
@@ -279,18 +300,21 @@ import { qtShowActionSheet } from "@/services/action-sheet";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
 import { useQtTwoColumn } from "@/uni_modules/qt-ui/composables/use-qt-columns";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { computed, ref } from "vue";
-import { onShow } from "@dcloudio/uni-app";
+import { computed, ref, onMounted, onUnmounted } from "vue";
+import { onShow, onHide, onUnload } from "@dcloudio/uni-app";
 import type { SheetAction } from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtActionSheet from "@/uni_modules/qt-ui/components/qt-action-sheet/qt-action-sheet.uvue";
 import QtIcon from "@/uni_modules/qt-ui/components/qt-icon/qt-icon.uvue";
 import QtButton from "@/uni_modules/qt-ui/components/qt-button/qt-button.uvue";
+import { useQtTv, qtTvTokens } from "@/uni_modules/qt-ui/composables/use-qt-tv";
 import QtSwitch from "@/uni_modules/qt-ui/components/qt-switch/qt-switch.uvue";
 import QtSheet from "@/uni_modules/qt-ui/components/qt-sheet/qt-sheet.uvue";
 import { QT_PLAYBACK_RATES, QT_SLEEP_OPTIONS, qtSleepSelectedIndex } from "@/services/player-setting-options";
-import { audioPlayer, audioCapabilities } from "@/services/audio-player";
+import { audioPlayer, audioCapabilities, PLAYER_CAPABILITIES_CHANGED_EVENT, PLAYER_PITCH_CHANGED_EVENT } from "@/services/audio-player";
+import QtPitchControls from "@/uni_modules/qt-ui/components/qt-pitch-controls/qt-pitch-controls.uvue";
+import { audioDlnaActive } from "@/uni_modules/qt-audio-player";
 import { usePlayerStore } from "@/stores/player";
-import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx } from "@/uni_modules/qt-ui/stores/font-scale";
 import { QT_MINI_PLAYER_MODES, useMiniPlayerSettings, setMiniPlayerMode } from "@/uni_modules/qt-ui/stores/mini-player";
 
 /**
@@ -302,6 +326,7 @@ const player = usePlayerStore();
 /** 两列布局按共享内容列宽判定，三栏设置工作区可自动回退单列。 */
 const { layout, twoColumn, colStyle, colsStyle } = useQtTwoColumn();
 const theme = useThemeStore();
+const tv = useQtTv();
 const miniSettings = useMiniPlayerSettings();
 const miniModeIndex = computed((): number => QT_MINI_PLAYER_MODES.findIndex((option) => option.id == miniSettings.mode));
 const miniModeOption = computed(() => QT_MINI_PLAYER_MODES[miniModeIndex.value]);
@@ -335,7 +360,7 @@ function showCarLyric(): void {
   }, carLyricMode.value);
 }
 const groupStyle = computed<string>(() => "background-color:" + theme.skin.surface + ";border-color:" + theme.skin.border + ";");
-const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";");
+const cellStyle = computed<string>(() => "border-bottom-color:" + theme.skin.divider + ";" + (tv.enabled ? "min-height:" + qtTvTokens().rowPx + "px;" : ""));
 
 const sheetVisible = ref(false);
 const sheetTitle = ref("");
@@ -441,35 +466,107 @@ function toggleGapless(): void {
 }
 
 // ==================== 音质与输出（浮点输出 / 软解优先 / 音量增强） ====================
-// 三项都在原生**构建播放器时**生效（media3 的 RenderersFactory 只读一次）：
-// 播放中点开关不打断当前曲，空闲/已播完时原生会立刻重建，下一次播放即用新参数。
-// 默认全关 = 与改动前行为完全一致，避免默认给所有人套上音效链/软解耗电。
-const effectsSupported = audioCapabilities().outputEffects;
-const floatOutput = ref(effectsSupported && audioPlayer.floatOutput);
-const preferSw = ref(effectsSupported && audioPlayer.preferSoftwareDecoder);
-const enhanceOn = ref(effectsSupported && audioPlayer.enhanceEnabled);
+// 输出格式与解码器选择仅在 Android 开放；iOS 原生音效支持 EQ 与音量增强。
+const capabilities = ref(audioCapabilities());
+const floatOutput = ref(capabilities.value.floatOutput && audioPlayer.floatOutput);
+const preferSw = ref(capabilities.value.softwareDecoder && audioPlayer.preferSoftwareDecoder);
+const enhanceOn = ref(capabilities.value.volumeEnhancement && audioPlayer.enhanceEnabled);
+
+function refreshAudioCapabilities(): void {
+  capabilities.value = audioCapabilities();
+  floatOutput.value = capabilities.value.floatOutput && audioPlayer.floatOutput;
+  preferSw.value = capabilities.value.softwareDecoder && audioPlayer.preferSoftwareDecoder;
+  enhanceOn.value = capabilities.value.volumeEnhancement && audioPlayer.enhanceEnabled;
+}
+uni.$on(PLAYER_CAPABILITIES_CHANGED_EVENT, refreshAudioCapabilities);
+function stopCapabilityListener(): void { uni.$off(PLAYER_CAPABILITIES_CHANGED_EVENT, refreshAudioCapabilities); }
+onUnload(stopCapabilityListener);
+onUnmounted(stopCapabilityListener);
 
 
 function toggleFloatOutput(): void {
-  if (!audioCapabilities().outputEffects) { qtShowToast({ title: "当前平台暂不支持浮点输出", icon: "none" }); return; }
+  refreshAudioCapabilities();
+  if (!capabilities.value.floatOutput) { qtShowToast({ title: "当前播放方式不支持选择浮点输出", icon: "none" }); return; }
   floatOutput.value = !floatOutput.value;
   audioPlayer.setFloatOutput(floatOutput.value);
   qtShowToast({ title: "32bit 浮点输出已" + (floatOutput.value ? "开启" : "关闭"), icon: "none" });
 }
 function togglePreferSw(): void {
-  if (!audioCapabilities().outputEffects) { qtShowToast({ title: "当前平台暂不支持选择解码器", icon: "none" }); return; }
+  refreshAudioCapabilities();
+  if (!capabilities.value.softwareDecoder) { qtShowToast({ title: "当前播放方式不支持选择解码器", icon: "none" }); return; }
   preferSw.value = !preferSw.value;
   audioPlayer.setPreferSoftwareDecoder(preferSw.value);
   qtShowToast({ title: preferSw.value ? "已改为软解优先" : "已改为自动解码（硬件优先）", icon: "none" });
 }
 function toggleEnhance(): void {
-  if (!audioCapabilities().outputEffects) { qtShowToast({ title: "当前平台暂不支持音量增强", icon: "none" }); return; }
+  refreshAudioCapabilities();
+  if (!capabilities.value.volumeEnhancement) { qtShowToast({ title: "当前播放方式不支持音量增强", icon: "none" }); return; }
   enhanceOn.value = !enhanceOn.value;
   // 增益固定 +3dB：再高会在母带接近满刻度的曲目上削波（原生侧 12dB 上限只是兜底）
   if (enhanceOn.value) audioPlayer.setEnhanceGain(3);
   audioPlayer.setEnhanceEnabled(enhanceOn.value);
   qtShowToast({ title: "音量增强已" + (enhanceOn.value ? "开启（+3dB）" : "关闭"), icon: "none" });
 }
+
+// ==================== 保持原速升降调 ====================
+// 页面只接收真实服务回执：setPitch 返回 false 时保持上次确认值，不发成功提示。
+const sheetPitch = ref(0);
+const appliedPitch = ref(0);
+const pitchSheetVisible = ref(false);
+let pitchListenersActive = false;
+function pitchLabel(): string {
+  if (!capabilities.value.pitch) return audioDlnaActive() ? "DLNA 沿用原调" : "当前平台暂不支持";
+  if (appliedPitch.value == 0) return "原调";
+  return (appliedPitch.value > 0 ? "+" : "") + appliedPitch.value + " 半音";
+}
+function refreshPitchControls(): void {
+  if (!pitchListenersActive) return;
+  refreshAudioCapabilities();
+  appliedPitch.value = audioPlayer.getPitch();
+  sheetPitch.value = appliedPitch.value;
+}
+function showPitchControls(): void {
+  if (!pitchListenersActive) return;
+  refreshPitchControls();
+  if (!capabilities.value.pitch) { qtShowToast({ title: audioDlnaActive() ? "DLNA 接收设备使用原调播放" : "当前平台暂不支持升降调", icon: "none" }); return; }
+  pitchSheetVisible.value = true;
+}
+function changePitch(value: number): void {
+  if (!pitchListenersActive) { pitchSheetVisible.value = false; return; }
+  if (!pitchListenersActive || !pitchSheetVisible.value) return;
+  if (!capabilities.value.pitch) { pitchSheetVisible.value = false; return; }
+  if (!audioPlayer.setPitch(value)) {
+    appliedPitch.value = audioPlayer.getPitch();
+    sheetPitch.value = appliedPitch.value;
+    return;
+  }
+  // 同步回执之后才确认成功，公共服务发出的数字事件也走同一条显示路径。
+  refreshPitchControls();
+}
+function onPitchChanged(value: number): void {
+  if (!pitchListenersActive) return;
+  appliedPitch.value = value;
+  sheetPitch.value = value;
+}
+function startPitchListeners(): void {
+  if (pitchListenersActive) return;
+  pitchListenersActive = true;
+  uni.$on(PLAYER_PITCH_CHANGED_EVENT, onPitchChanged);
+  uni.$on(PLAYER_CAPABILITIES_CHANGED_EVENT, refreshPitchControls);
+  refreshPitchControls();
+}
+function stopPitchListeners(): void {
+  pitchSheetVisible.value = false;
+  if (!pitchListenersActive) return;
+  pitchListenersActive = false;
+  uni.$off(PLAYER_PITCH_CHANGED_EVENT, onPitchChanged);
+  uni.$off(PLAYER_CAPABILITIES_CHANGED_EVENT, refreshPitchControls);
+}
+onMounted(startPitchListeners);
+onShow(startPitchListeners);
+onHide(stopPitchListeners);
+onUnload(stopPitchListeners);
+onUnmounted(stopPitchListeners);
 
 // ==================== 音乐缓存上限 ====================
 
@@ -512,17 +609,27 @@ function showCacheLimit(): void {
 const cacheSheetVisible = ref(false);
 const cacheSheetValue = ref("");
 const cacheSheetError = ref("");
+const cacheInputActive = ref(false);
 /** 输入框填充底色 + 文字色 */
 const cacheInputStyle = computed<string>(() => "background-color:" + theme.skin.surfaceInset + ";color:" + theme.skin.text + ";border-radius:14rpx;");
 const cacheInputStyleWide = computed<string>(() => "background-color:" + theme.skin.surfaceInset + ";color:" + theme.skin.text + ";border-radius:8px;");
+const cacheInputStyleTv = computed<string>(() => cacheInputStyleWide.value + "height:" + qtTvTokens().controlPx + "px;font-size:" + qtFontValuePx(14) + "px;");
 
 function openCacheSheet(): void {
   cacheSheetValue.value = "";
   cacheSheetError.value = "";
+  cacheInputActive.value = false;
   cacheSheetVisible.value = true;
 }
 function closeCacheSheet(): void {
   cacheSheetVisible.value = false;
+  cacheInputActive.value = false;
+}
+function activateCacheInput(): void {
+  if (cacheSheetVisible.value) cacheInputActive.value = true;
+}
+function onCacheInputBlur(): void {
+  cacheInputActive.value = false;
 }
 function onCacheSheetInput(e: InputEvent): void {
   cacheSheetValue.value = e.detail.value;
@@ -536,6 +643,7 @@ function submitCacheSheet(): void {
     return;
   }
   cacheSheetVisible.value = false;
+  cacheInputActive.value = false;
   audioPlayer.setCacheLimitMb(mb);
   cacheLimitMb.value = audioPlayer.getCacheLimitMb();
   qtShowToast({ title: "音乐缓存上限：" + cacheLimitLabel(cacheLimitMb.value), icon: "none" });
@@ -549,9 +657,7 @@ onShow(() => {
   cacheLimitMb.value = audioPlayer.getCacheLimitMb();
   gapless.value = audioPlayer.getGapless();
   // 音质与输出三项：别处（清空数据、恢复备份）可能复位，进页面统一对账
-  floatOutput.value = audioPlayer.floatOutput;
-  preferSw.value = audioPlayer.preferSoftwareDecoder;
-  enhanceOn.value = audioPlayer.enhanceEnabled;
+  refreshAudioCapabilities();
 });
 
 </script>

@@ -23,7 +23,7 @@
         >
           <text
             class="cat-more-text" :max-lines="1"
-            :style="qtFontDual(24, 13) + 'color:' + theme.skin.textMuted + ';'"
+            :style="playlistFont(24, 13) + 'color:' + theme.skin.textMuted + ';'"
           >{{
             catPanelVisible ? "收起分类" : "全部分类（" + categories.length + "）"
           }}</text>
@@ -74,10 +74,10 @@
               class="grid-row-inner" :class="layout.isWide ? 'grid-row-inner-wide' : ''"
             >
               <view
-                v-for="item in row"
+                v-for="(item, columnIndex) in row"
                 :key="item.platform + ':' + item.id"
                 class="card" :class="layout.isWide ? 'card-wide' : ''"
-                :style="cardStyle"
+                :style="cardItemStyle(columnIndex)"
                 :hover-class="layout.isWide ? 'card-hover' : 'none'"
                 @click="openPlaylist(item)"
               >
@@ -85,10 +85,10 @@
                   <image class="cover" :style="coverStyle" :src="item.picUrl" mode="aspectFill" />
                   <view v-if="item.playCount.length > 0" class="cover-badge" :class="layout.isWide ? 'cover-badge-wide' : ''">
                     <QtIcon name="headset" :size="layout.isWide ? 11 : 20" color="#ffffff" />
-                    <text class="cover-badge-text" :class="layout.isWide ? 'cover-badge-text-wide' : ''" :style="qtFontDual(20, 11)">{{ formatBigCount(item.playCount) }}</text>
+                    <text class="cover-badge-text" :class="layout.isWide ? 'cover-badge-text-wide' : ''" :style="playlistFont(20, 11)">{{ formatBigCount(item.playCount) }}</text>
                   </view>
                 </view>
-                <text class="name" :class="layout.isWide ? 'name-wide' : ''" :max-lines="2" :style="qtFontDual(26, 15) + 'color:' + theme.skin.text + ';'">{{ item.name }}</text>
+                <text class="name" :class="layout.isWide ? 'name-wide' : ''" :max-lines="2" :style="playlistFont(26, 15) + 'color:' + theme.skin.text + ';'">{{ item.name }}</text>
               </view>
             </view>
             <!-- 骨架仅在请求尚未返回时出现。真实数据一到立即卸载：原生 list-view 下
@@ -106,7 +106,7 @@
                   v-for="ci in columns"
                   :key="'sk' + ri + '-' + ci"
                   class="card" :class="layout.isWide ? 'card-wide' : ''"
-                  :style="cardStyle"
+                  :style="cardItemStyle(ci - 1)"
                 >
                   <view class="sk-cover" :class="layout.isWide ? 'sk-cover-wide' : ''" :style="coverStyle"></view>
                   <view class="sk-line" :class="layout.isWide ? 'sk-line-wide' : ''"></view>
@@ -122,10 +122,10 @@
       <list-item v-for="(row, tailIndex) in tailRows" :key="'r' + tailIndex" class="grid-row">
         <view class="grid-row-inner" :class="layout.isWide ? 'grid-row-inner-wide' : ''">
           <view
-            v-for="item in row"
+            v-for="(item, columnIndex) in row"
             :key="item.platform + ':' + item.id"
             class="card" :class="layout.isWide ? 'card-wide' : ''"
-            :style="tailItemStyle(tailIndex)"
+            :style="tailItemStyle(tailIndex, columnIndex)"
             :hover-class="layout.isWide ? 'card-hover' : 'none'"
             @click="openPlaylist(item)"
           >
@@ -133,19 +133,19 @@
               <image class="cover" :style="coverStyle" :src="item.picUrl" mode="aspectFill" />
               <view v-if="item.playCount.length > 0" class="cover-badge" :class="layout.isWide ? 'cover-badge-wide' : ''">
                 <QtIcon name="headset" :size="layout.isWide ? 11 : 20" color="#ffffff" />
-                <text class="cover-badge-text" :class="layout.isWide ? 'cover-badge-text-wide' : ''" :style="qtFontDual(20, 11)">{{ formatBigCount(item.playCount) }}</text>
+                <text class="cover-badge-text" :class="layout.isWide ? 'cover-badge-text-wide' : ''" :style="playlistFont(20, 11)">{{ formatBigCount(item.playCount) }}</text>
               </view>
             </view>
-            <text class="name" :class="layout.isWide ? 'name-wide' : ''" :max-lines="2" :style="qtFontDual(26, 15) + 'color:' + theme.skin.text + ';'">{{ item.name }}</text>
+            <text class="name" :class="layout.isWide ? 'name-wide' : ''" :max-lines="2" :style="playlistFont(26, 15) + 'color:' + theme.skin.text + ';'">{{ item.name }}</text>
           </view>
         </view>
       </list-item>
       <!-- 尾部条目：空态 / 加载中 / 已加载全部，底部留白也由它承担 -->
       <list-item class="foot-item">
         <view class="foot-inner" :class="layout.isWide ? 'foot-inner-wide' : ''">
-          <text v-if="playlists.length == 0 && !loading" class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="qtFontDual(27, 16)">暂无歌单</text>
+          <text v-if="playlists.length == 0 && !loading" class="empty-text" :class="layout.isWide ? 'empty-text-wide' : ''" :style="playlistFont(27, 16)">暂无歌单</text>
           <qt-loading v-else-if="loadingMore" :visible="true" :size="44" />
-          <text v-else-if="!hasMore" class="foot-text" :class="layout.isWide ? 'foot-text-wide' : ''" :style="qtFontDual(24, 14)">已加载全部</text>
+          <text v-else-if="!hasMore" class="foot-text" :class="layout.isWide ? 'foot-text-wide' : ''" :style="playlistFont(24, 14)">已加载全部</text>
         </view>
       </list-item>
     </list-view>
@@ -160,6 +160,7 @@
     ></view>
     <view
       v-if="catPanelVisible"
+      ref="tvCatPanel"
       class="cat-panel" :class="layout.isWide ? 'cat-panel-wide' : ''"
       :style="catPanelStyle"
     >
@@ -194,10 +195,11 @@
   </qt-page-frame>
 </template>
 <script setup lang="ts">
+import { sourcePolicyFingerprint, SOURCE_POLICY_CHANGED_EVENT } from "@/services/source-policy";
 import { qtShowToast } from "@/services/toast";
 import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue";
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
-import { onShow } from "@dcloudio/uni-app";
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from "vue";
+import { onShow, onUnload } from "@dcloudio/uni-app";
 import { musicApi } from "@/services/music-api";
 import { formatBigCount } from "@/services/format";
 import { packsFingerprint, SOURCE_PACKS_CHANGED_EVENT } from "@/services/source-update";
@@ -212,11 +214,12 @@ import { useQtSelectionReveal } from "@/uni_modules/qt-ui/composables/use-qt-sel
 import QtBackToTop from "@/uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue";
 import QtSkeletonShine from "@/uni_modules/qt-ui/components/qt-skeleton-shine/qt-skeleton-shine.uvue";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtTvModal } from "@/uni_modules/qt-ui/composables/use-qt-tv-modal";
 import { qtContentWidth, qtColumnCount, QT_MIN_COLUMN_WIDTH } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { qtTrackError } from "@/uni_modules/qt-stat";
 import type { Playlist } from "@/types/music";
 import type { Source } from "@/services/music-api";
-import { qtFontDual, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtFontDual, qtFontValuePx, fontScale } from "@/uni_modules/qt-ui/stores/font-scale";
 import { qtOptionChipWidthPx, qtOptionChipMinHeightPx, qtOptionChipRows } from "@/uni_modules/qt-ui/composables/qt-option-metrics";
 import { logMsgErr } from "@/services/logger";
 
@@ -272,7 +275,7 @@ const theme = useThemeStore();
  * 窄屏栅格直接读全局响应式窗口宽。useQtLayout 每秒/旋转时会刷新它，
  * 不能只在 onMounted 抄一次；否则横竖屏切换后仍按旧宽度算列数和封面宽。
  */
-const screenWidth = computed((): number => layout.windowWidth);
+const screenWidth = computed((): number => layout.paneWidth);
 
 // 回到顶部
 const scrollTop = ref(0);
@@ -290,12 +293,7 @@ let diagReported = false;
 let measureFailReported = false;
 /** 本页所有延迟/重试定时器句柄：页面卸载时统一清掉，避免在已注销的实例上触发回调 */
 let viewportTimers: number[] = [];
-// 页面存活标志（onUnmounted 置 false）。
-// 不能只靠上面那份句柄：框架路由（reLaunch/redirectTo/navigateBack）是先 closeWebview
-// 销毁原生页、再 unmountPage 跑 onUnmounted，中间那段窗口原生 UniPage 已反注册而本页
-// 脚本还在，此时 createSelectorQuery().exec() 会走到 $nativePage.waitNativeRender，
-// 桥调用带着已反注册的 instanceId → "UTS instance N is not registered"。
-// 所以定时器回调进场先判这个标志。
+// 路由卸载与宽屏组件卸载都立即作废，测量及其异步回执共享这个标志。
 let viewportAlive = true;
 
 /**
@@ -309,6 +307,7 @@ function measureViewport(attempt: number = 0): void {
     uni.createSelectorQuery()
       .select("#pl-scroll")
       .boundingClientRect((rect: UniNodeInfo) => {
+        if (!viewportAlive) return;
         if (rect != null && rect.height > 0) {
           viewportHeight.value = rect.height;
           return;
@@ -407,11 +406,15 @@ const columns = computed((): number => {
 const cardWidth = computed((): number => {
   const cols = columns.value;
   const gap = gridGap.value;
+  if (layout.isTv) return Math.floor((gridInnerWidth.value - gap * (cols - 1)) / cols);
   const w = Math.floor((gridInnerWidth.value - gap * cols) / cols);
   if (!layout.isWide) return w;
   // 上限 200：再宽封面就抢了歌单名的主视觉，一行也放不下更多卡
   return w > 200 ? 200 : (w > 96 ? w : 96);
 });
+function playlistFont(baseRpx: number, widePx: number): string {
+  return qtFontDual(baseRpx, widePx) + (layout.isTv ? "line-height:" + Math.round(qtFontValuePx(widePx) * 1.4) + "px;" : "");
+}
 const cardStyle = computed(
   (): string =>
     "width:" + cardWidth.value + "px;margin-right:" + gridGap.value + "px;margin-bottom:" + (layout.isWide ? 14 : 18) + "px;"
@@ -419,6 +422,9 @@ const cardStyle = computed(
 const coverStyle = computed(
   (): string => "width:" + cardWidth.value + "px;height:" + cardWidth.value + "px;"
 );
+function cardItemStyle(columnIndex: number): string {
+  return cardStyle.value + (layout.isTv && columnIndex == columns.value - 1 ? "margin-right:0;" : "");
+}
 
 /**
  * 把歌单切成「一行 columns 张」的行数组。
@@ -467,8 +473,8 @@ const skeletonOn = computed((): boolean => loading.value && playlists.value.leng
 const shining = computed((): boolean => skeletonOn.value);
 
 /** 尾部行走 list-item 原生复用池，只写固定尺寸，避免滚动复用时出现空白行。 */
-function tailItemStyle(_tailIndex: number): string {
-  return cardStyle.value;
+function tailItemStyle(_tailIndex: number, columnIndex: number): string {
+  return cardItemStyle(columnIndex);
 }
 
 /** Preview and floating panel use the same chip metrics, with bounded row gaps. */
@@ -640,7 +646,7 @@ async function loadMore(): Promise<void> {
 }
 
 async function ensureLoad(): Promise<void> {
-  const fp = packsFingerprint();
+  const fp = packsFingerprint() + sourcePolicyFingerprint();
   if (loadedSource == sourceStore.current && loadedPackFp == fp) return;
   loadedSource = sourceStore.current;
   loadedPackFp = fp;
@@ -678,11 +684,13 @@ function selectCategory(category: string): void {
 const headerActions = ["grid"];
 const pageElement = ref<UniElement | null>(null);
 const catPanelVisible = ref(false);
+const tvCatPanel = ref<UniElement | null>(null);
+useQtTvModal(tvCatPanel, (): boolean => layout.isTv && catPanelVisible.value, closeCatPanel, 31);
 const toolbarHeight = ref(0);
 const pageHeight = ref(0);
 const panelTop = computed((): number => layout.isWide ? toolbarHeight.value + 4 : 0);
 // Compact page-frame fills the window; wide popovers keep the page's inner padding.
-const panelWidth = computed((): number => Math.max(1, layout.isWide ? qtContentWidth("grid") - 40 : layout.windowWidth));
+const panelWidth = computed((): number => Math.max(1, layout.isWide ? qtContentWidth("grid") - 40 : layout.paneWidth));
 const panelCategoryRows = computed((): CategoryCell[][] =>
   qtOptionChipRows(categories.value, Math.max(1, panelWidth.value - 34), 8));
 const catPanelStyle = computed((): string => {
@@ -693,13 +701,14 @@ const catPanelStyle = computed((): string => {
 });
 /** Bound to the actual page, which already reserves the fixed player and safe area. */
 const catPanelHeight = computed((): number => {
-  const available = (pageHeight.value > 0 ? pageHeight.value : layout.windowHeight * 0.75) - panelTop.value - 14;
-  const limit = Math.max(1, Math.min(available, layout.windowHeight * (layout.isWide ? 0.5 : 0.6)));
+  const available = (pageHeight.value > 0 ? pageHeight.value : layout.paneHeight * 0.75) - panelTop.value - 14;
+  const limit = Math.max(1, Math.min(available, layout.paneHeight * (layout.isWide ? 0.5 : 0.6)));
   if (!layout.isWide) return Math.floor(limit);
   const content = panelCategoryRows.value.length * (qtOptionChipMinHeightPx() + 8) + 24;
   return Math.ceil(Math.min(content, limit));
 });
 function measureCategoryPanel(): void {
+  if (!viewportAlive) return;
   const root = pageElement.value;
   if (root == null) return;
   const rect = root.getBoundingClientRect();
@@ -792,6 +801,7 @@ onMounted(() => {
   sourceRegistry.ensure();
   ensureLoad();
   uni.$on(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
+  uni.$on(SOURCE_POLICY_CHANGED_EVENT, onPacksChanged);
   // 首帧 list-view 还没完成布局，晚一点量（measureViewport 内部还有重试）
   viewportTimers.push(setTimeout(() => {
     measureViewport();
@@ -802,7 +812,8 @@ onShow(() => {
   ensureLoad();
   if (viewportHeight.value <= 0) measureViewport();
 });
-onUnmounted(() => {
+function disposeViewport(): void {
+  if (!viewportAlive) return;
   viewportAlive = false;
   // 页面卸载时清掉全部延迟/重试定时器，避免在已注销的 UTS 实例上触发回调
   for (const t of viewportTimers) {
@@ -810,7 +821,10 @@ onUnmounted(() => {
   }
   viewportTimers = [];
   uni.$off(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
-});
+  uni.$off(SOURCE_POLICY_CHANGED_EVENT, onPacksChanged);
+}
+onUnload(disposeViewport);
+onBeforeUnmount(disposeViewport);
 
 </script>
 

@@ -95,8 +95,8 @@
             <text class="all-head-title" :class="layout.isWide ? 'all-head-title-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(30, 20)">单曲</text>
             <text class="all-head-more" :class="layout.isWide ? 'all-head-more-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(24, 15)" @click="gotoType('song')">查看更多</text>
           </view>
-          <view v-for="item in allSongRows" :key="item.key" class="all-row">
-            <QtSongRowLite :song="item.song!" @play="play(item.song!)" @more="openSheet" />
+          <view v-for="(item, index) in allSongRows" :key="item.key" class="all-row" :style="qtTvSongRowStyle()">
+            <QtSongRowLite :song="item.song!" :tv-id="'search:all:' + item.key + ':' + index" @play="play(item.song!)" @more="openSheet" />
           </view>
         </view>
         </view>
@@ -186,13 +186,13 @@
         <!-- 播放全部已上移为类型条下方的悬浮条（play-all-float），不再占用
              list-item 槽位；这里只留骨架与数据行，虚拟滚动依旧稳定 -->
         <list-item
-          v-for="item in songRows"
+          v-for="(item, index) in songRows"
           :key="item.key"
-          class="row-item" :class="layout.isWide ? 'row-item-wide' : ''"
-          @click="openResult(item)"
+          class="row-item" :class="layout.isWide ? 'row-item-wide' : ''" :style="qtTvSongRowStyle()"
         >
           <QtSongRowLite
             :song="item.song!"
+            :tv-id="'search:song:' + item.key + ':' + index"
             @play="play(item.song!)"
             @more="openSheet"
           />
@@ -370,6 +370,7 @@
   </view>
   </qt-page-frame>
 </template><script setup lang="ts">
+import { sourcePolicyFingerprint, SOURCE_POLICY_CHANGED_EVENT } from "@/services/source-policy";
 import { qtShowToast } from "@/services/toast";
 import { logWarn } from "@/services/logger";
 import { formatBigCount } from "@/services/format";
@@ -377,8 +378,8 @@ import QtPageFrame from "@/uni_modules/qt-ui/components/qt-page-frame/qt-page-fr
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
 import { qtContentWidth, qtCanTwoColumn } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
-import { ref, reactive, computed, onMounted, onUnmounted, watch } from "vue";
-import { onShow } from "@dcloudio/uni-app";
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from "vue";
+import { onShow, onUnload } from "@dcloudio/uni-app";
 import QtSongRowLite from "@/uni_modules/qt-ui/components/qt-song-row-lite/qt-song-row-lite.uvue";
 import QtSkeletonList from "@/uni_modules/qt-ui/components/qt-skeleton-list/qt-skeleton-list.uvue";
 import QtLoading from "@/uni_modules/qt-ui/components/qt-loading/qt-loading.uvue";
@@ -401,6 +402,7 @@ import { qtTrackPage } from "@/uni_modules/qt-stat";
 import type { Song, Playlist, Artist, Album } from "@/types/music";
 import type { Source } from "@/services/music-api";
 import { qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
+import { qtTvSongRowStyle } from "@/uni_modules/qt-ui/composables/qt-song-row-metrics";
 
 /** 搜索结果统一行：混排歌曲/歌单/歌手/专辑，供 list-view 虚拟滚动复用 */
 type ResultRow = {
@@ -522,6 +524,7 @@ let loadedHotFp = "";
 // 表现为"切了音源页面却没反应"。所有异步写回前都校验代号是否仍是最新。
 let searchSeq = 0;
 let hotSeq = 0;
+let searchAlive = true;
 // 「全部」视图当前关键词+音源下是否已拉到四节首页（切回 tag 时免重复请求）
 let allLoaded = false;
 /** 「全部」聚合的展示门：四个板块全部返回后才整体展示，不边回边刷 */
@@ -681,7 +684,7 @@ async function loadHot(): Promise<void> {
 
 function ensureSource(): void {
   const current = sourceStore.current;
-  const fp = packsFingerprint();
+  const fp = packsFingerprint() + sourcePolicyFingerprint();
   if (loadedSource == current && loadedPackFp == fp) return;
   loadedSource = current;
   loadedPackFp = fp;
@@ -697,7 +700,7 @@ function ensureSource(): void {
 function onPacksChanged(): void {
   ensureSource();
 }
-/** 聚合音源白名单变了（音源包管理页改的）：清跨页去重并刷新进行中的聚合搜索；
+/** 聚合音源白名单变了（音源平台管理页改的）：清跨页去重并刷新进行中的聚合搜索；
  *  热词同样按白名单拉（用户没勾的源热词不要），落地区强制重拉 */
 function onAggSourcesChanged(): void {
   aggSeenKeys.clear();
@@ -720,6 +723,7 @@ onMounted(() => {
   loadHistory();
   ensureSource();
   uni.$on(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
+  uni.$on(SOURCE_POLICY_CHANGED_EVENT, onPacksChanged);
   uni.$on(AGGREGATE_SOURCES_CHANGED_EVENT, onAggSourcesChanged);
 });
 onShow(() => {
@@ -727,10 +731,17 @@ onShow(() => {
   sourceStore.restore();
   ensureSource();
 });
-onUnmounted(() => {
+function disposeSearch(): void {
+  if (!searchAlive) return;
+  searchAlive = false;
+  searchSeq++;
+  hotSeq++;
   uni.$off(SOURCE_PACKS_CHANGED_EVENT, onPacksChanged);
+  uni.$off(SOURCE_POLICY_CHANGED_EVENT, onPacksChanged);
   uni.$off(AGGREGATE_SOURCES_CHANGED_EVENT, onAggSourcesChanged);
-});
+}
+onBeforeUnmount(disposeSearch);
+onUnload(disposeSearch);
 
 const emptyShowSong = computed(() => songs.value.length == 0);
 const emptyShowPlaylist = computed(() => playlists.value.length == 0);
@@ -1113,6 +1124,8 @@ function switchType(index: number): void {
   searchCurrent(value);
 }
 async function searchCurrent(curType: string): Promise<void> {
+  if (!searchAlive) return;
+  const seq = searchSeq;
   const text = keyword.value.trim();
   // load-more 在途时不能直接丢弃本 tab 的首页加载：等它结束再补拉，
   // 否则新切到的 tab 永远不加载数据、还显示假「没有找到相关结果」空态。
@@ -1121,11 +1134,10 @@ async function searchCurrent(curType: string): Promise<void> {
   while (resultsLoadingMore.value && waited < 20000) {
     await new Promise<void>((r) => setTimeout(r, 200) as number);
     waited += 200;
-    if (type.value !== curType || !searched.value) return; // 用户已切走
+    if (!searchAlive || seq != searchSeq || type.value !== curType || !searched.value) return;
   }
-  if (resultsLoadingMore.value) return;
+  if (!searchAlive || seq != searchSeq || resultsLoadingMore.value) return;
   resultsLoadingMore.value = true;
-  const seq = searchSeq;
   try {
     if (curType == "all") {
       await runAllSections(text, seq);

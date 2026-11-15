@@ -53,7 +53,7 @@
           <text v-if="wallpaperError.length > 0" class="error-text" :class="layout.isWide ? 'error-text-wide' : ''" :style="('color:' + theme.skin.danger + ';') + qtFontDual(21, 12)">{{ wallpaperError }}</text>
         </qt-card>
 
-        <qt-card class="theme-card" title="自定义配色" description="点整行打开精确取色：拖滑动条调色相、饱和度与明度，也可直接输入色码。" elevated>
+        <qt-card class="theme-card" title="自定义配色" :description="tv.enabled ? '点整行打开精确取色：用减少、增加调色相、饱和度与明度，也可直接输入色码。' : '点整行打开精确取色：拖滑动条调色相、饱和度与明度，也可直接输入色码。'" elevated>
           <view class="custom-name-row" :class="layout.isWide ? 'custom-name-row-wide' : ''">
             <text class="custom-label" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(23, 13)">名称</text>
             <input
@@ -94,7 +94,7 @@
             <view v-for="rail in pickerRails" :key="rail.key" class="picker-block" :class="layout.isWide ? 'picker-block-wide' : ''">
               <view class="picker-caption-row">
                 <text class="picker-caption" :class="layout.isWide ? 'picker-caption-wide' : ''" :style="('color:' + theme.skin.textMuted + ';') + qtFontDual(21, 12)">{{ rail.caption }}</text>
-                <text class="picker-value" :class="layout.isWide ? 'picker-value-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(21, 12)">{{ rail.readout }}</text>
+                <text v-if="!tv.enabled" class="picker-value" :class="layout.isWide ? 'picker-value-wide' : ''" :style="('color:' + theme.skin.text + ';') + qtFontDual(21, 12)">{{ rail.readout }}</text>
               </view>
               <!-- 色带只说明「这一段是什么颜色」，精确取值交给下面的滑动条；色带本身仍可点选做粗调。
                    分段之间不画任何描边/分隔线：Vapor 没有线性渐变，色带只能靠一排纯色 view 拼，
@@ -108,7 +108,12 @@
                   @click="pickSegment(rail.key, segIndex)"
                 />
               </view>
-              <slider
+              <view v-if="tv.enabled" class="picker-tv-controls">
+                <QtButton label="减少" variant="outline" size="sm" :disabled="rail.value <= 0" @click="applyRailValue(rail.key, rail.value - 1)" />
+                <text class="picker-value picker-value-tv" :style="('color:' + theme.skin.text + ';') + qtFontDual(21, 12)">{{ rail.readout }}</text>
+                <QtButton label="增加" variant="outline" size="sm" :disabled="rail.value >= rail.max" @click="applyRailValue(rail.key, rail.value + 1)" />
+              </view>
+              <slider v-else
                 class="picker-slider"
                 :min="0"
                 :max="rail.max"
@@ -185,6 +190,7 @@ import { useQtSelectionReveal } from "@/uni_modules/qt-ui/composables/use-qt-sel
 import { QT_SKINS, type QtSkin, type QtThemeMode, useThemeStore } from "@/uni_modules/qt-ui/stores/theme";
 import { QT_FONT_TIERS, type QtFontTier, useFontScaleStore, qtFontDual } from "@/uni_modules/qt-ui/stores/font-scale";
 import { useQtLayout } from "@/uni_modules/qt-ui/composables/use-qt-layout";
+import { useQtTv } from "@/uni_modules/qt-ui/composables/use-qt-tv";
 import { qtContentWidth, QT_GUTTER_PX } from "@/uni_modules/qt-ui/composables/use-qt-widths";
 import { chooseImage } from "@/services/media";
 import { logMsgErr } from "@/services/logger";
@@ -193,6 +199,7 @@ type ModeOption = { id: QtThemeMode; name: string; description: string };
 type TierOption = { id: QtFontTier; name: string; description: string };
 const theme = useThemeStore();
 const layout = useQtLayout();
+const tv = useQtTv();
 //
 // 两列门限按**可用宽度**判，不按窗口宽度判：三栏模式下窗口仍是 1280 但右栏只有约 400，
 // 若按窗口判会算出两列各 320 直接横向溢出。判据 = 内容列宽减两侧留白与中间间距后
@@ -896,6 +903,8 @@ onShow(() => {
 .picker-caption-inline { margin-bottom: 0; }
 .picker-value { font-size: 21rpx; font-family: monospace; }
 .picker-value-wide { font-size: 12px; }
+.picker-tv-controls { flex-direction: row; align-items: center; margin-top: 10px; }
+.picker-value-tv { flex: 1; margin-left: 12px; margin-right: 12px; text-align: center; }
 .picker-caption-wide { font-size: 12px; margin-bottom: 6px; }
 /* 色带：整条一条连续色带，分段之间不留描边、不留缝（加了 border 就碎成方格）。
    圆角只加在首尾两端，中间段是直角，拼起来才是一条干净的色带。 */
