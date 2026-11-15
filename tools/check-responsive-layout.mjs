@@ -1,3 +1,4 @@
+import { qtSafePane } from '../uni_modules/qt-ui/composables/fold-geometry.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
@@ -30,8 +31,8 @@ function harness() {
     },
   });
   const androidLayout = read('uni_modules/qt-ui/composables/use-qt-layout.ts').replace(/\/\/ #ifdef APP-IOS[\s\S]*?\/\/ #endif/g, '');
-  const api = runInNewContext(runnable(androidLayout) + '\n({ useQtLayout, refreshQtLayout, qtLayout, qtRpx, qtRailWidth, qtTabBarFloatGapPx, qtTabBarHeightPx, qtPlayerBarHeightPx, pauseQtLayoutWatcher, resumeQtLayoutWatcher, applyQtNativeSafeBottom });', {
-    reactive, console: { log() {} },
+  const api = runInNewContext(runnable(androidLayout) + '\n({ useQtLayout, refreshQtLayout, qtLayout, qtRpx, qtRailWidth, qtTabBarFloatGapPx, qtTabBarHeightPx, qtPlayerBarHeightPx, pauseQtLayoutWatcher, resumeQtLayoutWatcher, applyQtNativeSafeBottom, applyQtFoldGeometry, qtFixedPaneStyle });', {
+    qtSafePane, reactive, console: { log() {} },
     uni: { getSystemInfoSync: () => systemWindow ?? window, getWindowInfo: () => {
       if (windowUnavailable) throw new Error('window not attached');
       return window;
@@ -61,6 +62,22 @@ function test(name, run) {
   if (selected != null && selected != name) return;
   run(); cases++; console.log('PASS ' + name);
 }
+test('physical-fold-safe-pane', () => {
+  const h=harness();h.resize(1400,900);const state=h.api.useQtLayout();
+  h.api.applyQtFoldGeometry({left:600,top:0,right:630,bottom:900,separating:true,tabletop:false});
+  assert.equal(state.paneLeft,630);assert.equal(state.paneWidth,770);assert.equal(state.windowWidth,1400);
+  assert.equal(h.api.qtRpx(100),100*1400/750,'CSS rpx stays tied to the physical window');
+  assert.ok(h.api.qtFixedPaneStyle().includes('left:630px;'));assert.equal(state.isWide,true,'a large pane in a landscape fold retains fixed-px controls');
+  h.resize(820,900);h.api.applyQtFoldGeometry({left:400,top:0,right:420,bottom:900,separating:true,tabletop:false});
+  assert.equal(state.paneWidth,400);assert.equal(state.isWide,true,'phone-sized fold panes avoid full-window rpx controls');assert.equal(h.api.qtRailWidth(),64);
+  h.resize(1400,900);
+  const epoch=state.sizeEpoch;
+  h.api.applyQtFoldGeometry({left:0,top:420,right:1400,bottom:450,separating:true,tabletop:true});
+  assert.equal(state.paneTop,0);assert.equal(state.paneHeight,420);assert.equal(state.safeBottomPx,0);assert.ok(state.sizeEpoch>epoch);
+  h.api.applyQtFoldGeometry(null);assert.equal(state.paneWidth,1400);assert.equal(state.paneHeight,900);
+  assert.deepEqual(JSON.parse(JSON.stringify(qtSafePane(400,800,{left:10,top:20,right:30,bottom:40,separating:true,tabletop:false}))),{left:0,top:0,width:400,height:800});
+  h.api.pauseQtLayoutWatcher();
+});
 test('rpx', () => {
   const h = harness();
   const state = h.api.useQtLayout();
@@ -243,8 +260,9 @@ test('navigation-inset-already-consumed', () => {
   });
   const sheet = read('uni_modules/qt-ui/components/qt-sheet/qt-sheet.uvue');
   const sheetBinding = sheet.match(/const panelStyle = computed\([\s\S]*?\n\}\);/)[0];
+  // footerFlush 默认 false：普通弹层仍保留面板自己的底部让位（footerFlush 只给动作条弹层用）。
   const panelStyle = runInNewContext(runnable(sheetBinding)+'\npanelStyle;', {
-    computed,layout:state,qtSheetWidth:()=>420,theme:{skin:{sheetSurface:'#fff'}},
+    computed,layout:state,qtSheetWidth:()=>420,theme:{skin:{sheetSurface:'#fff'}},props:{footerFlush:false},
   });
   assert.equal(frameStyle.value,'padding-bottom:0px;','settings content must reach the already-safe bottom');
   assert.ok(panelStyle.value.endsWith('padding-bottom:4.096px;'),'cancel footer retains only the ordinary small sheet padding');
@@ -282,7 +300,7 @@ test('page-entry-inset-stability', () => {
   const miniSource = read('uni_modules/qt-ui/components/qt-mini-player/qt-mini-player.uvue');
   const hostBinding = miniSource.match(/const hostStyle = computed\([\s\S]*?\n\}\);/)[0];
   const host = runInNewContext(runnable(hostBinding)+'\nhostStyle;', {
-    ...h.api,...dock,computed,isDocked:{value:true},props:{aboveTab:false},
+    ...h.api,...dock,computed,layout:state,isDocked:{value:true},props:{aboveTab:false},
     renderWidth:{get value(){return state.windowWidth-h.api.qtRpx(48);}},
     renderHeight:{get value(){return dock.qtMiniDockBarHeightPx();}},
   });
@@ -424,8 +442,10 @@ test('immersive-player-inset-handoff', () => {
     selfHeader:{value:false},qtStatusBarPx:()=>41,
   });
   const stageBinding = playerSource.match(/const portraitStageStyle = computed\([^\n]+/)[0];
-  const stage = runInNewContext(runnable(stageBinding)+'\nportraitStageStyle;', {computed,layout});
-  const metrics = runInNewContext(runnable(read('uni_modules/qt-ui/composables/player-presentation.ts'))+'\n({portraitPlayerMetrics,widePlayerMetrics});');
+  const trackMetrics = runInNewContext(runnable(read('uni_modules/qt-ui/composables/playing-track-metrics.ts'))+'\n({playingTrackMetrics});');
+  const metrics = runInNewContext(runnable(read('uni_modules/qt-ui/composables/player-presentation.ts'))+'\n({portraitPlayerMetrics,widePlayerMetrics});', trackMetrics);
+  const portraitMetrics = computed(() => metrics.portraitPlayerMetrics(layout.windowWidth, layout.windowHeight, 41, layout.safeBottomPx, 1));
+  const stage = runInNewContext(runnable(stageBinding)+'\nportraitStageStyle;', {computed,layout,portraitMetrics});
   const px = (style,key) => Number(style.match(new RegExp('(?:^|;)'+key+':([\\d.]+)px;'))?.[1] ?? 0);
   const stageBottom = nativeHeight => {
     const shell = frame.shellStyle.value;
@@ -439,7 +459,7 @@ test('immersive-player-inset-handoff', () => {
     for (const scale of [0.85,1,1.15,1.3,1.5]) {
       const m = metrics.portraitPlayerMetrics(layout.windowWidth,layout.windowHeight,41,layout.safeBottomPx,scale);
       assert.ok(Math.abs((m.discRpx+m.reservedRpx)*unit-stageBottom(nativeHeight))<0.001,'classic/gallery geometry must fit the actual parent, not just an independent height estimate');
-      const bottomPadding = 28 * unit;
+      const bottomPadding = m.padBottomPx;
       const toolsBottom = (m.discRpx+m.reservedRpx)*unit-bottomPadding;
       assert.ok(toolsBottom<=Math.min(stageBottom(nativeHeight),nativeHeight),'the complete bottom toolbar must remain above the native clipping edge');
     }

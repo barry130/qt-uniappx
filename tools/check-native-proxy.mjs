@@ -5,11 +5,14 @@ import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { preprocessPlatform } from './platform-preprocess.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const pluginName = process.argv[3] || 'qt-app-native';
+assert.ok(['qt-app-native', 'qt-audio-player'].includes(pluginName), 'Unsupported native module');
 const cache = resolve(root, process.argv[2] ||
-  'unpackage/cache/vapor/uts_custom_android/app-android/uts/uni_modules/qt-app-native');
-const plugin = resolve(root, 'uni_modules/qt-app-native');
+  `unpackage/cache/vapor/uts_custom_android/app-android/uts/uni_modules/${pluginName}`);
+const plugin = resolve(root, 'uni_modules/' + pluginName);
 const read = path => readFileSync(path, 'utf8');
 const android = read(resolve(plugin, 'utssdk/app-android/index.uts'));
 const proxy = read(resolve(cache, 'utssdk.js'));
@@ -37,16 +40,20 @@ const declared = [...android.matchAll(/^export\s+(?:async\s+)?(?:function|const)
   .map(match => match[1]);
 assert.deepEqual([...exports.keys()].sort(), [...declared].sort(),
   'Generated proxy exports differ from Android source; rebuild the complete native cache');
-const service = read(resolve(root, 'services/app-native.uts'));
-for (const match of service.matchAll(/^import\s*\{([^}]+)\}\s*from\s*"@\/uni_modules\/qt-app-native"/gm)) {
+const service = preprocessPlatform(
+  read(resolve(root, pluginName == 'qt-app-native' ? 'services/app-native.uts' : 'services/audio-player.uts')),
+  'APP-ANDROID',
+);
+for (const match of service.matchAll(new RegExp(`^import\\s*\\{([^}]+)\\}\\s*from\\s*["']@/uni_modules/${pluginName}["']`, 'gm'))) {
   for (const specifier of match[1].split(',')) {
-    const name = specifier.trim().split(/\s+as\s+/)[0];
+    const name = specifier.replace(/\/\/[^\n]*/g, '').trim().split(/\s+as\s+/)[0];
+    if (!name || name.startsWith('type ')) continue;
     assert.ok(exports.has(name), `Service imports ${name}, but the generated proxy does not export it`);
   }
 }
 
 // Verify IDs against Kotlin's actual dispatch table, not source declaration order.
-const dispatch = kotlin.slice(kotlin.indexOf('UTSBridge.registerUTSMethod("qt-app-native"'));
+const dispatch = kotlin.slice(kotlin.indexOf(`UTSBridge.registerUTSMethod("${pluginName}"`));
 assert.ok(dispatch.startsWith('UTSBridge.registerUTSMethod'), 'Native dispatch table missing');
 const branches = [...dispatch.matchAll(/^( +)(\d+) ->\s*$/gm)];
 assert.ok(branches.length > 0, 'Native dispatch branches missing');
@@ -66,6 +73,8 @@ for (const [filename, signature] of [['classes.dex', 'dex\n'], ['index.jar', 'PK
   assert.equal(readFileSync(artifact).subarray(0, signature.length).toString(), signature,
     `${filename}: invalid binary output`);
 }
-assert.equal(exports.get('exitAppNative')?.id, 9, 'Existing exit bridge ID must remain stable');
-assert.deepEqual(exports.get('moveAppToBackgroundNative'), { id: 27, async: true });
-console.log(`PASS native-proxy: ${exports.size} exports, source hashes, Kotlin IDs, JAR and DEX verified`);
+if (pluginName == 'qt-app-native') {
+  assert.equal(exports.get('exitAppNative')?.id, 9, 'Existing exit bridge ID must remain stable');
+  assert.deepEqual(exports.get('moveAppToBackgroundNative'), { id: 27, async: true });
+}
+console.log(`PASS native-proxy ${pluginName}: ${exports.size} exports, source hashes, Kotlin IDs, JAR and DEX verified`);

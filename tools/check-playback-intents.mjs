@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
 import { verify } from 'node:crypto';
+import { preprocessPlatform } from './platform-preprocess.mjs';
 const read = p => readFileSync(new URL('../' + p, import.meta.url), 'utf8');
 const noop = () => {};
 const defer = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
@@ -30,13 +31,22 @@ for (const result of [song('sub'), null]) await check('stale local substitute ca
 });
 await check('quality result after a new selection never writes quality or starts playback', async () => {
   const page = read('pages/player/index.uvue'), d = defer(), events = [];
-  let choose; let revision = 1;
+  let revision = 1;
   const a = song('a'), b = song('b', 'qq');
-  const player = { current: a, queue: [a, b], playbackRevision: () => revision, effQualityOf: () => '320', setSourceQuality: (...args) => events.push(args), play: (...args) => events.push(args) };
+  const player = { current: a, queue: [a, b], playbackRevision: () => revision, effQualityOf: () => '320', resolvedUrlOf: () => '',
+    setSourceQuality: (...args) => events.push(args), play: (...args) => events.push(args) };
   const code = between(page, 'let qualityRequestSeq', '\nfunction onDiscTap()');
-  const { switchQuality } = load(code, ['switchQuality'], { player, sourceRegistry: { sourceQualities: () => [{ id: 'flac', name: 'flac' }] }, musicApi: { playUrl: () => d.promise }, openActionSheet: (_t, _a, cb) => { choose = cb; } });
-  await switchQuality(); const task = choose(null, 0); player.current = b; revision++;
-  d.resolve('https://audio.invalid/a.flac'); await task; assert.equal(events.length, 0); assert.equal(a.url, undefined);
+  const { switchQuality, onPlaybackQualityPicked } = load(code, ['switchQuality', 'onPlaybackQualityPicked'], {
+    player, sourceRegistry: { sourceQualities: () => [{ id: 'flac', name: 'flac' }], has: () => true },
+    musicApi: { playUrl: () => d.promise, playConfigEpoch: () => 1, playSourceOf: value => value,
+      playbackInfoOf: value => ({ source: value, quality: '320', size: 0 }) },
+    playbackInfo: { get value() { return { source: player.current }; } },
+    playbackRequestedQuality: { value: '320' },
+    pageAlive: true, pageVisible: { value: true }, playingLocalFile: { value: false }, playingPodcast: { value: false },
+    playbackSourceSection: { value: '' }, playbackSourceOpen: { value: false }, beginLoading: () => 1, finishLoading: noop,
+  });
+  switchQuality(); onPlaybackQualityPicked('flac'); player.current = b; revision++;
+  d.resolve('https://audio.invalid/a.flac'); await drain(); assert.equal(events.length, 0); assert.equal(a.url, undefined);
 });
 await check('failure advances in single-repeat mode and does not seek/resume the failed item', () => {
   const events = [], { PlayerStore } = load(playerClass, ['PlayerStore'], { useDislikesStore: () => ({ hasRules: () => false }), audioPlayer: { resume: () => events.push('resume') } });
@@ -68,16 +78,65 @@ await check('Harmony retains seek position during initial resolution', () => {
   const body = between(src, 'export function audioSeek(', '\n/**');
   assert.ok(body.indexOf('gPendingPositionSec = Math.max(0, seconds)') < body.indexOf('if (p == null) return'));
 });
-await check('unsupported audio effects are disabled in Harmony UI and do not claim success', () => {
+await check('native audio capabilities separate iOS DSP from Android decoder controls and disable effects during DLNA', () => {
   const source = read('services/audio-player.uts');
-  const capabilities = between(source, 'export function audioCapabilities()', '\nexport class AudioPlayer');
-  assert.ok(capabilities.includes('return { equalizer: false, outputEffects: false }'));
+  const capabilities = (platform, casting, dsp = true) => {
+    const body = between(preprocessPlatform(source, platform), 'export function audioCapabilities()', '\nexport class AudioPlayer');
+    return load(body, ['audioCapabilities'], { audioDlnaActive: () => casting, audioEffectsSupported: () => dsp }).audioCapabilities();
+  };
+  assert.ok(Object.values(capabilities('APP-HARMONY', false)).every(value => value === false));
+  assert.ok(Object.values(capabilities('APP-ANDROID', false)).every(value => value === true));
+  assert.ok(Object.values(capabilities('APP-ANDROID', true)).every(value => value === false));
+  const ios = capabilities('APP-IOS', false);
+  assert.equal(ios.equalizer, true);
+  assert.equal(ios.volumeEnhancement, true);
+  assert.equal(ios.floatOutput, false);
+  assert.equal(ios.softwareDecoder, false);
+  assert.ok(Object.values(capabilities('APP-IOS', true)).every(value => value === false));
+  assert.ok(Object.values(capabilities('APP-IOS', false, false)).every(value => value === false));
   const equalizer = read('pages/equalizer/index.uvue'), settings = read('pages/play-settings/index.uvue');
   assert.ok(equalizer.includes(':disabled="!effectsSupported"'));
-  for (const action of ['toggleFloatOutput', 'togglePreferSw', 'toggleEnhance']) {
+  for (const [action, capability] of [['toggleFloatOutput', 'floatOutput'], ['togglePreferSw', 'softwareDecoder'], ['toggleEnhance', 'volumeEnhancement']]) {
     const method = between(settings, 'function ' + action + '(): void {', '\n}');
-    assert.ok(method.includes('if (!audioCapabilities().outputEffects)'));
+    assert.ok(method.includes('refreshAudioCapabilities()'));
+    assert.ok(method.includes(`if (!capabilities.value.${capability})`));
+    assert.ok(settings.includes(`:disabled="!capabilities.${capability}"`));
   }
+});
+await check('play-settings renders the actual capability hint after local / cast transitions without stale identifiers', () => {
+  const settings = read('pages/play-settings/index.uvue');
+  const hints = [...settings.matchAll(/<text\b[^>]*class="hint-text"[^>]*>([\s\S]*?)<\/text>/g)];
+  const hint = hints.find(match => match[1].includes('浮点输出'));
+  assert.ok(hint, 'missing audio capability hint');
+  const expression = hint[1].match(/{{([\s\S]*?)}}/);
+  assert.ok(expression, 'capability hint must react to the active audio backend');
+  const { renderHint } = load('function renderHint(capabilities: any): string { return (' + expression[1] + '); }', ['renderHint']);
+  let current = { floatOutput: true, softwareDecoder: true, volumeEnhancement: true };
+  const listeners = new Map(), cleanups = [];
+  const api = load(between(settings, 'const capabilities =', '\nfunction toggleFloatOutput'), [
+    'capabilities', 'floatOutput', 'preferSw', 'enhanceOn',
+  ], {
+    ref: value => ({ value }), audioCapabilities: () => ({ ...current }),
+    audioPlayer: { floatOutput: true, preferSoftwareDecoder: true, enhanceEnabled: true },
+    PLAYER_CAPABILITIES_CHANGED_EVENT: 'capabilities',
+    uni: { $on: (event, fn) => listeners.set(event, fn), $off: event => listeners.delete(event) },
+    onUnload: fn => cleanups.push(fn), onUnmounted: fn => cleanups.push(fn),
+  });
+  for (const [capability, expected] of [
+    [current, '下一首或停止后重播生效'],
+    [{ floatOutput: false, softwareDecoder: false, volumeEnhancement: true }, '支持音量增强，暂不支持浮点输出'],
+    [{ floatOutput: false, softwareDecoder: false, volumeEnhancement: false }, '暂不支持浮点输出、解码器选择和音量增强'],
+    [current, '下一首或停止后重播生效'],
+  ]) {
+    current = capability;
+    listeners.get('capabilities')();
+    assert.ok(renderHint(api.capabilities.value).includes(expected));
+    assert.equal(api.floatOutput.value, capability.floatOutput);
+    assert.equal(api.preferSw.value, capability.softwareDecoder);
+    assert.equal(api.enhanceOn.value, capability.volumeEnhancement);
+  }
+  for (const cleanup of cleanups) cleanup();
+  assert.equal(listeners.size, 0);
 });
 await check('official verification uses host crypto and rejects a forged signature', async () => {
   const src = read('services/pack-signature.uts');

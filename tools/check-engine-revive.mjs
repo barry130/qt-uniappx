@@ -11,6 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import { sourcePolicyFixture } from "./source-policy-fixture.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.join(here, "..");
@@ -34,6 +35,7 @@ let healthy = true;
 const calls = { start: 0, stop: 0, loadBundle: 0, invoke: 0 };
 
 const mods = {
+  "@/services/source-policy": sourcePolicyFixture({ getStorageSync: () => "" }),
   "@/uni_modules/qt-js-engine": {
     start: (options, cb) => {
       calls.start++;
@@ -62,7 +64,7 @@ const mods = {
       calls.loadBundle++;
       cb({ ok: true, error: "" });
     },
-    evaluate: (code, timeoutMs, cb) => {
+    evaluate: (code, cb) => {
       cb({ ok: true, value: "null", error: "" });
     },
     isRunning: () => true,
@@ -126,13 +128,14 @@ const mods = {
 };
 
 const mod = { exports: {} };
-new Function("require", "module", "exports", js)(
+new Function("require", "module", "exports", "uni", js)(
   (id) => {
     if (mods[id]) return mods[id];
     throw new Error("未预料的 import：" + id);
   },
   mod,
   mod.exports,
+  { $on() {}, $emit() {} },
 );
 const svc = mod.exports;
 

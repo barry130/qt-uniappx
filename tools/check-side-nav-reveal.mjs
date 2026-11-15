@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
+import { sourcePolicyFixture } from './source-policy-fixture.mjs';
 import * as Vue from 'vue';
 import { parse as parseSfc, compileScript } from '@vue/compiler-sfc';
 
@@ -34,6 +35,7 @@ function runnable(text) {
     .replace(/\bexport\s+(?=(?:async\s+)?(?:function|class|const|let|var))/g, '');
 }
 function module(text, scope) {
+  if (scope.uni) Object.assign(scope, sourcePolicyFixture(scope.uni));
   const names = [...text.matchAll(/^export\s+(?:async\s+)?(?:function|class|const|let)\s+(\w+)/gm)].map((m) => m[1]);
   return vm.runInNewContext(runnable(text) + '\n;({' + names.join(',') + '})', { ...scope });
 }
@@ -202,7 +204,7 @@ function harness() {
     logWarn() {}, // Native logging boundary; no playback/quality operation is invoked by the rail.
   };
   for (const path of ['stores/source.ts', 'stores/source-registry.ts', 'uni_modules/qt-ui/stores/theme.ts',
-    'uni_modules/qt-ui/composables/use-qt-layout.ts', 'uni_modules/qt-ui/stores/font-scale.ts',
+    'uni_modules/qt-ui/composables/fold-geometry.ts', 'uni_modules/qt-ui/composables/use-qt-layout.ts', 'uni_modules/qt-ui/stores/font-scale.ts',
     'uni_modules/qt-ui/composables/qt-page-chrome.ts', 'uni_modules/qt-ui/composables/qt-wide-workspace.ts',
     'uni_modules/qt-ui/composables/qt-nav.ts', 'uni_modules/qt-ui/composables/selection.ts',
     'uni_modules/qt-ui/composables/use-qt-nav-scroll.ts',

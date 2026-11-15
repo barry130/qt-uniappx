@@ -4,6 +4,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import { runInNewContext } from 'node:vm';
 import { ref, computed, reactive, watch, nextTick } from 'vue';
 import { qtHdHomeMetrics } from '../uni_modules/qt-ui/composables/hd-layout.ts';
+import { tvScriptFixture } from './tv-script-fixture.mjs';
 
 // Execute production width ownership and frame lifecycle registrations. Only
 // the native page stack, lifecycle and window boundary are synthetic; no UI render.
@@ -25,7 +26,7 @@ const railCode = runnable(['workspaceCoversPlayer', 'showRail'].map(name => {
   return declaration;
 }).join('\n'));
 function harness() {
-  const layout = reactive({ windowWidth: 1120, windowHeight: 640, isWide: true });
+  const layout = reactive({ get paneWidth() { return this.windowWidth; }, get paneHeight() { return this.windowHeight; }, windowWidth: 1120, windowHeight: 640, isWide: true });
   const top = ref('/pages/home/index');
   const getCurrentPages = () => [{ route: top.value.slice(1) }];
   const chrome = runInNewContext(runnable(read('uni_modules/qt-ui/composables/qt-page-chrome.ts')) + '\n({qtIsSettingsRoute,qtIsProfileRoute})', { ref, getCurrentPages });
@@ -42,13 +43,18 @@ function harness() {
   const frames = [];
   function create(route, expectedSplit = false, hosted = '', explicit = true) {
     const hooks = { mount: [], show: [], hide: [], unmount: [] };
-    const stops = [];
+    const stops = [], provided = new Map();
+    const provide = (key, value) => provided.set(key, value);
+    const tv = tvScriptFixture({ uni: { getStorageSync: () => '', setStorageSync() {} } }, {
+      getCurrentPages, vueOverrides: { inject: key => provided.get(key) ?? null, onUnmounted: fn => hooks.unmount.push(fn) },
+    });
     const family = chrome.qtIsSettingsRoute(route) || chrome.qtIsProfileRoute(route);
     assert.equal(family, expectedSplit, 'fixture must match the production route family');
     const showSplit = computed(() => layout.isWide && family);
     const paneWidthPx = computed(() => widths.qtContentWidthRaw('flow') - (showSplit.value ? 416 : 0));
     const api = runInNewContext(routeCode + railCode + capCode + '\n({syncPaneCap,paneCapToken,currentRoute,showRail})', {
-      ...widths, ...workspace, ref, computed, layout, showSplit, paneWidthPx, hostedRoute: hosted,
+      ...tv, ...widths, ...workspace, ref, computed, provide, layout, showSplit, paneWidthPx, hostedRoute: hosted,
+      hostedContentDisposed: false, frameElement: ref(null), onBeforeUnmount: fn => hooks.unmount.push(fn),
       props: explicit ? { current: route } : {}, fullWidth: ref(false), getCurrentPages, qtTopRoute: () => top.value,
       onMounted: fn => hooks.mount.push(fn), onShow: fn => hooks.show.push(fn), onHide: fn => hooks.hide.push(fn),
       onUnmounted: fn => hooks.unmount.push(fn), watch: (...args) => stops.push(watch(...args)),

@@ -1,15 +1,22 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { sourcePolicyFixture } from './source-policy-fixture.mjs';
 import {stripTypeScriptTypes} from 'node:module';
 const read=p=>fs.readFileSync(new URL('../'+p,import.meta.url),'utf8').replaceAll('\r\n','\n');
 const between=(s,a,b)=>{const i=s.indexOf(a),j=s.indexOf(b,i+a.length);assert.ok(i>=0&&j>i,a);return s.slice(i,j);};
 const compile=s=>stripTypeScriptTypes(s.replace(/^import[\s\S]*?\bfrom\s*["'][^"']+["'];?\s*/gm,''),{mode:'strip'}).replace(/^export /gm,'');
 const noop=()=>{};
+// New radio imports are host boundaries only. These legacy cancellation tests keep
+// the app-default choice and all of their original production behavior assertions.
+const appRadioBoundary={readRecommendationChoice:()=>({origin:'app',sourceId:''}),recommendationChoiceRevision:()=>0,
+  recommendationChoiceCurrent:(_kind,choice,revision)=>revision===0&&choice.origin==='app'&&choice.sourceId==='',
+  accountRecommendationContextCurrent:()=>true,RECOMMENDATION_SOURCE_CHANGED_EVENT:'qt-recommendation-source-changed',
+  SOURCE_AUTH_CHANGED_EVENT:'qt-source-auth-changed',SOURCE_PACKS_CHANGED_EVENT:'qt-source-packs-changed',SOURCE_POLICY_CHANGED_EVENT:'qt-source-policy-changed'};
 const song=(id,platform='wyy',url='')=>({id,platform,url,name:'Song '+id,singer:'Artist',album:'',picUrl:'',duration:200});
 class Json {get(k){return this[k]??null;}set(k,v){this[k]=v;}static keys(o){return Object.keys(o);}}
 const storage=new Map();let files=new Set(),downloads=[],library=[],network='4g';const calls=[];
-const context=vm.createContext({console,UTSJSONObject:Json,parseJsonToUtso:t=>Object.assign(new Json(),JSON.parse(t)),
+const context=vm.createContext({console,collectionStorageKey:k=>k,UTSJSONObject:Json,parseJsonToUtso:t=>Object.assign(new Json(),JSON.parse(t)),
   uni:{getStorageSync:k=>storage.get(k)??(k.includes('local-audio')?library:''),setStorageSync:(k,v)=>storage.set(k,v),removeStorageSync:k=>storage.delete(k),getNetworkType:o=>o.success({networkType:network})},
   useDownloadsStore:()=>({items:downloads,find:s=>downloads.find(d=>d.song.id===s.id&&d.song.platform===s.platform)}),
   statLocalFile:p=>files.has(p)?100:-1,logMsg:noop,logMsgWarn:noop,qtShowToast:noop,preferredSource:()=>null,
@@ -17,13 +24,14 @@ const context=vm.createContext({console,UTSJSONObject:Json,parseJsonToUtso:t=>Ob
   audioPlayer:{setRepeatMode:n=>calls.push(['repeat',n]),stop:()=>calls.push(['stop']),getGapless:()=>true,preloadTrack:p=>calls.push(['preload',p])},
 });
 const source=read('stores/player.ts');
+Object.assign(context, sourcePolicyFixture(context.uni));
 const playerClass=between(source,'class PlayerStore {','\nconst player = reactive(new PlayerStore())');
 vm.runInContext(compile(read('services/local-first.ts'))+'\n'+compile(read('stores/persist-codec.ts'))+'\n'+compile(playerClass)+'\nglobalThis.api={LocalAudioLookup,localFirstEnabled,PlayerStore};',context);
 const {LocalAudioLookup,PlayerStore}=context.api;
 let groups=0;
 const check=async(name,fn)=>{await fn();groups++;console.log('PASS '+name);};
 const host=()=>Object.assign(Object.create(PlayerStore.prototype),{radioActive:false,radioBackup:'',current:null,queue:[],mode:'random',quality:'320',progress:0,duration:0,lockedNextMid:'',playCounts:new Map(),playing:false,playSeq:0,
-  localFirstFailed:new Map(),localFirstUsed:new Map(),localPathByMid:new Map(),resolvedUrlMap:new Map(),localFirstTick:0,
+  localFirstFailed:new Map(),localFirstUsed:new Map(),localPathByMid:new Map(),resolvedUrlMap:new Map(),localFirstTick:0,policyBlockedMap:new Map(),
   persist(){this.saveState();},effQualityOf:()=> '320',listenSession:{start:noop},stopProgressClock:noop,markProgress(p){this.progress=p;},resume(){this.playing=true;}});
 
 await check('all sources: explicit file, download identity, library identity, metadata, missing file and rejection',()=>{
@@ -89,14 +97,14 @@ await check('FM cancellation while preference is loading never claims queue',asy
   let resolve;const pref=new Promise(r=>resolve=r);const p=host();let begins=0;p.beginRadio=()=>begins++;
   const radioSource=read('stores/radio.ts');
   const radioClass=between(radioSource,'class RadioStore {','\n// ---- 心跳');
-  const ctx=vm.createContext({usePlayerStore:()=>p,loadPreference:()=>pref,readTaste:()=> 'heart',stopHeartbeat:noop,logMsgWarn:noop,errMsg:e=>e.message});
+  const ctx=vm.createContext({...appRadioBoundary,usePlayerStore:()=>p,loadPreference:()=>pref,readTaste:()=> 'heart',stopHeartbeat:noop,logMsgWarn:noop,errMsg:e=>e.message});
   vm.runInContext(compile(radioClass)+'\nglobalThis.radio=new RadioStore();',ctx);
   const task=ctx.radio.start();ctx.radio.stop();resolve({});await task;assert.equal(begins,0);assert.equal(ctx.radio.active,false);
 });
 await check('FM delayed start yields when user has already selected another song',async()=>{
   let resolve;const pref=new Promise(r=>resolve=r);const p=host();let begins=0;p.beginRadio=()=>begins++;
   const code=between(read('stores/radio.ts'),'class RadioStore {','\n// ---- 心跳');
-  const ctx=vm.createContext({usePlayerStore:()=>p,loadPreference:()=>pref,readTaste:()=> 'heart',stopHeartbeat:noop,logMsgWarn:noop,errMsg:e=>e.message});
+  const ctx=vm.createContext({...appRadioBoundary,usePlayerStore:()=>p,loadPreference:()=>pref,readTaste:()=> 'heart',stopHeartbeat:noop,logMsgWarn:noop,errMsg:e=>e.message});
   vm.runInContext(compile(code)+'\nglobalThis.radio=new RadioStore();',ctx);
   const task=ctx.radio.start();p.playSeq++;resolve({});await task;assert.equal(begins,0);assert.equal(ctx.radio.loading,false);
 });
@@ -113,8 +121,9 @@ await check('lyrics prefer embedded over cached online words, suppress mixed tra
   const cacheMethods=between(src,'  private cacheGet(', '  /**\n   * 作废单条歌词缓存');
   const ensure=between(src,'  private async ensureLyric(', '  /** ensureLyric 的实际取词步骤');
   const lyricKey=between(src,'  private lyricKeyOf(', '  // ==================== 引擎调用');
-  const ctx=vm.createContext({readSongEmbedded:async()=>embedded,readLyricDisk:()=>'',writeLyricDisk:noop,qtDiag:noop,LYRIC_EMPTY_TTL_MS:60000,preferredSource:()=>null});
-  vm.runInContext(compile('class Music {\n'+methods+cacheMethods+ensure+lyricKey+'\n}\nglobalThis.Music=Music;'),ctx);
+  const preferred=between(src,'function enabledPreferredSource(', '/**');
+  const ctx=vm.createContext({readSongEmbedded:async()=>embedded,readLyricDisk:()=>'',writeLyricDisk:noop,qtDiag:noop,LYRIC_EMPTY_TTL_MS:60000,preferredSource:()=>null,...sourcePolicyFixture(context.uni)});
+  vm.runInContext(compile(preferred+'\nclass Music {\n'+methods+cacheMethods+ensure+lyricKey+'\n}\nglobalThis.Music=Music;'),ctx);
   const api=Object.assign(new ctx.Music(),{lyricCache:new Json(),lyricAsked:new Map(),lyricInflight:new Map(),pickedLyricOf:()=>null,fetchLyricFor:async function(_s,k){fetches++;this.lyricCache.set(k,'online');}});
   api.lyricCache.set('wyy:a','stale-online');api.lyricCache.set('wyy:a:tr','stale-translation');
   assert.equal(await api.lyrics(song('a')),'embedded');assert.equal(await api.lyricTranslation(song('a')),'');assert.equal(fetches,0);

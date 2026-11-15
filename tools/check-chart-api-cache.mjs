@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
+import { sourcePolicyFixture } from './source-policy-fixture.mjs';
 
 const modules = new Map(['services/http.ts', 'services/source-bundle-fs.uts',
   'services/ttl-store.ts', 'services/music-api.ts'].map(path => [path,
@@ -15,6 +16,8 @@ const modules = new Map(['services/http.ts', 'services/source-bundle-fs.uts',
 class UTSJSONObject {
   constructor(value = {}) { Object.assign(this, value); }
   get(key) { return Object.hasOwn(this, key) ? this[key] : null; }
+  getString(key) { return this.get(key); }
+  getNumber(key) { return this.get(key); }
   set(key, value) { this[key] = value; }
   static keys(value) { return Object.keys(value); }
 }
@@ -35,6 +38,7 @@ function android(text) {
 }
 
 function load(path, scope) {
+  Object.assign(scope, sourcePolicyFixture(scope.uni));
   const source = modules.get(path);
   const names = [...source.matchAll(/^export\s+(?:async\s+)?(?:function|class|const|let)\s+(\w+)/gm)]
     .map(match => match[1]);
@@ -84,7 +88,7 @@ function runtime(storage = new Map()) {
     preferredSource: () => null, sourcePlayLoginActive: () => false, sourceVipTierOf: () => '',
     cachedQualityProfileOf: () => null, PROFILE_MODE_OFFICIAL: 'official', sourcePlayQualityOf: () => '',
     readSongEmbedded: async () => null, readLyricDisk: () => '', writeLyricDisk: () => {},
-    removeLyricDisk: () => {}, clearLyricDisk: () => {}, mergeAggregateSongs: value => value,
+    removeLyricDisk: () => {}, clearLyricDisk: () => {}, mergeAggregateSongs: value => value, readAggregateSources: () => null,
     uni: {
       getStorageSync: key => { env.storageReads.push(key); return env.storage.get(key) ?? ''; },
       setStorageSync: (key, value) => { env.storage.set(key, value); env.storageWrites.push(key); },

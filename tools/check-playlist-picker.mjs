@@ -19,7 +19,7 @@ function picker(batchMode = false) {
       return playlist;
     },
   };
-  const layout = { isWide: true, windowHeight: 600, safeBottomPx: 0, sizeEpoch: 0 };
+  const layout = { isWide: true, windowHeight: 600, get paneHeight(){return this.windowHeight;}, safeBottomPx: 0, sizeEpoch: 0 };
   const context = {
     defineProps: () => props, withDefaults: (value, defaults) => Object.assign(defaults, value),
     defineEmits: () => (event, value) => emitted.push([event, value]),

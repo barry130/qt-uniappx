@@ -55,7 +55,8 @@ assert.equal(cssRule(podcast, 'show-act-wide').get('width'), '36px');
 assert.equal(cssRule(podcast, 'ep-play-wide').get('width'), '40px');
 assert.match(podcast, /:placeholder-style="'color:' \+ themeStore\.skin\.placeholder \+ ';' \+ subscriptionFont/);
 assert.match(podcast, /:style="'color:' \+ themeStore\.skin\.text \+ ';' \+ subscriptionFont/);
-assert.match(podcast, /const subscriptionFont = computed\(\(\): string => qtFontDual\(25, 14\)\)/);
+assert.match(podcast, /const subscriptionFont = computed\(\(\): string => podcastFont\(25, 14\)\)/);
+assert.match(podcast, /function podcastFont\(handsetRpx: number, desktopPx: number\): string\s*\{\s*return qtFontDual\(handsetRpx, desktopPx\) \+ \(layout\.isTv \? "line-height:" \+ Math\.round\(qtFontValuePx\(desktopPx\) \* 1\.4\) \+ "px;" : ""\);\s*\}/, 'podcast preserves the original scaled font for touch; only TV appends its actual-font line height');
 assert.ok(!podcast.includes(':placeholder-class='), 'placeholder and input share the scaled inline font, not divergent class defaults');
 const playlist = source('pages/playlist/index.uvue');
 assert.match(playlist, /const detailMetrics = computed\(\(\) => detailLayoutMetrics\(layout\.isWide, qtContentWidth\("detail"\)\)\)/);
@@ -104,7 +105,8 @@ for (const c of geometryCases) {
 assert.deepEqual([1080, 488, 636, 635, 720].map(width => detailLayoutMetrics(true, width).split), [true, false, true, false, true]);
 const settings = source('uni_modules/qt-ui/components/qt-settings-overview/qt-settings-overview.uvue');
 assert.ok(settings.includes('return settingsOverviewTwoColumn(layout.isWide, props.inPane == true, qtContentWidth("flow"), QT_GUTTER_PX);'), 'settings columns must share the wide font/density decision plus effective width and inPane guard');
-assert.ok(settings.includes('qtFontDual(28, 17)') && settings.includes('qtFontDual(24, 14)'), 'settings text must retain globally scaled responsive fonts');
+assert.ok(settings.includes('overviewFont(28, 17)') && settings.includes('overviewFont(24, 14)'), 'settings text must retain globally scaled responsive fonts');
+assert.match(settings, /function overviewFont\(compact: number, wide: number\): string\s*\{\s*return qtFontDual\(compact, wide\) \+ \(layout\.isTv \? "line-height:" \+ Math\.round\(qtFontValuePx\(wide\) \* 1\.4\) \+ "px;" : ""\);\s*\}/, 'settings preserve both original responsive font arguments; only TV appends its actual-font line height');
 const { settingsOverviewTwoColumn } = await import('../uni_modules/qt-ui/composables/detail-layout.ts');
 const settingsCases = [
   [false, false, 764, false],

@@ -4,6 +4,7 @@
 // No actual accounts, credentials, production requests, native compilation or device-login proof.
 import assert from 'node:assert/strict';
 import { read, load, host, deferred, drain, noop } from './check-source-auth-session.mjs';
+import { preprocessPlatform } from './platform-preprocess.mjs';
 
 const names = (path) => [...read(path).matchAll(/^export\s+(?:(?:async\s+)?function|const)\s+(\w+)/gm)].map((m) => m[1]);
 const registryJson = (sources = ['wyy']) => JSON.stringify({ sources: sources.map((id) => ({
@@ -18,8 +19,11 @@ const validUser = (id = 'A') => JSON.stringify({ ok: true, user: {
 } });
 const cookie = (id = 'A') => [`FIXTURE_LOGIN=${id}; other=synthetic`];
 
-function fixture({ holdInjection = false } = {}) {
-  const b = host(), requests = [], cookies = [], native = { opens: [], closes: 0, current: null };
+let testedPlatform = 'APP-ANDROID';
+function fixture({ holdInjection = false, nativeSupported } = {}) {
+  const capabilities = load(preprocessPlatform(read('services/app-native.uts'), testedPlatform), ['supportsNativeAuthWebView']);
+  const supportsNativeLogin = nativeSupported ?? capabilities.supportsNativeAuthWebView();
+  const b = host(), requests = [], cookies = [], cookieReadAfterOpen = [], native = { opens: [], closes: 0, current: null };
   const invokeSource = (name, args) => {
     if (name === 'sourceRegistry' || name === 'authImportCookie' || (name === 'setAuth' && holdInjection)) {
       const d = deferred(); requests.push({ name, args: JSON.parse(args)[0], ...d }); return d.promise;
@@ -29,14 +33,16 @@ function fixture({ holdInjection = false } = {}) {
   const service = load(read('services/source-auth.ts'), names('services/source-auth.ts'), {
     uni: b.uni, invokeSource, setMetaAuthHook: noop,
   });
-  const quality = load(read('services/source-quality.ts'), names('services/source-quality.ts'), { uni: b.uni, invokeSource, ...service });
+  const network = load(read('services/network-kind.ts'), names('services/network-kind.ts'), { uni: b.uni });
+  const quality = load(read('services/source-quality.ts'), names('services/source-quality.ts'), { uni: b.uni, invokeSource, ...service, ...network });
   const { musicApi } = load(read('services/music-api.ts'), ['musicApi'], {
     uni: b.uni, invokeSource, ...service, ...quality,
     ensureLocalStateRestored: async () => {}, activeMetaPack: () => ({ hash: 'fixture-package' }),
   });
   const source = load(read('stores/source.ts'), ['useSourceStore'], { uni: b.uni, reactive: (value) => value, logWarn: noop });
   const registryApi = load(read('stores/source-registry.ts'), ['useSourceRegistryStore'], {
-    ...b.vue, uni: b.uni, reactive: (value) => value, ...source, ...quality, ...service, musicApi,
+    ...b.vue, uni: b.uni, reactive: (value) => value, ...source, ...quality, ...network, ...service, musicApi,
+    ensureDataEngine: async () => true, sourceMetaRevision: () => 'fixture-meta', sourceMetaCurrent: revision => revision === 'fixture-meta',
     SOURCE_PACKS_CHANGED_EVENT: 'fixture-source-packs-changed',
     usePlayerStore: () => ({ quality: '320' }), useDownloadsStore: () => ({ downloadQuality: '320' }),
   });
@@ -48,8 +54,9 @@ function fixture({ holdInjection = false } = {}) {
     const page = load(pageText, ['retry', 'openNativeLogin', 'phase', 'webUrl', 'nativeOpen', 'nativeTip', 'statusText'], {
       ...h.vue, uni: { ...h.uni, navigateBack: (options) => h.routes.push(options) }, ...service, ...registryApi, ...helpers, ...session,
       Date: { now: () => clock.now }, onHide: (fn) => h.hooks.hide.push(fn),
-      logErrV: (...args) => logs.push(args), useThemeStore: () => ({ skin: {} }), isAndroidOs: () => true,
-      getWebCookies: (urls) => { const d = deferred(); cookies.push({ urls, ...d }); return d.promise; },
+      logErrV: (...args) => logs.push(args), useThemeStore: () => ({ skin: {} }),
+      supportsNativeAuthWebView: () => supportsNativeLogin,
+      getWebCookies: (urls) => { cookieReadAfterOpen.push(native.opens.length); const d = deferred(); cookies.push({ urls, ...d }); return d.promise; },
       openAuthWebView: (url, onClose, ua) => { const view = { url, onClose, ua }; native.opens.push(view); native.current = view; },
       closeAuthWebView: () => { native.closes++; native.current = null; },
     });
@@ -57,7 +64,7 @@ function fixture({ holdInjection = false } = {}) {
       flushTimeouts: () => { const tasks = [...h.timeouts.values()]; h.timeouts.clear(); for (const fn of tasks) fn(); },
     };
   }
-  return { ...createPage(b), service, requests, cookies, native, logs, clock, createPage,
+  return { ...createPage(b), service, requests, cookies, cookieReadAfterOpen, native, logs, clock, createPage,
     registry: registryApi.useSourceRegistryStore(),
     ready: async (sources) => {
       const pending = registryApi.useSourceRegistryStore().ensure(); await drain();
@@ -67,6 +74,9 @@ function fixture({ holdInjection = false } = {}) {
 }
 async function check(label, test) { await test(); console.log('  ✓ ' + label); }
 
+for (const platform of ['Android', 'iOS']) {
+testedPlatform = platform === 'Android' ? 'APP-ANDROID' : 'APP-IOS';
+console.log(platform + ' native login lifecycle:');
 await check('WEB-01: leaving during registry ensure must not open a departed page/native view', async () => {
   const b = fixture(); b.loadPage(); await drain();
   for (const onUnload of b.hooks.unload) onUnload();
@@ -378,4 +388,31 @@ await check('WEB-35: other readback revocations stay silent and cannot disturb t
     b.flushTimeouts(); assert.equal(b.routes.length, 0); assert.equal(b.native.current, currentView); assert.equal(b.native.closes, closeCount);
   }
 });
-console.log('Web-login session: 35 passed (actual page/services; synthetic native/engine/host boundaries).');
+await check('WEB-37: native login (which clears the WebView cookie jar) opens before the first cookie read, so a stale session cannot auto-authenticate', async () => {
+  const b = fixture(); await b.ready(); b.loadPage();
+  assert.equal(b.native.opens.length, 1, 'the native login view must open before polling starts');
+  assert.equal(b.cookieReadAfterOpen[0], 1, 'the first cookie read must happen only after openAuthWebView (which triggers the cookie wipe)');
+  assert.equal(b.cookies.length, 1);
+});
+}
+await check('WEB-36: unsupported native login uses the embedded WebView without a false native-open receipt', async () => {
+  testedPlatform = 'APP-HARMONY';
+  const b = fixture(); await b.ready(); b.loadPage();
+  assert.equal(b.native.opens.length, 0);
+  assert.equal(b.page.nativeOpen.value, false);
+  assert.equal(b.page.webUrl.value, 'https://auth.example.test/wyy/login');
+  assert.equal(b.page.phase.value, 'polling');
+  assert.equal(b.cookies.length, 1);
+});
+await check('WEB-38: qq WeChat login jar (wxuin + qqmusic_key) normalizes to marker-hit uin + qm_keyst', async () => {
+  const helpers = load(read('services/source-web-login.ts'), names('services/source-web-login.ts'));
+  const raw = `wxopenid=o_fixture; wxuin=o123456789; qqmusic_key=${'K'.repeat(40)}`;
+  const jar = helpers.normalizeQqWebLoginCookie(raw);
+  assert.equal(helpers.qqWebLoginIsWeChatCookie(jar), true);
+  assert.equal(helpers.qqWebLoginAccountId(jar), '123456789');
+  assert.equal(helpers.cookieValueOf(jar, 'uin'), '123456789');
+  assert.equal(helpers.cookieValueOf(jar, 'qm_keyst'), 'K'.repeat(40));
+  assert.equal(helpers.markerHit(jar, ['qm_keyst']), true, 'old installed packs only check qm_keyst');
+  assert.equal(helpers.normalizeQqWebLoginCookie('uin=42; qm_keyst=' + 'Q'.repeat(40)), 'uin=42; qm_keyst=' + 'Q'.repeat(40), 'QQ jar is unchanged');
+});
+console.log('Web-login session: 74 passed (actual page/services; synthetic native/engine/host boundaries).');

@@ -1,8 +1,19 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { portraitPlayerMetrics, widePlayerMetrics, playerQueueMetrics, playerQueueWindow, playerQueueAnchorScroll, playerOffsetMetrics, playerOffsetThumbLeft, playerOffsetFromClientX } from '../uni_modules/qt-ui/composables/player-presentation.ts';
+import { stripTypeScriptTypes } from 'node:module';
+import { playingTrackMetrics } from '../uni_modules/qt-ui/composables/playing-track-metrics.ts';
 import { turntableMetrics, turntableStyles } from '../uni_modules/qt-ui/composables/turntable-presentation.ts';
 import { marqueeOverflows, marqueeLoopDuration } from '../uni_modules/qt-ui/composables/marquee-motion.ts';
+
+// The app bundler resolves extensionless TS imports. Execute this same pure
+// module with its actual dependency in Node, retaining all geometry assertions.
+const metricsSource = readFileSync(new URL('../uni_modules/qt-ui/composables/player-presentation.ts', import.meta.url), 'utf8');
+const metricNames = ['portraitPlayerMetrics', 'widePlayerMetrics', 'playerQueueMetrics', 'playerQueueWindow',
+  'playerQueueAnchorScroll', 'playerOffsetMetrics', 'playerOffsetThumbLeft', 'playerOffsetFromClientX'];
+const metricsCode = stripTypeScriptTypes(metricsSource.replace(/^import .*;\r?\n/gm, '').replace(/^export /gm, ''));
+const { portraitPlayerMetrics, widePlayerMetrics, playerQueueMetrics, playerQueueWindow, playerQueueAnchorScroll,
+  playerOffsetMetrics, playerOffsetThumbLeft, playerOffsetFromClientX } =
+  new Function('playingTrackMetrics', metricsCode + '\nreturn {' + metricNames.join(',') + '};')(playingTrackMetrics);
 
 const page = readFileSync(new URL('../pages/player/index.uvue', import.meta.url), 'utf8');
 const mq = readFileSync(new URL('../uni_modules/qt-ui/components/qt-marquee/qt-marquee.uvue', import.meta.url), 'utf8');
@@ -19,63 +30,71 @@ function cssRpx(selector, property) {
   assert.ok(value.endsWith('rpx'), `${selector}.${property} must use rpx`);
   return Number(value.slice(0, -3));
 }
-const stagePadding = cssValue('portrait-stage', 'padding').split(/\s+/).map(value => Number(value.replace('rpx', '')));
-const footer = ['progress-row', 'controls', 'bar-row'].reduce((sum, selector) => sum + cssRpx(selector, 'height') + cssRpx(selector, 'margin-top'), stagePadding[2]);
-assert.equal(footer, 284, 'compact footer budget must match the actual CSS');
-// Tighten row spacing without reducing the drag surface or button hit targets.
-assert.equal(cssRpx('progress-row', 'margin-top'), 4);
-assert.equal(cssRpx('controls', 'margin-top'), 4);
-assert.equal(cssRpx('bar-row', 'margin-top'), 0);
-assert.equal(cssRpx('prog-range', 'height'), 64);
-assert.equal(cssRpx('control-hit', 'width'), 80);
-assert.equal(cssRpx('control-hit', 'height'), 88);
-assert.equal(cssRpx('icon-main', 'width'), 96);
-assert.equal(cssRpx('icon-main', 'height'), 96);
-assert.equal(cssRpx('bar-hit', 'height'), 88);
-assert.ok(cssRpx('controls', 'height') >= cssRpx('icon-main', 'height'), 'play hit target must fit its row');
-assert.ok(cssRpx('controls', 'height') >= cssRpx('control-hit', 'height'), 'side hit targets must fit their row');
-assert.ok(cssRpx('bar-row', 'height') >= cssRpx('bar-hit', 'height'), 'tool hit targets must fit their row');
-// The actual short-screen CSS occupies 124px, not the former 116px script estimate.
 function cssPx(selector, property) {
   const value = cssValue(selector, property);
   assert.ok(value.endsWith('px') && !value.endsWith('rpx'), `${selector}.${property} must use fixed px`);
   return Number(value.slice(0, -2));
 }
-// Lyric tools now live above lyrics; footer = separator/margin 11 + progress 42 + transport 46.
-assert.equal(widePlayerMetrics(1280,480,0,0,true,7,1).footerPx, 99);
+for (const selector of ['nav-btn', 'control-hit', 'control-side', 'tool-btn']) {
+  assert.ok(cssPx(selector, 'width') >= 44 && cssPx(selector, 'height') >= 44, `${selector} keeps a usable touch target`);
+}
+// 用户 2026-11-13：播放页返回键与全站 qt-page-frame 标准返回（44/22 + 主文字色）一致。
+assert.match(page, /@click="back"><QtIcon name="chevron-left" :size="layout\.isWide \? 22 : 44" :color="playerInk"/, 'the player back key mirrors the frame-standard chevron size and ink');
+const frameSource = readFileSync(new URL('../uni_modules/qt-ui/components/qt-page-frame/qt-page-frame.uvue', import.meta.url), 'utf8');
+assert.match(frameSource, /<QtIcon name="chevron-left" :size="layout\.isWide \? 22 : 44"/, 'qt-page-frame keeps the standard back chevron the player mirrors');
+// 用户 2026-11-14：仅手机返回键向左贴近截图红框，不移动风格/投屏/分享或宽屏按钮。
+assert.match(page, /class="nav-btn" :class="layout\.isWide \? 'nav-btn-wide' : 'nav-btn-back'" @click="back"/, 'only the compact back target gets the left offset');
+assert.equal(cssPx('nav-btn', 'margin-left') - cssPx('nav-btn-back', 'margin-left'), 14, 'compact back shifts left by 14 logical px');
+const compactBackLeft = cssPx('nav', 'padding-left') + cssPx('nav-btn-back', 'margin-left');
+assert.equal(compactBackLeft, 2, 'back touch target stays inside the viewport');
+assert.equal(compactBackLeft + cssPx('nav-btn', 'width') / 2, 24, 'compact back arrow aligns with the requested left edge');
+assert.equal(cssPx('nav', 'padding-right'), 12, 'right-hand player actions keep their existing inset');
+assert.equal(cssPx('nav-btn-wide', 'margin-left'), 8, 'wide navigation retains its original position');
+assert.equal(cssPx('prog-range', 'height'), 36, 'thin progress rail retains its large drag surface');
 function cssWithout(selector, properties) {
   const block = page.match(new RegExp(`\\.${selector} \\{([^}]*)\\}`))?.[1];
   assert.ok(block != null, `missing CSS rule: ${selector}`);
   for (const property of properties) assert.ok(!new RegExp(`(?:^|;)\\s*${property}:`).test(block), `${selector} must not override its bound ${property}`);
 }
 for (const s of ['lyric-tools-row-wide','lyric-tools-row-short','progress-row-wide','progress-row-short','controls-wide','controls-short']) cssWithout(s, ['height','margin-top']);
+for (const s of ['portrait-stage', 'progress-row', 'prog-meta-row', 'controls', 'bar-row']) cssWithout(s, ['height']);
 for (const s of ['queue-row','queue-row-wide']) cssWithout(s, ['height']);
 assert.ok(!page.includes('class="controls controls-wide"') && !page.includes('class="progress-row progress-row-wide"') && !page.includes('class="lyric-tools-row lyric-tools-row-wide"'), 'wide bound geometry must not inherit compact CSS heights');
 assert.match(page, /portraitStageStyle = computed\(\(\): string => "margin-bottom:" \+ layout.safeBottomPx/);
-assert.ok(!page.includes('const WIDE_SHORT_BOTTOM_ROWS_PX = 116;'), 'short-screen stage must reserve all 124px of actual fixed rows');
+assert.ok(page.includes('class="portrait-cover-scroll"'), 'exceptionally short fold panes scroll information instead of covering transport');
 let cases = 0;
+for (const [windowWidth,paneWidth,height] of [[700,340,1000],[1080,530,1600]]) {
+  const m=portraitPlayerMetrics(paneWidth,height,24,24,1,windowWidth);
+  const unit=windowWidth/750;
+  assert.ok(turntableMetrics(m.discRpx).widthRpx*unit<=m.trackWidthPx);
+  assert.ok((m.discRpx+m.reservedRpx)*unit<=height-24+1);
+  const q=playerQueueMetrics(paneWidth,height,false,24,1,windowWidth);
+  assert.equal(q.stridePx,104*unit,'folded queues retain the actual CSS row scale');
+  const offset=playerOffsetMetrics(paneWidth,height,false,paneWidth,24,1,windowWidth);
+  assert.equal(offset.trackWidthPx,paneWidth-80*unit);
+  cases++;
+}
 for (const [width, height, status, safe] of [[320,568,24,24],[360,640,24,24],[375,667,24,0],[391,695,24,0],[384,845,41,42],[430,932,54,34],[393,864,36,24],[412,1000,32,24],[800,1280,24,24]]) {
   let previousDisc = Infinity;
   for (const scale of [0.85,1,1.15,1.3,1.5]) {
     const m = portraitPlayerMetrics(width,height,status,safe,scale);
     const available = (height-safe)/(width/750);
-    const expectedReserved = status/(width/750) + stagePadding[0] + m.trackTopRpx + m.titleRowRpx + m.artistRowRpx + m.lyricRowRpx + cssRpx('track-row-artist', 'margin-top') + cssRpx('track-row-lyric', 'margin-top') + m.trackBottomRpx + footer + m.metaRowRpx + m.artTopRpx;
+    const unit = width / 750;
+    const expectedReserved = (m.padTopPx + m.padBottomPx + m.trackHeightPx + m.lyricRowPx + cssPx('track-row-lyric', 'margin-top') + m.footerPx) / unit + m.trackTopRpx + m.trackBottomRpx + m.artTopRpx;
     assert.ok(Math.abs(m.reservedRpx - expectedReserved) < 0.000001, 'geometry budget must agree with CSS');
     assert.ok(m.discRpx + m.reservedRpx <= available + 1, 'disc must not consume text/controls');
     assert.ok(Math.abs(m.discRpx + m.reservedRpx - available) < 0.000001, 'height changes must not leave unallocated space above the title');
-    assert.ok(m.trackTopRpx >= 28 && m.trackTopRpx <= 92, 'artwork and its title remain one group, even on very tall phones');
-    if (m.discRpx < 613) {
-      assert.ok(m.artTopRpx < 1 && m.trackBottomRpx < 17, 'short screens prioritize artwork, text and touch targets over extra spacing');
-    } else {
-      const spare = m.artTopRpx + m.trackTopRpx - 28 + m.trackBottomRpx - 16;
-      const gaps = [m.artTopRpx, m.trackTopRpx - 28, m.trackBottomRpx - 16];
-      assert.ok(Math.max(...gaps) <= spare * 0.65 + 1, 'surplus height must not accumulate in a single empty gap');
-    }
-    assert.ok(m.titleRowRpx >= 38*scale*1.4 + 8);
-    assert.ok(m.artistRowRpx >= 28*scale*1.4 + 8);
+    assert.ok(m.trackTopRpx * unit >= 12 && m.trackTopRpx * unit <= 36, 'cover and title remain one group on tall phones');
+    const track = playingTrackMetrics(m.trackWidthPx, width, false, false, scale, '');
+    assert.equal(m.trackHeightPx, track.heightPx, 'cover and lyric headings reserve the actual shared component');
+    assert.equal(m.controlsRowPx, cssPx('icon-main', 'height'));
+    assert.ok(m.toolRowPx >= 44);
+    assert.equal(m.footerPx, m.progressRowPx + m.metaRowPx + m.controlsRowPx + cssPx('controls', 'margin-top') + m.toolRowPx + cssPx('bar-row', 'margin-top'));
+    assert.equal(m.contentHeightPx + m.footerPx + m.padTopPx + m.padBottomPx + safe, height);
     assert.ok(m.discRpx <= previousDisc, 'larger type shrinks disc instead of rows');
     const scene = turntableMetrics(m.discRpx);
     assert.ok(scene.widthRpx <= 682 && scene.heightRpx <= m.discRpx + 0.00001);
+    assert.ok(scene.widthRpx * unit <= m.trackWidthPx + 0.001, 'whole native canvas fits the content pane');
     assert.ok(scene.recordLeftRpx >= 0 && scene.recordTopRpx >= 0);
     assert.ok(scene.recordLeftRpx + scene.recordRpx <= scene.widthRpx);
     assert.ok(scene.recordTopRpx + scene.recordRpx <= scene.heightRpx);
@@ -111,8 +130,10 @@ for (const width of [600, 640, 700, 899, 900, 1280, 1600]) {
       assert.ok(m.stacked ? m.toolsWidthPx <= m.controlsWidthPx : m.toolsWidthPx <= m.wingWidthPx, 'all configured tools must fit their actual available width');
       if (width <= 700) assert.equal(m.stacked, true, '600–700px must not squeeze tools into the right half');
       if (width >= 1280) assert.equal(m.stacked, false, 'broad windows retain the original centered equal-wing design');
-      assert.equal(m.footerPx, (short ? 99 : 109) + m.toolsRowPx, 'footer agrees with the reviewed fixed-row contract plus visible overflow tools');
-      assert.ok(m.padTopPx >= 24 + (short ? 44 : 52), 'content must clear its real nav');
+      assert.equal(m.footerPx, cssPx('wide-footer','margin-top') + 1 + m.progressHeightPx + m.progressMarginPx + m.controlsHeightPx + m.controlsMarginPx, 'footer includes its real border, spacing and overflow tools');
+      assert.equal(m.transportWidthPx, cssPx('control-side','width') * 4 + m.mainSizePx + (short ? 8 : 12) * 4);
+      assert.equal(m.toolsWidthPx, cssPx('tool-btn','width') * 8 + m.toolGapPx * 7);
+      assert.ok(m.padTopPx >= 24 + 52, 'content must clear its real nav');
       assert.equal(m.padBottomPx, (short ? 8 : 14) + 20, 'safe bottom is consumed exactly once in the stage');
       assert.ok(m.coverCardPx + m.trackHeightPx <= m.bodyHeightPx + 0.001, 'cover never invades its text or controls');
       cases++;
@@ -123,6 +144,20 @@ assert.match(page, /:style="wideLyricToolsStyle"/);
 assert.match(page, /:style="wideProgressStyle"/);
 assert.match(page, /:style="wideControlsStyle"/);
 assert.ok(page.includes('wideControlsStacked') && page.includes('.control-wing-right-stacked {'));
+// Native 600×360 showed clipped title/source when a stacked metadata block was
+// centered inside a shorter scroll viewport. The scroll content must retain
+// the whole block without taking height from the fixed footer.
+for (const [width, height, safe, scale] of [[600,360,0,1],[640,360,20,1.5],[700,320,0,1.3],[1280,800,32,1]]) {
+  const short = height < 520;
+  const base = widePlayerMetrics(width,height,24,safe,short,4,scale);
+  const track = playingTrackMetrics(base.trackWidthPx,width,true,short,scale,'网易云音乐 · 高品 320k');
+  const m = widePlayerMetrics(width,height,24,safe,short,4,scale,track.heightPx);
+  assert.ok(m.leftContentHeightPx >= track.heightPx, 'scroll content must retain both title lines and the artist/source hit targets');
+  assert.ok(m.leftContentHeightPx >= m.bodyHeightPx, 'fitting metadata can keep its centered presentation');
+  assert.equal(m.bodyHeightPx + m.footerPx + m.padTopPx + m.padBottomPx, height, 'scrolling information must not change the footer budget');
+  if (track.heightPx > m.bodyHeightPx) assert.ok(m.leftContentHeightPx > m.bodyHeightPx, 'overflow must be available to the scroll view');
+  cases++;
+}
 assert.ok(!page.includes('const QUEUE_VIEWPORT_ESTIMATE = 800;'), 'the virtual queue must cover its real or window-derived viewport, not a fixed 800px estimate');
 for (const [width, height, wide, safe] of [[375,667,false,0],[500,800,false,24],[599,1000,false,0],[640,360,true,20],[700,480,true,0],[900,1600,true,32],[1280,2000,true,0]]) {
   for (const scale of [1, 1.15, 1.5]) {
@@ -213,8 +248,11 @@ for (const bad of [0, -5, NaN, Infinity]) {
   assert.equal(marqueeOverflows(100, bad), false);
   cases++;
 }
-assert.match(page, /<QtMarquee[^>]*:text="name\(\)"[^>]*:active="pageVisible"/);
-assert.match(page, /<QtMarquee[^>]*:text="artistText\(\)"[^>]*:active="pageVisible"/);
+const trackComponent = readFileSync(new URL('../uni_modules/qt-ui/components/qt-playing-track/qt-playing-track.uvue', import.meta.url),'utf8');
+assert.match(page, /<QtPlayingTrack[^>]*:name="name\(\)"[^>]*:active="pageVisible"/);
+assert.match(trackComponent, /<QtMarquee[^>]*:text="artist"[^>]*:active="active"/);
+// 2026-11-14 用户裁定：歌名改单行跑马灯（放得下静止、溢出滚动），不再两行换行。
+assert.match(trackComponent, /<QtMarquee[^>]*class="pt-title"[^>]*:text="name"[^>]*:active="active"/, 'the song title scrolls in one line instead of wrapping to two beside the badge');
 // Seamless loop needs exactly two copies of one text; the copy mounts only when overflowing,
 // the slide distance is the measured copy offset fed straight to translateX (no pixelRatio
 // inflation — the old round-trip implementation multiplied it and overshot past the text tail).

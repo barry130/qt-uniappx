@@ -5,6 +5,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
+import { sourcePolicyFixture } from './source-policy-fixture.mjs';
+import { tvScriptFixture } from './tv-script-fixture.mjs';
 import { fileURLToPath } from 'node:url';
 
 export const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
@@ -12,6 +14,8 @@ export const noop = () => {};
 export class UTSJSONObject {
   constructor(value = {}) { Object.assign(this, value); }
   get(key) { return Object.hasOwn(this, key) ? this[key] : null; }
+  getString(key) { return this.get(key); }
+  getNumber(key) { return this.get(key); }
   set(key, value) { this[key] = value; }
   static keys(value) { return Object.keys(value); }
 }
@@ -26,6 +30,13 @@ export function parseJsonToUtso(text) {
   return convert(JSON.parse(text));
 }
 export function load(text, names, extra = {}) {
+  if (extra.uni) extra = { ...extra, ...sourcePolicyFixture(extra.uni) };
+  if (extra.uni && text.includes('<script setup') &&
+      (text.includes('composables/use-qt-tv') || text.includes('composables/use-qt-layout'))) {
+    const ui = tvScriptFixture(extra);
+    extra = { useQtTv: ui.useQtTv, qtTvTokens: ui.qtTvTokens, useQtLayout: ui.useQtLayout,
+      qtContentWidth: ui.qtContentWidth, qtFontDual: ui.qtFontDual, qtFontValuePx: ui.qtFontValuePx, ...extra };
+  }
   const script = text.includes('<script setup') ? text.match(/<script setup[^>]*>([\s\S]*?)<\/script>/)[1] : text;
   const cleaned = script.replace(/^import[\s\S]*?\bfrom\s*["'][^"']+["'];?\s*/gm, '');
   const js = stripTypeScriptTypes(cleaned, { mode: 'strip' })
@@ -43,7 +54,7 @@ export async function drain() { for (let i = 0; i < 40; i++) await Promise.resol
 export function host() {
   const storage = new Map(), intervals = new Map(), timeouts = new Map();
   const hooks = { load: [], show: [], unload: [], unmounted: [] };
-  const toasts = [], files = [], events = [], routes = [];
+  const toasts = [], files = [], events = [], routes = [], networkWatchers = [];
   let nextTimer = 1;
   const uni = {
     env: { CACHE_PATH: '/fixture/cache' },
@@ -52,6 +63,8 @@ export function host() {
     removeStorageSync: (key) => storage.delete(key),
     getStorageInfoSync: () => ({ keys: [...storage.keys()] }),
     getFileSystemManager: () => ({ writeFileSync: (...args) => files.push(args) }),
+    getNetworkType: (options) => { options.success({ networkType: 'wifi' }); },
+    onNetworkStatusChange: (fn) => { networkWatchers.push(fn); },
     $emit: (...args) => events.push(args), $on: noop, $off: noop,
     reLaunch: (opts) => routes.push(opts), navigateTo: (opts) => routes.push(opts),
   };
@@ -60,13 +73,14 @@ export function host() {
     computed: (get) => ({ get value() { return get(); } }),
     onLoad: (fn) => hooks.load.push(fn), onShow: (fn) => hooks.show.push(fn),
     onUnload: (fn) => hooks.unload.push(fn), onUnmounted: (fn) => hooks.unmounted.push(fn),
+    onBeforeUnmount: (fn) => hooks.unmounted.push(fn),
     setInterval: (fn) => { const id = nextTimer++; intervals.set(id, fn); return id; },
     clearInterval: (id) => intervals.delete(id),
     setTimeout: (fn) => { const id = nextTimer++; timeouts.set(id, fn); return id; },
     clearTimeout: (id) => timeouts.delete(id),
     qtShowToast: (message) => toasts.push(message),
   };
-  return { storage, intervals, timeouts, hooks, toasts, files, events, routes, uni, vue,
+  return { storage, intervals, timeouts, hooks, toasts, files, events, routes, uni, vue, networkWatchers,
     tick: () => { for (const fn of [...intervals.values()]) fn(); } };
 }
 const serviceNames = [...read('services/source-auth.ts').matchAll(/^export\s+(?:async\s+)?function\s+(\w+)/gm)].map((m) => m[1]);
@@ -85,14 +99,19 @@ export function qrFixture({ holdInjection = false } = {}) {
   });
   const player = { savedPlaylists: [] };
   const sync = load(read('services/source-playlist-sync.ts'), syncNames, { ...service, usePlayerStore: () => player });
+  const aggregate = load(read('services/aggregate-sources.ts'), [
+    'readAggregateSources', 'saveAggregateSources', 'AGGREGATE_SOURCES_CHANGED_EVENT',
+  ], { uni: b.uni });
   const page = load(read('pages/source-auth/index.uvue'), [
     'startQr', 'regenerateQr', 'closeQrSheet',
     'qrVisible', 'qrBusy', 'qrSource', 'qrKey', 'qrStatusText',
   ], {
-    ...b.vue, uni: b.uni, ...service, ...sync,
+    ...b.vue, uni: b.uni, ...service, ...sync, ...aggregate,
+    applyEngineSourcePolicy: async () => {}, sourcePolicyStatus: () => ({ message: '' }),
+    platformLabel: (source) => source,
     SOURCE_AUTH_CHANGED_EVENT: 'qt-source-auth-changed', WEB_LOGIN_DONE_EVENT: 'qt-web-login-done',
     useThemeStore: () => ({ skin: {} }), useQtLayout: () => ({ windowHeight: 800, safeBottomPx: 0, isWide: false }),
-    useSourceRegistryStore: () => ({ sources: [], ensure: async () => {}, label: (s) => s }),
+    useSourceRegistryStore: () => ({ sources: [], catalog: [], ensure: async () => {}, label: (s) => s }),
     usePlayerStore: () => player, useDownloadsStore: () => ({}), useQtSelectionReveal: () => ({}),
   });
   return { ...b, page, service, requests, injections };

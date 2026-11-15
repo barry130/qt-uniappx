@@ -6,9 +6,20 @@ const read=p=>readFileSync(new URL('../'+p,import.meta.url),'utf8').replaceAll('
 const compile=s=>stripTypeScriptTypes(s.replace(/^import[\s\S]*?from\s*["'][^"']+["'];?\s*/gm,'').replace(/^export /gm,''),{mode:'strip'});
 const between=(s,a,b)=>{const start=s.indexOf(a),end=s.indexOf(b,start+a.length);assert.ok(start>=0&&end>start,a);return s.slice(start,end);};
 const core=compile(read('uni_modules/qt-audio-player/utssdk/car-lyric.uts'));
-const pure=vm.runInNewContext(core+'\n({parseCarLyric,carLyricAt,carLyricFields,carLyricText})');
+const pure=vm.runInNewContext(core+'\n({parseCarLyric,carLyricAt,carLyricFields,carLyricText,nextCarLyricDelay})');
 let count=0;
 const pass=name=>{count++;console.log('PASS '+name);};
+
+{
+  const lines=pure.parseCarLyric('[00:01]A\n[00:02]B\n[00:02]C\n[00:03]D');
+  assert.equal(pure.nextCarLyricDelay(lines,1000,0,1),1000);
+  assert.equal(pure.nextCarLyricDelay(lines,1000,500,2),250);
+  assert.equal(pure.nextCarLyricDelay(lines,2000,0,1),1000);
+  assert.equal(pure.nextCarLyricDelay(lines,1999,0,1),40);
+  assert.equal(pure.nextCarLyricDelay(lines,3000,0,1),-1);
+  assert.equal(pure.nextCarLyricDelay([],0,0,1),-1);
+  pass('widget scheduling follows the next distinct lyric boundary, offset and speed');
+}
 
 {
   const lines=pure.parseCarLyric('[ar:123456]\n[00:03.50][00:08.500]第二行\r\n[00:01.00]第一行\n[00:06.00]\n[00:99]invalid\n[offset:500]');
@@ -41,16 +52,43 @@ class Metadata {
 }
 const makeItem=(id,meta=new Metadata())=>({mediaId:id,mediaMetadata:meta,uri:'unchanged://audio',buildUpon(){let m=this.mediaMetadata;const item=this;return {setMediaMetadata(v){m=v;return this;},build(){return makeItem(item.mediaId,m);}};}});
 const native=read('uni_modules/qt-audio-player/utssdk/app-android/index.uts');
+{
+  // Execute the native scheduler with fake Android boundaries; actual Kotlin is
+  // validated separately by HBuilderX. This tests cancellation and rescheduling.
+  const pending=new Map();let screen=true,playing=true,positionMs=1000,speed=1,widgets=1,casts=false,registered=0,paints=0;
+  const receiverContext={getSystemService:()=>({isInteractive:()=>screen}),registerReceiver:()=>registered++,unregisterReceiver:()=>registered--};
+  const schedulerContext=vm.createContext({console,...pure,UTSAndroid:{getAppContext:()=>receiverContext},
+    gMediaPlayer:{getCurrentPosition:()=>positionMs,isPlaying:()=>playing,getPlaybackParameters:()=>({speed})},
+    gCarLines:[],gCarLinesReady:false,gCarLyricText:'[00:01]A\n[00:03]B\n[00:05]C',gCarOffsetMs:0,
+    BroadcastReceiver:class {},IntentFilter:class {addAction(){}},ComponentName:class {},
+    Intent:{ACTION_SCREEN_ON:'on',ACTION_SCREEN_OFF:'off'},Context:{POWER_SERVICE:'power',RECEIVER_NOT_EXPORTED:4},Build:{VERSION:{SDK_INT:35}},
+    AppWidgetManager:{getInstance:()=>({getAppWidgetIds:()=>({size:widgets})})},dlnaActive:()=>casts,
+    getHandler:()=>({removeCallbacks:r=>pending.delete(r),postDelayed:(r,delay)=>pending.set(r,delay)}),refreshWidgetViews:()=>paints++,
+  });
+  const schedulerCode=between(native,"let gWidgetLyric =",'// A direct Activity PendingIntent')
+    .replaceAll('implements Runnable','').replaceAll('override ','').replaceAll('.toDouble()','').replaceAll('.toLong()','');
+  const scheduler=vm.runInContext(compile(schedulerCode)+'\n({scheduleWidgetLyric,stopWidgetLyric,get lyric(){return gWidgetLyric;}})',schedulerContext);
+  scheduler.scheduleWidgetLyric();assert.equal(scheduler.lyric,'A');assert.deepEqual([...pending.values()],[2000]);assert.equal(registered,1);
+  const before=paints;scheduler.scheduleWidgetLyric();assert.equal(paints,before);assert.equal(registered,1);assert.equal(pending.size,1);
+  screen=false;scheduler.scheduleWidgetLyric();assert.equal(pending.size,0);
+  positionMs=3500;screen=true;scheduler.scheduleWidgetLyric();assert.equal(scheduler.lyric,'B');assert.deepEqual([...pending.values()],[1500]);
+  playing=false;scheduler.scheduleWidgetLyric();assert.equal(pending.size,0);
+  positionMs=1200;speed=2;playing=true;scheduler.scheduleWidgetLyric();assert.equal(scheduler.lyric,'A');assert.deepEqual([...pending.values()],[900]);
+  casts=true;scheduler.scheduleWidgetLyric();assert.equal(pending.size,0);assert.equal(registered,0);assert.equal(scheduler.lyric,'');
+  casts=false;scheduler.scheduleWidgetLyric();widgets=0;scheduler.scheduleWidgetLyric();assert.equal(registered,0);assert.equal(pending.size,0);
+  widgets=1;schedulerContext.gMediaPlayer=null;scheduler.scheduleWidgetLyric();assert.equal(pending.size,0);
+  pass('widget native scheduler: screen off/on, paused, seek, speed, DLNA, removed widget and released player');
+}
 let code=core+'\n'+between(native,'let gCarLyricGen:', '// ==================== 音频磁盘缓存');
 code+='\nconst CAR_LYRIC_KEY="android.media.metadata.LYRICS";\n'+between(native,'function applyCarLyric(', '\n/**\n * 保留整首歌词');
-code+='\n'+native.slice(native.indexOf('function carBluetoothConnected()'));
+code+='\n'+native.slice(native.indexOf('function carBluetoothConnected()'),native.indexOf('// Append-only bridge export: existing custom-base'));
 code=code.replaceAll('.toDouble()','').replaceAll('.toInt()','').replace('outputs.size','outputs.length').replaceAll('implements Runnable','').replaceAll('override run()','run()');
-let item=makeItem('wyy:A'),position=0,connected=true,now=10000,replacements=0;
+let item=makeItem('wyy:A'),position=0,connected=true,now=10000,replacements=0,playing=true,speed=1;
 const tasks=new Map();
 const handler={removeCallbacks:r=>tasks.delete(r),post:r=>{tasks.set(r,0);},postDelayed:(r,d)=>{tasks.set(r,d);}};
-const player={getCurrentMediaItem:()=>item,getCurrentMediaItemIndex:()=>0,getCurrentPosition:()=>position,replaceMediaItem:(_i,next)=>{item=next;replacements++;}};
+const player={getCurrentMediaItem:()=>item,getCurrentMediaItemIndex:()=>0,getCurrentPosition:()=>position,isPlaying:()=>playing,getPlaybackParameters:()=>({speed}),replaceMediaItem:(_i,next)=>{item=next;replacements++;}};
 let casting=false;
-const ctx=vm.createContext({Bundle,gMediaPlayer:player,dlnaActive:()=>casting,Build:{VERSION:{SDK_INT:35}},Context:{AUDIO_SERVICE:'audio'},AudioManager:{GET_DEVICES_OUTPUTS:2},AudioDeviceInfo:{TYPE_BLUETOOTH_A2DP:8},
+const ctx=vm.createContext({scheduleWidgetLyric:()=>{},Bundle,gMediaPlayer:player,dlnaActive:()=>casting,Build:{VERSION:{SDK_INT:35}},Context:{AUDIO_SERVICE:'audio'},AudioManager:{GET_DEVICES_OUTPUTS:2},AudioDeviceInfo:{TYPE_BLUETOOTH_A2DP:8},
   getContext:()=>({getSystemService:()=>({getDevices:()=>connected?[{getType:()=>8}]:[]})}),getHandler:()=>handler,SystemClock:{elapsedRealtime:()=>now},Looper:{myLooper:()=>1,getMainLooper:()=>1},Uri:{parse:v=>v},console});
 vm.runInContext(compile(code)+`\nglobalThis.api={audioSetCarLyricMode,audioCarLyricToken,audioSetCarLyricFor,audioSetCarLyricOffset,tickCarLyric,QtCarLyricCommand,audioSetTrackCover,
   transition(mid){gCarTrackEpoch++;gCarTrackMid=mid;gCarLyricText=null;gCarLines=[];gCarLinesReady=false;gCarOffsetMs=0;scheduleCarLyricTick();},publishCarLyricFields};`,ctx);
@@ -83,6 +121,32 @@ pass('native metadata: default off, artist/title modes, reconnect, dedup, restor
   token=api.audioCarLyricToken();api.audioSetCarLyricFor('wyy:A',token,'无时间轴的歌词',0);api.tickCarLyric();assert.equal(item.mediaMetadata.artist,'真实歌手');
   api.audioSetCarLyricFor('wyy:A',token,'',0);api.tickCarLyric();assert.equal(item.mediaMetadata.title,'真实歌名');
   pass('native lifecycle: seek/offset/blank/untimed lyrics and stale A→B→A bridge deliveries');
+}
+
+{
+  // 播放中把下一拍定在行边界上：行中保持 500ms 状态巡检节拍、边界一拍 ≥40ms、
+  // 倍速按 speed 缩短等待、暂停回退轮询、越过最后边界回退 500ms。
+  api.audioSetCarLyricMode(1);token=api.audioCarLyricToken();
+  api.audioSetCarLyricFor('wyy:A',token,'[00:01]你好\n[00:04]世界\n[00:06]\n[00:08]再见',0);
+  position=1500;assert.equal(api.tickCarLyric(),500);assert.equal(item.mediaMetadata.artist,'你好');
+  now+=1000;position=3960;assert.equal(api.tickCarLyric(),40);assert.equal(item.mediaMetadata.artist,'你好');
+  now+=100;position=4050;assert.equal(api.tickCarLyric(),500);assert.equal(item.mediaMetadata.artist,'世界');
+  now+=1000;speed=2;position=5500;assert.equal(api.tickCarLyric(),250);assert.equal(item.mediaMetadata.artist,'世界');
+  now+=1000;speed=1;playing=false;position=4700;assert.equal(api.tickCarLyric(),500);assert.equal(item.mediaMetadata.artist,'世界');
+  now+=1000;playing=true;position=8500;assert.equal(api.tickCarLyric(),500);assert.equal(item.mediaMetadata.artist,'再见');
+  pass('car scheduling: lyric-boundary firing, speed, paused fallback and end-of-lyrics cadence');
+}
+
+{
+  // 稠密行合并 ≥500ms：被窗口挡下的一拍在窗口打开时立即重试，
+  // 不等下一个行边界（该行不会整行丢失）。
+  api.audioSetCarLyricFor('wyy:A',token,'[00:04]甲\n[00:04.3]乙\n[00:04.6]丙',0);
+  position=4050;assert.equal(api.tickCarLyric(),250);assert.equal(item.mediaMetadata.artist,'甲');
+  now+=250;position=4350;const beforeDense=replacements;
+  assert.equal(api.tickCarLyric(),250);assert.equal(replacements,beforeDense);assert.equal(item.mediaMetadata.artist,'甲');
+  now+=250;assert.equal(api.tickCarLyric(),250);assert.equal(item.mediaMetadata.artist,'乙');
+  api.audioSetCarLyricMode(0);assert.equal(item.mediaMetadata.artist,'真实歌手');
+  pass('car coalescing: dense lines retry at the window boundary without losing lines');
 }
 
 {

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { sourcePolicyFixture } from './source-policy-fixture.mjs';
 import assert from 'node:assert/strict';
 import {stripTypeScriptTypes} from 'node:module';
 const read=p=>fs.readFileSync(new URL('../'+p,import.meta.url),'utf8').replaceAll('\r\n','\n');
@@ -57,6 +58,7 @@ const end=player.indexOf('\n  collectDupConflicts(',start);
 let epoch=1,decision=async()=>result,writes=0,durable=null,queued=[];
 const toasts=[];
 const tx=vm.createContext({
+  prepareCollectionWrite() {},
   getSessionEpoch:()=>epoch,LIKED_KEY:'test-liked',
   collectKey:s=>s.platform+':'+s.id,
   chooseCollectSongs:(...args)=>decision(...args),
@@ -137,6 +139,7 @@ const music=vm.createContext({
   readLyricDisk:k=>disk.get(k)??'',writeLyricDisk:(k,v)=>disk.set(k,v),removeLyricDisk:k=>disk.delete(k),
   qtDiag:()=>{},Map,Set,
 });
+Object.assign(music, sourcePolicyFixture(music.uni), { readAggregateSources: () => null });
 vm.runInContext(compile(read('services/music-api.ts'))+'\nglobalThis.api=musicApi;',music);
 const musicApi=music.api;
 musicApi.urlCacheSet('qq:1:320','https://old-source');

@@ -16,13 +16,14 @@ const pass = name => { passed++; console.log('PASS ' + name); };
 
 // One shared animation across stacked pages; no work while invisible/background/wide.
 {
-  const layout = {windowWidth:390,windowHeight:844,isWide:false,safeBottomPx:0};
+  const layout = {windowWidth:390,windowHeight:844,isWide:false,safeBottomPx:0,paneLeft:0,paneTop:0,get paneWidth(){return this.windowWidth;},get paneHeight(){return this.windowHeight;}};
   const settings = {mode:"expandable"};
+  const performancePolicy = {reduceMotion:false,expensiveEffects:true};
   const raf = new Map(), watches = [], timeouts = new Map();
   let id=0, writes=0, updates=0;
   const watchedRef = initial => { let value=initial; return {get value(){return value;}, set value(v){if(v!==value)updates++;value=v;}}; };
   const api = runInNewContext(runnable(read('uni_modules/qt-ui/services/mini-player-singleton.ts')) + '\n({miniPlayerMount,miniPlayerUnmount,miniPlayerSetPlaying,miniPlayerSetVisible,miniPlayerSetForeground,miniRotateDeg,ensureMiniPositioned,miniPositioned})', {
-    qtMiniStripHeightPx:()=>layout.isWide?56:112*layout.windowWidth/750,useMiniPlayerSettings:()=>settings,computed,ref:watchedRef,watch:(get,callback)=>{watches.push({get,callback});},qtLayout:()=>layout,qtRpx:n=>n*layout.windowWidth/750,qtRailWidth:()=>96,
+    qtPerformance:performancePolicy,qtMiniStripHeightPx:()=>layout.isWide?56:112*layout.windowWidth/750,useMiniPlayerSettings:()=>settings,computed,ref:watchedRef,watch:(get,callback)=>{watches.push({get,callback});},qtLayout:()=>layout,qtRpx:n=>n*layout.windowWidth/750,qtRailWidth:()=>96,
     requestAnimationFrame:fn=>{raf.set(++id,fn);return id;},cancelAnimationFrame:i=>raf.delete(i),
     setTimeout:fn=>{timeouts.set(++id,fn);return id;},clearTimeout:i=>timeouts.delete(i),logWarn:()=>{},
     uni:{getWindowInfo:()=>layout,getStorageSync:()=>'',setStorageSync:()=>{writes++;}},
@@ -46,6 +47,8 @@ const pass = name => { passed++; console.log('PASS ' + name); };
   api.ensureMiniPositioned();assert.equal(api.miniPositioned.value,true,'wide floating mode initializes coordinates');
   settings.mode='docked';watches[0].callback();assert.equal(raf.size,0,'dock has no decorative animation');
   settings.mode='expandable';watches[0].callback();
+  performancePolicy.reduceMotion=true;watches[0].callback();assert.equal(raf.size,0,'system reduced motion cancels the shared loop immediately');
+  performancePolicy.reduceMotion=false;watches[0].callback();assert.equal(raf.size,1,'normal motion resumes one loop');
   layout.isWide=false;watches[1].callback();assert.equal(raf.size,1);
   const initialWrites=writes;layout.windowHeight=900;watches[1].callback();
   assert.equal(writes-initialWrites,1,'shared resize writes position once for two mounted pages');
@@ -54,6 +57,23 @@ const pass = name => { passed++; console.log('PASS ' + name); };
   api.miniPlayerMount();assert.equal(watches.length,2,'remount does not accumulate resize watchers');
   api.miniPlayerSetPlaying(false);assert.equal(raf.size,0);
   pass('mini-player: 30 updates/s at 120Hz; zero hidden/background loops; one resize writer');
+}
+
+{
+  const policy=runInNewContext(runnable(read('uni_modules/qt-ui/composables/use-qt-performance.ts'))+'\n({qtPerformance,applyQtPerformance})',{reactive:v=>v});
+  const page=read('pages/player/index.uvue');
+  const state={qtPerformance:policy.qtPerformance,pageVisible:{value:true},player:{playing:true},playingStyle:{style:'classic'},layout:{isWide:false},showLyric:{value:false}};
+  let spinning=false;
+  const sync=runInNewContext(runnable(slice(page,'function syncDiscSpin():','// A mode/ref replacement'))+'\nsyncDiscSpin',{
+    ...state,startDiscSpin:()=>{spinning=true;},stopDiscSpin:()=>{spinning=false;},
+  });
+  sync();assert.equal(spinning,true);
+  for(const flags of [[true,false,false],[false,true,false],[false,false,true]]){
+    policy.applyQtPerformance(...flags);sync();assert.equal(spinning,false);assert.equal(policy.qtPerformance.expensiveEffects,false);
+    policy.applyQtPerformance(false,false,false);sync();assert.equal(spinning,true);
+  }
+  state.pageVisible.value=false;sync();assert.equal(spinning,false);
+  pass('system power/memory/animation policy stops both expensive effects and full-player decoration');
 }
 
 {
@@ -122,7 +142,7 @@ const pass = name => { passed++; console.log('PASS ' + name); };
   const source=read('uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue');
   const code=slice(source,'const posStyle =','</script>');
   for(const [width,height,wide,safe] of [[390,844,false,34],[640,360,true,20],[900,700,true,0],[1920,1080,true,42]]){
-    const layout={windowWidth:width,windowHeight:height,isWide:wide,safeBottomPx:safe};
+    const layout={windowWidth:width,windowHeight:height,paneWidth:width,paneHeight:height,paneLeft:0,paneTop:0,isWide:wide,safeBottomPx:safe};
     let queries=0;
     const api=runInNewContext(runnable(code)+'\n({posStyle})',{computed,layout,miniSettings:{mode:"docked"},qtMiniDockReservePx:()=>wide?84+safe:296*width/750+safe,player:{current:{}},qtRpx:n=>n*width/750,qtPlayerBarHeightPx:()=>84+safe,qtTabBarHeightPx:()=>184*width/750+safe,uni:{getWindowInfo(){queries++;return layout;}}});
     const style=api.posStyle.value;
@@ -132,5 +152,20 @@ const pass = name => { passed++; console.log('PASS ' + name); };
     assert.ok(bottom>=(wide?84+safe:184*width/750+safe));assert.equal(queries,0);
   }
   pass('back-to-top: correct compact/wide dock clearance with zero window bridge calls');
+}
+
+{
+  // 2026-11-14 用户截图：长按动作单打开时「回到顶部」火箭穿透遮罩压在「屏蔽该歌手」右侧。
+  // fixed 节点在窗口层（z 950），QtSheet 遮罩是 absolute z 999 且被
+  // .qt-page-frame-content 的 z-index:2 层叠上下文约束在内容层 —— 必须在弹层期间不渲染。
+  // 同款契约见 qt-mini-player（2026-11-13 sheet-visibility 计数）。
+  const source=read('uni_modules/qt-ui/components/qt-back-to-top/qt-back-to-top.uvue');
+  assert.ok(/import\s*\{\s*qtSheetOverlayCount\s*\}\s*from\s*"@\/uni_modules\/qt-ui\/stores\/sheet-visibility"/.test(source),
+    'back-to-top must consume the sheet overlay counter');
+  assert.ok(/v-if="visible && sheetHidden"/.test(source),
+    'back-to-top must not render while a QtSheet overlay is open (fixed node pierces the mask)');
+  assert.ok(/const sheetHidden = computed\(\(\): boolean => qtSheetOverlayCount\(\)\.value == 0\)/.test(source),
+    'back-to-top sheetHidden must be the shared overlay counter');
+  pass('back-to-top: hidden while any QtSheet overlay is open (no mask piercing)');
 }
 console.log(`UI performance: ${passed} production behavior groups passed`);

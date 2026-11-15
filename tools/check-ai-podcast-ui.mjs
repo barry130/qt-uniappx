@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
+import { sourcePolicyFixture } from './source-policy-fixture.mjs';
 
 const read = name => readFileSync(new URL('../' + name, import.meta.url), 'utf8');
 const noop = () => {};
@@ -31,6 +32,8 @@ function compile(text) {
     .replace(/\bexport\s+(?=(?:async\s+)?(?:function|class|const|let|var))/g, '');
 }
 function load(text, names, extra = {}) {
+  const uni = extra.uni ?? { getStorageSync: () => "" };
+  extra = { ...extra, uni, ...sourcePolicyFixture(uni) };
   const context = vm.createContext({
     console, ref, computed, UTSJSONObject, parseJsonToUtso: text => toUTS(JSON.parse(text)),
     logMsgErr: noop, logWarn: noop, logErrV: noop, qtShowToast: noop,

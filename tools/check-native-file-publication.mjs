@@ -228,6 +228,8 @@ function runtime(sdk = 28) {
       Downloads: { EXTERNAL_CONTENT_URI: NativeUri.parse('content://media/external/downloads') } },
     // Unused native WebView subclasses must exist to load the whole Android module.
     WebView: class {}, WebViewClient: class {}, NativeObject: class {},
+    BroadcastReceiver: class {}, ContentObserver: class {},
+    Handler: class {}, Looper: { getMainLooper: () => ({}) },
   };
   Object.assign(adapters, load('embed-bytes.uts', adapters));
   Object.assign(adapters, load('read-embed.uts', adapters));

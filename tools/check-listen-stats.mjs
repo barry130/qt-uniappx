@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
+import { preprocessPlatform } from './platform-preprocess.mjs';
 
 const storeSource = readFileSync(new URL('../stores/listen-stats.ts', import.meta.url), 'utf8');
 const code = stripTypeScriptTypes(storeSource.replace(/^import .*;\r?\n/gm, '').replace(/^export /gm, ''));
@@ -320,8 +321,7 @@ check('只有最近在听一类时整区仍不出场（单类不算数）', () =
 const bridgeSource = readFileSync(new URL('../services/listen-stats-file.uts', import.meta.url), 'utf8');
 function fileBridge(engine, android = true) {
   const calls = [];
-  const source = bridgeSource.replace(/^[ \t]*\/\/ #if(n?)def APP-ANDROID\r?\n([\s\S]*?)^[ \t]*\/\/ #endif/gm,
-    (_match, negative, body) => (negative ? !android : android) ? body : '');
+  const source = preprocessPlatform(bridgeSource, android ? 'APP-ANDROID' : 'WEB');
   const bridgeCode = stripTypeScriptTypes(source.replace(/^import .*;\r?\n/gm, '').replace(/^export /gm, ''));
   const bridge = vm.runInNewContext(bridgeCode + '\n({ listenStatsPath, readListenStatsFile, writeListenStatsFile });', {
     QtJsEngine: Object.freeze(engine),
@@ -347,7 +347,7 @@ check('新基座使用系统返回的目录并先写临时文件再替换', () =
   assert.equal(newBridge.listenStatsPath(), path); assert.equal(newRead.ok, true); assert.equal(newRead.text, 'saved'); assert.equal(newWrite, true);
   assert.deepEqual(newBridge.calls, [['read', path], ['write', path + '.tmp', 'new'], ['rename', path + '.tmp', path]]);
 });
-check('公共目录接口异常或非 Android 平台安全降级', () => {
+check('公共目录接口异常或 Web 平台安全降级', () => {
   assert.equal(fileBridge({ publicDataDir: () => { throw Error('unavailable'); } }).listenStatsPath(), '');
   assert.equal(fileBridge({ publicDataDir: () => '/Download/QtMusic' }, false).listenStatsPath(), '');
 });

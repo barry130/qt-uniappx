@@ -1,22 +1,30 @@
 // 批次⑥最小单测面：services/like-sync.ts 收藏同步引擎的确定性核心回归。
-// VM 沙箱跑真实类（stripTypeScriptTypes 去类型），垫 like/auth/logger/uni 存储桥。
+// VM 沙箱按真实 import 装载模块，垫 like/auth/logger/uni 桥；不把依赖注入全局。
 // 覆盖：load/save 游标与积压队列往返 + 损坏条目跳过、payload 字段口径、
 //       flushPendingOps 批量上送（200 分批/整批原子/失败保序/无效丢弃/seq 回写）、
-//       ensurePlaylistPid 兜底生成、resetLikeSync / clearLocalLikeData。
+//       ensurePlaylistPid 兜底生成、resetLikeSync / clearLocalLikeData、
+//       登录后后台同步的延迟 loading 与收尾（真实 ui-loading + 可控时钟）。
 // 范围说明：pullChanges 的多端 LWW 合并依赖完整 host 方法面，留作后续深化，
 // 本脚本先锁住纯机器状态与推送管线（从 player.ts 抽出时的最高回归风险面）。
 // node tools/check-like-sync.mjs（Node >= 22.13）
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { stripTypeScriptTypes } from 'node:module';
+import ts from 'typescript';
 import vm from 'node:vm';
 
-const source = readFileSync(new URL('../services/like-sync.ts', import.meta.url), 'utf8');
-const pidSource = readFileSync(new URL('../services/global-pid.ts', import.meta.url), 'utf8');
-const code = stripTypeScriptTypes(source.replace(/^import .*;\r?\n/gm, '').replace(/^export /gm, ''));
-const pidCode = stripTypeScriptTypes(pidSource.replace(/^import .*;\r?\n/gm, '').replace(/^export /gm, ''));class Utso {
+const moduleCode = new Map([
+  ['@/services/like-sync', 'like-sync.ts'],
+  ['@/services/global-pid', 'global-pid.ts'],
+  ['@/services/ui-loading', 'ui-loading.uts'],
+].map(([id, file]) => [id, ts.transpileModule(
+  readFileSync(new URL('../services/' + file, import.meta.url), 'utf8'),
+  { fileName: file + '.ts', compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } },
+).outputText]));
+
+class Utso {
   constructor(data = {}) { this.data = data; }
   get(key) { return this.data[key] ?? null; }
+  getString(key) { return this.get(key); }
   set(key, value) { this.data[key] = value; }
   toJSON() { return this.data; }
 }
@@ -26,11 +34,44 @@ function wrap(value) {
   return value;
 }
 
+function createClock() {
+  let now = 0;
+  let seq = 0;
+  const timers = new Map();
+  return {
+    setTimeout(callback, delay) {
+      const id = ++seq;
+      timers.set(id, { callback, at: now + delay });
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
+    get pending() { return timers.size; },
+    async advance(ms) {
+      const target = now + ms;
+      while (true) {
+        const next = [...timers.entries()].filter(([, timer]) => timer.at <= target)
+          .sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next) break;
+        const [id, timer] = next;
+        now = timer.at;
+        timers.delete(id);
+        timer.callback(); // 与原生定时器一样，回调异常不能被同步请求的 catch 吞掉。
+        await tick();
+      }
+      now = target;
+      await tick();
+    },
+  };
+}
+
 function boot(env) {
   env.storage = new Map();
   env.batches = [];
   env.changes = [];
   env.logs = [];
+  env.loadingEvents = [];
+  env.pages = env.pages ?? [{ route: 'pages/profile/index' }];
+  env.clock = createClock();
   env.sessionEpoch = env.sessionEpoch ?? 0;
   env.userId = env.userId ?? '';
   env.host = {
@@ -51,43 +92,67 @@ function boot(env) {
       if (!song.pids.includes(pid)) song.pids.push(pid);
     },
     removeSongsOfPlaylistLocal() {},
+    restoreAccountCollections() { env.host.likedSongs = []; env.host.savedPlaylists = []; env.host.localPlaylists = []; },
     persistNow() { env.host.persistCount++; },
     saveLocalPlaylistsNow() { env.host.saveLocalCount++; },
   };
+  const dependencies = {
+    '@/services/collection-transaction': { prepareCollectionWrite() { env.recover?.(); } },
+    '@/services/http': { parseJsonToUtso: (text) => wrap(JSON.parse(text)) },
+    '@/services/auth': {
+      getAccessToken: () => env.token,
+      getUserId: () => env.userId,
+      getSessionEpoch: () => env.sessionEpoch,
+      sessionIsCurrent: (epoch) => env.sessionEpoch === epoch,
+    },
+    '@/services/logger': { logMsg: (...args) => { env.logs.push(args); } },
+    '@/services/like': {
+      likeBatch: async (bodies) => {
+        if (env.likeBatchImpl) return env.likeBatchImpl(bodies);
+        if (env.failBatch) throw Error('network down');
+        env.batches.push(bodies);
+        return env.nextSeq;
+      },
+      fetchChanges: async (since) => {
+        if (env.fetchChangesImpl) return env.fetchChangesImpl(since);
+        env.changes.push('fetchChanges');
+        return { maxSeq: 0, changes: [] };
+      },
+      fetchAllLikes: async (page) => {
+        if (env.fetchAllLikesImpl) return env.fetchAllLikesImpl(page);
+        env.changes.push('fetchAllLikes');
+        return { songs: [], playlists: [], maxSeq: 0 };
+      },
+    },
+  };
   const ctx = vm.createContext({
     UTSJSONObject: Utso,
-    parseJsonToUtso: (text) => wrap(JSON.parse(text)),
-    getAccessToken: () => env.token,
-    getUserId: () => env.userId,
-    getSessionEpoch: () => env.sessionEpoch,
-    sessionIsCurrent: (epoch) => env.sessionEpoch === epoch,
-    logMsg: (...args) => { env.logs.push(args); },
-    likeBatch: async (bodies) => {
-      if (env.likeBatchImpl) return env.likeBatchImpl(bodies);
-      if (env.failBatch) throw Error('network down');
-      env.batches.push(bodies);
-      return env.nextSeq;
-    },
-    fetchChanges: async (since) => {
-      if (env.fetchChangesImpl) return env.fetchChangesImpl(since);
-      env.changes.push('fetchChanges');
-      return { maxSeq: 0, changes: [] };
-    },
-    fetchAllLikes: async (page) => {
-      if (env.fetchAllLikesImpl) return env.fetchAllLikesImpl(page);
-      env.changes.push('fetchAllLikes');
-      return { songs: [], playlists: [], maxSeq: 0 };
-    },
+    setTimeout: env.clock.setTimeout,
+    clearTimeout: env.clock.clearTimeout,
+    getCurrentPages: () => env.pages,
     uni: {
       getStorageSync: (k) => env.storage.get(k) ?? '',
       setStorageSync: (k, v) => env.storage.set(k, v),
       removeStorageSync: (k) => env.storage.delete(k),
+      showLoading: ({ title, mask }) => env.loadingEvents.push({ type: 'show', title, mask }),
+      hideLoading: () => env.loadingEvents.push({ type: 'hide' }),
     },
   });
-  vm.runInContext(pidCode, ctx); // 装载真实的 generateGlobalPid（like-sync 的运行依赖）
-  vm.runInContext(code, ctx);
-  env.ctx = ctx;
-  const { LikeSyncEngine } = vm.runInContext('({ LikeSyncEngine })', ctx);
+  const cache = new Map();
+  function loadModule(id) {
+    if (Object.hasOwn(dependencies, id)) return dependencies[id];
+    if (cache.has(id)) return cache.get(id).exports;
+    assert.ok(moduleCode.has(id), '未提供模块依赖：' + id);
+    const module = { exports: {} };
+    cache.set(id, module);
+    const factory = vm.runInContext('(function(require, module, exports) {\n' + moduleCode.get(id) + '\n})', ctx, { filename: id });
+    factory(loadModule, module, module.exports);
+    return module.exports;
+  }
+  // 加载了依赖也不能让它变成隐式全局：漏 import 时，延迟回调必须在本测试中报错。
+  env.loading = loadModule('@/services/ui-loading');
+  env.generateGlobalPid = loadModule('@/services/global-pid').generateGlobalPid;
+  const { LikeSyncEngine } = loadModule('@/services/like-sync');
   env.LikeSyncEngine = LikeSyncEngine;
   env.engine = new LikeSyncEngine(env.host);
   return env;
@@ -99,8 +164,9 @@ function tick() { return new Promise((r) => setTimeout(r, 0)); }
 function norm(v) { return JSON.parse(JSON.stringify(v)); }
 function deferred() {
   let resolve;
-  const promise = new Promise((r) => { resolve = r; });
-  return { promise, resolve };
+  let reject;
+  const promise = new Promise((r, j) => { resolve = r; reject = j; });
+  return { promise, resolve, reject };
 }
 function remoteChange(id, seq) {
   return {
@@ -315,15 +381,15 @@ await check('resetLikeSync / clearLocalLikeData：清本地收藏数据与引擎
   assert.deepEqual(norm(env.host.likedSongs), []);
   assert.deepEqual(norm(env.host.savedPlaylists), []);
   assert.deepEqual(norm(env.host.localPlaylists), []);
-  assert.equal(env.host.likedDirty, true);
-  assert.equal(env.host.playlistsDirty, true);
-  assert.equal(env.host.localPlaylistsDirty, true);
-  assert.equal(env.host.persistCount, 1);
+  assert.equal(env.host.likedDirty, false);
+  assert.equal(env.host.playlistsDirty, false);
+  assert.equal(env.host.localPlaylistsDirty, false);
+  assert.equal(env.host.persistCount, 0);
 });
 
 await check('generateGlobalPid：UUID v4 形态（8-4-4-4-12、hex 字符集、变体位 89ab）', async () => {
   const env = boot({ token: null, nextSeq: 1 });
-  const gen = vm.runInContext('generateGlobalPid', env.ctx);
+  const gen = env.generateGlobalPid;
   const seen = new Set();
   for (let i = 0; i < 64; i++) {
     const pid = gen();
@@ -524,6 +590,106 @@ await check('SYNC-03：损坏内层 dataJson 被隔离留痕，健康操作继�
   await env.engine.flushPendingOps();
   assert.equal(env.batches.length, 1);
   assert.equal(env.engine.pendingOps.length, 0);
+});
+
+await check('SYNC-04：拉取等待期间新出现的跟随恢复先完成，增量游标不越过待推成员变更', async () => {
+  const env=boot({token:'tok',nextSeq:12});env.engine.likeCursor=10;
+  let recovered=0;
+  env.fetchChangesImpl=async()=>{
+    env.recover=()=>{recovered++;env.engine.pendingOps=[{type:'song',action:'remove',dataJson:JSON.stringify({sid:'s1',platform:'test',pid:'p1'})}];env.recover=null;};
+    return {maxSeq:11,changes:[{...remoteChange('s1',11),pid:'p1'}]};
+  };
+  await env.engine.pullChanges();assert.equal(recovered,1);assert.equal(env.engine.likeCursor,10);
+  assert.equal(env.host.likedSongs.length,0);assert.equal(env.engine.pendingOps.length,1);
+});
+await check('SYNC-05：全量快照不能复活等待网络期间被本地删除的最后一份成员关系', async () => {
+  const env=boot({token:'tok',nextSeq:12});
+  env.fetchAllLikesImpl=async page=>{
+    if(page===1)return {songs:[{id:'s1',platform:'test',name:'s1',singer:'',album:'',picUrl:'',pids:['p1'],likeSeq:11}],playlists:[],maxSeq:11};
+    env.recover=()=>{env.engine.pendingOps=[{type:'song',action:'remove',dataJson:JSON.stringify({sid:'s1',platform:'test',pid:'p1'})}];env.recover=null;};
+    return {songs:[],playlists:[],maxSeq:11};
+  };
+  await env.engine.pullChanges();assert.equal(env.host.likedSongs.length,0);assert.equal(env.engine.pendingOps.length,1);
+});
+
+await check('后台同步：登录跳转后才发请求，快请求不闪 loading，结束后取消延迟回调', async () => {
+  const response = deferred();
+  const env = boot({ token: 'tok' });
+  let requests = 0;
+  env.fetchAllLikesImpl = () => { requests++; return response.promise; };
+  const job = env.engine.syncLikedFromServerInBackground();
+  await env.clock.advance(699);
+  assert.equal(requests, 0);
+  await env.clock.advance(1);
+  assert.equal(requests, 1);
+  await env.clock.advance(599);
+  assert.deepEqual(env.loadingEvents, []);
+  response.resolve({ songs: [], playlists: [], maxSeq: 0 });
+  await job;
+  await env.clock.advance(1000);
+  assert.deepEqual(env.loadingEvents, []);
+  assert.equal(env.clock.pending, 0);
+});
+
+await check('后台同步：慢请求的定时器调用真实 loading 模块，收藏落地后成对关闭', async () => {
+  const response = deferred();
+  const env = boot({ token: 'tok' });
+  env.fetchAllLikesImpl = (page) => page === 1 ? response.promise : { songs: [], playlists: [], maxSeq: 9 };
+  const job = env.engine.syncLikedFromServerInBackground();
+  await env.clock.advance(1300);
+  assert.deepEqual(env.loadingEvents, [{ type: 'show', title: '正在同步收藏', mask: true }]);
+  response.resolve({ songs: [{ ...remoteChange('cloud-song', 9), likeSeq: 9, picUrl: '' }], playlists: [], maxSeq: 9 });
+  await job;
+  assert.deepEqual(norm(env.host.likedSongs.map((song) => song.id)), ['cloud-song']);
+  assert.deepEqual(env.loadingEvents.map((event) => event.type), ['show', 'hide']);
+  assert.equal(env.engine.likeSyncBusy, false);
+  assert.equal(env.clock.pending, 0);
+});
+
+await check('后台同步：多次慢请求失败都收回 loading，释放同步锁和定时器', async () => {
+  const env = boot({ token: 'tok' });
+  for (let i = 0; i < 3; i++) {
+    const response = deferred();
+    env.fetchAllLikesImpl = () => response.promise;
+    const job = env.engine.syncLikedFromServerInBackground();
+    await env.clock.advance(1300);
+    assert.equal(env.loadingEvents.at(-1).type, 'show');
+    response.reject(new Error('network timeout'));
+    await job;
+    assert.equal(env.loadingEvents.at(-1).type, 'hide');
+    assert.equal(env.engine.likeSyncBusy, false);
+    assert.equal(env.clock.pending, 0);
+  }
+  assert.deepEqual(env.loadingEvents.map((event) => event.type), ['show', 'hide', 'show', 'hide', 'show', 'hide']);
+});
+
+await check('后台同步：页面已销毁时，慢请求不调用原生 loading', async () => {
+  const response = deferred();
+  const env = boot({ token: 'tok', pages: [] });
+  env.fetchAllLikesImpl = () => response.promise;
+  const job = env.engine.syncLikedFromServerInBackground();
+  await env.clock.advance(1300);
+  assert.deepEqual(env.loadingEvents, []);
+  response.resolve({ songs: [], playlists: [], maxSeq: 0 });
+  await job;
+  assert.deepEqual(env.loadingEvents, []);
+  assert.equal(env.clock.pending, 0);
+});
+
+await check('后台同步：旧同步收尾不会关闭其他操作新打开的 loading', async () => {
+  const response = deferred();
+  const env = boot({ token: 'tok' });
+  env.fetchAllLikesImpl = () => response.promise;
+  const job = env.engine.syncLikedFromServerInBackground();
+  await env.clock.advance(1300);
+  const otherToken = env.loading.beginLoading('其他操作');
+  const beforeFinish = env.loadingEvents.slice();
+  response.resolve({ songs: [], playlists: [], maxSeq: 0 });
+  await job;
+  assert.deepEqual(env.loadingEvents, beforeFinish);
+  env.loading.finishLoading(otherToken);
+  assert.equal(env.loadingEvents.at(-1).type, 'hide');
+  assert.equal(env.clock.pending, 0);
 });
 
 console.log(`[check-like-sync] ${passed} 条引擎用例通过`);

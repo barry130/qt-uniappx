@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {stripTypeScriptTypes} from 'node:module';
 import {runInNewContext} from 'node:vm';
+import {sourcePolicyFixture} from './source-policy-fixture.mjs';
 import { reactive, effect, stop } from 'vue';
 const read=p=>readFileSync(new URL('../'+p,import.meta.url),'utf8').replaceAll('\r\n','\n');
 const between=(s,a,b)=>s.slice(s.indexOf(a),s.indexOf(b,s.indexOf(a)+a.length));
@@ -76,7 +77,7 @@ reset();{
 {
   const methods=between(read('services/music-api.ts'),'  async songCover(', '  /**\n   * 清空全部歌词缓存');
   class Json {set(k,v){this[k]=v;}get(k){return this[k];}}
-  const CoverApi=runInNewContext(strip('class CoverApi { '+methods+' }')+'\nCoverApi',{UTSJSONObject:Json});
+  const CoverApi=runInNewContext(strip('class CoverApi { '+methods+' }')+'\nCoverApi',{UTSJSONObject:Json,...sourcePolicyFixture({getStorageSync:()=>''})});
   const a=new CoverApi();let args; a.songArgsOf=s=>s;a.strOf=s=>s??'';a.engineInvoke=async(_name,value)=>{args=value;return{get:()=> 'https://refreshed'};};
   const s={...song(),picUrl:'https://expired'};assert.equal(await a.songCover(s,true),'https://refreshed');
   assert.equal(args.song.picUrl,'');assert.equal(args.song.url,'/song.mp3');assert.equal(s.picUrl,'https://expired');
@@ -108,3 +109,5 @@ console.log('cover recovery: readable disk URI, missing-file fallback, embedded 
   const other=await diskApi.cacheCoverFile('wyy%3Aa','https://cover');assert.notEqual(other,migrated,'distinct keys never share a cache file');
 }
 console.log('cover cache: unifile-safe names, legacy migration and invalidation passed');
+
+await import('./check-media-upload.mjs');

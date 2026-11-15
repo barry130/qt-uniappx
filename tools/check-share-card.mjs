@@ -19,7 +19,7 @@ function fixture() {
     ref: value => ({ value }), computed: getter => ({ get value() { return getter(); } }),
     useQtLayout: () => ({ isWide: true, windowWidth: 1100 }),
     useThemeStore: () => ({ skin: {} }), useShareCardStore: () => ({ song: { name: 'Test', picUrl: 'cover.png' } }),
-    onLoad: () => {}, onUnload: callback => { unload = callback; },
+    onLoad: () => {}, onUnload: callback => { unload = callback; }, onBeforeUnmount: callback => { unload = callback; },
     qtTrackPage: () => {}, qtFontPx: () => '', DEFAULT_PLAYLIST_COVER_ASSET: 'fallback.png',
     qtShowToast: options => toasts.push(options.title), logError: () => {},
     beginLoading: () => { const id = ++seq; loading.add(id); return id; }, finishLoading: id => loading.delete(id),

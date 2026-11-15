@@ -1,7 +1,9 @@
+import { qtSafePane } from '../uni_modules/qt-ui/composables/fold-geometry.ts';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { runInNewContext } from 'node:vm';
+import { tvScriptFixture } from './tv-script-fixture.mjs';
 // Lead-confirmed UI seams under autonomous testing authorization:
 // QtOption props -> rendered native styles; playlist page mount -> actual category option bindings.
 // Tests inspect rendered bindings, never call textWidthPx or another private production helper.
@@ -11,12 +13,12 @@ const strip = text => stripTypeScriptTypes(text.replace(/^import[\s\S]*?from\s+[
 const setup = source => source.match(/<script setup[^>]*>([\s\S]*?)<\/script>/)[1];
 const computed = getter => ({get value(){return getter();}});
 const ref = value => ({value});
-const layout={isWide:true,windowWidth:1098,windowHeight:686,sizeEpoch:0};
+const layout={get paneWidth(){return this.windowWidth;},get paneHeight(){return this.windowHeight;},isWide:true,windowWidth:1098,windowHeight:686,sizeEpoch:0};
 const mounts=[],unmounts=[],watches=[]; const timers=new Map(); let timerId=0;
 const native={
-  console, Map, Set, Promise, Math, Date, String, Number, ref, computed, reactive:value=>value,
+  qtSafePane, console, Map, Set, Promise, Math, Date, String, Number, ref, computed, reactive:value=>value,
   useQtLayout:()=>layout,qtIsWide:()=>layout.isWide,
-  onMounted:cb=>mounts.push(cb),onUnmounted:cb=>unmounts.push(cb),onShow:()=>{},
+  onMounted:cb=>mounts.push(cb),onBeforeUnmount:cb=>unmounts.push(cb),onUnmounted:cb=>unmounts.push(cb),onShow:()=>{},onUnload:cb=>unmounts.push(cb),
   nextTick:cb=>cb(),setTimeout:cb=>{const id=++timerId;timers.set(id,cb);return id;},clearTimeout:id=>timers.delete(id),
   watch:(from,cb,opts)=>{watches.push({from,cb});if(opts?.immediate)cb(typeof from==='function'?from():from.value);},
   logWarn:()=>{},
@@ -28,7 +30,8 @@ const selection=runInNewContext(strip(read('uni_modules/qt-ui/composables/select
 const canonicalLayout=runInNewContext(strip(read('uni_modules/qt-ui/composables/use-qt-layout.ts'))+'\n({qtRpx});',{
   ...native,uni:{...native.uni,getWindowInfo:()=>layout},
 });
-const base={...native,...fonts,...selection,...canonicalLayout};
+const tvUi=tvScriptFixture(native,{modal:true,vueOverrides:{inject:()=>null,onUnmounted:native.onUnmounted}});
+const base={...tvUi,...native,...fonts,...selection,...canonicalLayout};
 // Use the real content-width contract: compact grid content deducts gutters even though its frame fills the window.
 const widths=runInNewContext(strip(read('uni_modules/qt-ui/composables/use-qt-widths.ts'))+'\n({qtContentWidth});',{
   ...native,qtLayout:()=>layout,qtRailWidth:()=>layout.isWide?(layout.windowWidth>=900?96:64):0,
@@ -56,6 +59,7 @@ const pageContext={...base,
   useSourceRegistryStore:()=>({playlistSorts:()=>[],ensure:async()=>{}}),
   useThemeStore:()=>({dark:false,skin:{text:'#222222',textMuted:'#777777',surface:'#ffffff',divider:'#eeeeee'}}),
   packsFingerprint:()=>'meta-fixture@1',SOURCE_PACKS_CHANGED_EVENT:'test-packs',
+  sourcePolicyFingerprint:()=>'test-policy@1',SOURCE_POLICY_CHANGED_EVENT:'test-policy',
   ...widths,qtColumnCount:()=>5,QT_MIN_COLUMN_WIDTH:{card:140},
   qtTrackError:()=>{},formatBigCount:String,qtShowToast:()=>{},logMsgErr:()=>{},
 };

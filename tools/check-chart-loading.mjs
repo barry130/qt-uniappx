@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
+import { sourcePolicyFixture } from './source-policy-fixture.mjs';
 import { ref, computed, reactive, watch, nextTick } from 'vue';
 import * as VueRuntime from 'vue';
 import { parse as parseSfc, compileScript, compileTemplate } from '@vue/compiler-sfc';
@@ -12,6 +13,8 @@ const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf
 class UTSJSONObject {
   constructor(value = {}) { Object.assign(this, value); }
   get(key) { return Object.hasOwn(this, key) ? this[key] : null; }
+  getString(key) { return this.get(key); }
+  getNumber(key) { return this.get(key); }
   set(key, value) { this[key] = value; }
   static keys(value) { return Object.keys(value); }
 }
@@ -39,6 +42,7 @@ function exportsOf(text) {
   return [...text.matchAll(/^export\s+(?:async\s+)?(?:function|class|const|let)\s+(\w+)/gm)].map((m) => m[1]);
 }
 function load(text, scope, names = exportsOf(text), label = 'production') {
+  if (scope.uni) Object.assign(scope, sourcePolicyFixture(scope.uni));
   const context = vm.createContext({ ...scope });
   vm.runInContext(compile(text) + `\n;globalThis.__api={${names.join(',')}};`, context, { filename: label });
   return context.__api;
@@ -90,6 +94,7 @@ function makeRuntime() {
     nativeRemove: (path, done) => { env.files.delete(path); done(true, '', ''); },
     nativeMkdirs: (_path, done) => done(true, '', ''),
     nativeRenamePath: (from, to, done) => { env.files.set(to, env.files.get(from)); env.files.delete(from); done(true, '', ''); },
+    ensureDataEngine: async () => true, sourceMetaRevision: () => meta.id, sourceMetaCurrent: revision => revision === meta.id,
     invokeSource: (name, args) => new Promise((resolve, reject) => {
       const request = { name, args: JSON.parse(args)[0], done: false };
       if (name === 'chartDetail') {
@@ -115,6 +120,8 @@ function makeRuntime() {
       },
       removeStorageSync: (key) => env.storage.delete(key),
       getStorageInfoSync: () => ({ keys: [...env.storage.keys()] }),
+      getNetworkType: (options) => { options.success({ networkType: 'wifi' }); },
+      onNetworkStatusChange: () => {},
       $on: () => {}, $off: () => {}, $emit: () => {},
     },
   };
@@ -155,13 +162,14 @@ function pageRuntime(runtime, host = {}, nativeWhole = false) {
   env.rect = Object.hasOwn(host, 'rect') ? host.rect : { width: 1020, height: 470 };
   const events = new Map();
   scope.onMounted = (fn) => env.hooks.mount.push(fn);
+  scope.onBeforeUnmount = (fn) => env.hooks.unmount.push(fn);
   scope.onUnmounted = (fn) => env.hooks.unmount.push(fn);
   scope.onShow = (fn) => env.hooks.show.push(fn);
   scope.onHide = (fn) => env.hooks.hide.push(fn);
   scope.onLoad = (fn) => env.hooks.load.push(fn);
   // New whole-SFC path keeps actual Vue hooks, including hooks in real composables.
   // The original 31 tests retain their agreed SDK/event-entry VM path unchanged.
-  if (nativeWhole) { scope.onMounted = VueRuntime.onMounted; scope.onUnmounted = VueRuntime.onUnmounted; }
+  if (nativeWhole) { scope.onMounted = VueRuntime.onMounted; scope.onBeforeUnmount = VueRuntime.onBeforeUnmount; scope.onUnmounted = VueRuntime.onUnmounted; }
   scope.setInterval = (fn, ms) => { const id = ++env.timerId; env.timers.set(id, { fn, at: env.time + ms, repeat: ms }); return id; };
   scope.clearInterval = scope.clearTimeout;
   scope.setMetaAuthHook = (fn) => { env.metaAuthHook = fn; };
@@ -187,9 +195,9 @@ function pageRuntime(runtime, host = {}, nativeWhole = false) {
     },
   });
   scope.SOURCE_PACKS_CHANGED_EVENT = read('services/source-update.uts').match(/export const SOURCE_PACKS_CHANGED_EVENT = ([^;]+);/)[1].slice(1, -1);
-  for (const path of ['services/logger.uts', 'services/source-auth.ts', 'services/source-quality.ts',
+  for (const path of ['services/logger.uts', 'services/source-auth.ts', 'services/network-kind.ts', 'services/source-quality.ts',
     'stores/source.ts', 'stores/source-registry.ts', 'services/platform.ts',
-    'uni_modules/qt-ui/composables/use-qt-layout.ts', 'uni_modules/qt-ui/composables/use-qt-widths.ts',
+    'uni_modules/qt-ui/composables/fold-geometry.ts', 'uni_modules/qt-ui/composables/use-qt-layout.ts', 'uni_modules/qt-ui/composables/use-qt-widths.ts',
     'uni_modules/qt-ui/stores/theme.ts', 'uni_modules/qt-ui/stores/font-scale.ts',
     'uni_modules/qt-ui/composables/qt-option-metrics.ts',
     'uni_modules/qt-ui/composables/selection.ts',

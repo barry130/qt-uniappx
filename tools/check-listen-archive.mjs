@@ -6,6 +6,12 @@
  * 一条不差、不多不少」，以及分片轮转后不会拼出重复或缺失的天。
  */
 
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { stripTypeScriptTypes } from "node:module";
+import vm from "node:vm";
+import { preprocessPlatform } from "./platform-preprocess.mjs";
+
 const ARCHIVE_VERSION = 1;
 const TRIGGER = 256 * 1024;
 const TARGET = 160 * 1024;
@@ -459,6 +465,74 @@ console.log("[listen-archive] 体积触发的日桶备份");
   const index3 = disk3.loadIndex();
   disk3.write(index3.p.length > 0 ? 1 : 0, "{ broken");
   check("备份内容损坏时不下结论", ensureDays(disk3, [index3.p[0][0]]).size === 0);
+}
+
+// 执行真实平台文件桥，避免 iOS 的沙盒权限/原子替换分支一直没有覆盖。
+{
+  const source = readFileSync(new URL("../services/listen-stats-file.uts", import.meta.url), "utf8");
+  function archiveBridge(platform) {
+    const files = new Map();
+    const env = { files, permission: false, permissionQueries: 0, failRename: false };
+    const code = stripTypeScriptTypes(preprocessPlatform(source, platform)
+      .replace(/^import[\s\S]*?\bfrom\s*["'][^"']+["'];?\s*/gm, "")
+      .replace(/^export /gm, ""));
+    const context = vm.createContext({
+      QtJsEngine: { publicDataDir: () => "/Documents/QtMusic" },
+      queryPermissionStates: () => {
+        env.permissionQueries++;
+        return [{ applicable: true, unknown: false, granted: env.permission }];
+      },
+      readTextFile: (path, cb) => cb(files.has(path), files.get(path) ?? "", files.has(path) ? "" : "ENOENT: 文件不存在"),
+      writeTextFile: (path, text, cb) => { files.set(path, text); cb(true, "", ""); },
+      renamePath: (from, to, cb) => {
+        if (env.failRename) { cb(false, "", "rename failed"); return; }
+        files.set(to, files.get(from)); files.delete(from); cb(true, "", "");
+      },
+      remove: (path, cb) => { files.delete(path); cb(true, "", ""); },
+    });
+    const names = ["listenStatsPath", "canWriteListenStats", "readListenStatsFile", "writeListenStatsFile",
+      "listenStatsArchivePath", "canUseListenStatsArchive", "readListenStatsArchive", "writeListenStatsArchive",
+      "writeListenStatsArchiveIndex", "removeListenStatsArchive"];
+    vm.runInContext(code + "\n;globalThis.api = {" + names.join(",") + "};", context);
+    return { ...env, env, api: context.api };
+  }
+  const ios = archiveBridge("APP-IOS");
+  assert.equal(ios.api.listenStatsPath(), "/Documents/QtMusic/listen-stats.json");
+  assert.equal(ios.api.canUseListenStatsArchive(), true);
+  assert.equal((await ios.api.readListenStatsFile()).missing, true);
+  assert.equal(await ios.api.writeListenStatsFile("original"), true);
+  ios.env.failRename = true;
+  assert.equal(await ios.api.writeListenStatsFile("interrupted"), false);
+  assert.equal((await ios.api.readListenStatsFile()).text, "original", "失败的替换必须保留上一份完整存档");
+  ios.env.failRename = false;
+  assert.equal(await ios.api.writeListenStatsArchive("history", 2), true);
+  assert.equal((await ios.api.readListenStatsArchive(2)).text, "history");
+  assert.equal(await ios.api.writeListenStatsArchiveIndex("index"), true);
+  assert.equal(await ios.api.removeListenStatsArchive(2), true);
+  assert.equal((await ios.api.readListenStatsArchive(2)).missing, true);
+  assert.equal(ios.env.permissionQueries, 0, "iOS 沙盒存档不应询问 Android 存储权限");
+  check("iOS 沙盒存档支持读取、备份、删除与失败替换保留原文件", true);
+
+  const android = archiveBridge("APP-ANDROID");
+  assert.equal(android.api.canWriteListenStats(), false);
+  assert.equal(await android.api.writeListenStatsFile("blocked"), false);
+  android.env.permission = true;
+  assert.equal(await android.api.writeListenStatsFile("granted"), true);
+  const web = archiveBridge("WEB");
+  assert.equal(web.api.listenStatsPath(), "");
+  assert.equal(await web.api.writeListenStatsFile("unsupported"), false);
+  check("Android 授权规则和 Web 降级维持原行为", true);
+}
+
+{
+  const source = readFileSync(new URL("../services/listen-clock.uts", import.meta.url), "utf8");
+  for (const platform of ["APP-ANDROID", "APP-HARMONY", "APP-IOS", "WEB"]) {
+    const code = stripTypeScriptTypes(preprocessPlatform(source, platform)
+      .replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""));
+    const context = vm.createContext({ audioMonotonicTime: () => 1234, Date: { now: () => 9876 } });
+    assert.equal(vm.runInContext(code + "\nlistenClockNow()", context), platform == "WEB" ? 9876 : 1234);
+  }
+  check("三端听歌统计使用原生单调时钟，Web 使用系统时间", true);
 }
 
 console.log(`[listen-archive] ${pass} 通过 / ${fail} 失败`);

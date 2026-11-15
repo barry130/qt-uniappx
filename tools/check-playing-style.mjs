@@ -111,32 +111,78 @@ const page=read('pages/player/index.uvue');
 const consumers=page.match(/<QtFocusLyrics\b[^>]*>/g);
 assert.equal(consumers.length,2);
 assert.ok(consumers.every(tag => !tag.includes('@seek') && tag.includes('@copy="copyLyric"')));
+// 滚动跳转的作用域：经典唱片与专辑画廊共用同一份可滚动完整歌词；律动/纯净是定行沉浸视图。
+const seekExpr = page.replace(/\r\n/g, '\n').match(/const lyricSeekable = computed\(\(\): boolean => ([\s\S]+?)\);\n/)[1];
+const seekableOf = (style, visible) => runInNewContext(
+  'const playingStyle = { style: ' + JSON.stringify(style) + ' }; const lyricVisible = { value: ' + visible + ' }; (' + seekExpr + ');', { tvLyricBrowsing: { value: false } });
+assert.equal(seekableOf('classic', true), true, '默认模式保持滚动跳转');
+assert.equal(seekableOf('gallery', true), true, '专辑画廊与默认模式同样支持滚动跳转');
+for (const style of ['rhythm', 'focus']) assert.equal(seekableOf(style, true), false, style + ' is a fixed-verse view');
+assert.equal(seekableOf('gallery', false), false, '竖屏未展开歌词时没有可滚动视口');
+// 切换按钮已移除：封面页 / 歌词页互切只靠点击。
+assert.ok(!/nav-btn[^>]*@click="toggleLyric"/.test(page), 'the extra nav switch button is gone');
+assert.ok(/class="nav-title-area/.test(page), 'nav keeps its layout placeholder slots');
 // Exercise the actual page interaction boundary, including a queued old-style tap.
-const seekCode=['seekToLine','onLyricLineTap'].map(name => page.match(new RegExp('function '+name+'\\([^]*?\\n\\}'))[0]).join('\n');
+const seekCode=['seekToLine','onLyricLineTap','onLyricBackgroundTap'].map(name => page.match(new RegExp('function '+name+'\\([^]*?\\n\\}'))[0]).join('\n');
 const seeks=[];
 let toggles=0, followups=0;
-const visible={value:true}, times={value:false}, target={value:1};
-const actions=runInNewContext(stripTypeScriptTypes(seekCode)+'\n({seekToLine,onLyricLineTap});', {
-  lyricVisible:visible, lyricTimesVisible:times, lyricTargetIndex:target, layout,
+const seekable={value:true}, times={value:false}, target={value:1};
+const actions=runInNewContext(stripTypeScriptTypes(seekCode)+'\n({seekToLine,onLyricLineTap,onLyricBackgroundTap});', {
+  lyricSeekable:seekable, lyricTimesVisible:times, lyricTargetIndex:target, layout, tvLyricBrowsing:{value:false},
   player:{seek:time=>seeks.push(time)}, lyricOffsetSec:()=>1.25, lyricUserScrollAt:100,
   hideLyricTimes:()=>{times.value=false;}, updateLyricScroll:()=>followups++, toggleLyric:()=>toggles++,
 });
 for (const wide of [false,true]) {
   layout.isWide=wide;
-  visible.value=true;
+  seekable.value=true;
   times.value=false;
   actions.onLyricLineTap(props.lines[1],1);
   assert.equal(seeks.length,wide ? 1 : 0, 'ordinary taps on classic lyrics must not seek');
   times.value=true;
   actions.onLyricLineTap(props.lines[1],1);
   assert.equal(seeks.at(-1),21.25,'the manually scrolled target retains offset-aware seeking');
-  visible.value=false;
+  seekable.value=false;
   times.value=true;
   const count=seeks.length;
   actions.onLyricLineTap(props.lines[1],1);
   actions.seekToLine(props.lines[0]);
-  assert.equal(seeks.length,count,'non-scrollable styles and hidden classic timeline ignore stale seek events');
+  actions.onLyricBackgroundTap();
+  assert.equal(seeks.length,count,'gallery, fixed-verse styles and hidden classic timeline ignore stale seek events');
 }
 assert.equal(toggles,1);
 assert.equal(followups,2);
-console.log('Playing style: preference restore/retry, background independence, lyric timing, fixed-verse tap/copy and classic scroll-target seeking passed');
+// Both gallery orientations render the complete timeline, including translations.
+const fullTemplates=page.match(/<scroll-view\b[^>]*class="lyric lyric-viewport"[^>]*>[\s\S]*?<\/scroll-view>/g);
+assert.equal(fullTemplates.length,2);
+const fullLines=Array.from({length:52},(_,index)=>({time:index*4,text:'歌词 '+index,translation:'Translation '+index}));
+for (const [templateIndex, fullTemplate] of fullTemplates.entries()) {
+  const wide=templateIndex===0;
+  layout.isWide=wide;
+  seekable.value=true;
+  times.value=true;
+  target.value=18;
+  const fullRender=new Function('Vue',compile(fullTemplate,{mode:'function',prefixIdentifiers:true,isCustomElement:()=>true}).code)(Vue);
+  const nodes=descendants(fullRender({
+    immersiveLyrics:false,galleryLyrics:true,showLyric:true,lyricSeekable:true,lyricLines:fullLines,
+    tv:{enabled:false},lyricLinesKey:'fixture',
+    lyricScrollTop:0,lyricScrollAnimated:true,qtPerformance:{reduceMotion:false},lyricPadStyle:'200px',
+    portraitLyricStyle:'height:400px;',activeLyric:18,lyricTimesVisible:true,lyricTargetIndex:18,
+    lineOpacityStyle:()=>'',isKaraokeLine:()=>false,lrcStyle:()=>'',hasRoma:()=>false,hasTr:()=>true,lrcTrStyle:()=>'',
+    onLyricUserScroll(){},onLyricScrollTouchStart(){},onLyricBackgroundTap:actions.onLyricBackgroundTap,
+    onLyricLineTap:actions.onLyricLineTap,copyLyric(){},playerRail:'#111111',qtFontDual:rpx=>'font-size:'+rpx+'rpx;',format:()=>'0:00',
+  },[]));
+  const rows=nodes.filter(node=>(node.props?.class||'').split(' ').includes('lyric-line'));
+  assert.equal(rows.length,52,'gallery must expose the full song, not only neighbouring verses');
+  assert.equal(nodes.filter(node=>(node.props?.class||'').split(' ').includes('lrc-tr')).length,52);
+  assert.equal(nodes.filter(node=>(node.props?.class||'').split(' ').includes('lrc-scroll-hint')).length,1,'gallery browsing shows the seek affordance on the target row');
+  const count=seeks.length;
+  rows[18].props.onClick({stopPropagation(){}});
+  assert.equal(seeks.length,count+1,'tapping the scrolled gallery target jumps playback');
+  assert.equal(seeks.at(-1),18*4+1.25,'gallery seeking keeps the same offset rule as classic');
+  const togglesBefore=toggles;
+  rows[3].props.onClick({stopPropagation(){}});
+  assert.equal(seeks.length,count+1,'a non-target gallery row never seeks');
+  if (wide) assert.equal(toggles,togglesBefore,'wide gallery panel has no cover page to fall back to');
+  else assert.equal(toggles,togglesBefore+1,'portrait gallery falls back to the cover page like classic');
+}
+console.log("Playing style: preference restore, background independence, full gallery timeline, fixed-verse tap/copy and classic+gallery seeking passed");

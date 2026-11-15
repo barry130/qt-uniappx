@@ -6,6 +6,8 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
+import { sourcePolicyFixture } from './source-policy-fixture.mjs';
+import { preprocessPlatform } from './platform-preprocess.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const quiet = new Proxy({}, { get: () => () => {} });
@@ -16,13 +18,17 @@ const parseUtso = text => JSON.parse(text, (k, v) => {
   return v;
 });
 function nativeBranches(text) {
-  return text.replace(/\/\/ #ifndef APP-ANDROID \|\| APP-HARMONY[\s\S]*?\/\/ #endif/g, '');
+  return preprocessPlatform(text, 'APP-ANDROID');
 }
 function load(file, modules, globals = {}, append = '') {
+  if (globals.uni) {
+    const policy = sourcePolicyFixture(globals.uni);
+    modules = { ...modules, '@/services/source-policy': policy, './source-policy': policy };
+  }
   const text = nativeBranches(fs.readFileSync(path.join(root, file), 'utf8')) + '\n' + append;
   const js = ts.transpileModule(text, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
   const context = vm.createContext({ console, setTimeout, clearTimeout, ...globals });
-  vm.runInContext(`class UTSJSONObject { get(k) { return this[k] ?? null } set(k,v) { this[k]=v } static keys(o) { return Object.keys(o) } }
+  vm.runInContext(`class UTSJSONObject { get(k) { return this[k] ?? null } getString(k) { return this.get(k) } set(k,v) { this[k]=v } static keys(o) { return Object.keys(o) } }
     const parse=JSON.parse; JSON.parse=(s)=>parse(s,(k,v)=>{ if(v && typeof v==='object' && !Array.isArray(v)) Object.setPrototypeOf(v,UTSJSONObject.prototype); return v });`, context);
   context.module = { exports: {} }; context.exports = context.module.exports;
   context.require = id => { if (id in modules) return modules[id]; throw Error('unexpected import: ' + id); };
@@ -119,6 +125,7 @@ function installFixture({ failCommit = false, rollbackLoad = true } = {}) {
     pruneOrphans: async () => { pruned++; }, isOfficialPackId: () => false, clearPackError: async () => {}, notePackError: async () => {},
   };
   const engine = {
+    applyEngineSourcePolicy: async () => {}, sourcePolicyStatus: () => ({ configured: false }),
     invalidatePlayPackCache: () => { cacheReady = false; }, playPackReady: () => cacheReady,
     loadedPlayPackId: () => state.activeId, loadedPlayPackCode: () => runningCode,
     ensurePlayPackLoaded: async () => { loads++; if (loads > 1 && !rollbackLoad) return false; runningCode = byId(state.activeId).versionCode; cacheReady = true; return true; },
@@ -154,6 +161,7 @@ for (const rollbackLoad of [true, false]) {
     '@/uni_modules/qt-js-engine': {
       isHealthy: () => true, isRunning: () => true,
       start: (opts, cb) => cb({ hostApiVersion: 1, version: 'test', engine: 'test', probe: '2' }, null), stop: cb => cb({ ok: true }), loadBundle: (code, cb) => cb({ ok: true }),
+      evaluate: (code, cb) => cb({ ok: true, value: 'null' }),
       loadPlayBundle: (code, cb) => { attempts++; cb({ ok: code !== 'bad', error: 'bad body' }); },
       invoke: (name, args, timeout, cb) => cb({ ok: true, value: name === 'bundleInfo' ? '{"name":"meta-bundle","hostApiVersion":1}' : '{"ok":true}' }),
     },

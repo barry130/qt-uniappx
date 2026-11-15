@@ -86,6 +86,7 @@ function store(b, extra = {}) {
       clampQualityFor: (_platform, quality) => quality,
       refererOf: () => '',
       actualQualityOf: () => '',
+      ensureRegistry: async () => {},
     },
     deleteMediaByPath: () => ({ deleted: 0, failed: 0 }),
     saveToPublicMedia: async () => '',
@@ -488,6 +489,236 @@ await check('DL-04：已完整的旧 part 即使有 ETag 也不直接跳过校�
   assert.equal(result.files.get(result.partPath).byteLength, 8);
 });
 
+function transferFixture(replies, options = {}) {
+  const fixtureBoundary = boundary();
+  fixtureBoundary.uni.env.USER_DATA_PATH = '/private';
+  const files = new Map();
+  const requests = [];
+  const logs = [];
+  const base = '/private/qt-download-parts';
+  const sample = song('headers');
+  const current = task(sample);
+  const partPath = base + '/test__headers.part';
+  const metaPath = partPath + '.meta';
+  if (options.resume) {
+    files.set(partPath, Uint8Array.from([7, 7]));
+    files.set(metaPath, JSON.stringify({
+      url: sample.url, total: 8, resourceKey: 'test__headers__320', etag: '"v1"',
+    }));
+  }
+  fixtureBoundary.uni.getFileSystemManager = () => ({
+    mkdirSync: noop,
+    readFileSync: (filePath) => files.get(filePath),
+    writeFileSync: (filePath, value) => files.set(filePath, typeof value === 'string' ? value : new Uint8Array(value)),
+    unlinkSync: (filePath) => files.delete(filePath),
+    statSync: (filePath) => files.has(filePath) ? [{ stats: { size: files.get(filePath).byteLength ?? 0 } }] : [],
+    readFile: ({ filePath, success }) => success({ data: files.get(filePath) }),
+    appendFile: ({ filePath, data, success }) => {
+      const previous = files.get(filePath);
+      const joined = new Uint8Array(previous.byteLength + data.byteLength);
+      joined.set(previous);
+      joined.set(data, previous.byteLength);
+      files.set(filePath, joined);
+      success({});
+    },
+  });
+  fixtureBoundary.uni.downloadFile = (request) => {
+    requests.push(request);
+    const reply = replies[requests.length - 1];
+    assert.ok(reply, 'unexpected extra download request');
+    let progressCallback = noop;
+    const handle = {
+      abort: () => request.fail({ errMsg: 'downloadFile:fail abort' }),
+      onProgressUpdate: (callback) => { progressCallback = callback; },
+    };
+    if (reply.manual) return handle;
+    queueMicrotask(() => {
+      if (reply.before) reply.before(current);
+      if (reply.fail) { request.fail(reply.fail); return; }
+      const data = Uint8Array.from(reply.bytes ?? [1, 2, 3, 4, 5, 6, 7, 8]);
+      files.set(reply.tempFilePath, data);
+      progressCallback({ progress: 100, totalBytesWritten: data.byteLength, totalBytesExpectedToWrite: data.byteLength });
+      request.success(reply);
+    });
+    return handle;
+  };
+  const downloads = store(fixtureBoundary, { qtDiagDebug: (message) => logs.push(message), ...options.runtime });
+  downloads.tasks = [current];
+  return { downloads, current, base, files, requests, partPath, metaPath, logs };
+}
+
+await check('DL-06：真实 downloadFile 无响应头的 206 自动整下，旧断点和分块不会拼进成品', async () => {
+  const fixture = transferFixture([
+    { statusCode: 206, tempFilePath: '/chunk-no-headers', bytes: [9, 9, 9, 9, 9, 9] },
+    { statusCode: 200, tempFilePath: '/whole' },
+  ], { resume: true });
+  const completed = await fixture.downloads.fetchResumable(
+    fixture.current.song.url, fixture.current.song, 8, 'test__headers__320', fixture.base, fixture.current, 1,
+  );
+  assert.equal(completed, '/whole');
+  assert.deepEqual(Array.from(fixture.files.get(completed)), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.equal(fixture.requests[0].header.get('Range'), 'bytes=2-7');
+  assert.equal(fixture.requests[1].header.get('Range'), null);
+  assert.equal(fixture.requests[1].header.get('If-Range'), null);
+  assert.equal(fixture.files.has('/chunk-no-headers'), false);
+  assert.equal(fixture.files.has(fixture.partPath), false);
+  assert.equal(fixture.files.has(fixture.metaPath), false);
+  assert.equal(fixture.current.retryCount, 0);
+});
+
+await check('DL-06：异常 Content-Range 同样降级，整下响应不能把 206 当作成品', async () => {
+  const fixture = transferFixture([
+    { statusCode: 206, tempFilePath: '/chunk-malformed', header: { 'Content-Range': 'bytes 0-7/*' } },
+    { statusCode: 206, tempFilePath: '/still-partial' },
+  ]);
+  await assert.rejects(fixture.downloads.fetchResumable(
+    fixture.current.song.url, fixture.current.song, 8, 'test__headers__320', fixture.base, fixture.current, 1,
+  ), /不完整/);
+  assert.equal(fixture.requests.length, 2);
+  assert.equal(fixture.files.has('/chunk-malformed'), false);
+  assert.equal(fixture.files.has('/still-partial'), false);
+});
+
+await check('DL-06：当前下载器无响应头时，后续任务跳过无效的长度探测和分块', async () => {
+  const fixture = transferFixture([
+    { statusCode: 206, tempFilePath: '/first-chunk' },
+    { statusCode: 200, tempFilePath: '/first-whole' },
+    { statusCode: 200, tempFilePath: '/second-whole' },
+  ]);
+  await fixture.downloads.fetchResumable(
+    fixture.current.song.url, fixture.current.song, 8, 'test__headers__320', fixture.base, fixture.current, 1,
+  );
+  const next = task(song('next'));
+  fixture.downloads.tasks = [next];
+  fixture.downloads.headTotal = async () => assert.fail('native transport without headers must not probe again');
+  fixture.downloads.saveToDisk = async (temporary) => {
+    assert.equal(temporary, '/second-whole');
+    return { path: '/downloads/next.mp3', sidecars: [] };
+  };
+  fixture.downloads.fileSizeOf = async () => 8;
+  await fixture.downloads.runTaskInner(next, 1);
+  assert.equal(next.status, 'done');
+  assert.equal(fixture.downloads.items.length, 1);
+  assert.equal(fixture.requests.length, 3);
+  assert.equal(fixture.requests[2].header.get('Range'), null);
+});
+
+await check('DL-06：完整下载失败走原错误，暂停后返回的整文件只清理不提交', async () => {
+  const failed = transferFixture([
+    { statusCode: 206, tempFilePath: '/invalid' },
+    { fail: { errMsg: 'downloadFile:fail timeout' } },
+  ]);
+  await assert.rejects(failed.downloads.fetchResumable(
+    failed.current.song.url, failed.current.song, 8, 'test__headers__320', failed.base, failed.current, 1,
+  ), /网络超时/);
+  assert.equal(failed.requests.length, 2);
+  const paused = transferFixture([
+    { statusCode: 206, tempFilePath: '/invalid' },
+    { statusCode: 200, tempFilePath: '/late-whole', before: (current) => { current.cancelled = true; current.runId++; } },
+  ]);
+  const completed = await paused.downloads.fetchResumable(
+    paused.current.song.url, paused.current.song, 8, 'test__headers__320', paused.base, paused.current, 1,
+  );
+  assert.equal(completed, null);
+  assert.equal(paused.files.has('/late-whole'), false);
+  assert.equal(paused.downloads.items.length, 0);
+});
+
+await check('DL-06：带有效范围和验证器的下载继续正常续传，容忍响应头首尾空白', async () => {
+  const fixture = transferFixture([
+    { statusCode: 206, tempFilePath: '/valid', bytes: [3, 4, 5, 6, 7, 8], header: { 'content-range': ' bytes 2-7/8\t', etag: '"v1"' } },
+  ], { resume: true });
+  assert.equal(fixture.downloads.readPartTotal(fixture.current.song, 'test__headers__320', fixture.current.song.url), 8);
+  assert.equal(fixture.downloads.readPartTotal(fixture.current.song, 'test__headers__320', 'https://media.invalid/other'), 0);
+  const completed = await fixture.downloads.fetchResumable(
+    fixture.current.song.url, fixture.current.song, 8, 'test__headers__320', fixture.base, fixture.current, 1,
+  );
+  assert.equal(completed, fixture.partPath);
+  assert.equal(fixture.requests.length, 1);
+  assert.deepEqual(Array.from(fixture.files.get(completed)), [7, 7, 3, 4, 5, 6, 7, 8]);
+});
+
+await check('DL-06：长度探测主动取消后不报网络失败，迟到的临时文件会清理', async () => {
+  const fixture = transferFixture([{ statusCode: 200, tempFilePath: '/probe', bytes: new Uint8Array(65536) }]);
+  assert.equal(await fixture.downloads.headTotal(fixture.current.song.url, 'test'), 65536);
+  assert.equal(fixture.logs.some((line) => line.includes('失败')), false);
+  assert.equal(fixture.files.has('/probe'), false);
+});
+
+await check('DL-06：服务器忽略 Range 返回 200 时直接使用整文件，不重复下载', async () => {
+  const fixture = transferFixture([{ statusCode: 200, tempFilePath: '/range-ignored' }], { resume: true });
+  const completed = await fixture.downloads.fetchResumable(
+    fixture.current.song.url, fixture.current.song, 8, 'test__headers__320', fixture.base, fixture.current, 1,
+  );
+  assert.equal(completed, '/range-ignored');
+  assert.equal(fixture.requests.length, 1);
+  assert.deepEqual(Array.from(fixture.files.get(completed)), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.equal(fixture.files.has(fixture.partPath), false);
+  assert.equal(fixture.files.has(fixture.metaPath), false);
+});
+
+await check('DL-06：单个音源范围头异常不禁用其他支持范围校验的下载', async () => {
+  const fixture = transferFixture([
+    { statusCode: 206, tempFilePath: '/bad-range', header: { 'Content-Range': 'invalid' } },
+    { statusCode: 200, tempFilePath: '/bad-range-whole' },
+    { statusCode: 206, tempFilePath: '/next-range', header: { 'Content-Range': 'bytes 0-7/8', etag: '"v2"' } },
+  ]);
+  await fixture.downloads.fetchResumable(
+    fixture.current.song.url, fixture.current.song, 8, 'test__headers__320', fixture.base, fixture.current, 1,
+  );
+  const next = task(song('supported'));
+  fixture.downloads.tasks = [next];
+  let probes = 0;
+  fixture.downloads.headTotal = async () => { probes++; return 8; };
+  fixture.downloads.saveToDisk = async (path) => {
+    assert.equal(path, fixture.base + '/test__supported.part');
+    return { path: '/downloads/supported.mp3', sidecars: [] };
+  };
+  fixture.downloads.fileSizeOf = async () => 8;
+  await fixture.downloads.runTaskInner(next, 1);
+  assert.equal(next.status, 'done');
+  assert.equal(probes, 1);
+  assert.equal(fixture.requests[2].header.get('Range'), 'bytes=0-7');
+});
+
+await check('DL-06：整下或分块超时后的迟到响应只清临时文件，不清新代次断点与句柄', async () => {
+  for (const whole of [true, false]) {
+    const timers = new Map();
+    let nextTimer = 1;
+    const runtime = {
+      setTimeout: (callback, ms) => {
+        const id = nextTimer++;
+        timers.set(id, { callback, ms });
+        return id;
+      },
+      clearTimeout: (id) => timers.delete(id),
+    };
+    const fixture = transferFixture(whole
+      ? [{ statusCode: 206, tempFilePath: '/fallback' }, { manual: true }]
+      : [{ manual: true }], { runtime });
+    const pending = fixture.downloads.fetchResumable(
+      fixture.current.song.url, fixture.current.song, 8, 'test__headers__320', fixture.base, fixture.current, 1,
+    );
+    const rejected = assert.rejects(pending, /网络超时/);
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    const clock = [...timers.values()].find((entry) => entry.ms === (whole ? 300000 : 90000));
+    assert.ok(clock, 'active transfer must have a timeout');
+    clock.callback();
+    await rejected;
+    const newestHandle = { abort: noop };
+    fixture.current.runId++;
+    fixture.current.abortHandle = newestHandle;
+    fixture.files.set(fixture.partPath, Uint8Array.from([4, 2]));
+    fixture.files.set(fixture.metaPath, 'new generation');
+    fixture.files.set('/late', Uint8Array.from([9, 9]));
+    fixture.requests.at(-1).success({ statusCode: whole ? 200 : 206, tempFilePath: '/late' });
+    assert.equal(fixture.files.has('/late'), false);
+    assert.deepEqual(Array.from(fixture.files.get(fixture.partPath)), [4, 2]);
+    assert.equal(fixture.files.get(fixture.metaPath), 'new generation');
+    assert.equal(fixture.current.abortHandle, newestHandle);
+  }
+});
+
 function harmonyApi(copy) {
   const source = read('uni_modules/qt-app-native/utssdk/app-harmony/index.uts');
   const start = source.indexOf('/** 公共目录同名文件不覆盖');
@@ -511,6 +742,33 @@ function harmonyApi(copy) {
   });
   return { api, files };
 }
+
+await check('DL-07：同时下载数只有 1/2 两档、默认 1，旧存量 3~6 回默认且 setter 钳制', async () => {
+  const b = boundary();
+  const downloads = store(b);
+  assert.equal(downloads.concurrency, 1, 'new default concurrency is 1');
+  downloads.setConcurrency(2);
+  assert.equal(downloads.concurrency, 2);
+  assert.equal(b.storage.get('qt-download-concurrency'), '2');
+  downloads.setConcurrency(6);
+  assert.equal(downloads.concurrency, 2, 'setConcurrency clamps to the 1~2 band');
+  downloads.setConcurrency(0);
+  assert.equal(downloads.concurrency, 1, 'setConcurrency clamps at the minimum');
+  for (const stale of ['3', '4', '6']) {
+    const legacy = boundary([['qt-download-concurrency', stale]]);
+    const migrated = store(legacy);
+    migrated.restore();
+    assert.equal(migrated.concurrency, 1, `legacy stored value ${stale} falls back to the new default`);
+  }
+  assert.equal(downloads.concurrencyText(), '1 个');
+  // 下载设置页与档位口径一致：只列 1/2，不再有「（较高）」与偏高确认。
+  const page = read('pages/download-settings/index.uvue');
+  assert.equal((page.match(/DOWNLOAD_CONCURRENCY_WARN_ABOVE/g) ?? []).length, 0, 'the warn threshold no longer exists');
+  assert.equal((page.match(/较高|仍然使用/g) ?? []).length, 0, 'no high-concurrency confirm copy remains');
+  const concurrencySection = page.slice(page.indexOf('function showDownloadConcurrency'), page.indexOf('function applyDownloadConcurrency'));
+  assert.ok(concurrencySection.includes('for (let n = DOWNLOAD_CONCURRENCY_MIN; n <= DOWNLOAD_CONCURRENCY_MAX; n++)'), 'options are generated from the 1~2 band');
+  assert.ok(!concurrencySection.includes('qtConfirm'), 'picking 1 or 2 never needs a confirmation dialog');
+});
 
 await check('DL-05：Harmony 同名目标复制失败不删除既有文件', async () => {
   const { api, files } = harmonyApi('fail');
